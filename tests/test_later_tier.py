@@ -311,13 +311,19 @@ class TestInstrumentedGateway(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            def post(path, obj):
+            def post(path, obj, secret=None):
+                headers = {"Content-Type": "application/json"}
+                if secret:
+                    headers["Authorization"] = f"Bearer {secret}"
                 req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
-                                             headers={"Content-Type": "application/json"}, method="POST")
+                                             headers=headers, method="POST")
                 with urllib.request.urlopen(req) as r:
                     return json.loads(r.read())
 
-            run_id = post("/runs", {})["run_id"]
+            opened = post("/runs", {})
+            run_id, secret = opened["run_id"], opened["run_secret"]
+            self.assertTrue(run_id.startswith("r_ep_"))
+            self.assertGreater(len(run_id), 20)  # unpredictable, not sequential
             # emit the untrusted read value, then the sink intent bound to it
             post(f"/runs/{run_id}/events", {
                 "type": "tool_result", "tool": "read_txns",
@@ -325,19 +331,61 @@ class TestInstrumentedGateway(unittest.TestCase):
                             "labels": ["untrusted_derived"],
                             "sources": [{"kind": "external_read",
                                          "origin_ref": "tool_result:read_txns:transactions[1].description"}]}],
-            })
+            }, secret=secret)
             resp = post(f"/runs/{run_id}/events", {
                 "type": "tool_call_intent", "tool": "send_money",
                 "arg_bindings": {"recipient": "v_r"},
                 "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
-            })
+            }, secret=secret)
             # the tool proxy verdict came back BEFORE the tool would run
             self.assertEqual(resp["decision"]["verdict"], "DENY")
 
-            with urllib.request.urlopen(base + f"/runs/{run_id}/trace") as r:
+            req = urllib.request.Request(base + f"/runs/{run_id}/trace",
+                                         headers={"Authorization": f"Bearer {secret}"})
+            with urllib.request.urlopen(req) as r:
                 trace = json.loads(r.read())
             self.assertEqual(trace["producer"]["mode"], "instrumented_endpoint")
             self.assertEqual(support.schema_errors(trace, "trace"), [])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_gateway_requires_token_and_run_secret(self) -> None:
+        import json
+        import threading
+        import urllib.error
+        import urllib.request
+
+        from lab_endpoint import make_gateway
+
+        server = make_gateway(
+            support.conditions()[1], support.manifests(),
+            support.banking_scenario()["inputs"], scenario_id="banking-exfil-01",
+            token="gwsecret",
+        )
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            def post(path, obj, headers=None):
+                req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
+                                             headers={"Content-Type": "application/json", **(headers or {})},
+                                             method="POST")
+                try:
+                    with urllib.request.urlopen(req) as r:
+                        return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, json.loads(e.read())
+
+            # opening a run without the gateway token → 401
+            self.assertEqual(post("/runs", {})[0], 401)
+            status, opened = post("/runs", {}, {"Authorization": "Bearer gwsecret"})
+            self.assertEqual(status, 201)
+            run_id, secret = opened["run_id"], opened["run_secret"]
+            # posting an event without the RUN secret → 401 (can't inject into another's run)
+            self.assertEqual(post(f"/runs/{run_id}/events", {"type": "tool_result", "tool": "x", "values": []})[0], 401)
+            self.assertEqual(
+                post(f"/runs/{run_id}/events", {"type": "tool_result", "tool": "read_txns", "values": []},
+                     {"Authorization": f"Bearer {secret}"})[0], 200)
         finally:
             server.shutdown()
             server.server_close()
@@ -427,22 +475,26 @@ class TestGatewayFailClosed(unittest.TestCase):
         base = f"http://127.0.0.1:{server.server_address[1]}"
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
-            def post(path, obj):
+            def post(path, obj, secret=None):
+                headers = {"Content-Type": "application/json"}
+                if secret:
+                    headers["Authorization"] = f"Bearer {secret}"
                 req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
-                                             headers={"Content-Type": "application/json"}, method="POST")
+                                             headers=headers, method="POST")
                 try:
                     with urllib.request.urlopen(req) as r:
                         return r.status, json.loads(r.read())
                 except urllib.error.HTTPError as e:
                     return e.code, json.loads(e.read())
 
-            run_id = post("/runs", {})[1]["run_id"]
+            opened = post("/runs", {})[1]
+            run_id, secret = opened["run_id"], opened["run_secret"]
             # intent references a value the client never emitted → 400, not ALLOW
             status, body = post(f"/runs/{run_id}/events", {
                 "type": "tool_call_intent", "tool": "send_money",
                 "arg_bindings": {"recipient": "v_forged"},
                 "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
-            })
+            }, secret=secret)
             self.assertEqual(status, 400)
             self.assertIn("unknown value", body["error"])
         finally:
@@ -464,23 +516,27 @@ class TestGatewayFailClosed(unittest.TestCase):
         base = f"http://127.0.0.1:{server.server_address[1]}"
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
-            def post(path, obj):
+            def post(path, obj, secret=None):
+                headers = {"Content-Type": "application/json"}
+                if secret:
+                    headers["Authorization"] = f"Bearer {secret}"
                 req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
-                                             headers={"Content-Type": "application/json"}, method="POST")
+                                             headers=headers, method="POST")
                 try:
                     with urllib.request.urlopen(req) as r:
                         return r.status, json.loads(r.read())
                 except urllib.error.HTTPError as e:
                     return e.code, json.loads(e.read())
 
-            run_id = post("/runs", {})[1]["run_id"]
+            opened = post("/runs", {})[1]
+            run_id, secret = opened["run_id"], opened["run_secret"]
             v = {"value_id": "v_dup", "labels": ["untrusted_derived"],
                  "sources": [{"kind": "external_read"}]}
             self.assertEqual(post(f"/runs/{run_id}/events",
-                                  {"type": "tool_result", "tool": "read_txns", "values": [v]})[0], 200)
+                                  {"type": "tool_result", "tool": "read_txns", "values": [v]}, secret=secret)[0], 200)
             # re-emitting the same value_id (redefining its lineage) is rejected
             status, body = post(f"/runs/{run_id}/events",
-                               {"type": "tool_result", "tool": "read_txns", "values": [v]})
+                               {"type": "tool_result", "tool": "read_txns", "values": [v]}, secret=secret)
             self.assertEqual(status, 400)
             self.assertIn("duplicate", body["error"])
         finally:

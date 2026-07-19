@@ -16,14 +16,34 @@ from lab_contracts.canonical import content_hash
 LABEL_UNTRUSTED = "untrusted_derived"
 LABEL_PROMPT_GIVEN = "prompt_given"
 LABEL_TRUSTED = "trusted"
+LABEL_SENSITIVE = "sensitive"
 
 _PREVIEW_MAX = 120
+REDACTED_PREVIEW = "[redacted]"
 
 
 def _preview_of(value: object) -> str:
     """A short, lossy UI string — NEVER the replay source."""
     text = value if isinstance(value, str) else repr(value)
     return text[:_PREVIEW_MAX]
+
+
+def _value_fields(value: object, sensitive: bool) -> dict[str, object]:
+    """Preview + replay-authoritative value fields, redacted when sensitive.
+
+    A sensitive value (declared via tool-manifest `sensitive_fields`, review
+    §7.4) never carries its raw content into the trace: the preview is masked
+    and the exact `decision_value` is omitted, leaving only the
+    `canonical_value_hash` to bind it. A value-dependent policy therefore
+    cannot be replayed exactly on a redacted value — the honest tradeoff the
+    trace schema already documents."""
+    fields: dict[str, object] = {"canonical_value_hash": content_hash(value)}
+    if sensitive:
+        fields["preview"] = REDACTED_PREVIEW
+    else:
+        fields["preview"] = _preview_of(value)
+        fields["decision_value"] = value
+    return fields
 
 
 @dataclass
@@ -71,16 +91,18 @@ class ValueLedger:
         )
         return value_id
 
-    def mint_external_read(self, value: object, origin_ref: str) -> str:
-        """`external_read` constructor: roots a taint (untrusted tool field)."""
+    def mint_external_read(self, value: object, origin_ref: str, sensitive: bool = False) -> str:
+        """`external_read` constructor: roots a taint (untrusted tool field).
+
+        A ``sensitive`` field additionally arms the confidentiality floor and
+        is redacted in the trace (review §7.4)."""
         value_id = self._next_id("ext")
+        labels = [LABEL_UNTRUSTED, LABEL_SENSITIVE] if sensitive else [LABEL_UNTRUSTED]
         self.values.append(
             {
                 "value_id": value_id,
-                "preview": _preview_of(value),
-                "decision_value": value,
-                "canonical_value_hash": content_hash(value),
-                "labels": [LABEL_UNTRUSTED],
+                **_value_fields(value, sensitive),
+                "labels": labels,
                 "sources": [{"kind": "external_read", "origin_ref": origin_ref}],
             }
         )

@@ -75,11 +75,22 @@ def make_gateway(
     scenario_id: str,
     host: str = "127.0.0.1",
     port: int = 0,
+    token: str | None = None,
+    max_runs: int = 1000,
+    max_events_per_run: int = 10000,
 ) -> ThreadingHTTPServer:
-    """Build (do not start) a gateway for one condition/scenario."""
+    """Build (do not start) a gateway for one condition/scenario.
+
+    Review §8: opening a run requires the bearer `token` (when set); each run
+    gets an unpredictable id AND a per-run secret that its subsequent events
+    must present, so one client cannot post events into another's run. Quotas
+    bound total runs and events per run."""
+    import hmac
+    import secrets
+
     kernel = default_registry((str(condition["kernel"]),)).get(str(condition["kernel"]))
     runs: dict[str, _Run] = {}
-    counter = {"n": 0}
+    run_secrets: dict[str, str] = {}
 
     def gate_intent(run: _Run, tool: str, arg_bindings: dict[str, str],
                     args: dict[str, object]) -> dict[str, object]:
@@ -99,16 +110,34 @@ def make_gateway(
         def log_message(self, *args: object) -> None:
             pass
 
+        def _bearer(self) -> str:
+            header = self.headers.get("Authorization", "")
+            return header[7:] if header.startswith("Bearer ") else ""
+
         def do_POST(self) -> None:  # noqa: N802
             if self.path == "/runs":
-                counter["n"] += 1
-                run_id = f"r_ep_{counter['n']}"
+                if token is not None and not hmac.compare_digest(self._bearer(), token):
+                    self._json(401, {"error": "missing or invalid bearer token"})
+                    return
+                if len(runs) >= max_runs:
+                    self._json(429, {"error": "run quota exceeded"})
+                    return
+                run_id = f"r_ep_{secrets.token_hex(16)}"  # unpredictable, not sequential
+                run_secret = secrets.token_hex(16)
                 runs[run_id] = _Run(run_id, condition, scenario_id, inputs, kernel)
-                self._json(201, {"run_id": run_id})
+                run_secrets[run_id] = run_secret
+                self._json(201, {"run_id": run_id, "run_secret": run_secret})
                 return
             match = _RUNS_RE.match(self.path)
             if match and match.group(1) in runs:
                 run = runs[match.group(1)]
+                # the per-run secret authorizes posting events into THIS run
+                if not hmac.compare_digest(self._bearer(), run_secrets.get(match.group(1), "")):
+                    self._json(401, {"error": "missing or invalid run secret"})
+                    return
+                if run.seq >= max_events_per_run:
+                    self._json(429, {"error": "event quota exceeded"})
+                    return
                 event = self._body()
                 if event.get("type") == "tool_result":
                     known = {v["value_id"] for v in run.values}
@@ -152,6 +181,9 @@ def make_gateway(
         def do_GET(self) -> None:  # noqa: N802
             match = _TRACE_RE.match(self.path)
             if match and match.group(1) in runs:
+                if not hmac.compare_digest(self._bearer(), run_secrets.get(match.group(1), "")):
+                    self._json(401, {"error": "missing or invalid run secret"})
+                    return
                 self._json(200, runs[match.group(1)].trace())
                 return
             self._json(404, {"error": "no such run"})

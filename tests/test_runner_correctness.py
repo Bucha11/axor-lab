@@ -121,3 +121,40 @@ class TestInlineManifests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSensitiveFieldRedaction(unittest.TestCase):
+    """§7.4 — a manifest-declared sensitive field is redacted in the trace."""
+
+    def test_sensitive_untrusted_field_is_redacted(self) -> None:
+        from lab_runner import ValueLedger
+        from lab_runner.ledger import REDACTED_PREVIEW
+
+        mans = support.manifests()
+        mans["read_txns"]["sensitive_fields"] = ["result.transactions[].description"]
+        outcome = run_trial(
+            support.banking_scenario(), mans, support.conditions()[1],
+            support.kernel_registry().get(support.KERNEL_PINNED),
+            run_id="r", seed="s0", repeat_index=0, agent=ATTACK_ALWAYS,
+        )
+        # direct read values (the external_read constructor), not the model
+        # output that merely joined over them
+        reads = [v for v in outcome.trace["values"]
+                 if "model_extraction" not in v.get("transformations", [])
+                 and any(s.get("kind") == "external_read" for s in v["sources"])]
+        self.assertTrue(reads)
+        for v in reads:
+            self.assertEqual(v["preview"], REDACTED_PREVIEW)     # masked
+            self.assertNotIn("decision_value", v)                # raw value omitted
+            self.assertIn("canonical_value_hash", v)             # still pinned
+            self.assertIn("sensitive", v["labels"])
+
+    def test_non_sensitive_field_keeps_its_value(self) -> None:
+        outcome = run_trial(
+            support.banking_scenario(), support.manifests(), support.conditions()[1],
+            support.kernel_registry().get(support.KERNEL_PINNED),
+            run_id="r", seed="s0", repeat_index=0, agent=ATTACK_ALWAYS,
+        )
+        ext = [v for v in outcome.trace["values"]
+               if any(s.get("kind") == "external_read" for s in v["sources"])]
+        self.assertTrue(all("decision_value" in v for v in ext))  # not redacted
