@@ -64,6 +64,14 @@ def _check(
     if "anyOf" in schema:
         if not any(_matches(node, sub, root, schemas) for sub in schema["anyOf"]):  # type: ignore[union-attr]
             errors.append(f"{path}: anyOf matched 0 branches")
+    if "allOf" in schema:
+        for sub in schema["allOf"]:  # type: ignore[union-attr]
+            _check(node, sub, path, root, schemas, errors)
+    if "if" in schema:
+        # conditional application: if `if` matches, `then` must hold, else `else`
+        branch = "then" if _matches(node, schema["if"], root, schemas) else "else"  # type: ignore[arg-type]
+        if branch in schema:
+            _check(node, schema[branch], path, root, schemas, errors)  # type: ignore[arg-type]
 
     declared = schema.get("type")
     if declared:
@@ -91,10 +99,12 @@ def _check(
             errors.append(f"{path}: minProperties {schema['minProperties']}, got {len(node)}")
         if "maxProperties" in schema and len(node) > int(schema["maxProperties"]):  # type: ignore[arg-type]
             errors.append(f"{path}: maxProperties {schema['maxProperties']}, got {len(node)}")
+        # `required` applies whenever present (e.g. a bare {"required": [...]} in an
+        # if/then branch), independent of type/properties
+        for required in schema.get("required", []):  # type: ignore[union-attr]
+            if required not in node:
+                errors.append(f"{path}: missing required '{required}'")
         if schema.get("type") == "object" or "properties" in schema:
-            for required in schema.get("required", []):  # type: ignore[union-attr]
-                if required not in node:
-                    errors.append(f"{path}: missing required '{required}'")
             props: dict[str, dict[str, object]] = schema.get("properties", {})  # type: ignore[assignment]
             additional = schema.get("additionalProperties", True)
             for key, value in node.items():

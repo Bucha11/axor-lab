@@ -115,6 +115,21 @@
         "node"
       ],
       "additionalProperties": false,
+      "allOf": [
+        {
+          "$comment": "discriminated by type: each event variant requires its load-bearing fields, so a gate_decision without a decision or a tool_call_intent without tool/arg_bindings is rejected (review §3.4)",
+          "if": { "properties": { "type": { "const": "gate_decision" } } },
+          "then": { "required": ["decision"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "tool_call_intent" } } },
+          "then": { "required": ["tool", "arg_bindings"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "tool_result" } } },
+          "then": { "required": ["tool"] }
+        }
+      ],
       "properties": {
         "seq": {
           "type": "integer",

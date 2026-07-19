@@ -34,7 +34,7 @@ def validate_scenario(scenario: dict[str, object], manifests: dict[str, dict[str
     inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
 
     for name in ("violation", "task_success"):
-        _check_predicate(scenario[name], name, tool_ids, inputs, errors)  # type: ignore[arg-type]
+        _check_predicate(scenario[name], name, tool_ids, inputs, errors, manifests)  # type: ignore[arg-type]
 
     _check_injection_vector(scenario, manifests, errors)
     _check_sink_exists(scenario, manifests, errors)
@@ -64,12 +64,17 @@ EVALUATOR_EVENTS = frozenset({"tool_call"})
 _ARG_ONLY_FIELD_RE = re.compile(r"^(args\.[A-Za-z0-9_]+|prov\(args\.[A-Za-z0-9_]+\))$")
 
 
+_NUMERIC_TYPES = frozenset({"number", "integer"})
+_ARG_NAME_RE = re.compile(r"^(?:args|prov\(args)\.([A-Za-z0-9_]+)")
+
+
 def _check_predicate(
     predicate: dict[str, object],
     name: str,
     tool_ids: set[str],
     inputs: dict[str, object],
     errors: list[str],
+    manifests: dict[str, dict[str, object]],
 ) -> None:
     for sub in _walk_event_matches(predicate):
         event = sub.get("event")
@@ -86,6 +91,7 @@ def _check_predicate(
         tool = sub.get("tool")
         if tool is not None and tool not in tool_ids:
             errors.append(f"[validating] {name}: predicate names unknown tool '{tool}'")
+        arg_props = _args_properties(manifests.get(str(tool))) if tool in manifests else None
         for field, matcher in sub.get("where", {}).items():  # type: ignore[union-attr]
             if not _ARG_ONLY_FIELD_RE.match(field):
                 errors.append(
@@ -102,6 +108,42 @@ def _check_predicate(
             for ref in _input_refs_of(operand):
                 if ref not in inputs:
                     errors.append(f"[validating] {name}: $inputs.{ref} does not resolve")
+            # type-check the field against the tool's args_schema (review §3.3)
+            _type_check_field(name, tool, field, op, arg_props, errors)
+
+
+def _args_properties(manifest: dict[str, object] | None) -> dict[str, dict[str, object]] | None:
+    if manifest is None:
+        return None
+    args_schema: dict[str, object] = manifest.get("args_schema", {})  # type: ignore[assignment]
+    props = args_schema.get("properties")
+    return props if isinstance(props, dict) else None
+
+
+def _type_check_field(
+    name: str,
+    tool: object,
+    field: str,
+    op: str,
+    arg_props: dict[str, dict[str, object]] | None,
+    errors: list[str],
+) -> None:
+    match = _ARG_NAME_RE.match(field)
+    if match is None or arg_props is None:
+        return
+    arg_name = match.group(1)
+    if arg_name not in arg_props:
+        errors.append(
+            f"[validating] {name}: '{field}' references arg '{arg_name}' absent from "
+            f"tool '{tool}' args_schema"
+        )
+        return
+    arg_type = arg_props[arg_name].get("type")
+    types = {arg_type} if isinstance(arg_type, str) else set(arg_type or ())
+    if op in ("gt", "lt") and types and not (types & _NUMERIC_TYPES):
+        errors.append(f"[validating] {name}: matcher '{op}' on non-numeric arg '{arg_name}' ({arg_type})")
+    if op == "matches" and types and "string" not in types:
+        errors.append(f"[validating] {name}: matcher 'matches' on non-string arg '{arg_name}' ({arg_type})")
 
 
 def _walk_event_matches(predicate: dict[str, object]) -> list[dict[str, object]]:

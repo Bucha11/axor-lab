@@ -114,5 +114,61 @@ class TestConfigHashVerifiedOnResolve(unittest.TestCase):
         resolve(self._document())  # support.conditions() carry correct hashes
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestPredicateTypeChecking(unittest.TestCase):
+    """§3.3 — predicates type-check against the tool's args_schema."""
+
+    def test_arg_absent_from_args_schema_is_rejected(self) -> None:
+        scenario = support.banking_scenario()
+        scenario["violation"] = {
+            "event": "tool_call", "tool": "send_money",
+            "where": {"args.nonexistent": {"equal": "x"}},
+        }
+        with self.assertRaises(ScenarioValidationError) as ctx:
+            validate_scenario(scenario, support.manifests())
+        self.assertTrue(any("absent from tool 'send_money' args_schema" in e for e in ctx.exception.errors))
+
+    def test_gt_on_string_arg_is_rejected(self) -> None:
+        scenario = support.banking_scenario()
+        scenario["violation"] = {
+            "event": "tool_call", "tool": "send_money",
+            "where": {"args.recipient": {"gt": 5}},  # recipient is a string
+        }
+        with self.assertRaises(ScenarioValidationError) as ctx:
+            validate_scenario(scenario, support.manifests())
+        self.assertTrue(any("non-numeric arg 'recipient'" in e for e in ctx.exception.errors))
+
+    def test_matches_on_number_arg_is_rejected(self) -> None:
+        scenario = support.banking_scenario()
+        scenario["violation"] = {
+            "event": "tool_call", "tool": "send_money",
+            "where": {"args.amount": {"matches": "^1"}},  # amount is a number
+        }
+        with self.assertRaises(ScenarioValidationError) as ctx:
+            validate_scenario(scenario, support.manifests())
+        self.assertTrue(any("non-string arg 'amount'" in e for e in ctx.exception.errors))
+
+
+class TestDiscriminatedTraceEvents(unittest.TestCase):
+    """§3.4 — trace events require their variant's load-bearing fields."""
+
+    def _base_trace(self, event: dict[str, object]) -> dict[str, object]:
+        return {
+            "schema_version": "trace/v1", "trace_id": "t", "values": [],
+            "trial": {"run_id": "r", "scenario_id": "s", "condition_id": "c",
+                      "seed": "s0", "repeat_index": 0},
+            "producer": {"mode": "wrapped_code", "provenance_fidelity": "explicit_flow_tracked",
+                         "kernel_version": "k"},
+            "events": [event],
+        }
+
+    def test_gate_decision_without_decision_is_rejected(self) -> None:
+        trace = self._base_trace({"seq": 0, "node": "root", "type": "gate_decision"})
+        self.assertTrue(any("decision" in e for e in support.schema_errors(trace, "trace")))
+
+    def test_tool_call_intent_without_bindings_is_rejected(self) -> None:
+        trace = self._base_trace({"seq": 0, "node": "root", "type": "tool_call_intent", "tool": "x"})
+        self.assertTrue(any("arg_bindings" in e for e in support.schema_errors(trace, "trace")))
+
+    def test_well_formed_events_pass(self) -> None:
+        trace = self._base_trace({"seq": 0, "node": "root", "type": "tool_result", "tool": "read"})
+        self.assertEqual(support.schema_errors(trace, "trace"), [])
