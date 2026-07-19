@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 from lab_contracts.canonical import content_hash
 
-from .kernel import Kernel
 from .replay import replay_trace
 
 STATUS_MATCHES = "matches_pinned_expected"

@@ -20,7 +20,6 @@ import json
 import re
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 from lab_runner.kernel import Kernel, default_registry
 

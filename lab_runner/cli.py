@@ -503,7 +503,7 @@ def _confirmed(args: argparse.Namespace) -> bool:
         return True
     if not sys.stdin.isatty():
         return False
-    answer = input(f"Proceed with the run? [y/N] ")
+    answer = input("Proceed with the run? [y/N] ")
     return answer.strip().lower() in ("y", "yes")
 
 

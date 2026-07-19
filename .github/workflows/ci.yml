@@ -39,6 +39,20 @@ jobs:
       - name: Smoke-check the shipped example resolves
         run: python -m lab_runner validate examples/banking-exfil-01.axl
 
+  lint:
+    name: Lint (ruff — correctness rules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ruff (pyflakes + bugbear; no style noise)
+        run: |
+          pip install ruff
+          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server \
+            lab_agent lab_entitlement lab_endpoint lab_sandbox lab_games
+
   determinism:
     name: Replay determinism matrix (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

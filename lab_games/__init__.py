@@ -1,4 +1,11 @@
-"""lab_games — the multi-agent game runtime (plan B7, spec-lab.md §5).
+"""lab_games — a deterministic multi-agent game model (plan B7, spec-lab.md §5).
+
+⚠️ MATURITY: experimental. These are small DETERMINISTIC strategy games, not a
+live multi-agent LLM runtime. The federation containment result is a property
+of THIS model (carried taint gives neighbours a clean signal), demonstrating
+the desired behaviour — it is NOT independent evidence of containment among
+real agents. Do not cite "contained at N=200" as a security proof; it is a toy
+model that exercises the honest per-run statistics below.
 
 The unit-of-analysis rule that invalidates most game statistics
 (`statistics.md` §1): the independent observation is ONE run, never one round.
