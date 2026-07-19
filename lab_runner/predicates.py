@@ -118,7 +118,9 @@ def _where_matches(
             value_id = bindings.get(arg_match.group(1))
             if value_id is None:
                 return False
-            actual = values[value_id].get("preview")
+            # the exact typed value, never the truncated UI preview (review P0.1)
+            bound = values[value_id]
+            actual = bound["decision_value"] if "decision_value" in bound else bound.get("preview")
         else:
             raise UnsupportedPredicateError(f"unsupported field address {field!r}")
         if not _matcher_holds(matcher, actual, inputs, is_provenance=bool(prov_match)):

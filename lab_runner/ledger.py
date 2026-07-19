@@ -11,11 +11,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from lab_contracts.canonical import content_hash
+
 LABEL_UNTRUSTED = "untrusted_derived"
 LABEL_PROMPT_GIVEN = "prompt_given"
 LABEL_TRUSTED = "trusted"
 
 _PREVIEW_MAX = 120
+
+
+def _preview_of(value: object) -> str:
+    """A short, lossy UI string — NEVER the replay source."""
+    text = value if isinstance(value, str) else repr(value)
+    return text[:_PREVIEW_MAX]
 
 
 @dataclass
@@ -44,33 +52,41 @@ class ValueLedger:
             str(v["value_id"]) for v in self.values if LABEL_UNTRUSTED in v["labels"]  # type: ignore[operator]
         )
 
-    def mint_constant(self, preview: str, origin_ref: str, label: str = LABEL_PROMPT_GIVEN) -> str:
-        """`constant` constructor: literal / prompt-given (trusted side)."""
+    def mint_constant(self, value: object, origin_ref: str, label: str = LABEL_PROMPT_GIVEN) -> str:
+        """`constant` constructor: literal / prompt-given (trusted side).
+
+        ``value`` is the EXACT typed value (string/number/list/…); it is stored
+        as the replay-authoritative `decision_value`, with a truncated
+        `preview` alongside for the UI."""
         value_id = self._next_id("const")
         self.values.append(
             {
                 "value_id": value_id,
-                "preview": preview[:_PREVIEW_MAX],
+                "preview": _preview_of(value),
+                "decision_value": value,
+                "canonical_value_hash": content_hash(value),
                 "labels": [label],
                 "sources": [{"kind": "constant", "origin_ref": origin_ref}],
             }
         )
         return value_id
 
-    def mint_external_read(self, preview: str, origin_ref: str) -> str:
+    def mint_external_read(self, value: object, origin_ref: str) -> str:
         """`external_read` constructor: roots a taint (untrusted tool field)."""
         value_id = self._next_id("ext")
         self.values.append(
             {
                 "value_id": value_id,
-                "preview": preview[:_PREVIEW_MAX],
+                "preview": _preview_of(value),
+                "decision_value": value,
+                "canonical_value_hash": content_hash(value),
                 "labels": [LABEL_UNTRUSTED],
                 "sources": [{"kind": "external_read", "origin_ref": origin_ref}],
             }
         )
         return value_id
 
-    def mint_model_extraction(self, preview: str) -> str:
+    def mint_model_extraction(self, value: object) -> str:
         """`model_extraction` constructor (Lab addition).
 
         Conservative join: the produced value inherits `untrusted_derived`
@@ -95,7 +111,9 @@ class ValueLedger:
         self.values.append(
             {
                 "value_id": value_id,
-                "preview": preview[:_PREVIEW_MAX],
+                "preview": _preview_of(value),
+                "decision_value": value,
+                "canonical_value_hash": content_hash(value),
                 "labels": labels,
                 "sources": sources,
                 "transformations": ["model_extraction"],

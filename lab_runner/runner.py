@@ -110,24 +110,24 @@ def run_trial(
         decision_call = agent.decide_sink_call(
             str(scenario["task"]), result, inputs, manifests[sink_tool]
         )
-        recipient_preview = decision_call.recipient
+        recipient = decision_call.recipient
         amount = decision_call.amount
         if untrusted_present:
-            v_recipient = ledger.mint_model_extraction(recipient_preview)
+            v_recipient = ledger.mint_model_extraction(recipient)
         else:
-            v_recipient = ledger.mint_constant(recipient_preview, "model:recipient")
+            v_recipient = ledger.mint_constant(recipient, "model:recipient")
     else:
         attacked = agent.follows_injection(str(scenario["name"]), seed)
         if attacked:
-            recipient_preview = agent.attacker_target(str(injection["text"]))
-            v_recipient = ledger.mint_model_extraction(recipient_preview)
+            recipient = agent.attacker_target(str(injection["text"]))
+            v_recipient = ledger.mint_model_extraction(recipient)
         else:
             faithful_key = _faithful_input_key(scenario)
-            recipient_preview = str(inputs[faithful_key])
-            v_recipient = ledger.mint_constant(recipient_preview, f"prompt:{faithful_key}")
+            recipient = inputs[faithful_key]  # the exact typed input value
+            v_recipient = ledger.mint_constant(recipient, f"prompt:{faithful_key}")
         amount = inputs.get("amount", DEFAULT_AMOUNT)
-    v_amount = ledger.mint_constant(str(amount), "prompt:amount")
-    args: dict[str, object] = {"recipient": recipient_preview, "amount": amount}
+    v_amount = ledger.mint_constant(amount, "prompt:amount")
+    args: dict[str, object] = {"recipient": recipient, "amount": amount}
     arg_bindings = {"recipient": v_recipient, "amount": v_amount}
     events.append(
         {"seq": seq, "node": "root", "type": "tool_call_intent", "tool": sink_tool,
@@ -275,32 +275,33 @@ def _mint_untrusted_fields(
     for pattern in manifest.get("untrusted_fields", []):  # type: ignore[union-attr]
         path = str(pattern)
         path = path[len("result."):] if path.startswith("result.") else path
-        for concrete, text in _expand_field(result, path):
+        for concrete, value in _expand_field(result, path):
             produced.append(
-                ledger.mint_external_read(text, f"tool_result:{tool_id}:{concrete}")
+                ledger.mint_external_read(value, f"tool_result:{tool_id}:{concrete}")
             )
     return produced
 
 
-def _expand_field(node: object, path: str) -> list[tuple[str, str]]:
+def _expand_field(node: object, path: str) -> list[tuple[str, object]]:
     """Expand a field pattern like `transactions[].description` into concrete
-    (path, value) instances present in the result."""
+    (path, typed value) instances present in the result. The value is kept
+    typed (not stringified) so the ledger stores the exact decision_value."""
     if not path:
-        return [("", str(node))] if isinstance(node, (str, int, float)) else []
+        return [("", node)] if isinstance(node, (str, int, float, bool)) else []
     head, _, rest = path.partition(".")
     if head.endswith("[]"):
         key = head[:-2]
         items = node.get(key, []) if isinstance(node, dict) else []
-        out: list[tuple[str, str]] = []
+        out: list[tuple[str, object]] = []
         for i, item in enumerate(items):
-            for sub, text in _expand_field(item, rest):
+            for sub, value in _expand_field(item, rest):
                 suffix = f".{sub}" if sub else ""
-                out.append((f"{key}[{i}]{suffix}", text))
+                out.append((f"{key}[{i}]{suffix}", value))
         return out
     if isinstance(node, dict) and head in node:
         return [
-            (f"{head}.{sub}" if sub else head, text)
-            for sub, text in _expand_field(node[head], rest)
+            (f"{head}.{sub}" if sub else head, value)
+            for sub, value in _expand_field(node[head], rest)
         ]
     return []
 

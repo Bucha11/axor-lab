@@ -111,7 +111,18 @@ def make_gateway(
                 run = runs[match.group(1)]
                 event = self._body()
                 if event.get("type") == "tool_result":
+                    known = {v["value_id"] for v in run.values}
                     for value in event.get("values", []):
+                        # reject duplicate/missing value ids — a client must not
+                        # be able to redefine a value's lineage (review P0.6)
+                        vid = value.get("value_id")
+                        if not vid or vid in known:
+                            self._json(400, {"error": f"duplicate or missing value_id {vid!r}"})
+                            return
+                        if "labels" not in value:
+                            self._json(400, {"error": f"value {vid!r} has no labels"})
+                            return
+                        known.add(vid)
                         run.values.append(value)
                     run.events.append({"seq": run.seq, "node": "root", "type": "tool_result",
                                       "tool": event.get("tool"),
@@ -122,8 +133,15 @@ def make_gateway(
                     self._json(200, {"ok": True})
                     return
                 if event.get("type") == "tool_call_intent":
-                    decision = gate_intent(run, str(event["tool"]),
-                                          dict(event.get("arg_bindings", {})),
+                    bindings = dict(event.get("arg_bindings", {}))
+                    known = {v["value_id"] for v in run.values}
+                    unknown = [vid for vid in bindings.values() if vid not in known]
+                    if unknown:
+                        # an intent binding an unknown value_id: the gate fails
+                        # closed on it, but flag the protocol violation too
+                        self._json(400, {"error": f"arg_bindings reference unknown value ids {unknown}"})
+                        return
+                    decision = gate_intent(run, str(event["tool"]), bindings,
                                           dict(event.get("args", {})))
                     self._json(200, {"decision": decision})  # the tool proxy verdict
                     return

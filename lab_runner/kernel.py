@@ -69,7 +69,23 @@ class Kernel:
         allowlist = _resolve_allowlist(policy, inputs)
         if self.taint_floor_enabled and effect_class in EGRESS_CLASSES:
             for arg_name in driving_args:
-                if LABEL_UNTRUSTED in arg_labels.get(arg_name, ()):
+                labels = arg_labels.get(arg_name, ())
+                # FAIL-CLOSED: an egress driving arg with no resolvable
+                # provenance (missing binding / unknown or unlabeled value) is
+                # DENIED, never allowed. A client cannot launder a value past
+                # the gate by omitting its lineage (review P0.6).
+                if not labels:
+                    return {
+                        "verdict": "DENY",
+                        "gate": GATE_TAINT_FLOOR,
+                        "driving_value_id": arg_bindings.get(arg_name, "v_unresolved"),
+                        "projection": PROJECTION_UNTRUSTED,
+                        "reason": (
+                            f"egress sink {manifest['id']}: driving arg '{arg_name}' has no "
+                            "resolvable provenance (fail-closed)"
+                        ),
+                    }
+                if LABEL_UNTRUSTED in labels:
                     # enum-supersession: an operator-declared allowlisted target
                     # supersedes the taint floor (paper §6.3) — this is the
                     # only sanctioned way to recover the over-taint utility cost.

@@ -1,12 +1,18 @@
 """The HTTP surface — a stdlib `http.server` app over the PublicationStore.
 
 Routes:
-  GET  /                                  catalog (HTML)
-  GET  /e/{id}                            publication page (HTML)
+  GET  /                                  catalog (HTML, public only)
+  GET  /e/{id}                            publication page (HTML; private → 404)
   GET  /e/{id}/evidence/{trace_id}        EvidenceCase (HTML)
   GET  /api/publications/{id}             publication (JSON) + provenance axes
-  POST /api/publications                  publish handshake
-  POST /api/publications/{id}/reproductions   append an attestation
+  POST /api/publications                  publish handshake        [write token]
+  POST /api/publications/{id}/reproductions   append an attestation [write token]
+  POST /api/publications/{id}/takedown    remove from catalog       [admin token]
+
+Auth: pass `write_token` / `admin_token` to gate mutations with a bearer token.
+When a token is set, a mutation without a matching `Authorization: Bearer …`
+header is rejected 401. Left unset (the local-dev default) the endpoint is
+open — do NOT expose an unauthenticated server publicly (review P0.5).
 
 Deliberately dependency-free (http.server). Size limits and untrusted-string
 escaping (in html.py) implement threat-model §4; the publish handshake and
@@ -15,6 +21,7 @@ escaping (in html.py) implement threat-model §4; the publish handshake and
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,9 +39,20 @@ _API_REPRO_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/reproductions$")
 _API_TAKEDOWN_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/takedown$")
 
 
-def make_server(store_root: Path, host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
+class Unauthorized(ServerError):
+    """A mutation was attempted without the required bearer token."""
+
+
+def make_server(
+    store_root: Path,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    write_token: str | None = None,
+    admin_token: str | None = None,
+    known_keys: dict[str, str] | None = None,
+) -> ThreadingHTTPServer:
     """Build (do not start) an HTTP server bound to host:port."""
-    store = PublicationStore(root=store_root)
+    store = PublicationStore(root=store_root, known_keys=known_keys or {})
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "axor-lab-server/0.1"
@@ -63,7 +81,10 @@ def make_server(store_root: Path, host: str = "127.0.0.1", port: int = 8000) -> 
                     return
                 page = _PUB_RE.match(self.path)
                 if page:
-                    self._html(render_publication(store.get(page.group(1))))
+                    stored = store.get(page.group(1))
+                    if stored.publication.get("visibility") == "private":
+                        raise NotFound("no such publication")  # never serve private
+                    self._html(render_publication(stored))
                     return
                 raise NotFound("no such route")
             except ServerError as exc:
@@ -75,6 +96,7 @@ def make_server(store_root: Path, host: str = "127.0.0.1", port: int = 8000) -> 
             try:
                 payload = self._read_json()
                 if self.path == "/api/publications":
+                    self._require(write_token)
                     stored = store.publish(
                         bundle=payload["bundle"],
                         traces=payload["traces"],
@@ -92,6 +114,7 @@ def make_server(store_root: Path, host: str = "127.0.0.1", port: int = 8000) -> 
                     return
                 takedown = _API_TAKEDOWN_RE.match(self.path)
                 if takedown:
+                    self._require(admin_token)  # takedown is admin-only
                     store.takedown(takedown.group(1))
                     self._json(200, {
                         "publication_id": takedown.group(1), "status": "taken_down",
@@ -110,6 +133,15 @@ def make_server(store_root: Path, host: str = "127.0.0.1", port: int = 8000) -> 
                 self._error(exc)
 
         # -- helpers ------------------------------------------------------
+
+        def _require(self, expected: str | None) -> None:
+            """Enforce a bearer token when one is configured (constant-time)."""
+            if expected is None:
+                return  # local-dev open mode
+            header = self.headers.get("Authorization", "")
+            presented = header[7:] if header.startswith("Bearer ") else ""
+            if not hmac.compare_digest(presented, expected):
+                raise Unauthorized("missing or invalid bearer token")
 
         def _read_json(self) -> dict[str, object]:
             length = int(self.headers.get("Content-Length", "0"))
@@ -135,7 +167,12 @@ def make_server(store_root: Path, host: str = "127.0.0.1", port: int = 8000) -> 
             self.wfile.write(body)
 
         def _error(self, exc: ServerError) -> None:
-            status = getattr(exc, "status", 404 if isinstance(exc, NotFound) else 500)
+            if isinstance(exc, Unauthorized):
+                status = 401
+            elif isinstance(exc, NotFound):
+                status = 404
+            else:
+                status = getattr(exc, "status", 500)
             self._json(status, {"error": str(exc)})
 
     return ThreadingHTTPServer((host, port), Handler)

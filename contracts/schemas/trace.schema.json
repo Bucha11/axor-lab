@@ -181,6 +181,14 @@
           "type": "string",
           "description": "short redacted preview for the EvidenceCase UI, never the full body"
         },
+        "decision_value": {
+          "description": "the EXACT typed value the gate evaluated (the replay-authoritative projection): string, number, boolean, null, array, or object. Distinct from `preview`, which is a truncated UI string. Replay reconstructs the gate's arguments from this, NEVER from `preview`. MAY be omitted for a sensitive value, in which case `canonical_value_hash` pins it and any effect/policy that turns on the value cannot be replayed exactly.",
+          "type": ["string", "number", "boolean", "null", "array", "object"]
+        },
+        "canonical_value_hash": {
+          "type": "string",
+          "description": "sha256 over the canonical serialization of the exact value; present so an omitted/redacted `decision_value` still binds the trace to a specific value, and so replay can assert value identity."
+        },
         "labels": {
           "type": "array",
           "items": {

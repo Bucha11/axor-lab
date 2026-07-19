@@ -391,3 +391,98 @@ class TestFederationAndPopulation(unittest.TestCase):
         for topology in (TOPOLOGY_RING, TOPOLOGY_STAR, TOPOLOGY_COMPLETE):
             run = run_federation(self._members(8), rounds=6, topology=topology)
             self.assertEqual(len(run.member_moves), 8)
+
+
+# ── P0.6 — gateway/kernel fail closed on missing/forged provenance ──────────
+class TestGatewayFailClosed(unittest.TestCase):
+    def test_kernel_denies_egress_arg_with_no_resolvable_provenance(self) -> None:
+        from lab_runner.kernel import Kernel
+
+        kernel = Kernel(version=support.KERNEL_PINNED)
+        # an egress send_money whose recipient binding resolves to NO labels
+        decision = kernel.decide(
+            enforcement="on",
+            manifest=support.manifests()["send_money"],
+            args={"recipient": support.ATTACKER_IBAN, "amount": 1200},
+            arg_labels={},  # recipient has no resolvable provenance
+            arg_bindings={"recipient": "v_unknown"},
+            inputs=support.banking_scenario()["inputs"],
+            policy={"profile": "strict"},
+        )
+        self.assertEqual(decision["verdict"], "DENY")
+        self.assertIn("fail-closed", decision["reason"])
+
+    def test_gateway_rejects_intent_binding_unknown_value(self) -> None:
+        import json
+        import threading
+        import urllib.error
+        import urllib.request
+
+        from lab_endpoint import make_gateway
+
+        server = make_gateway(
+            support.conditions()[1], support.manifests(),
+            support.banking_scenario()["inputs"], scenario_id="banking-exfil-01",
+        )
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            def post(path, obj):
+                req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                try:
+                    with urllib.request.urlopen(req) as r:
+                        return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, json.loads(e.read())
+
+            run_id = post("/runs", {})[1]["run_id"]
+            # intent references a value the client never emitted → 400, not ALLOW
+            status, body = post(f"/runs/{run_id}/events", {
+                "type": "tool_call_intent", "tool": "send_money",
+                "arg_bindings": {"recipient": "v_forged"},
+                "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
+            })
+            self.assertEqual(status, 400)
+            self.assertIn("unknown value", body["error"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_gateway_rejects_duplicate_value_id(self) -> None:
+        import json
+        import threading
+        import urllib.error
+        import urllib.request
+
+        from lab_endpoint import make_gateway
+
+        server = make_gateway(
+            support.conditions()[1], support.manifests(),
+            support.banking_scenario()["inputs"], scenario_id="banking-exfil-01",
+        )
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            def post(path, obj):
+                req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                try:
+                    with urllib.request.urlopen(req) as r:
+                        return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, json.loads(e.read())
+
+            run_id = post("/runs", {})[1]["run_id"]
+            v = {"value_id": "v_dup", "labels": ["untrusted_derived"],
+                 "sources": [{"kind": "external_read"}]}
+            self.assertEqual(post(f"/runs/{run_id}/events",
+                                  {"type": "tool_result", "tool": "read_txns", "values": [v]})[0], 200)
+            # re-emitting the same value_id (redefining its lineage) is rejected
+            status, body = post(f"/runs/{run_id}/events",
+                               {"type": "tool_result", "tool": "read_txns", "values": [v]})
+            self.assertEqual(status, 400)
+            self.assertIn("duplicate", body["error"])
+        finally:
+            server.shutdown()
+            server.server_close()

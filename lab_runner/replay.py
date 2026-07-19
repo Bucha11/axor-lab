@@ -102,14 +102,15 @@ def replay_bundle(
 
 
 def _arg_value(value: dict[str, object]) -> object:
-    preview = value.get("preview")
-    if isinstance(preview, str):
-        try:
-            number = float(preview)
-            return int(number) if number.is_integer() else number
-        except ValueError:
-            return preview
-    return preview
+    """The exact typed value the gate must see on replay.
+
+    Reads the replay-authoritative `decision_value` (any JSON type), NEVER the
+    truncated `preview`. A value with no `decision_value` (redacted/sensitive)
+    yields a sentinel so a policy that turns on the value fails closed rather
+    than silently replaying against a wrong reconstruction."""
+    if "decision_value" in value:
+        return value["decision_value"]
+    return {"__redacted__": value.get("canonical_value_hash")}
 
 
 def _verdict_core(decision: dict[str, object]) -> dict[str, object]:
