@@ -5,7 +5,17 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import Kernel, ScriptedAgent, check_pins, pin, replay_trace, run_trial
+from lab_runner import (
+    REPLAY_MALFORMED_TRACE,
+    REPLAY_MATCH,
+    Kernel,
+    ScriptedAgent,
+    check_pins,
+    pin,
+    replay_trace,
+    replay_trace_status,
+    run_trial,
+)
 from lab_runner.regression import STATUS_MATCHES, STATUS_MISSING, STATUS_TAMPERED
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
@@ -58,6 +68,54 @@ class TestReplayMultiCall(unittest.TestCase):
         )
         self.assertTrue(matches)  # first intent (attacker) → DENY, second (landlord) → ALLOW
         self.assertEqual([d["verdict"] for d in recomputed], ["DENY", "ALLOW"])
+
+
+class TestMalformedTraceIsNotReproduced(unittest.TestCase):
+    """A structurally broken trace must NEVER replay as bit-identical (review
+    r2 §replay): the old code returned matches=True when there was simply
+    nothing to compare."""
+
+    def setUp(self) -> None:
+        self.trace = _governed_trace()
+        self.condition = support.conditions()[1]
+        self.kernel = Kernel(version=support.KERNEL_PINNED)
+        self.manifests = support.manifests()
+        self.inputs = support.banking_scenario()["inputs"]
+
+    def _status(self, trace: dict[str, object]) -> str:
+        _, status = replay_trace_status(
+            trace, self.condition, self.kernel, self.manifests, self.inputs
+        )
+        return status
+
+    def test_well_formed_trace_matches(self) -> None:
+        self.assertEqual(self._status(self.trace), REPLAY_MATCH)
+
+    def test_intent_without_decision_is_malformed_not_match(self) -> None:
+        broken = support.deep(self.trace)
+        broken["events"] = [e for e in broken["events"] if e.get("type") != "gate_decision"]
+        # the fail-open bug: this returned matches=True (nothing to compare)
+        self.assertEqual(self._status(broken), REPLAY_MALFORMED_TRACE)
+        _, matches = replay_trace(broken, self.condition, self.kernel, self.manifests, self.inputs)
+        self.assertFalse(matches)
+
+    def test_decision_without_intent_is_malformed(self) -> None:
+        broken = support.deep(self.trace)
+        broken["events"] = [e for e in broken["events"] if e.get("type") != "tool_call_intent"]
+        self.assertEqual(self._status(broken), REPLAY_MALFORMED_TRACE)
+
+    def test_duplicate_decision_for_one_call_is_malformed(self) -> None:
+        broken = support.deep(self.trace)
+        decision = next(e for e in broken["events"] if e.get("type") == "gate_decision")
+        broken["events"].append(support.deep(decision))  # second decision, same call_id
+        self.assertEqual(self._status(broken), REPLAY_MALFORMED_TRACE)
+
+    def test_decision_referencing_unknown_call_id_is_malformed(self) -> None:
+        broken = support.deep(self.trace)
+        for event in broken["events"]:
+            if event.get("type") == "gate_decision":
+                event["call_id"] = "call_does_not_exist"
+        self.assertEqual(self._status(broken), REPLAY_MALFORMED_TRACE)
 
 
 class TestRegressionRobustness(unittest.TestCase):

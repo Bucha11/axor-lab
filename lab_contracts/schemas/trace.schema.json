@@ -155,6 +155,10 @@
           "type": "string",
           "description": "for tool_result / tool_call_intent"
         },
+        "call_id": {
+          "type": "string",
+          "description": "correlates a tool_call_intent with its gate_decision so replay pairs them by id (not just node order) and can detect a missing or duplicated decision"
+        },
         "produces_value_ids": {
           "type": "array",
           "items": {

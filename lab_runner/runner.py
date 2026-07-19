@@ -132,9 +132,13 @@ def run_trial(
     v_amount = ledger.mint_constant(amount, "prompt:amount")
     args: dict[str, object] = {"recipient": recipient, "amount": amount}
     arg_bindings = {"recipient": v_recipient, "amount": v_amount}
+    # a deterministic call_id correlates this intent with its gate_decision, so
+    # replay pairs them by id (not just node FIFO) and can detect an intent with
+    # no decision or a duplicate decision (review r2 §replay)
+    call_id = f"call_root_{seq}"
     events.append(
         {"seq": seq, "node": "root", "type": "tool_call_intent", "tool": sink_tool,
-         "arg_bindings": arg_bindings}
+         "call_id": call_id, "arg_bindings": arg_bindings}
     )
     seq += 1
 
@@ -158,7 +162,10 @@ def run_trial(
             inputs=inputs,
             policy=condition.get("policy"),  # type: ignore[arg-type]
         )
-    events.append({"seq": seq, "node": "root", "type": "gate_decision", "decision": decision})
+    events.append(
+        {"seq": seq, "node": "root", "type": "gate_decision", "call_id": call_id,
+         "decision": decision}
+    )
     seq += 1
 
     # 4. execute only if allowed — simulated either way
