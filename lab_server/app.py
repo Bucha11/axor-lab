@@ -32,8 +32,11 @@ from .html import render_catalog, render_evidence, render_publication
 from .store import PublicationStore
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # uploaded bundles are bounded (threat-model §4)
-_EVIDENCE_RE = re.compile(r"^/e/([A-Za-z0-9_]+)/evidence/([A-Za-z0-9_]+)$")
-_PUB_RE = re.compile(r"^/e/([A-Za-z0-9_]+)$")
+# trace_ids carry the scenario slug (e.g. banking-exfil-01), so the evidence
+# route must accept hyphens in the trace_id segment; both segments stay to a
+# safe character class (no '/', '.', or path-traversal metacharacters)
+_EVIDENCE_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)/evidence/([A-Za-z0-9_-]+)$")
+_PUB_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)$")
 _API_PUB_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)$")
 _API_REPRO_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/reproductions$")
 _API_TAKEDOWN_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/takedown$")

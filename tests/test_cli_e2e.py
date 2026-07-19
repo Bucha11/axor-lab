@@ -127,7 +127,12 @@ class TestCliEndToEnd(unittest.TestCase):
 
         tampered = Path(self.tmp.name) / "tampered"
         shutil.copytree(self.bundle_dir, tampered)
-        victim = tampered / "traces" / f"{self.denied_trace_id}.json"
+        # trace files are named by content hash now, so locate the victim by
+        # its trace_id rather than assuming the filename
+        victim = next(
+            p for p in (tampered / "traces").glob("*.json")
+            if json.loads(p.read_text())["trace_id"] == self.denied_trace_id
+        )
         trace = json.loads(victim.read_text())
         for event in trace["events"]:
             if event.get("type") == "gate_decision":

@@ -167,7 +167,14 @@ def run_trial(
 
     trace: dict[str, object] = {
         "schema_version": "trace/v1",
-        "trace_id": f"t_{run_id}_{condition['id']}_{seed}",
+        # trace identity MUST carry the full trial coordinate. Omitting
+        # scenario_id (and repeat_index) collided every scenario that shared a
+        # (condition, seed) — 3 scenarios × 2 conditions × 6 repeats produced
+        # only 12 distinct ids, and the colliding traces overwrote each other in
+        # the bundle manifest and on disk, corrupting multi-scenario bundles.
+        "trace_id": (
+            f"t_{run_id}_{scenario['name']}_{condition['id']}_{seed}_r{repeat_index}"
+        ),
         "trial": {
             "run_id": run_id,
             "scenario_id": str(scenario["name"]),

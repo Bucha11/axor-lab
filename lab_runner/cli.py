@@ -132,7 +132,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         packaging=dict(PACKAGING),
     )
     out = Path(args.out)
-    write_bundle_dir(out, bundle, result.traces)
+    write_bundle_dir(out, bundle, result.traces, overwrite=bool(getattr(args, "overwrite", False)))
     print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
     print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")
@@ -632,6 +632,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--real-kernel", action="store_true",
         help="govern with the installed axor-core kernel (not the reference)",
+    )
+    p_run.add_argument(
+        "--overwrite", action="store_true",
+        help="replace a non-empty --out directory (clears stale traces first)",
     )
     p_run.set_defaults(func=_cmd_run)
 
