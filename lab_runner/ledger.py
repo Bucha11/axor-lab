@@ -86,16 +86,26 @@ class ValueLedger:
         )
         return value_id
 
-    def mint_model_extraction(self, value: object) -> str:
+    def mint_model_extraction(self, value: object, context_value_ids: tuple[str, ...] | None = None) -> str:
         """`model_extraction` constructor (Lab addition).
 
         Conservative join: the produced value inherits `untrusted_derived`
-        with ``derived_from`` = ALL untrusted values live in context and
-        ``sources`` = the union of their sources. We do not claim the model
-        copied any particular span — any output may depend on any untrusted
-        input in context.
+        with ``derived_from`` = the untrusted values live in THIS model call's
+        context and ``sources`` = the union of their sources. We do not claim
+        the model copied any particular span — any output may depend on any
+        untrusted input in context.
+
+        ``context_value_ids`` scopes the join to the values the model actually
+        saw at this call (review §4.2 — the ledger no longer joins over every
+        untrusted value ever minted). If omitted, falls back to all untrusted
+        values (correct for a single-model-call trial).
         """
-        untrusted = self.untrusted_ids()
+        if context_value_ids is None:
+            untrusted = self.untrusted_ids()
+        else:
+            untrusted = tuple(
+                vid for vid in context_value_ids if LABEL_UNTRUSTED in self.labels_of(vid)
+            )
         sources: list[dict[str, object]] = []
         seen: set[str] = set()
         for uid in untrusted:

@@ -91,6 +91,15 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
         errors += [
             f"[validating] scenario {name}: {e}" for e in validate_artifact(scenario, "scenario")
         ]
+        # inline tool manifests (a full manifest in scenario.tools, not just a
+        # $ref) are registered alongside top-level tool_manifests (review §4.5)
+        for tool in scenario.get("tools", []):  # type: ignore[union-attr]
+            if isinstance(tool, dict) and "$ref" not in tool and "id" in tool:
+                errors += [
+                    f"[validating] inline manifest {tool['id']}: {e}"
+                    for e in validate_artifact(tool, "tool-manifest")
+                ]
+                manifests.setdefault(str(tool["id"]), tool)
         try:
             from lab_contracts import validate_scenario
 
