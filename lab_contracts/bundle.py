@@ -35,6 +35,14 @@ def build_bundle(
     for trace in traces.values():
         hashes[f"trace:{trace['trace_id']}"] = content_hash(trace)
     hashes["aggregates"] = content_hash(aggregates)
+    # the integrity spine covers EVERY field, not just the artifacts — so
+    # model metadata, trial statuses, failure reasons, timestamps, and
+    # packaging cannot be edited after the fact (review P0.3)
+    hashes["environment"] = content_hash(environment)
+    hashes["trials"] = content_hash(trials)
+    hashes["meta"] = content_hash({"bundle_id": bundle_id, "created": created})
+    if packaging is not None:
+        hashes["packaging"] = content_hash(packaging)
     bundle: dict[str, object] = {
         "schema_version": "bundle/v1",
         "bundle_id": bundle_id,
@@ -64,6 +72,11 @@ def verify_bundle(bundle: dict[str, object], traces: dict[str, dict[str, object]
     for manifest in bundle["tool_manifests"]:  # type: ignore[union-attr]
         _check(hashes, f"tool_manifest:{manifest['id']}", manifest, errors)
     _check(hashes, "aggregates", bundle["aggregates"], errors)
+    _check(hashes, "environment", bundle["environment"], errors)
+    _check(hashes, "trials", bundle["trials"], errors)
+    _check(hashes, "meta", {"bundle_id": bundle["bundle_id"], "created": bundle["created"]}, errors)
+    if "packaging" in bundle:
+        _check(hashes, "packaging", bundle["packaging"], errors)
     by_ref = {content_hash(t): t for t in traces.values()}
     for trial in bundle["trials"]:  # type: ignore[union-attr]
         ref = trial.get("trace_ref")

@@ -56,6 +56,14 @@ def _declared_tool_ids(
     return ids
 
 
+# The reference evaluator (lab_runner.predicates) supports a SUBSET of the
+# predicate schema. Author-time validation rejects the rest so a scenario can
+# never be schema-valid yet runtime-invalid (review §3.2). These sets track
+# exactly what the evaluator runs; widen them only when the evaluator does.
+EVALUATOR_EVENTS = frozenset({"tool_call"})
+_ARG_ONLY_FIELD_RE = re.compile(r"^(args\.[A-Za-z0-9_]+|prov\(args\.[A-Za-z0-9_]+\))$")
+
+
 def _check_predicate(
     predicate: dict[str, object],
     name: str,
@@ -64,12 +72,26 @@ def _check_predicate(
     errors: list[str],
 ) -> None:
     for sub in _walk_event_matches(predicate):
+        event = sub.get("event")
+        if event not in EVALUATOR_EVENTS:
+            errors.append(
+                f"[validating] {name}: event '{event}' is defined in the schema but not "
+                f"supported by the runtime evaluator (supported: {sorted(EVALUATOR_EVENTS)})"
+            )
+        if "count" in sub:
+            errors.append(
+                f"[validating] {name}: 'count' is schema-defined but not evaluated at runtime; "
+                "remove it or the test would silently not apply it"
+            )
         tool = sub.get("tool")
         if tool is not None and tool not in tool_ids:
             errors.append(f"[validating] {name}: predicate names unknown tool '{tool}'")
         for field, matcher in sub.get("where", {}).items():  # type: ignore[union-attr]
-            if not _FIELD_RE.match(field):
-                errors.append(f"[validating] {name}: unparseable field address '{field}'")
+            if not _ARG_ONLY_FIELD_RE.match(field):
+                errors.append(
+                    f"[validating] {name}: field address '{field}' is not supported by the "
+                    "runtime evaluator (only args.<name> and prov(args.<name>))"
+                )
             if not isinstance(matcher, dict) or len(matcher) != 1:
                 errors.append(f"[validating] {name}: matcher for '{field}' must have exactly one operator")
                 continue

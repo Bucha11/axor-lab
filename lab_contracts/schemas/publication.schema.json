@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/publication.schema.json",
+  "title": "Axor Lab Publication",
+  "description": "The immutable public record of a run. Provenance is MULTIDIMENSIONAL: execution origin, integrity, and reproduction are independent axes, not one mutually-exclusive status. A Lab-executed run can also be independently reproduced; a self-reported run can later accrue reproductions. The card composes them: 'Lab-executed \u00b7 signed bundle \u00b7 independently live-reproduced \u00d74'.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "publication_id",
+    "bundle_ref",
+    "question",
+    "origin",
+    "integrity",
+    "claims",
+    "limitations",
+    "license"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "publication/v1"
+    },
+    "publication_id": {
+      "type": "string"
+    },
+    "bundle_ref": {
+      "type": "string",
+      "description": "content hash of the bundle this publishes"
+    },
+    "question": {
+      "type": "string"
+    },
+    "author": {
+      "type": "string"
+    },
+    "created": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "immutable": {
+      "const": true,
+      "description": "publications never change in place; a revision is a new publication linking back"
+    },
+    "origin": {
+      "enum": [
+        "lab_infra",
+        "local",
+        "external"
+      ],
+      "description": "AXIS 1 \u2014 where it executed. local/external are honest about not running on Lab infra."
+    },
+    "integrity": {
+      "enum": [
+        "unsigned",
+        "hash_verified",
+        "signed"
+      ],
+      "description": "AXIS 2 \u2014 artifact integrity. hash_verified = content hashes check out; signed = detached signature by the author key."
+    },
+    "claims": {
+      "type": "array",
+      "description": "claims are typed by what actually supports them \u2014 the exact/statistical boundary is structural, not prose (see claims.md)",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "text",
+          "support_ref"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "exactly_replayable",
+              "statistically_reproducible"
+            ],
+            "description": "exactly_replayable = a verdict over a fixed trace ('on trace T, axor-core 0.4.2 returns DENY because recipient is untrusted-derived'). statistically_reproducible = an aggregate over live runs ('in 30 live repetitions, cooperation 0.88 [CI]'). A behavioral delta is NEVER exactly_replayable."
+          },
+          "text": {
+            "type": "string"
+          },
+          "support_ref": {
+            "type": "string",
+            "description": "trace ref for exact claims; aggregate ref for statistical claims"
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "stated, not hidden \u2014 including the interested-result caveat (this measures Axor's own enforcement) and the replay-counterfactual limit"
+    },
+    "citation": {
+      "type": "string",
+      "description": "BibTeX including kernel version + config hash"
+    },
+    "license": {
+      "type": "string"
+    },
+    "visibility": {
+      "enum": [
+        "public",
+        "unlisted",
+        "private"
+      ],
+      "default": "unlisted"
+    },
+    "reproductions_ref": {
+      "type": "string",
+      "description": "pointer to an append-only attestation log (attestation/v1 entries). The publication is immutable; reproductions accrue in a separate append-only stream, each an independent signed attestation referencing this publication_id. Resolves the immutable-body vs growing-count tension."
+    }
+  }
+}

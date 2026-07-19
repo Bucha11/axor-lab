@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/experiment.schema.json",
+  "title": "Axor Lab Experiment",
+  "description": "Binds what runs to how it's compared: a scenario/bench set, the conditions to compare, repeats, the agent artifact, and the experiment type. Conditions live HERE, not in a scenario \u2014 the same scenario is reused across conditions.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "type",
+    "scenario_ids",
+    "conditions",
+    "repeats",
+    "agent_ref"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "experiment/v1"
+    },
+    "id": {
+      "type": "string"
+    },
+    "type": {
+      "enum": [
+        "benchmark",
+        "game"
+      ]
+    },
+    "scenario_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "bench_id": {
+      "type": "string",
+      "description": "optional: an ordered bench instead of a loose scenario set"
+    },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "$ref": "condition.schema.json"
+      },
+      "minItems": 2,
+      "description": "\u22652 to compare; each differs in exactly the axis under study"
+    },
+    "repeats": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "n per condition; statistics.md governs the unit of analysis"
+    },
+    "agent_ref": {
+      "type": "string",
+      "description": "the AgentArtifact under test"
+    },
+    "run_mode": {
+      "enum": [
+        "ungoverned",
+        "governed",
+        "compare"
+      ],
+      "default": "compare"
+    }
+  }
+}

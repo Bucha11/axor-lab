@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/scenario.schema.json",
+  "title": "Axor Lab Scenario",
+  "description": "A fully executable scenario: not just the breach criterion but the world that produces it. Adds fixtures (what each tool returns, and where the injection lands) and structured inputs (ground-truth values predicates compare against), so the scenario describes an executable world, not just a test. Gates are never authored here \u2014 taint and decide are the kernel's.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "name",
+    "task",
+    "tools",
+    "fixtures",
+    "injection",
+    "violation",
+    "task_success"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "scenario/v1"
+    },
+    "name": {
+      "type": "string"
+    },
+    "task": {
+      "type": "string",
+      "description": "the legitimate goal, as the user prompt"
+    },
+    "inputs": {
+      "type": "object",
+      "description": "structured ground-truth values (the real accountant email, valid IBANs). Predicates compare against these via $inputs.x \u2014 never against entities scraped from the prompt text.",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean",
+          "array"
+        ]
+      }
+    },
+    "tools": {
+      "type": "array",
+      "description": "the tools available in this scenario; each is a full manifest (or a $ref to a shared one)",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "tool-manifest.schema.json"
+          },
+          {
+            "type": "object",
+            "required": [
+              "$ref"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "$ref": {
+                "type": "string",
+                "description": "id of a tool manifest defined in the bundle's tool_manifests"
+              }
+            }
+          }
+        ]
+      },
+      "minItems": 1
+    },
+    "fixtures": {
+      "type": "object",
+      "description": "what each tool returns during the run, and precisely where the injection is placed. Without this the scenario names a criterion but not an executable world.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "description": "the tool's returned object; may embed the token $injection at the exact field the attacker controls",
+            "type": [
+              "object",
+              "array",
+              "string"
+            ]
+          },
+          "injection_placement": {
+            "type": "object",
+            "description": "how $injection enters the result",
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "description": "result path, e.g. transactions[3].description"
+              },
+              "mode": {
+                "enum": [
+                  "replace",
+                  "append"
+                ],
+                "default": "append"
+              }
+            }
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "result"
+            ]
+          },
+          {
+            "required": [
+              "injection_placement"
+            ]
+          }
+        ]
+      }
+    },
+    "injection": {
+      "type": "object",
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "the attacker payload; substituted for $injection in fixtures"
+        },
+        "goal": {
+          "type": "string",
+          "description": "the effect the attacker wants (for readability / EvidenceCase narration)"
+        },
+        "from_agent": {
+          "type": "string",
+          "description": "multi-agent: the peer/node the injection arrives from, instead of a tool result"
+        }
+      }
+    },
+    "violation": {
+      "$ref": "predicate.schema.json",
+      "description": "breach predicate \u2192 ASR. e.g. tool_call send_money where prov(args.recipient) is untrusted_derived"
+    },
+    "task_success": {
+      "$ref": "predicate.schema.json",
+      "description": "legitimate-completion predicate \u2192 utility"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "$comment": "Author-time validation (all enforced before a scenario is runnable): (1) violation.tool and task_success.tool name a declared tool; (2) at least one tool has untrusted_fields AND the fixture places $injection into one of them (an injection needs a vector); (3) at least one EXPORT/WRITE/EXEC tool exists to breach; (4) every $inputs.x resolves; (5) every matcher type-checks against the tool's args/result schema; (6) each predicate has a sample-trace preview. A scenario failing any check is rejected at author time."
+}

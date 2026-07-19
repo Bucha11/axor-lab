@@ -74,6 +74,17 @@ def _check(
     if "pattern" in schema and isinstance(node, str):
         if not re.search(str(schema["pattern"]), node):
             errors.append(f"{path}: pattern {schema['pattern']} no match")
+    if "minLength" in schema and isinstance(node, str) and len(node) < int(schema["minLength"]):  # type: ignore[arg-type]
+        errors.append(f"{path}: minLength {schema['minLength']}, got {len(node)}")
+
+    # numeric bounds (review §3.1: the schemas use `minimum` etc.)
+    if isinstance(node, (int, float)) and not isinstance(node, bool):
+        if "minimum" in schema and node < schema["minimum"]:  # type: ignore[operator]
+            errors.append(f"{path}: minimum {schema['minimum']}, got {node}")
+        if "maximum" in schema and node > schema["maximum"]:  # type: ignore[operator]
+            errors.append(f"{path}: maximum {schema['maximum']}, got {node}")
+        if "exclusiveMinimum" in schema and node <= schema["exclusiveMinimum"]:  # type: ignore[operator]
+            errors.append(f"{path}: exclusiveMinimum {schema['exclusiveMinimum']}, got {node}")
 
     if isinstance(node, dict):
         if "minProperties" in schema and len(node) < int(schema["minProperties"]):  # type: ignore[arg-type]
@@ -94,9 +105,14 @@ def _check(
                 elif isinstance(additional, dict):
                     _check(value, additional, f"{path}.{key}", root, schemas, errors)
 
-    if isinstance(node, list) and "items" in schema:
-        for i, item in enumerate(node):
-            _check(item, schema["items"], f"{path}[{i}]", root, schemas, errors)  # type: ignore[arg-type]
+    if isinstance(node, list):
+        if "minItems" in schema and len(node) < int(schema["minItems"]):  # type: ignore[arg-type]
+            errors.append(f"{path}: minItems {schema['minItems']}, got {len(node)}")
+        if "maxItems" in schema and len(node) > int(schema["maxItems"]):  # type: ignore[arg-type]
+            errors.append(f"{path}: maxItems {schema['maxItems']}, got {len(node)}")
+        if "items" in schema:
+            for i, item in enumerate(node):
+                _check(item, schema["items"], f"{path}[{i}]", root, schemas, errors)  # type: ignore[arg-type]
 
 
 def _resolve_ref(

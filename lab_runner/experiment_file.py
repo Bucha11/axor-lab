@@ -109,10 +109,17 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
     pinned: list[dict[str, object]] = []
     for condition in conditions:
         entry = dict(condition)
-        if "config_hash" not in entry:
-            entry["config_hash"] = condition_config_hash(
-                str(entry.get("kernel", "")), entry.get("policy")  # type: ignore[arg-type]
+        computed = condition_config_hash(
+            str(entry.get("kernel", "")), entry.get("policy")  # type: ignore[arg-type]
+        )
+        # verify on EVERY resolve, not only when absent (review §4.6): a stale
+        # or wrong config_hash must not silently flow into runs/replay/publish
+        if "config_hash" in entry and entry["config_hash"] != computed:
+            errors.append(
+                f"[validating] condition '{entry.get('id')}': config_hash {entry['config_hash']} "
+                f"does not match its kernel+policy ({computed})"
             )
+        entry["config_hash"] = computed
         pinned.append(entry)
 
     agent: AgentAdapter | None = None

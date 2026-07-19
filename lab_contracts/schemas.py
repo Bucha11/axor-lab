@@ -38,13 +38,46 @@ def contracts_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "contracts"
 
 
+def _load_from_package_data() -> dict[str, dict[str, object]] | None:
+    """Load schemas shipped as package data (lab_contracts/schemas/*.json).
+
+    This is the installed-wheel path (review §12): a wheel bundles the schemas
+    next to the code, so `axor-lab` works outside a source checkout with no
+    environment variable. Returns None if the package data is absent (source
+    checkout without a build step) so the caller falls back to contracts/.
+    """
+    try:
+        from importlib.resources import files  # noqa: PLC0415
+
+        anchor = files("lab_contracts").joinpath("schemas")
+        if not anchor.is_dir():
+            return None
+        schemas: dict[str, dict[str, object]] = {}
+        for name in SCHEMA_NAMES:
+            resource = anchor.joinpath(f"{name}{_SCHEMA_SUFFIX}")
+            if not resource.is_file():
+                return None
+            schemas[name] = json.loads(resource.read_text())
+        return schemas
+    except (ModuleNotFoundError, FileNotFoundError, OSError):
+        return None
+
+
 @lru_cache(maxsize=4)
 def load_schemas(directory: str | None = None) -> dict[str, dict[str, object]]:
-    """Load every contract schema, keyed by short name (e.g. 'trace')."""
+    """Load every contract schema, keyed by short name (e.g. 'trace').
+
+    Resolution order: explicit `directory` arg → AXOR_LAB_CONTRACTS env →
+    package data (installed wheel) → the repo-relative contracts/ directory.
+    """
+    if directory is None and ENV_CONTRACTS_DIR not in os.environ:
+        packaged = _load_from_package_data()
+        if packaged is not None:
+            return packaged
     schemas_path = (Path(directory) if directory else contracts_dir()) / "schemas"
     if not schemas_path.is_dir():
         raise ContractsError(
-            f"contract schemas directory not found at {schemas_path}; "
+            f"contract schemas not found (package data missing and {schemas_path} absent); "
             f"set {ENV_CONTRACTS_DIR} to the contracts/ directory"
         )
     schemas: dict[str, dict[str, object]] = {}

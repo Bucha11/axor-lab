@@ -30,6 +30,13 @@ packages = [
     "lab_games",
 ]
 
+# ship the contract schemas as package data so an installed wheel is
+# self-contained (no AXOR_LAB_CONTRACTS needed outside a checkout). The source
+# of truth is contracts/schemas/; lab_contracts/schemas/ is a build-time copy
+# kept byte-identical by tests/test_packaging.py.
+[tool.setuptools.package-data]
+lab_contracts = ["schemas/*.schema.json"]
+
 [project.optional-dependencies]
 # the BYOK Anthropic backend; the cassette path and everything else is stdlib
 byok = ["anthropic>=0.40"]

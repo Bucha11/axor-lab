@@ -140,5 +140,44 @@ class TestSignedIntegrity(unittest.TestCase):
                               signature=wrong_sig, author="@acme")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestFullBundleIntegrity(unittest.TestCase):
+    """Review P0.3 — the integrity spine and signature cover EVERY field."""
+
+    def test_tampering_environment_fails_verify(self) -> None:
+        from lab_contracts import BundleIntegrityError, verify_bundle
+        bundle, traces = _bundle_and_traces()
+        bundle["environment"]["model"]["id"] = "some-other-model"  # post-hoc edit
+        with self.assertRaises(BundleIntegrityError):
+            verify_bundle(bundle, traces)
+
+    def test_tampering_trials_fails_verify(self) -> None:
+        from lab_contracts import BundleIntegrityError, verify_bundle
+        bundle, traces = _bundle_and_traces()
+        bundle["trials"][0]["status"] = "failed"
+        with self.assertRaises(BundleIntegrityError):
+            verify_bundle(bundle, traces)
+
+    def test_tampering_created_fails_verify(self) -> None:
+        from lab_contracts import BundleIntegrityError, verify_bundle
+        bundle, traces = _bundle_and_traces()
+        bundle["created"] = "1999-01-01T00:00:00Z"
+        with self.assertRaises(BundleIntegrityError):
+            verify_bundle(bundle, traces)
+
+    @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed (optional crypto)")
+    def test_signature_covers_environment_and_trials(self) -> None:
+        from nacl.signing import SigningKey
+        from lab_contracts.signing import (
+            SignatureInvalid,
+            sign_bundle,
+            verify_bundle_signature,
+        )
+        key = SigningKey.generate()
+        pub = bytes(key.verify_key).hex()
+        bundle, _ = _bundle_and_traces()
+        sig = sign_bundle(bundle, bytes(key).hex())
+        verify_bundle_signature(bundle, sig, pub)  # ok as-is
+        # edit a field the OLD content_hashes-only signature would have missed
+        bundle["environment"]["model"]["provider"] = "forged"
+        with self.assertRaises(SignatureInvalid):
+            verify_bundle_signature(bundle, sig, pub)

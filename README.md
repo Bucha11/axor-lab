@@ -7,6 +7,24 @@ Axor Lab — standalone research surface for the Axor governance stack: bring an
 - **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
 - **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3), packaging/economics, bench format guide, UI mocks.
 
+## Maturity — subsystems are NOT equally production-ready
+
+Axor Lab is a contract-first **executable research prototype** with a
+production-oriented contract, not yet a hosted SaaS. Honest per-area status
+(see `docs/POST_MVP_PLAN.md` for the roadmap):
+
+| Area | Maturity | Notes |
+|---|---|---|
+| contracts, local runner, replay, EvidenceCase, regression, analysis | **beta** | the vertical-slice spine; correctness-hardened per the review (typed replay values, full-bundle integrity) |
+| AgentDojo adapter | **beta** | curated **banking** subset (3 tasks), not arbitrary-dataset import |
+| server / catalog | **beta (local)** | token-gated writes, content-hash filenames, atomic writes; not yet a public SaaS (no OAuth/DB/object-store) |
+| BYOK agent | **beta** | wrapped runtime is banking-slice-shaped; generic multi-tool loop is roadmap |
+| endpoint gateway | **experimental** | fail-closed governance + SSRF guard; auth/TTL/quotas are roadmap |
+| sandbox | **experimental** | real RLIMIT process limits; NOT namespace/seccomp isolation — do not run hostile code from untrusted users |
+| games / federation | **experimental** | a deterministic toy model; containment is demonstrated, not proven |
+| kernel | **reference** | `reference_taint_floor_kernel` (1 gate); real axor-core integration is roadmap (kernel version = intent metadata) |
+| Private Lab / workspaces / billing | **design-only** | `lab_entitlement` gates features; hosted workspace surface not built |
+
 ## Packages (MVP spine + post-MVP blocks, stdlib-only core)
 
 - **`lab_contracts/`** — the contract layer: schema loading + the contracts' own
@@ -74,7 +92,7 @@ one test file per criterion, plus two golden paths (in-process
 is validated against the real schemas in `contracts/`.
 
 ```
-python -m unittest discover -s tests -t .      # 153 tests, no dependencies
+python -m unittest discover -s tests -t .      # full suite, no required dependencies
 ```
 
 Beyond the ten acceptance criteria, the suite covers the AgentDojo adapter,
