@@ -97,8 +97,18 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   a declared allowlist in `condition.policy.allowlist`, never heuristic
   un-tainting. Covered by a utility-cost regression test.
 
-### B2 — Control Plane export (the earned bridge)
+### B2 — Control Plane export (the earned bridge) — ✅ implemented
 *Carry the validated policy + manifests into production; add what Lab can't provide.*
+
+> **Status:** `lab_runner/cp_export.py` + `axor-lab export-cp` emit an
+> `axor-cp-deploy/v1` config carrying the validated policy, the `config_hash`
+> (byte-identical carry-over key, recomputed and asserted against the recorded
+> condition), the tool manifests, and pinned regressions — plus a
+> `production-todo.md` listing exactly the four NOT-reused categories
+> (bindings, credentials, topology, operations). `earned_bridge()` surfaces
+> only when an aggregate shows governance changed the outcome. `axor-lab
+> import-incident` builds a trace-replay bundle from a production trace (second
+> funnel). Covered by `test_cp_export.py`.
 
 - **Contract anchor:** `control-plane-handoff.md` (what carries / what must be
   added), `axor-packaging.md` §8 (Production Governance is an add-on toggle,

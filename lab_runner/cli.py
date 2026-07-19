@@ -325,6 +325,77 @@ def _publish_to_server(
     return EXIT_OK
 
 
+def _cmd_export_cp(args: argparse.Namespace) -> int:
+    from .cp_export import CPExportError, export_cp
+
+    bundle, _ = read_bundle_dir(Path(args.bundle))
+    regressions: list[dict[str, object]] = []
+    if args.pins:
+        regressions = [
+            {"trace_id": p["trace_id"], "expected_verdict": p["expected_verdict"]}
+            for p in json.loads(Path(args.pins).read_text())
+        ]
+    try:
+        export = export_cp(bundle, regressions)
+    except CPExportError as exc:
+        raise RunnerError(str(exc)) from exc
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
+    (out / "production-todo.md").write_text(export.production_todo)
+    print(f"exported CP deploy config -> {out}/cp-deploy.json")
+    print(f"  config_hash (carry-over key): {export.config['config_hash']}")
+    print(f"  regressions carried: {len(export.config['regressions'])}")  # type: ignore[arg-type]
+    print(f"  production-todo (NOT reused): {out}/production-todo.md")
+    if export.earned_bridge:
+        print("  earned bridge: governance changed the outcome on your agent — "
+              "run this governed config in production.")
+    else:
+        print("  note: no aggregate shows governance changed an outcome yet "
+              "(the bridge surfaces once one does).")
+    return EXIT_OK
+
+
+def _cmd_import_incident(args: argparse.Namespace) -> int:
+    """Second funnel: a production trace -> a trace-replay bundle you can test a
+    policy against, pin, and export (control-plane-handoff.md §Second funnel)."""
+    from lab_contracts import build_bundle, content_hash, validate_artifact
+
+    trace: dict[str, object] = json.loads(Path(args.trace).read_text())
+    errors = validate_artifact(trace, "trace")
+    if errors:
+        raise RunnerError(f"incident trace is not a conformant trace/v1: {errors}")
+    scenario: dict[str, object] = json.loads(Path(args.scenario).read_text())
+    manifests: list[dict[str, object]] = json.loads(Path(args.manifests).read_text())
+    trial: dict[str, object] = trace["trial"]  # type: ignore[assignment]
+    condition = {
+        "schema_version": "condition/v1",
+        "id": str(trial["condition_id"]),
+        "enforcement": "on",
+        "kernel": str(trace["producer"]["kernel_version"]),  # type: ignore[index]
+    }
+    trials = [{
+        "trial_id": content_hash(trace), "scenario_id": str(trial["scenario_id"]),
+        "condition_id": str(trial["condition_id"]), "seed": str(trial["seed"]),
+        "repeat_index": int(trial["repeat_index"]), "status": "completed",
+        "trace_ref": content_hash(trace),
+    }]
+    bundle = build_bundle(
+        bundle_id=f"b_incident_{content_hash(trace)[7:13]}",
+        created=args.created or "1970-01-01T00:00:00Z",
+        scenarios=[scenario], conditions=[condition], tool_manifests=manifests,
+        environment={"kernel_version": str(trace["producer"]["kernel_version"]),  # type: ignore[index]
+                     "model": {"provider": "imported", "id": "production-incident"}},
+        trials=trials, aggregates=[], traces={str(trace["trace_id"]): trace},
+        packaging=dict(PACKAGING),
+    )
+    write_bundle_dir(Path(args.out), bundle, {str(trace["trace_id"]): trace})
+    print(f"imported incident -> {args.out} (trace-replay bundle)")
+    print(f"  replay it:  axor-lab replay {args.out}")
+    print(f"  pin + export:  axor-lab pin ... && axor-lab export-cp {args.out} --pins pins.json")
+    return EXIT_OK
+
+
 def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
     from lab_adapters import (
         UnknownSuiteError,
@@ -567,6 +638,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument("--server", help="upload via the publish handshake to this base URL")
     p_publish.add_argument("--license", default="CC-BY-4.0")
     p_publish.set_defaults(func=_cmd_publish)
+
+    p_export = sub.add_parser(
+        "export-cp", help="export the validated policy + manifests + regressions to a CP config"
+    )
+    p_export.add_argument("bundle")
+    p_export.add_argument("--out", required=True, help="output directory for cp-deploy.json")
+    p_export.add_argument("--pins", default=None, help="regression pins to carry over")
+    p_export.set_defaults(func=_cmd_export_cp)
+
+    p_incident = sub.add_parser(
+        "import-incident", help="build a trace-replay bundle from a production incident trace"
+    )
+    p_incident.add_argument("--trace", required=True, help="a conformant trace/v1 JSON")
+    p_incident.add_argument("--scenario", required=True, help="scenario/v1 JSON")
+    p_incident.add_argument("--manifests", required=True, help="tool-manifest/v1 list JSON")
+    p_incident.add_argument("--out", required=True)
+    p_incident.add_argument("--created", default=None)
+    p_incident.set_defaults(func=_cmd_import_incident)
 
     p_import = sub.add_parser(
         "import-agentdojo", help="materialize a curated AgentDojo suite as an .axl file"
