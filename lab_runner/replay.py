@@ -17,7 +17,14 @@ from .kernel import Kernel
 
 @dataclass(frozen=True)
 class ReplayReport:
-    """Recorded vs recomputed decisions for a set of traces."""
+    """Recorded vs recomputed decisions for a set of traces.
+
+    `bit_identical` is precise about WHAT is identical: (a) the recomputed
+    verdict-core (verdict + gate + driving value id) matches the recorded one —
+    `reason`/`projection` prose may evolve without changing the verdict — and
+    (b) the recomputed report is byte-identical across machines/processes given
+    the same pinned kernel (the `canonical()` witness). It is NOT a claim that
+    the full free-text decision object is byte-equal (review §5.2)."""
 
     decisions: tuple[tuple[str, tuple[dict[str, object], ...]], ...]
     bit_identical: bool
@@ -53,21 +60,28 @@ def replay_trace(
     events: list[dict[str, object]] = list(trace["events"])  # type: ignore[arg-type]
     recomputed: list[dict[str, object]] = []
     matches = True
-    pending_call: dict[str, object] | None = None
+    # per-node FIFO queues of unmatched intents — a single `pending_call` breaks
+    # on interleaved nodes / parallel calls / several intents before decisions
+    # (review §5.1). Each gate_decision pairs with the earliest unmatched intent
+    # on its own node.
+    pending: dict[str, list[dict[str, object]]] = {}
     # accumulate the governor's taint registrations from tool_result events
     registrations: list[tuple[str, object]] = []
     for event in events:
+        node = str(event.get("node", "root"))
         if event.get("type") == "tool_result":
             for vid in event.get("produces_value_ids", []) or []:
                 value = values.get(str(vid), {})
                 if "untrusted_derived" in value.get("labels", []) and "decision_value" in value:
                     registrations.append((str(event.get("tool")), value["decision_value"]))
         elif event.get("type") == "tool_call_intent":
-            pending_call = event
+            pending.setdefault(node, []).append(event)
         elif event.get("type") == "gate_decision":
-            if pending_call is None:
+            queue = pending.get(node, [])
+            if not queue:
                 matches = False
                 continue
+            pending_call = queue.pop(0)
             bindings: dict[str, str] = pending_call.get("arg_bindings", {})  # type: ignore[assignment]
             args = {name: _arg_value(values[vid]) for name, vid in bindings.items()}
             if isinstance(kernel, AxorKernel):
@@ -94,7 +108,6 @@ def replay_trace(
             recorded = event["decision"]
             if canonical_json(_verdict_core(decision)) != canonical_json(_verdict_core(recorded)):  # type: ignore[arg-type]
                 matches = False
-            pending_call = None
     return tuple(recomputed), matches
 
 

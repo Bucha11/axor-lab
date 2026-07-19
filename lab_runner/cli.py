@@ -150,7 +150,8 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     if not report.bit_identical:
         print("MISMATCH: recomputed verdicts differ from recorded", file=sys.stderr)
         return EXIT_FAILURE
-    print("bit-identical: recomputed verdicts match the recorded traces exactly")
+    print("bit-identical: verdict-core (verdict+gate+driving value) matches the "
+          "recorded traces; the replay report is byte-identical across machines")
     print("(exact claim — no CI; behavioral outcomes reproduce statistically via `run`)")
     return EXIT_OK
 
