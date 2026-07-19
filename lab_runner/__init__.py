@@ -8,6 +8,13 @@ lab_contracts; statistics in lab_analysis.
 """
 
 from .agents import AgentAdapter, ScriptedAgent, resolve_agent
+from .axor_backend import (
+    AxorKernel,
+    axor_available,
+    governor_config,
+    real_kernel_version,
+    resolve_kernel,
+)
 from .errors import (
     ConfirmationRequired,
     ExperimentFileError,
@@ -35,7 +42,12 @@ from .simulator import SimulatedToolHost
 
 __all__ = [
     "AgentAdapter",
+    "AxorKernel",
     "ConfirmationRequired",
+    "axor_available",
+    "governor_config",
+    "real_kernel_version",
+    "resolve_kernel",
     "ExperimentFileError",
     "ExperimentResult",
     "Kernel",

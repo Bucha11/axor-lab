@@ -66,6 +66,21 @@ jobs:
           cd contracts && python validate_slice.py && cd ..
           python -m unittest tests.test_agentdojo_adapter tests.test_packaging -v
 
+  real-kernel:
+    name: Real axor-core kernel integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the real kernel and run the integration tests
+        # if axor-core is unavailable the tests skip (optional dependency); when
+        # present they prove Lab governs with the production ToolCallGovernor
+        run: |
+          pip install "axor-core>=0.9" || echo "axor-core unavailable — integration will skip"
+          python -m unittest tests.test_real_kernel -v
+
   packaging:
     name: Wheel installs and runs outside the checkout
     runs-on: ubuntu-latest

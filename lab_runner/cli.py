@@ -82,7 +82,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     print("[validating]")
-    resolved = resolve(load_axl(Path(args.file)))
+    document = load_axl(Path(args.file))
+    if args.real_kernel:
+        _repin_to_real_kernel(document)
+    resolved = resolve(document)
 
     print("[estimate]")
     _print_estimate(resolved, _estimate_model(args, resolved))
@@ -445,6 +448,23 @@ def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
 # -- helpers ------------------------------------------------------------------
 
 
+def _repin_to_real_kernel(document: dict[str, object]) -> None:
+    """Repin every enforcement-on condition to the installed axor-core version,
+    so the run governs with the REAL kernel (not the reference)."""
+    from lab_contracts import condition_config_hash
+    from lab_runner import axor_available, real_kernel_version
+
+    if not axor_available():
+        raise RunnerError("--real-kernel requested but axor-core is not installed")
+    version = real_kernel_version()
+    experiment: dict[str, object] = document["experiment"]  # type: ignore[assignment]
+    for condition in experiment.get("conditions", []):  # type: ignore[union-attr]
+        if condition.get("enforcement") == "on":
+            condition["kernel"] = version
+            condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
+    print(f"  repinned governed condition(s) to the real kernel: {version}")
+
+
 def _resolve_agent_override(spec: str) -> object:
     """Build a BYOK agent from --agent (cassette:<file> | anthropic:<model>)."""
     from lab_agent import AnthropicBackend, FileCassetteAgent, WrappedModelAgent
@@ -600,6 +620,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--agent", default=None,
         help="BYOK agent override: cassette:<file> (offline) or anthropic:<model>",
+    )
+    p_run.add_argument(
+        "--real-kernel", action="store_true",
+        help="govern with the installed axor-core kernel (not the reference)",
     )
     p_run.set_defaults(func=_cmd_run)
 

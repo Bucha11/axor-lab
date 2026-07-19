@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from lab_contracts.canonical import content_hash
 
 from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
+from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
 from .kernel import Kernel, KernelRegistry
 from .ledger import ValueLedger
 from .predicates import evaluate
@@ -135,16 +136,26 @@ def run_trial(
     )
     seq += 1
 
-    # 3. gate — the ONE decide implementation (also used by replay)
-    decision = kernel.decide(
-        enforcement=str(condition["enforcement"]),
-        manifest=manifests[sink_tool],
-        args=args,
-        arg_labels={name: ledger.labels_of(vid) for name, vid in arg_bindings.items()},
-        arg_bindings=arg_bindings,
-        inputs=inputs,
-        policy=condition.get("policy"),  # type: ignore[arg-type]
-    )
+    # 3. gate — the ONE decide implementation (also used by replay). The real
+    # axor-core governor and the reference kernel share this dispatch.
+    if isinstance(kernel, AxorKernel):
+        registrations = [
+            (read_tool, ledger.get(vid)["decision_value"]) for vid in produced
+        ]
+        decision = gate_with_governor(
+            kernel.config, str(condition["enforcement"]), registrations,
+            sink_tool, args, v_recipient,
+        )
+    else:
+        decision = kernel.decide(
+            enforcement=str(condition["enforcement"]),
+            manifest=manifests[sink_tool],
+            args=args,
+            arg_labels={name: ledger.labels_of(vid) for name, vid in arg_bindings.items()},
+            arg_bindings=arg_bindings,
+            inputs=inputs,
+            policy=condition.get("policy"),  # type: ignore[arg-type]
+        )
     events.append({"seq": seq, "node": "root", "type": "gate_decision", "decision": decision})
     seq += 1
 
@@ -223,7 +234,7 @@ def run_experiment(
     result = ExperimentResult(run_id=run_id)
     scenario_id = str(scenario["name"])
     for condition in conditions:
-        kernel = kernel_registry.get(str(condition["kernel"]))
+        kernel = resolve_kernel(str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry)
         for repeat_index in range(repeats):
             seed = f"s{repeat_index:03d}"
             outcome = run_trial(
@@ -325,7 +336,7 @@ def run_experiment_suite(
     for scenario in scenarios:
         scenario_id = str(scenario["name"])
         for condition in conditions:
-            kernel = kernel_registry.get(str(condition["kernel"]))
+            kernel = resolve_kernel(str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry)
             for repeat_index in range(repeats):
                 seed = f"s{repeat_index:03d}"
                 outcome = run_trial(

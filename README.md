@@ -22,7 +22,7 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 | endpoint gateway | **experimental** | fail-closed governance + SSRF guard; auth/TTL/quotas are roadmap |
 | sandbox | **experimental** | real RLIMIT process limits; NOT namespace/seccomp isolation — do not run hostile code from untrusted users |
 | games / federation | **experimental** | a deterministic toy model; containment is demonstrated, not proven |
-| kernel | **reference** | `reference_taint_floor_kernel` (1 gate); real axor-core integration is roadmap (kernel version = intent metadata) |
+| kernel | **reference + real backend** | ships `reference_taint_floor_kernel` (1 gate, stdlib) AND a real backend that drives the production `axor_core.governor.ToolCallGovernor` when axor-core is installed and the condition pins the installed version (`pip install axor-lab[kernel]`; `axor-lab run --real-kernel`). Verified: real governor DENYs the exfil, ALLOWs the faithful payment, replays bit-identically |
 | Private Lab / workspaces / billing | **design-only** | `lab_entitlement` gates features; hosted workspace surface not built |
 
 ## Packages (MVP spine + post-MVP blocks, stdlib-only core)
