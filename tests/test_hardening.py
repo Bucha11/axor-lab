@@ -181,3 +181,57 @@ class TestFullBundleIntegrity(unittest.TestCase):
         bundle["environment"]["model"]["provider"] = "forged"
         with self.assertRaises(SignatureInvalid):
             verify_bundle_signature(bundle, sig, pub)
+
+
+class TestPublicationIdAndAttestations(unittest.TestCase):
+    """§6.3/§6.4 — 128-bit ids + verified, de-duplicated attestations."""
+
+    def test_publication_id_is_128_bit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PublicationStore(root=Path(tmp))
+            bundle, traces = _bundle_and_traces()
+            pid = str(store.publish(bundle, traces, question="q").publication["publication_id"])
+            self.assertEqual(len(pid), len("e_") + 32)  # 32 hex = 128 bits
+
+    def test_duplicate_attestation_does_not_inflate_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PublicationStore(root=Path(tmp))
+            bundle, traces = _bundle_and_traces()
+            pid = str(store.publish(bundle, traces, question="q").publication["publication_id"])
+            att = {"schema_version": "attestation/v1", "publication_id": pid, "by": "@ext",
+                   "kind": "fresh_live", "created": "2026-07-20T00:00:00Z", "result": {"estimate": 0.0}}
+            store.add_attestation(pid, att)
+            store.add_attestation(pid, att)  # same (by, kind, publication) → deduped
+            self.assertEqual(len(store.reproductions_of(pid)), 1)
+
+    def test_re_publishing_same_bundle_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PublicationStore(root=Path(tmp))
+            bundle, traces = _bundle_and_traces()
+            a = store.publish(bundle, traces, question="q")
+            b = store.publish(bundle, traces, question="q")
+            self.assertEqual(a.publication["publication_id"], b.publication["publication_id"])
+
+    @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed (optional crypto)")
+    def test_signed_attestation_is_verified_and_marked(self) -> None:
+        from nacl.signing import SigningKey
+        from lab_contracts.publication import add_reproduction
+        from lab_contracts.signing import sign_bundle
+
+        key = SigningKey.generate()
+        pub = bytes(key.verify_key).hex()
+        body = {"schema_version": "attestation/v1", "publication_id": "e_x", "by": "@mit",
+                "kind": "fresh_live", "created": "2026-07-20T00:00:00Z", "result": {"estimate": 0.0}}
+        sig = sign_bundle({"content_hashes": body}, bytes(key).hex())
+        log = add_reproduction((), {**body, "signature": sig}, known_keys={"@mit": pub})
+        self.assertTrue(log[0]["verified"])
+
+    def test_attestation_signed_by_unknown_key_is_rejected(self) -> None:
+        from lab_contracts.publication import add_reproduction
+        from lab_contracts.errors import ClaimTypingError
+
+        body = {"schema_version": "attestation/v1", "publication_id": "e_x", "by": "@stranger",
+                "kind": "fresh_live", "created": "2026-07-20T00:00:00Z", "result": {"estimate": 0.0},
+                "signature": "deadbeef"}
+        with self.assertRaises(ClaimTypingError):
+            add_reproduction((), body, known_keys={})

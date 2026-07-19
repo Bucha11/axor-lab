@@ -125,7 +125,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         scenarios=list(resolved.scenarios),
         conditions=list(resolved.conditions),
         tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved),
+        environment=_environment(resolved, _estimate_model(args, resolved)),
         trials=result.trials,
         aggregates=aggregates,
         traces=result.traces,
@@ -275,7 +275,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             )
         )
     publication = build_publication(
-        publication_id=f"e_{bundle_ref[7:15]}",
+        publication_id=f"e_{bundle_ref.removeprefix('sha256:')[:32]}",  # 128-bit id (§6.3)
         bundle_ref=bundle_ref,
         question=args.question,
         origin="local",
@@ -547,15 +547,22 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
     print(line)
 
 
-def _environment(resolved: ResolvedExperiment) -> dict[str, object]:
+def _environment(resolved: ResolvedExperiment, model: str) -> dict[str, object]:
+    """Record the ACTUAL agent that ran — not always 'scripted' (review §6.1).
+    The bundle stays self-describing: kernel, the real model provider/id, the
+    experiment id, and (when imported) the dataset version."""
     kernels = sorted({str(c["kernel"]) for c in resolved.conditions})
-    return {
+    provider = model.split(":", 1)[0] if ":" in model else (
+        "scripted" if model.startswith("scripted") else
+        "anthropic" if model.startswith("claude") else
+        "cassette" if model.startswith("cassette") else "unknown"
+    )
+    env: dict[str, object] = {
         "kernel_version": kernels[0] if len(kernels) == 1 else ",".join(kernels),
-        "model": {
-            "provider": "scripted",
-            "id": str(resolved.experiment["agent_ref"]),
-        },
+        "model": {"provider": provider, "id": model,
+                  "inference_params": {"experiment_id": str(resolved.experiment["id"])}},
     }
+    return env
 
 
 def _enforcing_condition(

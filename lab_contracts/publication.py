@@ -73,12 +73,38 @@ def build_publication(
 
 
 def add_reproduction(
-    log: tuple[dict[str, object], ...], attestation: dict[str, object]
+    log: tuple[dict[str, object], ...],
+    attestation: dict[str, object],
+    known_keys: dict[str, str] | None = None,
 ) -> tuple[dict[str, object], ...]:
-    """Append to the attestation log — the publication itself never changes."""
+    """Append to the attestation log — the publication itself never changes.
+
+    Review §6.4: reproductions are provenance, not a free counter. This
+    (1) rejects an unknown kind, (2) de-duplicates by (attester, kind,
+    publication) so the count can't be inflated by re-posting, and (3) when the
+    attestation carries a `signature` + `by` key that is KNOWN, verifies it and
+    marks it `verified` — an unknown-key or bad signature is rejected rather
+    than silently counted as verified."""
     if attestation.get("kind") not in REPRODUCTION_KINDS:
         raise ClaimTypingError(f"unknown reproduction kind {attestation.get('kind')!r}")
-    return log + (attestation,)
+    key = (attestation.get("by"), attestation.get("kind"), attestation.get("publication_id"))
+    if any((a.get("by"), a.get("kind"), a.get("publication_id")) == key for a in log):
+        return log  # idempotent: a duplicate attestation does not inflate the count
+    entry = dict(attestation)
+    signature = entry.pop("signature", None)
+    if signature is not None:
+        pubkey = (known_keys or {}).get(str(entry.get("by")))
+        if pubkey is None:
+            raise ClaimTypingError(f"attestation signed by unknown key {entry.get('by')!r}")
+        from .signing import SignatureInvalid, verify_bundle_signature
+
+        try:
+            # sign over the attestation body (minus signature), same crypto path
+            verify_bundle_signature({"content_hashes": entry}, signature, pubkey)
+        except SignatureInvalid as exc:
+            raise ClaimTypingError(f"attestation signature invalid: {exc}") from exc
+        entry["verified"] = True
+    return log + (entry,)
 
 
 def provenance_axes(

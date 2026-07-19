@@ -1,0 +1,74 @@
+[
+  {
+    "input": {
+      "b": 2,
+      "a": 1
+    },
+    "canonical": "{\"a\":1,\"b\":2}",
+    "sha256": "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+  },
+  {
+    "input": {
+      "z": [
+        1,
+        2,
+        {
+          "y": "x"
+        }
+      ],
+      "k": "v"
+    },
+    "canonical": "{\"k\":\"v\",\"z\":[1,2,{\"y\":\"x\"}]}",
+    "sha256": "sha256:9f9130bd5d0f4efeb6c8ca29f3ad8a358fb5fbf5cf66cdc6ed8c45d541af97b7"
+  },
+  {
+    "input": {
+      "unicode": "café",
+      "n": 42,
+      "bool": true,
+      "nul": null
+    },
+    "canonical": "{\"bool\":true,\"n\":42,\"nul\":null,\"unicode\":\"café\"}",
+    "sha256": "sha256:52b91effac1e6ec5c072be3f3e5dc9541e174fdd62b31ec12d26430f3c68191f"
+  },
+  {
+    "input": [
+      {
+        "id": "send_money",
+        "cls": "EXPORT"
+      }
+    ],
+    "canonical": "[{\"cls\":\"EXPORT\",\"id\":\"send_money\"}]",
+    "sha256": "sha256:2c44b60019384ac0d06ac5f800bcbdb231213832177047f4e94594b16b973dd1"
+  },
+  {
+    "input": {
+      "kernel": "axor-core@0.4.2",
+      "policy": {
+        "profile": "strict",
+        "allowlist": [
+          "GB29NWBK60161331926819"
+        ]
+      }
+    },
+    "canonical": "{\"kernel\":\"axor-core@0.4.2\",\"policy\":{\"allowlist\":[\"GB29NWBK60161331926819\"],\"profile\":\"strict\"}}",
+    "sha256": "sha256:53dc782604d75a76942859060ab31683d89a19f35c48c8741e1d1f98a2886e9a"
+  },
+  {
+    "input": {
+      "nested": {
+        "deep": {
+          "deeper": [
+            true,
+            false,
+            null,
+            0,
+            -1
+          ]
+        }
+      }
+    },
+    "canonical": "{\"nested\":{\"deep\":{\"deeper\":[true,false,null,0,-1]}}}",
+    "sha256": "sha256:7f18890d44d71bba0b2757d7176c5bd41e071076c094dfa10f78721c69934315"
+  }
+]

@@ -169,7 +169,7 @@ class PublicationStore:
         with self._lock:  # serialize the read-modify-write so concurrent attestations don't race
             stored = self.get(publication_id)
             stored.reproductions = list(
-                add_reproduction(tuple(stored.reproductions), attestation)
+                add_reproduction(tuple(stored.reproductions), attestation, self.known_keys)
             )
             self._persist_reproductions(stored)
             return stored
@@ -186,6 +186,18 @@ class PublicationStore:
         # ONLY public: unlisted is capability-URL-reachable but never listed,
         # private is never served (review §7 / P0.5)
         return [s for s in self._cache.values() if s.publication.get("visibility") == "public"]
+
+    def _mint_id(self, bundle_ref: str) -> str:
+        """A 128-bit id (32 hex chars) from the bundle hash (review §6.3 — the
+        old 32-bit id was collision-searchable). Re-publishing the SAME bundle
+        is idempotent (same id); a genuine collision — the id already exists for
+        a DIFFERENT bundle — is rejected."""
+        digest = bundle_ref.removeprefix("sha256:")
+        candidate = f"e_{digest[:32]}"
+        existing = self._cache.get(candidate)
+        if existing is not None and existing.publication.get("bundle_ref") != bundle_ref:
+            raise PublishRejected(f"publication id collision for {candidate}")
+        return candidate
 
     def is_taken_down(self, publication_id: str) -> bool:
         return publication_id in self._tombstones
@@ -247,7 +259,7 @@ class PublicationStore:
                 )
             )
         return build_publication(
-            publication_id=f"e_{bundle_ref[7:15]}",
+            publication_id=self._mint_id(bundle_ref),
             bundle_ref=bundle_ref,
             question=question,
             origin="local",
