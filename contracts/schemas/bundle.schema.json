@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/bundle.schema.json",
+  "title": "Axor Lab Reproducible Bundle",
+  "description": "bundle/v1 \u2014 everything needed to reproduce a run's governance verdicts exactly, and to re-run it live. 'config + seeds + traces' was shorthand; this is the real list. Kernel version and config hashes are load-bearing.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "bundle_id",
+    "created",
+    "scenarios",
+    "conditions",
+    "tool_manifests",
+    "environment",
+    "trials",
+    "aggregates",
+    "content_hashes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "bundle/v1"
+    },
+    "bundle_id": {
+      "type": "string"
+    },
+    "created": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "$ref": "scenario.schema.json"
+      }
+    },
+    "bench": {
+      "type": "object",
+      "description": "optional: ordered scenario set + report config",
+      "additionalProperties": true
+    },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "$ref": "condition.schema.json"
+      }
+    },
+    "tool_manifests": {
+      "type": "array",
+      "items": {
+        "$ref": "tool-manifest.schema.json"
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": [
+        "kernel_version",
+        "model"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kernel_version": {
+          "type": "string"
+        },
+        "model": {
+          "type": "object",
+          "required": [
+            "provider",
+            "id"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "provider": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "inference_params": {
+              "type": "object",
+              "additionalProperties": true,
+              "description": "temperature, top_p, etc \u2014 recorded, but note the model is still stochastic across calls"
+            }
+          }
+        },
+        "container_digest": {
+          "type": "string",
+          "description": "for cloud/template runs; absent for pure-local"
+        },
+        "dependency_lock_hash": {
+          "type": "string"
+        },
+        "dataset_version": {
+          "type": "string",
+          "description": "e.g. AgentDojo version, for imported benchmarks"
+        }
+      }
+    },
+    "trials": {
+      "type": "array",
+      "description": "raw attempts. Each references a trace; the trace carries verdicts. Missing/failed trials are recorded, not silently dropped (see statistics: missingness).",
+      "items": {
+        "type": "object",
+        "required": [
+          "trial_id",
+          "scenario_id",
+          "condition_id",
+          "seed",
+          "repeat_index",
+          "status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "trial_id": {
+            "type": "string",
+            "description": "stable identity = hash(scenario_id, condition_id, seed, repeat_index); a retry replaces, never duplicates"
+          },
+          "scenario_id": {
+            "type": "string"
+          },
+          "condition_id": {
+            "type": "string"
+          },
+          "seed": {
+            "type": "string"
+          },
+          "repeat_index": {
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "failed",
+              "excluded"
+            ]
+          },
+          "failure_reason": {
+            "type": "string",
+            "description": "for failed/excluded \u2014 so missingness can be judged non-random"
+          },
+          "trace_ref": {
+            "type": "string",
+            "description": "content hash of the trace.schema.json for this trial"
+          }
+        }
+      }
+    },
+    "aggregates": {
+      "type": "array",
+      "description": "computed results per (scenario|bench, condition, metric); estimator + interval + test are named per statistics.md, never assumed",
+      "items": {
+        "type": "object",
+        "required": [
+          "metric",
+          "condition_id",
+          "estimate",
+          "interval",
+          "n",
+          "unit_of_analysis"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "metric": {
+            "type": "string"
+          },
+          "condition_id": {
+            "type": "string"
+          },
+          "estimate": {
+            "type": "number"
+          },
+          "interval": {
+            "type": "object",
+            "required": [
+              "method",
+              "low",
+              "high"
+            ],
+            "properties": {
+              "method": {
+                "type": "string"
+              },
+              "low": {
+                "type": "number"
+              },
+              "high": {
+                "type": "number"
+              }
+            }
+          },
+          "n": {
+            "type": "integer",
+            "description": "count in the correct unit of analysis, NOT rounds-within-run"
+          },
+          "unit_of_analysis": {
+            "type": "string",
+            "description": "e.g. 'run' not 'round' \u2014 rounds inside one run are not independent"
+          },
+          "test": {
+            "type": "object",
+            "description": "pairwise test vs a baseline condition, if computed",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "redaction_manifest": {
+      "type": "object",
+      "description": "what was redacted from traces and how; observations only, never raw bodies",
+      "additionalProperties": true
+    },
+    "content_hashes": {
+      "type": "object",
+      "description": "sha256 of every artifact above, the integrity spine",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "signature": {
+      "type": "string",
+      "description": "optional detached signature over content_hashes (see publication.integrity)"
+    },
+    "canonicalization": {
+      "const": "JCS/RFC8785",
+      "description": "content_hashes and any signature are computed over JCS-canonicalized (RFC 8785) serialization \u2014 the same canonicalization the control-plane protocol v0.2 uses (v2 Ch.6), so a hash is stable across serializers."
+    },
+    "packaging": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "how the bundle is physically laid out for transport",
+      "properties": {
+        "layout": {
+          "const": "axor-bundle-dir/v1"
+        },
+        "manifest": {
+          "type": "string",
+          "description": "path to the manifest listing every artifact + its content hash"
+        },
+        "traces_dir": {
+          "type": "string",
+          "default": "traces/"
+        },
+        "compression": {
+          "enum": [
+            "none",
+            "zstd",
+            "gzip"
+          ],
+          "default": "zstd"
+        }
+      }
+    }
+  }
+}
