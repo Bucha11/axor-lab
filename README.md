@@ -7,7 +7,7 @@ Axor Lab — standalone research surface for the Axor governance stack: bring an
 - **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
 - **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3), packaging/economics, bench format guide, UI mocks.
 
-## Packages (plan Phases 0–3, stdlib-only)
+## Packages (MVP spine + post-MVP blocks, stdlib-only core)
 
 - **`lab_contracts/`** — the contract layer: schema loading + the contracts' own
   subset JSON-Schema validator (cwd-independent), semantic checks (author-time
@@ -26,9 +26,20 @@ Axor Lab — standalone research surface for the Axor governance stack: bring an
   axor-eval's property map), each schema-valid and author-time-validated.
 - **`lab_server/`** — the hosted surface (Phase 4 + minimal Phase 5): the
   publish handshake (schema + hash + safe replay verification, `origin=local`),
-  an append-only attestation log, and escaped HTML catalog / publication /
-  EvidenceCase pages with three-axis provenance. Stdlib `http.server`; runs no
-  live agents.
+  an append-only attestation log, `integrity=signed` for known author keys,
+  takedown that preserves attestations, and escaped HTML catalog / publication
+  / EvidenceCase pages with three-axis provenance. Stdlib `http.server`; runs
+  no live agents.
+- **`lab_agent/`** (B1) — BYOK model-backed agent: `ModelBackend` protocol,
+  `CassetteBackend` (offline) + `AnthropicBackend`, a `WrappedModelAgent`
+  driving the loop through the ledger; cost estimate.
+- **`lab_entitlement/`** (B9) — the Private Lab license (modules as flags) and
+  the two lines as code: safety free forever, org use paid; optional Ed25519.
+- **`lab_endpoint/`** (B5) — instrumented-endpoint trace assembly + black-box
+  eval-only labeling + SSRF guard.
+- **`lab_sandbox/`** (B6) — the sandbox policy decision layer (egress
+  allowlist, resource caps, no host mounts, non-persistent secrets, audit).
+- **`lab_games/`** (B7) — iterated-game runtime with honest per-run statistics.
 
 ## CLI quickstart (`axor-lab`, or `python -m lab_runner`)
 
@@ -63,9 +74,13 @@ one test file per criterion, plus two golden paths (in-process
 is validated against the real schemas in `contracts/`.
 
 ```
-python -m unittest discover -s tests -t .      # 102 tests, no dependencies
+python -m unittest discover -s tests -t .      # 153 tests, no dependencies
 ```
 
 Beyond the ten acceptance criteria, the suite covers the AgentDojo adapter,
 the CLI (subprocess), the server over real HTTP (publish handshake, escaped
-pages, three-axis provenance), and a terminology lint.
+pages, three-axis provenance, takedown), a terminology lint, and the post-MVP
+blocks: BYOK agent (cassette-driven), Control Plane export, entitlement,
+bundle signing, instrumented/black-box endpoints, the sandbox red-team suite,
+and per-run game statistics. Optional Ed25519/BYOK paths skip cleanly when
+PyNaCl / the Anthropic SDK are absent.

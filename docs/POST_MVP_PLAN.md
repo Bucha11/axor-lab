@@ -217,8 +217,18 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 
 ## Later tier — new subsystems (each needs its contract first)
 
-### B5 — Instrumented-endpoint contract
+### B5 — Instrumented-endpoint contract — ◐ code slice implemented
 *Govern an agent behind an endpoint that emits value-carrying events.*
+
+> **Status:** `lab_endpoint` assembles emitted value-carrying events into a
+> conformant `trace/v1` with `producer.mode=instrumented_endpoint`, gated by
+> the same pure kernel (governance/EvidenceCase/replay all apply); fidelity is
+> `explicit_flow_tracked` only when labels are carried, else flagged
+> `heuristic_attribution`. Black-box mode produces NO trace and is labeled
+> "evaluation-only — not governance". SSRF/private-network/DNS-rebinding guard
+> (`ssrf_check`) blocks loopback, link-local, private, and rebound addresses.
+> The live gateway transport (SSE + tool proxy) is the remaining infra piece.
+> Covered by `test_later_tier.py`.
 
 - **Contract anchor:** `endpoint-protocol.md` (the split: instrumented =
   governance-capable via `POST /runs` + `SSE /runs/{id}/events` + tool gateway;
@@ -243,8 +253,18 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   and the UI never offers gate-on/off for it. **Blocked by:** none for the
   instrumented path; the safety runner shares infra with B6's egress controls.
 
-### B6 — Sandbox + arbitrary cloud code
+### B6 — Sandbox + arbitrary cloud code — ◐ policy layer implemented
 *The single most expensive subsystem; gates every "run untrusted code on Lab infra" path.*
+
+> **Status:** `lab_sandbox` ships the policy DECISION layer the isolation
+> runtime consults: egress deny-by-default + API allowlist, CPU/RAM/disk/
+> wall-time/output/process caps, no host mounts, secret injection without
+> persisting the value, and an audit trail on every decision. A red-team suite
+> (`test_later_tier.py`) drives it: egress exfiltration, fork bomb, disk fill,
+> output flood, host mount, and secret-value leakage are each denied and
+> audited. The actual gVisor/Firecracker isolation runtime is the deferred
+> infra that enforces these decisions — until it lands, code execution stays
+> local-only (the MVP posture).
 
 - **Contract anchor:** `spec-lab.md` §9 ("Sandbox is a real subsystem, not a
   phrase" — the full enumerated list), `threat-model.md` §2 (untrusted code).
@@ -263,8 +283,17 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   produces a bundle byte-identical to the same run executed locally. **This is
   the critical-path gate for the rest of the Later tier.**
 
-### B7 — Multi-agent game runtime
+### B7 — Multi-agent game runtime — ◐ core + honest stats implemented
 *Players are singles or federations; composition is a variable.*
+
+> **Status:** `lab_games` ships a deterministic iterated-game runtime (players
+> are reproducible strategies) and per-run statistics: a run's cooperation
+> rate is the run's SINGLE value, `n` = runs, CI is a paired bootstrap that
+> narrows with runs, and a round-level `unit_of_analysis` is rejected by
+> `lab_analysis` — a game can never fabricate precision by counting rounds
+> (`statistics.md` §1). Covered by `test_later_tier.py`. Federation players,
+> arbitrary topology, and cloud-executed games (behind B6) are the deferred
+> extensions.
 
 - **Contract anchor:** `spec-lab.md` §5 (Game experiment type),
   `statistics.md` §1 (the unit-of-analysis error that invalidates iterated
@@ -287,8 +316,15 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   structure-within-observation (a property test asserts a round-level n is
   rejected at aggregate time).
 
-### B8 — Population scale + arbitrary topology
+### B8 — Population scale + arbitrary topology — ○ designed, blocked by B6/B7
 *Towns of N agents, arbitrary interaction graphs (the outreach targets).*
+
+> **Status:** intentionally not started — it is blocked by the sandbox (B6, for
+> scale-out execution) and the game runtime (B7, for federation players). The
+> `lab_games` per-run statistics and the federation-aware trace model
+> (`node`/`spawn`/`death`/`cross_process_in`) are the foundation it builds on;
+> population-scale spawn and arbitrary topology are the remaining work, gated
+> by B6.
 
 - **Contract anchor:** `spec-lab.md` §9 (population-scale is Vision), Prompt
   Infection / topology-attack outreach targets (`outreach-targets.md`).

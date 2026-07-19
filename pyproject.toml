@@ -25,6 +25,9 @@ packages = [
     "lab_server",
     "lab_agent",
     "lab_entitlement",
+    "lab_endpoint",
+    "lab_sandbox",
+    "lab_games",
 ]
 
 [project.optional-dependencies]
