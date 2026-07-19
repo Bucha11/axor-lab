@@ -57,6 +57,14 @@
       ],
       "description": "AXIS 2 \u2014 artifact integrity. hash_verified = content hashes check out; signed = detached signature by the author key."
     },
+    "statistics_integrity": {
+      "enum": [
+        "self_reported",
+        "recomputed_from_traces",
+        "lab_executed"
+      ],
+      "description": "AXIS 4 \u2014 how the statistical aggregates were established. self_reported = taken from the upload on faith (never used for a statistically_reproducible claim); recomputed_from_traces = the server recomputed every aggregate from the trials + traces + scenario predicates and they matched; lab_executed = the run itself executed on Lab infra."
+    },
     "claims": {
       "type": "array",
       "description": "claims are typed by what actually supports them \u2014 the exact/statistical boundary is structural, not prose (see claims.md)",

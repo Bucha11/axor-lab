@@ -55,8 +55,9 @@ def build_publication(
     license_id: str,
     limitations: tuple[str, ...] = DEFAULT_LIMITATIONS,
     visibility: str = "unlisted",
+    statistics_integrity: str | None = None,
 ) -> dict[str, object]:
-    return {
+    publication: dict[str, object] = {
         "schema_version": "publication/v1",
         "publication_id": publication_id,
         "bundle_ref": bundle_ref,
@@ -70,6 +71,9 @@ def build_publication(
         "visibility": visibility,
         "reproductions_ref": f"attlog:{publication_id}",
     }
+    if statistics_integrity is not None:
+        publication["statistics_integrity"] = statistics_integrity
+    return publication
 
 
 def add_reproduction(

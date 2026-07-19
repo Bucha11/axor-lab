@@ -261,6 +261,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
                 aggregate_refs=aggregate_refs,
             )
         )
+    provider = str(bundle.get("environment", {}).get("model", {}).get("provider", ""))  # type: ignore[union-attr]
+    agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
     for aggregate in aggregates:
         interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
         claims.append(
@@ -268,7 +270,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
                 "statistically_reproducible",
                 f"{aggregate['metric']} under {aggregate['condition_id']}: "
                 f"{aggregate['estimate']:.2f} "
-                f"[{interval['low']:.2f}, {interval['high']:.2f}] over {aggregate['n']} live trials.",
+                f"[{interval['low']:.2f}, {interval['high']:.2f}] over {aggregate['n']} trials{agent_note}.",
                 f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
                 trace_refs=trace_refs,
                 aggregate_refs=aggregate_refs,
@@ -282,6 +284,9 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         integrity="hash_verified",
         claims=claims,
         license_id=args.license,
+        # local publish reports its own numbers; only the server independently
+        # recomputes them (→ recomputed_from_traces). Be honest about which.
+        statistics_integrity="self_reported" if aggregates else None,
     )
     errors = validate_artifact(publication, "publication")
     if errors:

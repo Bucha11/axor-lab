@@ -29,6 +29,7 @@ from lab_contracts.publication import add_reproduction
 from lab_runner import default_registry, replay_bundle
 
 from .errors import NotFound, PublishRejected
+from .recompute import check_aggregates
 
 _ATTESTATION_ID_MAX = 128
 
@@ -106,6 +107,17 @@ class PublicationStore:
         if not report.bit_identical:
             raise PublishRejected(
                 "server replay does not match recorded verdicts — refusing to publish"
+            )
+
+        # recompute every statistical aggregate from the evidence and reject a
+        # bundle whose uploaded numbers do not follow from its own traces — hash
+        # verification proves internal consistency, NOT that the estimates and n
+        # were actually measured (review r2 Patch 4)
+        mismatches = check_aggregates(bundle, traces)
+        if mismatches:
+            raise PublishRejected(
+                "uploaded aggregates do not match server recomputation: "
+                + "; ".join(mismatches[:5])
             )
 
         integrity = self._integrity(bundle, signature, author)
@@ -244,6 +256,12 @@ class PublicationStore:
                     aggregate_refs=aggregate_refs,
                 )
             )
+        # honest agent wording: the default runner drives a deterministic
+        # scripted agent, so the claim says "trials", not "live trials"
+        provider = str(
+            bundle.get("environment", {}).get("model", {}).get("provider", "")  # type: ignore[union-attr]
+        )
+        agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
         for aggregate in aggregates:
             interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
             claims.append(
@@ -252,12 +270,16 @@ class PublicationStore:
                     f"{aggregate['metric']} under {aggregate['condition_id']}: "
                     f"{float(aggregate['estimate']):.2f} "
                     f"[{float(interval['low']):.2f}, {float(interval['high']):.2f}] "
-                    f"over {aggregate['n']} live trials.",
+                    f"over {aggregate['n']} trials{agent_note}, "
+                    "server-recomputed from the traces.",
                     f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
                     trace_refs=trace_refs,
                     aggregate_refs=aggregate_refs,
                 )
             )
+        # the server only reaches here after check_aggregates matched, so every
+        # statistical claim is backed by a server recomputation, not the upload
+        statistics_integrity = "recomputed_from_traces" if aggregates else None
         return build_publication(
             publication_id=self._mint_id(bundle_ref),
             bundle_ref=bundle_ref,
@@ -267,6 +289,7 @@ class PublicationStore:
             claims=claims,
             license_id=license_id,
             visibility=visibility,
+            statistics_integrity=statistics_integrity,
         )
 
     @staticmethod
