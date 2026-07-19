@@ -1,12 +1,25 @@
 # Axor Lab — Production-Ready Implementation Plan (v1)
 
-> **Status (2026-07-19):** Phase 0 (lab_contracts), the Phase 1–2 engine
-> (lab_runner: ledger/kernel/simulator/runner/replay/EvidenceCase/regression,
-> scripted agent behind `AgentAdapter`), the Phase 3 statistics core
-> (lab_analysis), and the runner-protocol CLI (`axor-lab`) are implemented and
-> covered by the executable acceptance suite (84 tests). Still open within
-> Phases 1–5: BYOK model-backed agent adapter, AgentDojo import, the Phase 4
-> server/catalog, and the Phase 5 web app.
+> **Status (2026-07-19):** the MVP spine is implemented and covered by the
+> executable acceptance suite (102 tests, stdlib-only):
+> - **Phase 0** — `lab_contracts` (schema loader + subset validator, semantic
+>   checks, canonical hashing, bundle, typed claims).
+> - **Phases 1–2** — `lab_runner` (ledger/kernel/simulator/predicates/runner/
+>   replay/EvidenceCase/regression, `AgentAdapter` with a scripted default,
+>   `.axl` resolution, `axor-bundle-dir/v1` I/O) + the runner-protocol CLI.
+> - **Phase 3** — `lab_analysis` (Wilson/McNemar/bootstrap/missingness).
+> - **MVP item 2** — `lab_adapters`: the curated AgentDojo banking suite →
+>   `scenario/v1`, with `axor-lab import-agentdojo`.
+> - **Phase 4 + minimal Phase 5** — `lab_server`: publish handshake (schema +
+>   hash + safe replay verification, `origin=local`), append-only attestations,
+>   escaped HTML catalog / publication / EvidenceCase pages, three-axis
+>   provenance; `axor-lab publish --server`. Plus a terminology lint.
+>
+> All ten acceptance criteria pass on the vertical slice, locally and over the
+> hosted publish path — the MVP readiness criterion (domain-model.md) is met.
+> Still open (post-MVP, per §5): a BYOK model-backed `AgentAdapter`, the
+> production-grade server (Postgres/object storage/OAuth of Phase 6), the
+> richer web app, and every Vision item (cloud code, endpoints, games).
 
 Derived from the `lab/` design archive (spec-lab v0.3 + `contracts/` v1). The
 archive is treated as the authoritative product/engineering contract; where this

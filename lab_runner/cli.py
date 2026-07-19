@@ -231,6 +231,11 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         print("refusing to publish: recomputed verdicts differ from recorded", file=sys.stderr)
         return EXIT_FAILURE
 
+    if args.server:
+        return _publish_to_server(args, bundle, traces)
+    if not args.out:
+        raise RunnerError("publish needs --out (local publication JSON) or --server (upload)")
+
     bundle_ref = content_hash(bundle)
     trace_refs = frozenset(content_hash(t) for t in traces.values())
     aggregates: list[dict[str, object]] = bundle["aggregates"]  # type: ignore[assignment]
@@ -278,7 +283,90 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         raise RunnerError(f"publication failed schema validation: {errors}")
     Path(args.out).write_text(json.dumps(publication, indent=2, ensure_ascii=False))
     print(f"publication {publication['publication_id']} -> {args.out}")
-    print("origin=local integrity=hash_verified (server-side signing/hosting is Phase 4)")
+    print("origin=local integrity=hash_verified")
+    print(f"host it: axor-lab publish {args.bundle} --question ... --server <url>")
+    return EXIT_OK
+
+
+def _publish_to_server(
+    args: argparse.Namespace,
+    bundle: dict[str, object],
+    traces: dict[str, dict[str, object]],
+) -> int:
+    """Upload via the publish handshake; the server re-verifies before minting."""
+    import urllib.error
+    import urllib.request
+
+    payload = json.dumps(
+        {
+            "bundle": bundle,
+            "traces": traces,
+            "question": args.question,
+            "license": args.license,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        args.server.rstrip("/") + "/api/publications",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request) as response:  # noqa: S310 (operator-supplied URL)
+            result = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        print(f"server rejected publish ({exc.code}): {detail}", file=sys.stderr)
+        return EXIT_FAILURE
+    except urllib.error.URLError as exc:
+        raise RunnerError(f"cannot reach server {args.server}: {exc.reason}") from exc
+    print(f"published {result['publication_id']} -> {args.server.rstrip('/')}{result['url']}")
+    return EXIT_OK
+
+
+def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
+    from lab_adapters import (
+        UnknownSuiteError,
+        available_suites,
+        build_experiment_document,
+    )
+    from lab_contracts import condition_config_hash
+
+    kernel = "axor-core@0.4.2"
+    conditions = [
+        {
+            "schema_version": "condition/v1",
+            "id": "ungoverned",
+            "label": "ungoverned",
+            "enforcement": "off",
+            "kernel": kernel,
+            "config_hash": condition_config_hash(kernel, None),
+        },
+        {
+            "schema_version": "condition/v1",
+            "id": "governed",
+            "label": "governed",
+            "enforcement": "on",
+            "kernel": kernel,
+            "policy": {"profile": "strict", "trust_model": "content-ledger"},
+            "config_hash": condition_config_hash(
+                kernel, {"profile": "strict", "trust_model": "content-ledger"}
+            ),
+        },
+    ]
+    try:
+        document = build_experiment_document(
+            args.suite, conditions, repeats=args.repeats, agent_ref=args.agent_ref
+        )
+    except UnknownSuiteError as exc:
+        print(f"error: {exc}; available: {list(available_suites())}", file=sys.stderr)
+        return EXIT_VALIDATION
+    # a materialized suite that cannot resolve is a bug — fail loudly, not silently
+    resolve(document)
+    Path(args.out).write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+    scenarios = document["scenarios"]  # type: ignore[index]
+    print(f"imported AgentDojo '{args.suite}': {len(scenarios)} scenario(s) -> {args.out}")
+    print(f"  run: axor-lab run {args.out} --out ./bundle --yes")
     return EXIT_OK
 
 
@@ -450,9 +538,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish = sub.add_parser("publish", help="mint a publication/v1 from a verified bundle")
     p_publish.add_argument("bundle")
     p_publish.add_argument("--question", required=True)
-    p_publish.add_argument("--out", required=True)
+    p_publish.add_argument("--out", help="write publication/v1 JSON locally")
+    p_publish.add_argument("--server", help="upload via the publish handshake to this base URL")
     p_publish.add_argument("--license", default="CC-BY-4.0")
     p_publish.set_defaults(func=_cmd_publish)
+
+    p_import = sub.add_parser(
+        "import-agentdojo", help="materialize a curated AgentDojo suite as an .axl file"
+    )
+    p_import.add_argument("suite", nargs="?", default="banking")
+    p_import.add_argument("--out", required=True, help="output .axl path")
+    p_import.add_argument("--repeats", type=int, default=30)
+    p_import.add_argument("--agent-ref", default="scripted@0.6")
+    p_import.set_defaults(func=_cmd_import_agentdojo)
 
     return parser
 

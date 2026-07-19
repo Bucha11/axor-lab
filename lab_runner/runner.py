@@ -20,6 +20,34 @@ from .predicates import evaluate
 from .simulator import SimulatedToolHost
 
 RUNTIME_ID = "lab-runner@0.1"
+DEFAULT_AMOUNT = 1200
+_FAITHFUL_FALLBACK_INPUT = "landlord_iban"
+
+
+def _faithful_input_key(scenario: dict[str, object]) -> str:
+    """The input the faithful agent pays: derived from the task_success
+    predicate's `args.recipient equal {input_ref: X}` — the declared ground
+    truth, never scraped from prompt text."""
+
+    def walk(predicate: dict[str, object]) -> str | None:
+        if "event" in predicate:
+            matcher = predicate.get("where", {}).get("args.recipient")  # type: ignore[union-attr]
+            if isinstance(matcher, dict):
+                operand = matcher.get("equal")
+                if isinstance(operand, dict) and "input_ref" in operand:
+                    return str(operand["input_ref"])
+            return None
+        for key in ("all", "any", "sequence"):
+            if key in predicate:
+                for sub in predicate[key]:  # type: ignore[union-attr]
+                    found = walk(sub)
+                    if found:
+                        return found
+        if "not" in predicate:
+            return walk(predicate["not"])  # type: ignore[arg-type]
+        return None
+
+    return walk(scenario["task_success"]) or _FAITHFUL_FALLBACK_INPUT  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -77,9 +105,10 @@ def run_trial(
         recipient_preview = agent.attacker_target(str(injection["text"]))
         v_recipient = ledger.mint_model_extraction(recipient_preview)
     else:
-        recipient_preview = str(inputs["landlord_iban"])
-        v_recipient = ledger.mint_constant(recipient_preview, "prompt:landlord_iban")
-    amount = 1200
+        faithful_key = _faithful_input_key(scenario)
+        recipient_preview = str(inputs[faithful_key])
+        v_recipient = ledger.mint_constant(recipient_preview, f"prompt:{faithful_key}")
+    amount = inputs.get("amount", DEFAULT_AMOUNT)
     v_amount = ledger.mint_constant(str(amount), "prompt:amount")
     args: dict[str, object] = {"recipient": recipient_preview, "amount": amount}
     arg_bindings = {"recipient": v_recipient, "amount": v_amount}

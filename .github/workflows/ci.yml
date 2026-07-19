@@ -36,3 +36,5 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Run acceptance tests (stdlib only, no dependencies)
         run: python -m unittest discover -s tests -t . -v
+      - name: Smoke-check the shipped example resolves
+        run: python -m lab_runner validate examples/banking-exfil-01.axl

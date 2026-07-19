@@ -23,7 +23,14 @@ from .ledger import ValueLedger
 from .predicates import evaluate
 from .regression import RegressionPin, check_pins, pin
 from .replay import ReplayReport, replay_bundle, replay_trace
-from .runner import ExperimentResult, TrialOutcome, run_experiment, run_trial, trial_id_for
+from .runner import (
+    ExperimentResult,
+    TrialOutcome,
+    run_experiment,
+    run_experiment_suite,
+    run_trial,
+    trial_id_for,
+)
 from .simulator import SimulatedToolHost
 
 __all__ = [
@@ -53,6 +60,7 @@ __all__ = [
     "replay_trace",
     "resolve_agent",
     "run_experiment",
+    "run_experiment_suite",
     "run_trial",
     "trial_id_for",
 ]

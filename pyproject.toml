@@ -17,7 +17,7 @@ dependencies = []
 axor-lab = "lab_runner.cli:main"
 
 [tool.setuptools]
-packages = ["lab_contracts", "lab_analysis", "lab_runner"]
+packages = ["lab_contracts", "lab_analysis", "lab_runner", "lab_adapters", "lab_server"]
 
 # NOTE: installed wheels need the contract schemas next to the code; until
 # schemas ship as package data (Phase 4 packaging work), point

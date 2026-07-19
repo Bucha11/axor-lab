@@ -20,22 +20,39 @@ Axor Lab — standalone research surface for the Axor governance stack: bring an
 - **`lab_analysis/`** — the statistics engine (`contracts/statistics.md` as
   code): Wilson, exact McNemar over stored pairs, paired bootstrap, missingness
   honesty, unit-of-analysis enforcement.
+- **`lab_adapters/`** — benchmark imports (MVP item 2): the curated AgentDojo
+  banking data-flow suite materialized as `scenario/v1` objects (mirrors
+  axor-eval's property map), each schema-valid and author-time-validated.
+- **`lab_server/`** — the hosted surface (Phase 4 + minimal Phase 5): the
+  publish handshake (schema + hash + safe replay verification, `origin=local`),
+  an append-only attestation log, and escaped HTML catalog / publication /
+  EvidenceCase pages with three-axis provenance. Stdlib `http.server`; runs no
+  live agents.
 
 ## CLI quickstart (`axor-lab`, or `python -m lab_runner`)
 
 ```
+axor-lab import-agentdojo banking --out suite.axl   # curated benchmark -> .axl
 axor-lab validate examples/banking-exfil-01.axl
 axor-lab run examples/banking-exfil-01.axl --out ./bundle --yes
 axor-lab replay ./bundle                       # exact: bit-identical verdicts
 axor-lab pin ./bundle <trace_id> DENY --out pins.json
 axor-lab regress ./bundle --pins pins.json     # surfaces changes, exit 4 if any
 axor-lab evidence ./bundle <trace_id>          # the three-mode EvidenceCase
-axor-lab publish ./bundle --question "…" --out publication.json
+axor-lab publish ./bundle --question "…" --out publication.json   # local
+axor-lab publish ./bundle --question "…" --server http://127.0.0.1:8000   # hosted
 ```
 
 Lifecycle, exit codes, and the estimate-confirm gate follow
 `contracts/runner-protocol.md` and `contracts/lifecycle.md`. The bundle
 directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
+
+Run the catalog/publish server (stdlib only, no live agents):
+
+```
+python -m lab_server --root ./lab-store --port 8000
+# GET / catalog · GET /e/{id} publication · GET /e/{id}/evidence/{trace_id}
+```
 
 ## Executable acceptance suite
 
@@ -45,5 +62,9 @@ one test file per criterion, plus two golden paths (in-process
 is validated against the real schemas in `contracts/`.
 
 ```
-python -m unittest discover -s tests -t .      # 84 tests, no dependencies
+python -m unittest discover -s tests -t .      # 102 tests, no dependencies
 ```
+
+Beyond the ten acceptance criteria, the suite covers the AgentDojo adapter,
+the CLI (subprocess), the server over real HTTP (publish handshake, escaped
+pages, three-axis provenance), and a terminology lint.
