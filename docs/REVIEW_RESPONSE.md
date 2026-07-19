@@ -60,3 +60,26 @@ absent.
 The most load-bearing review points — replay correctness, the real kernel,
 full-bundle signing, path traversal, fail-closed governance, packaging, and
 honest positioning — are resolved.
+
+## Second review round
+
+The second pass found concrete bugs (not just architecture) that broke the
+multi-scenario benchmark path. Fixed in six ordered patches, each with a
+proving test; the whole suite stays stdlib-only and green.
+
+| Round-2 finding | Fix | Proof |
+|---|---|---|
+| **P0** multi-scenario traces collide (trace_id omits scenario_id) → bundle manifest + on-disk files overwrite, roundtrip loses 24/36 trials | trace_id carries the full trial coordinate; trace files named by content hash; atomic write; clean-on-overwrite; schema-validate on read | `test_multiscenario_bundle.py` (36 distinct traces survive build→write→read→verify→replay) |
+| **P0** replay accepts an incomplete trace as bit-identical (no leftover-pending check) | `replay_trace_status` → MATCH / MISMATCH / MALFORMED_TRACE / UNSUPPORTED_KERNEL; call_id correlation end to end; leftover/duplicate/orphan decisions ⇒ malformed, never reproduced | `test_replay_regression_robustness.py::TestMalformedTraceIsNotReproduced` |
+| **P0** predicate scores a decision-less intent as executed (fail-open ALLOW default) | an intent counts as executed only with an explicit ALLOW decision (call_id-paired); also `count` cardinality honored, invalid regex → predicate error, bool≠number | `test_predicate_evaluator.py` |
+| **P0-hosted** server mints "statistically reproducible" from uploaded aggregates without recomputing | server recomputes every aggregate from trials+traces+predicates and rejects mismatches; `statistics_integrity` axis (self_reported / recomputed_from_traces); honest "trials (scripted agent)" wording | `test_hosted_stats_integrity.py` (fabricated 10^6-trial bundle rejected) |
+| **P0/P1** import-incident reconstructs the condition (loses enforcement/policy/config_hash) | `--condition` required + used verbatim; full schema/semantic/cross-ref/config-hash validation; replay before write | `test_import_incident.py` |
+| **P1** resolve() KeyErrors on a schema-invalid scenario; duplicate ids silently overwrite | two-stage (semantic validation only on schema-valid scenarios); duplicate manifest/scenario ids are errors | `test_validation_pipeline.py` |
+| **P1/P2** sandbox output cap buffers gigabytes in the parent; stderr uncapped; descendants orphaned | streaming reads with a process-group kill at the cap, combined stdout+stderr, isolated temp cwd + cleanup, `start_new_session` | `test_later_tier.py` (memory-bounded flood, stderr cap) |
+| **P1** CLI leaks tracebacks from BYOK/analysis/contract errors | main() maps AgentError / AnalysisError / ContractsError to stable exit codes | CLI error handling |
+| **P2** entitlement `allows_nodes` ignores expiry/module | requires a non-expired license with the module, not just the ceiling | `test_entitlement.py::TestNodeCeilingRespectsExpiryAndModule` |
+| **CI** signing tests silently skip (PyNaCl never installed) | dedicated `crypto` CI job installs PyNaCl and runs them | `.github/workflows/ci.yml` |
+
+Still deferred (unchanged from round 1): the generic multi-tool runner loop,
+end-to-end typed models, the hosted SaaS surface, and the real
+gVisor/Firecracker isolation runtime.

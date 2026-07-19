@@ -15,12 +15,13 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 
 | Area | Maturity | Notes |
 |---|---|---|
-| contracts, local runner, replay, EvidenceCase, regression, analysis | **beta** | the vertical-slice spine; correctness-hardened per the review (typed replay values, full-bundle integrity) |
+| contracts, local runner, replay, EvidenceCase, regression, analysis | **beta** | the vertical-slice spine; correctness-hardened per two review rounds (typed replay values, full-bundle integrity, replay rejects malformed/incomplete traces, predicate completion is fail-closed) |
+| multi-scenario benchmark bundle | **beta** | trace ids carry the full trial coordinate; a 3-scenario suite survives a build→write→read→verify→replay roundtrip (`tests/test_multiscenario_bundle.py`) — the round-2 P0 that used to corrupt it is fixed |
 | AgentDojo adapter | **beta** | curated **banking** subset (3 tasks), not arbitrary-dataset import |
-| server / catalog | **beta (local)** | token-gated writes, content-hash filenames, atomic writes; not yet a public SaaS (no OAuth/DB/object-store) |
+| server / catalog | **beta (local)** | token-gated writes, content-hash filenames, atomic writes, and it **recomputes every statistical aggregate from the traces** (rejects fabricated estimates/n); not yet a public SaaS (no OAuth/DB/object-store) |
 | BYOK agent | **beta** | wrapped runtime is banking-slice-shaped; generic multi-tool loop is roadmap |
-| endpoint gateway | **experimental** | fail-closed governance + SSRF guard; auth/TTL/quotas are roadmap |
-| sandbox | **experimental** | real RLIMIT process limits; NOT namespace/seccomp isolation — do not run hostile code from untrusted users |
+| endpoint gateway | **experimental** | fail-closed governance + SSRF guard + bearer token + per-run secret + quotas; a full isolation runtime is roadmap |
+| sandbox | **experimental** | real RLIMIT process limits + streaming output cap + process-group kill + isolated cwd; NOT namespace/seccomp isolation — do not run hostile code from untrusted users |
 | games / federation | **experimental** | a deterministic toy model; containment is demonstrated, not proven |
 | kernel | **reference + real backend** | ships `reference_taint_floor_kernel` (1 gate, stdlib) AND a real backend that drives the production `axor_core.governor.ToolCallGovernor` when axor-core is installed and the condition pins the installed version (`pip install axor-lab[kernel]`; `axor-lab run --real-kernel`). Verified: real governor DENYs the exfil, ALLOWs the faithful payment, replays bit-identically |
 | Private Lab / workspaces / billing | **design-only** | `lab_entitlement` gates features; hosted workspace surface not built |
