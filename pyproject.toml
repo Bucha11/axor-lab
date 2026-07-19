@@ -24,11 +24,14 @@ packages = [
     "lab_adapters",
     "lab_server",
     "lab_agent",
+    "lab_entitlement",
 ]
 
 [project.optional-dependencies]
 # the BYOK Anthropic backend; the cassette path and everything else is stdlib
 byok = ["anthropic>=0.40"]
+# Ed25519 license + bundle signing (same crypto as the Control Plane license)
+crypto = ["pynacl>=1.5"]
 
 # NOTE: installed wheels need the contract schemas next to the code; until
 # schemas ship as package data (Phase 4 packaging work), point

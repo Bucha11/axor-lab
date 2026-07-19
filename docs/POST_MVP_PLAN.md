@@ -292,8 +292,19 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 
 ## Parallel track — Commercial (demand-gated, not code-gated)
 
-### B9 — Private Lab workspaces (the paid rung)
+### B9 — Private Lab workspaces (the paid rung) — ✅ entitlement implemented
 *Turn the spine into revenue the moment there's a buyer; reuse the CP license.*
+
+> **Status:** `lab_entitlement` ships the license (modules as flags, one file
+> both modules — mirrors CP `cp-monetization.md` §4) and the two lines as code:
+> `SAFETY_FEATURES` are free forever (the `FeatureGate` never consults a license
+> for them), `ORG_FEATURES` require a non-expired license flagging `private_lab`,
+> tier-bundled (team vs security). Expiry degrades org features to read-only and
+> never touches safety. Optional Ed25519 sign/verify (PyNaCl) over a JCS-subset
+> payload, same crypto as CP. Covered by `test_entitlement.py` (safety-free,
+> org-paid, expiry read-only, module-flag, signed round-trip when PyNaCl is
+> present). The hosted workspace UI/billing surface is the remaining
+> infra-level work (rides on B3/B4).
 
 - **Contract anchor:** `axor-packaging.md` (single source of truth: tiers,
   prices, the one-ladder/two-modules frame), `lab-economics.md` (bill the
