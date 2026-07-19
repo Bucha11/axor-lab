@@ -261,6 +261,11 @@ Not features — the "-ready" in production-ready:
 - **Legal/ops:** takedown workflow, license notice (Apache-2.0), privacy note
   ("observations only, never raw bodies" + redaction manifest).
 
+> The post-MVP blocks below are planned in detail in
+> **[POST_MVP_PLAN.md](POST_MVP_PLAN.md)** (BYOK adapter, Control Plane export,
+> web app, hardening, then endpoints/sandbox/games/scale, plus the commercial
+> track) — each with a contract anchor and an executable definition of done.
+
 ## 5. Post-MVP sequence (from the contracts — not in v1 scope)
 
 - **Then:** full boolean predicate authoring UI · richer local tool binding ·
