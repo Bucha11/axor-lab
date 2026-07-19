@@ -48,8 +48,18 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 
 ## Then tier — built outward from the spine
 
-### B1 — BYOK model-backed AgentAdapter
+### B1 — BYOK model-backed AgentAdapter — ✅ implemented
 *The scripted agent becomes real: run the researcher's own agent on their key.*
+
+> **Status:** `lab_agent` ships the `ModelBackend` protocol (`CassetteBackend`
+> offline, `AnthropicBackend` BYOK behind an optional dependency + key), a
+> `WrappedModelAgent` driving read→sink through the ledger as a `DrivingAgent`,
+> and a pre-run cost estimate. The kernel gained allowlist enum-supersession
+> (paper §6.3) for the over-taint utility recovery. `axor-lab run --agent
+> cassette:<file>|anthropic:<model>` routes it. Covered by `test_byok_agent.py`
+> (attacker DENY, faithful known-IBAN ALLOW via effect model, external
+> over-taint DENY, allowlist recovery, schema-valid trace, bit-identical
+> replay) — no network in CI.
 
 - **Contract anchor:** `spec-lab.md` §1 (upload-code / wrapped-code ingest,
   `explicit_flow_tracked`), `provenance-semantics.md` §4 (labels travel with

@@ -85,7 +85,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     resolved = resolve(load_axl(Path(args.file)))
 
     print("[estimate]")
-    _print_estimate(resolved)
+    _print_estimate(resolved, _estimate_model(args, resolved))
     if not _confirmed(args):
         print(
             "not confirmed — pass --yes (or answer y) to execute; nothing ran",
@@ -95,6 +95,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     print("[running_local]")
     run_id = args.run_id or f"r_{content_hash(resolved.experiment)[7:15]}"
+    agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     result = run_experiment_suite(
         list(resolved.scenarios),
         resolved.manifests,
@@ -102,7 +103,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         resolved.kernel_registry,
         repeats=resolved.repeats,
         run_id=run_id,
-        agent=resolved.agent,
+        agent=agent,
     )
     print(f"  {len(result.trials)} trials completed")
 
@@ -373,16 +374,36 @@ def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
 # -- helpers ------------------------------------------------------------------
 
 
-def _print_estimate(resolved: ResolvedExperiment) -> None:
+def _resolve_agent_override(spec: str) -> object:
+    """Build a BYOK agent from --agent (cassette:<file> | anthropic:<model>)."""
+    from lab_agent import AnthropicBackend, FileCassetteAgent, WrappedModelAgent
+
+    kind, _, param = spec.partition(":")
+    if kind == "cassette":
+        return FileCassetteAgent(path=Path(param))
+    if kind == "anthropic":
+        return WrappedModelAgent(backend=AnthropicBackend(model=param or "claude-opus-4-8"))
+    raise RunnerError(f"unknown --agent {spec!r}; use cassette:<file> or anthropic:<model>")
+
+
+def _estimate_model(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
+    if args.agent:
+        kind, _, param = args.agent.partition(":")
+        if kind == "cassette":
+            return "cassette (recorded transcript)"
+        return param or kind
+    return str(resolved.experiment["agent_ref"])
+
+
+def _print_estimate(resolved: ResolvedExperiment, model: str) -> None:
+    from lab_agent import estimate_cost
+
     print(
         f"  {len(resolved.scenarios)} scenario(s) x {len(resolved.conditions)} condition(s) "
         f"x {resolved.repeats} repeat(s) = {resolved.trial_count} trials"
     )
-    agent_ref = str(resolved.experiment["agent_ref"])
-    if agent_ref.startswith("scripted"):
-        print(f"  agent: {agent_ref} -> estimated inference cost: $0.00 (no model calls)")
-    else:
-        print(f"  agent: {agent_ref} -> BYOK inference; cost depends on your provider")
+    estimate = estimate_cost(resolved.trial_count, model)
+    print(f"  agent: {model} -> {estimate.line()}")
 
 
 def _confirmed(args: argparse.Namespace) -> bool:
@@ -505,6 +526,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--yes", action="store_true", help="confirm the estimate non-interactively")
     p_run.add_argument("--run-id", default=None)
     p_run.add_argument("--created", default=None, help="override bundle timestamp (RFC3339)")
+    p_run.add_argument(
+        "--agent", default=None,
+        help="BYOK agent override: cassette:<file> (offline) or anthropic:<model>",
+    )
     p_run.set_defaults(func=_cmd_run)
 
     p_replay = sub.add_parser("replay", help="recompute verdicts over frozen traces (exact)")

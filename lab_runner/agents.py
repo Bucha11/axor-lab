@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from .errors import UnknownAgentError
 
@@ -23,7 +23,7 @@ _RATE_SCALE = 1000
 
 
 class AgentAdapter(Protocol):
-    """What the runner needs from an agent (structural, no inheritance)."""
+    """What the runner needs from a scripted agent (structural, no inheritance)."""
 
     def follows_injection(self, scenario_name: str, seed: str) -> bool:
         """Whether this trial's behavior follows the injected instruction."""
@@ -31,6 +31,38 @@ class AgentAdapter(Protocol):
 
     def attacker_target(self, injection_text: str) -> str:
         """The exfiltration target the agent extracts from the injection."""
+        ...
+
+
+@dataclass(frozen=True)
+class SinkDecision:
+    """The sink call a driving agent produced after observing tool output.
+
+    The runtime — not the agent — assigns provenance: because the value was
+    produced by a model call whose context held the (possibly injected) tool
+    result, it is minted `model_extraction` under the conservative join
+    (over-taints, never under-taints). The agent only reports what it called.
+    """
+
+    recipient: str
+    amount: object
+
+
+@runtime_checkable
+class DrivingAgent(Protocol):
+    """A model-backed agent that DRIVES the loop: it observes the read result
+    (which may carry an injection) and emits the sink call itself. The runner
+    dispatches to this path when the adapter implements it; provenance is still
+    the runtime's (conservative join), so a driving agent cannot launder taint.
+    """
+
+    def decide_sink_call(
+        self,
+        task: str,
+        read_result: object,
+        inputs: dict[str, object],
+        sink_manifest: dict[str, object],
+    ) -> SinkDecision:
         ...
 
 

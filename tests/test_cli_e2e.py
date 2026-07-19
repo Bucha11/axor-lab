@@ -102,7 +102,7 @@ class TestCliEndToEnd(unittest.TestCase):
         for state in ("[validating]", "[estimate]", "[running_local]",
                       "[analyzing]", "[uploading_artifacts]", "[completed]"):
             self.assertIn(state, self.run_stdout)
-        self.assertIn("estimated inference cost: $0.00", self.run_stdout)
+        self.assertIn("$0.00", self.run_stdout)  # scripted → no paid inference
         self.assertIn(f"n={REPEATS * 2}/{REPEATS * 2}", self.run_stdout)
 
     def test_run_wrote_a_schema_valid_bundle_dir(self) -> None:

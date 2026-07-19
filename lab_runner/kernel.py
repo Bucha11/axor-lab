@@ -11,12 +11,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from lab_contracts.inputs import expand_list
+
 from .effects import EGRESS_CLASSES, resolve_effect_class
 from .errors import UnknownKernelError
 from .ledger import LABEL_UNTRUSTED
 
 GATE_TAINT_FLOOR = "taint_floor"
 PROJECTION_UNTRUSTED = "untrusted-derived"
+
+
+def _resolve_allowlist(
+    policy: dict[str, object] | None, inputs: dict[str, object]
+) -> frozenset[object]:
+    """The operator-declared trusted egress set (paper §6.3, condition.policy.
+
+    allowlist). Entries may be literals or `$inputs.x` references (a referenced
+    list splices). Static and attacker-inaccessible by construction — it is
+    the condition, not the trace, that carries it.
+    """
+    if not policy:
+        return frozenset()
+    entries = policy.get("allowlist")
+    if not entries:
+        return frozenset()
+    return frozenset(expand_list(list(entries), inputs))  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -34,6 +53,7 @@ class Kernel:
         arg_labels: dict[str, tuple[str, ...]],
         arg_bindings: dict[str, str],
         inputs: dict[str, object],
+        policy: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Pure function of (recorded call state, condition) → decision dict."""
         driving_args: list[str] = list(manifest["effect"]["driving_args"])  # type: ignore[index]
@@ -46,9 +66,23 @@ class Kernel:
                 "reason": "enforcement off (observe-only); observation stays on",
             }
         effect_class = resolve_effect_class(manifest, args, inputs)
+        allowlist = _resolve_allowlist(policy, inputs)
         if self.taint_floor_enabled and effect_class in EGRESS_CLASSES:
             for arg_name in driving_args:
                 if LABEL_UNTRUSTED in arg_labels.get(arg_name, ()):
+                    # enum-supersession: an operator-declared allowlisted target
+                    # supersedes the taint floor (paper §6.3) — this is the
+                    # only sanctioned way to recover the over-taint utility cost.
+                    if args.get(arg_name) in allowlist:
+                        return {
+                            "verdict": "ALLOW",
+                            "gate": GATE_TAINT_FLOOR,
+                            "driving_value_id": arg_bindings[arg_name],
+                            "reason": (
+                                f"egress sink {manifest['id']}: driving arg is "
+                                "untrusted_derived but allowlisted (enum-supersession)"
+                            ),
+                        }
                     return {
                         "verdict": "DENY",
                         "gate": GATE_TAINT_FLOOR,

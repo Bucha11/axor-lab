@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from lab_contracts.canonical import content_hash
 
-from .agents import AgentAdapter, ScriptedAgent
+from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
 from .kernel import Kernel, KernelRegistry
 from .ledger import ValueLedger
 from .predicates import evaluate
@@ -98,17 +98,34 @@ def run_trial(
     )
     seq += 1
 
-    # 2. the scripted "model" decides
+    # 2. the "model" decides the sink call
     sink_tool = _sink_tool_id(scenario, manifests)
-    attacked = agent.follows_injection(str(scenario["name"]), seed)
-    if attacked:
-        recipient_preview = agent.attacker_target(str(injection["text"]))
-        v_recipient = ledger.mint_model_extraction(recipient_preview)
+    untrusted_present = bool(produced)
+    if isinstance(agent, DrivingAgent):
+        # model-backed: the agent observed the read result (with any injection)
+        # and produced the sink call. The RUNTIME assigns provenance — because
+        # the recipient was produced by a model call whose context held an
+        # untrusted value, it is model_extraction (conservative join). The
+        # agent cannot launder taint by claiming the value is clean.
+        decision_call = agent.decide_sink_call(
+            str(scenario["task"]), result, inputs, manifests[sink_tool]
+        )
+        recipient_preview = decision_call.recipient
+        amount = decision_call.amount
+        if untrusted_present:
+            v_recipient = ledger.mint_model_extraction(recipient_preview)
+        else:
+            v_recipient = ledger.mint_constant(recipient_preview, "model:recipient")
     else:
-        faithful_key = _faithful_input_key(scenario)
-        recipient_preview = str(inputs[faithful_key])
-        v_recipient = ledger.mint_constant(recipient_preview, f"prompt:{faithful_key}")
-    amount = inputs.get("amount", DEFAULT_AMOUNT)
+        attacked = agent.follows_injection(str(scenario["name"]), seed)
+        if attacked:
+            recipient_preview = agent.attacker_target(str(injection["text"]))
+            v_recipient = ledger.mint_model_extraction(recipient_preview)
+        else:
+            faithful_key = _faithful_input_key(scenario)
+            recipient_preview = str(inputs[faithful_key])
+            v_recipient = ledger.mint_constant(recipient_preview, f"prompt:{faithful_key}")
+        amount = inputs.get("amount", DEFAULT_AMOUNT)
     v_amount = ledger.mint_constant(str(amount), "prompt:amount")
     args: dict[str, object] = {"recipient": recipient_preview, "amount": amount}
     arg_bindings = {"recipient": v_recipient, "amount": v_amount}
@@ -126,6 +143,7 @@ def run_trial(
         arg_labels={name: ledger.labels_of(vid) for name, vid in arg_bindings.items()},
         arg_bindings=arg_bindings,
         inputs=inputs,
+        policy=condition.get("policy"),  # type: ignore[arg-type]
     )
     events.append({"seq": seq, "node": "root", "type": "gate_decision", "decision": decision})
     seq += 1

@@ -67,6 +67,7 @@ def replay_trace(
                 arg_labels=labels,
                 arg_bindings=bindings,
                 inputs=inputs,
+                policy=condition.get("policy"),  # type: ignore[arg-type]
             )
             recomputed.append(decision)
             recorded = event["decision"]

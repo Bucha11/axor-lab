@@ -17,7 +17,18 @@ dependencies = []
 axor-lab = "lab_runner.cli:main"
 
 [tool.setuptools]
-packages = ["lab_contracts", "lab_analysis", "lab_runner", "lab_adapters", "lab_server"]
+packages = [
+    "lab_contracts",
+    "lab_analysis",
+    "lab_runner",
+    "lab_adapters",
+    "lab_server",
+    "lab_agent",
+]
+
+[project.optional-dependencies]
+# the BYOK Anthropic backend; the cassette path and everything else is stdlib
+byok = ["anthropic>=0.40"]
 
 # NOTE: installed wheels need the contract schemas next to the code; until
 # schemas ship as package data (Phase 4 packaging work), point
