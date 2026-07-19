@@ -13,8 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests import support  # noqa: E402
-from lab_ref import replay_bundle, run_experiment  # noqa: E402
-from lab_ref.bundle import build_bundle  # noqa: E402
+from lab_runner import replay_bundle, run_experiment  # noqa: E402
+from lab_contracts import build_bundle  # noqa: E402
 
 REPEATS = 12
 CREATED = "2026-07-19T00:00:00Z"

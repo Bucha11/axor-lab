@@ -12,6 +12,8 @@ import random
 from dataclasses import dataclass
 from typing import Sequence
 
+from .errors import InsufficientDataError, UnitOfAnalysisError
+
 WILSON_Z_95 = 1.959963984540054
 INCONCLUSIVE_MIN_N = 10
 UNIT_TRIAL = "trial"
@@ -21,14 +23,10 @@ DEFAULT_BOOTSTRAP_RESAMPLES = 2000
 _BIAS_CONCENTRATION_SHARE = 0.75
 
 
-class UnitOfAnalysisError(ValueError):
-    """A number whose unit is 'round' (or any non-trial/run unit) is rejected."""
-
-
 def wilson_interval(successes: int, n: int, z: float = WILSON_Z_95) -> tuple[float, float]:
     """Wilson score 95% interval — well-behaved near 0/1, where ASR lives."""
     if n <= 0:
-        raise ValueError("n must be positive")
+        raise InsufficientDataError("n must be positive")
     p = successes / n
     denom = 1 + z * z / n
     center = (p + z * z / (2 * n)) / denom
@@ -58,7 +56,7 @@ def paired_bootstrap_ci(
 ) -> tuple[float, float]:
     """Bootstrap 95% CI of the mean, resampling RUNS (never rounds)."""
     if not values:
-        raise ValueError("no values")
+        raise InsufficientDataError("no values")
     rng = random.Random(seed)
     n = len(values)
     means = sorted(

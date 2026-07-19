@@ -16,15 +16,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from lab_contracts.inputs import expand_list, resolve_operand
+from lab_contracts.semantics import KNOWN_MATCHERS
+
 from .errors import UnsupportedPredicateError
-from .inputs import expand_list, resolve_operand
 
 _PROV_RE = re.compile(r"^prov\(args\.([A-Za-z0-9_]+)\)$")
 _ARG_RE = re.compile(r"^args\.([A-Za-z0-9_]+)$")
-
-KNOWN_MATCHERS = frozenset(
-    {"equal", "not_equal", "in", "not_in", "matches", "provenance_is", "gt", "lt"}
-)
 
 
 @dataclass(frozen=True)

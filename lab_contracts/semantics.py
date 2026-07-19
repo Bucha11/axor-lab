@@ -1,22 +1,29 @@
-"""Author-time semantic scenario validation (acceptance test 1).
+"""Semantic checks JSON Schema cannot express, plus the contract vocabulary.
 
-Implements the checks named in scenario.schema.json's $comment — the ones
-plain JSON Schema cannot express. Every failure is a specific, actionable
-message tied to the `validating` stage; a scenario failing any check never
-reaches `queued` (lifecycle.md).
+Author-time scenario validation (acceptance test 1): every failure is a
+specific, actionable message tied to the `validating` stage; a scenario
+failing any check never reaches `queued` (lifecycle.md). Trace referential
+integrity mirrors contracts/validate.py's trace_semantics.
 """
 
 from __future__ import annotations
 
 import re
 
-from .effects import EGRESS_CLASSES
 from .errors import ScenarioValidationError
 from .inputs import INPUTS_PREFIX
-from .predicates import KNOWN_MATCHERS
+from .schemas import load_schemas
+from .subset_validator import validate_against
+
+# contract vocabulary (tool-manifest.schema effect classes, predicate matchers)
+EGRESS_CLASSES = frozenset({"EXPORT", "EXEC"})
+SINK_CLASSES = EGRESS_CLASSES | {"WRITE"}
+KNOWN_MATCHERS = frozenset(
+    {"equal", "not_equal", "in", "not_in", "matches", "provenance_is", "gt", "lt"}
+)
 
 _INDEX_RE = re.compile(r"\[\d+\]")
-_SINK_CLASSES = EGRESS_CLASSES | {"WRITE"}
+_SINK_CLASSES = SINK_CLASSES
 _FIELD_RE = re.compile(r"^(args\.[A-Za-z0-9_]+|result\.[A-Za-z0-9_.\[\]]+|output\.[A-Za-z0-9_.\[\]]+|prov\(args\.[A-Za-z0-9_]+\))$")
 
 
@@ -165,3 +172,34 @@ def _check_manifest_input_refs(
 
 def _normalize_path(path: str) -> str:
     return _INDEX_RE.sub("[]", path)
+
+
+def trace_semantics(trace: dict[str, object]) -> list[str]:
+    """Referential integrity of a trace's value ledger (contracts/validate.py)."""
+    errors: list[str] = []
+    ids = {str(v["value_id"]) for v in trace.get("values", [])}  # type: ignore[union-attr]
+    for event in trace.get("events", []):  # type: ignore[union-attr]
+        for arg, vid in (event.get("arg_bindings") or {}).items():
+            if vid not in ids:
+                errors.append(f"arg_bindings.{arg} -> unknown value_id {vid}")
+        for vid in event.get("produces_value_ids") or []:
+            if vid not in ids:
+                errors.append(f"produces_value_ids -> unknown value_id {vid}")
+        decision = event.get("decision")
+        if decision and decision.get("driving_value_id") not in ids:
+            errors.append(
+                f"decision.driving_value_id -> unknown {decision.get('driving_value_id')}"
+            )
+    for value in trace.get("values", []):  # type: ignore[union-attr]
+        for derived in value.get("derived_from") or []:
+            if derived not in ids:
+                errors.append(f"value {value['value_id']}.derived_from -> unknown {derived}")
+    return errors
+
+
+def validate_artifact(obj: dict[str, object], schema_name: str) -> list[str]:
+    """Schema validation plus the semantic layer for the schemas that have one."""
+    errors = validate_against(obj, schema_name, load_schemas())
+    if schema_name == "trace":
+        errors += ["[sem] " + e for e in trace_semantics(obj)]
+    return errors

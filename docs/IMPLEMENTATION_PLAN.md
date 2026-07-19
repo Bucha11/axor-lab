@@ -1,5 +1,13 @@
 # Axor Lab — Production-Ready Implementation Plan (v1)
 
+> **Status (2026-07-19):** Phase 0 (lab_contracts), the Phase 1–2 engine
+> (lab_runner: ledger/kernel/simulator/runner/replay/EvidenceCase/regression,
+> scripted agent behind `AgentAdapter`), the Phase 3 statistics core
+> (lab_analysis), and the runner-protocol CLI (`axor-lab`) are implemented and
+> covered by the executable acceptance suite (84 tests). Still open within
+> Phases 1–5: BYOK model-backed agent adapter, AgentDojo import, the Phase 4
+> server/catalog, and the Phase 5 web app.
+
 Derived from the `lab/` design archive (spec-lab v0.3 + `contracts/` v1). The
 archive is treated as the authoritative product/engineering contract; where this
 plan and a contract disagree, the contract wins. Scope discipline follows

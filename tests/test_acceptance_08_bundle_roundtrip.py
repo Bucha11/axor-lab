@@ -10,13 +10,8 @@ import json
 import unittest
 
 from tests import support
-from lab_ref import (
-    BundleIntegrityError,
-    build_bundle,
-    replay_bundle,
-    run_experiment,
-    verify_bundle,
-)
+from lab_contracts import BundleIntegrityError, build_bundle, verify_bundle
+from lab_runner import replay_bundle, run_experiment
 
 REPEATS = 10
 CREATED = "2026-07-19T00:00:00Z"

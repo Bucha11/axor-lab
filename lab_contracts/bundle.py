@@ -22,6 +22,7 @@ def build_bundle(
     trials: list[dict[str, object]],
     aggregates: list[dict[str, object]],
     traces: dict[str, dict[str, object]],
+    packaging: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Assemble a bundle/v1 dict; `created` is caller-supplied (determinism)."""
     hashes: dict[str, str] = {}
@@ -34,7 +35,7 @@ def build_bundle(
     for trace in traces.values():
         hashes[f"trace:{trace['trace_id']}"] = content_hash(trace)
     hashes["aggregates"] = content_hash(aggregates)
-    return {
+    bundle: dict[str, object] = {
         "schema_version": "bundle/v1",
         "bundle_id": bundle_id,
         "created": created,
@@ -47,6 +48,9 @@ def build_bundle(
         "content_hashes": hashes,
         "canonicalization": "JCS/RFC8785",
     }
+    if packaging is not None:
+        bundle["packaging"] = packaging
+    return bundle
 
 
 def verify_bundle(bundle: dict[str, object], traces: dict[str, dict[str, object]]) -> None:

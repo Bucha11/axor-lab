@@ -11,7 +11,7 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_ref import (
+from lab_runner import (
     RealExecutionBlocked,
     ScriptedAgent,
     SimulatedToolHost,

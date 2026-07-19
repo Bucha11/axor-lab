@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .canonical import canonical_json
+from lab_contracts.canonical import canonical_json
+
 from .kernel import Kernel
 
 

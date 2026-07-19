@@ -77,3 +77,13 @@ class KernelRegistry:
             if kernel.version == version:
                 return kernel
         raise UnknownKernelError(version)
+
+
+def default_registry(versions: tuple[str, ...]) -> KernelRegistry:
+    """A registry with the default gate set for every pinned version named.
+
+    The reference kernel behavior is identical across versions; a variant
+    (e.g. taint_floor disabled) must be constructed explicitly — regression
+    checks do exactly that.
+    """
+    return KernelRegistry(kernels=tuple(Kernel(version=v) for v in dict.fromkeys(versions)))

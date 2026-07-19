@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_ref import ScenarioValidationError, validate_scenario
+from lab_contracts import ScenarioValidationError, validate_scenario
 
 
 class TestScenarioValidation(unittest.TestCase):

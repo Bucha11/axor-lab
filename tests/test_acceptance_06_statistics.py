@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from lab_ref import (
+from lab_analysis import (
     binary_aggregate,
     is_inconclusive,
     mcnemar_exact,
@@ -18,7 +18,7 @@ from lab_ref import (
     paired_bootstrap_ci,
     wilson_interval,
 )
-from lab_ref.stats import UnitOfAnalysisError
+from lab_analysis.errors import UnitOfAnalysisError
 
 
 class TestWilson(unittest.TestCase):

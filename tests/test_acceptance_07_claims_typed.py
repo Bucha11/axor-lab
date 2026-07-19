@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from lab_ref import ClaimTypingError, build_publication, make_claim
+from lab_contracts import ClaimTypingError, build_publication, make_claim
 from tests import support
 
 TRACE_REFS = frozenset({"sha256:tr07"})

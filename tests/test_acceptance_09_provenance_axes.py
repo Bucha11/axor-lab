@@ -11,8 +11,8 @@ import json
 import unittest
 
 from tests import support
-from lab_ref import add_reproduction, build_publication, make_claim, provenance_axes
-from lab_ref.errors import ClaimTypingError
+from lab_contracts import add_reproduction, build_publication, make_claim, provenance_axes
+from lab_contracts.errors import ClaimTypingError
 
 TRACE_REFS = frozenset({"sha256:tr07"})
 AGG_REFS = frozenset({"agg:ASR:governed"})

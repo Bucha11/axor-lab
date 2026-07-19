@@ -4,11 +4,9 @@ compare against (never scraped from prompt text)."""
 
 from __future__ import annotations
 
+from .errors import UnresolvedInputError
+
 INPUTS_PREFIX = "$inputs."
-
-
-class UnresolvedInputError(KeyError):
-    """An `$inputs.x` reference does not resolve against scenario.inputs."""
 
 
 def resolve_operand(operand: object, inputs: dict[str, object]) -> object:

@@ -3,57 +3,23 @@ vertical-slice.md §1–3) and access to the contracts schema validator."""
 
 from __future__ import annotations
 
-import contextlib
 import copy
-import importlib.util
-import os
 import sys
 from pathlib import Path
-from types import ModuleType
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONTRACTS_DIR = REPO_ROOT / "contracts"
 sys.path.insert(0, str(REPO_ROOT))
 
-from lab_ref import Kernel, KernelRegistry, condition_config_hash  # noqa: E402
+from lab_contracts import condition_config_hash, validate_artifact  # noqa: E402
+from lab_runner import Kernel, KernelRegistry  # noqa: E402
 
 KERNEL_PINNED = "axor-core@0.4.2"
 KERNEL_NO_TAINT_FLOOR = "axor-core@0.5.0-hypothetical-no-taint-floor"
 
-_validator: ModuleType | None = None
-
-
-def contracts_validator() -> ModuleType:
-    """Load contracts/validate.py (its schema glob is cwd-relative)."""
-    global _validator
-    if _validator is None:
-        spec = importlib.util.spec_from_file_location(
-            "contracts_validate", CONTRACTS_DIR / "validate.py"
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        with _chdir(CONTRACTS_DIR):
-            spec.loader.exec_module(module)
-        _validator = module
-    return _validator
-
 
 def schema_errors(obj: dict[str, object], schema_name: str) -> list[str]:
-    validator = contracts_validator()
-    errors = list(validator.validate(obj, schema_name))
-    if schema_name == "trace":
-        errors += ["[sem] " + e for e in validator.trace_semantics(obj)]
-    return errors
-
-
-@contextlib.contextmanager
-def _chdir(path: Path):
-    old = os.getcwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(old)
+    return validate_artifact(obj, schema_name)
 
 
 def read_txns_manifest() -> dict[str, object]:

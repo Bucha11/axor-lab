@@ -7,9 +7,10 @@ WRITE to a known IBAN and EXPORT to an unknown one (tool-manifest.schema).
 
 from __future__ import annotations
 
-from .inputs import expand_list, resolve_operand
+from lab_contracts.inputs import expand_list, resolve_operand
+from lab_contracts.semantics import EGRESS_CLASSES
 
-EGRESS_CLASSES = frozenset({"EXPORT", "EXEC"})
+__all__ = ["EGRESS_CLASSES", "resolve_effect_class"]
 
 
 def resolve_effect_class(

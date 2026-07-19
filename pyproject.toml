@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "axor-lab"
+version = "0.1.0"
+description = "Axor Lab — reproducible governance experiments for AI agents: local runner, exact replay, EvidenceCase, regression pinning"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+# deliberately dependency-free: the contract validator, runner, replay and
+# statistics engine are stdlib-only (see contracts/ and the acceptance suite)
+dependencies = []
+
+[project.scripts]
+axor-lab = "lab_runner.cli:main"
+
+[tool.setuptools]
+packages = ["lab_contracts", "lab_analysis", "lab_runner"]
+
+# NOTE: installed wheels need the contract schemas next to the code; until
+# schemas ship as package data (Phase 4 packaging work), point
+# AXOR_LAB_CONTRACTS at a checkout's contracts/ directory when running
+# outside the repo.

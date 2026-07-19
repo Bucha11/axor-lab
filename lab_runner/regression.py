@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .canonical import content_hash
+from lab_contracts.canonical import content_hash
+
 from .kernel import Kernel
 from .replay import replay_trace
 

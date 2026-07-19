@@ -6,22 +6,44 @@ Axor Lab — standalone research surface for the Axor governance stack: bring an
 - **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
 - **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3), packaging/economics, bench format guide, UI mocks.
 
+## Packages (plan Phases 0–3, stdlib-only)
+
+- **`lab_contracts/`** — the contract layer: schema loading + the contracts' own
+  subset JSON-Schema validator (cwd-independent), semantic checks (author-time
+  scenario validation, trace referential integrity), canonical JCS hashing,
+  bundle assembly/verification, typed publication claims.
+- **`lab_runner/`** — the execution engine + CLI: value ledger with
+  conservative-join provenance, the single pure `decide` shared by live runs and
+  replay, simulated tools with `$injection` fixtures, predicate evaluation,
+  trial/suite runner (scripted agent behind a pluggable `AgentAdapter`), exact
+  replay, EvidenceCase, regression pinning.
+- **`lab_analysis/`** — the statistics engine (`contracts/statistics.md` as
+  code): Wilson, exact McNemar over stored pairs, paired bootstrap, missingness
+  honesty, unit-of-analysis enforcement.
+
+## CLI quickstart (`axor-lab`, or `python -m lab_runner`)
+
+```
+axor-lab validate examples/banking-exfil-01.axl
+axor-lab run examples/banking-exfil-01.axl --out ./bundle --yes
+axor-lab replay ./bundle                       # exact: bit-identical verdicts
+axor-lab pin ./bundle <trace_id> DENY --out pins.json
+axor-lab regress ./bundle --pins pins.json     # surfaces changes, exit 4 if any
+axor-lab evidence ./bundle <trace_id>          # the three-mode EvidenceCase
+axor-lab publish ./bundle --question "…" --out publication.json
+```
+
+Lifecycle, exit codes, and the estimate-confirm gate follow
+`contracts/runner-protocol.md` and `contracts/lifecycle.md`. The bundle
+directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
+
 ## Executable acceptance suite
 
-`contracts/acceptance-tests.md` §1–10 runs as code, today, against **`lab_ref/`** — a
-minimal stdlib-only reference implementation of the vertical slice (value ledger with
-conservative-join provenance, the pure `decide` shared by runner and replay, simulated
-tools with `$injection` fixtures, a scripted agent standing in for the model layer,
-Wilson/McNemar/bootstrap statistics, bundle hashing, typed claims, regression pins).
+`contracts/acceptance-tests.md` §1–10 runs as code against these packages —
+one test file per criterion, plus two golden paths (in-process
+`test_slice_e2e.py` and subprocess `test_cli_e2e.py`); every produced artifact
+is validated against the real schemas in `contracts/`.
 
 ```
-python -m unittest discover -s tests -t .      # 74 tests, no dependencies
+python -m unittest discover -s tests -t .      # 84 tests, no dependencies
 ```
-
-- `tests/test_acceptance_01…10_*.py` — one file per acceptance criterion.
-- `tests/test_slice_e2e.py` — the golden path: banking-exfil-01 compare run →
-  paired aggregates → bundle → publication → bit-identical replay → regression pin,
-  with every produced artifact validated against the real schemas in `contracts/`.
-
-`lab_ref` is scaffolding for Phase 0–2 of the plan: the real packages replace it
-module by module; the acceptance tests stay and must keep passing.

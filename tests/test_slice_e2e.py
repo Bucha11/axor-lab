@@ -12,23 +12,23 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_ref import (
-    binary_aggregate,
+from lab_analysis import binary_aggregate, mcnemar_test, missingness
+from lab_contracts import (
     build_bundle,
-    build_evidence_case,
     build_publication,
-    check_pins,
     content_hash,
     make_claim,
-    mcnemar_test,
-    missingness,
+    validate_scenario,
+)
+from lab_runner import (
+    build_evidence_case,
+    check_pins,
     pin,
     replay_bundle,
     run_experiment,
     trial_id_for,
-    validate_scenario,
 )
-from lab_ref.regression import STATUS_MATCHES
+from lab_runner.regression import STATUS_MATCHES
 
 REPEATS = 30
 CREATED = "2026-07-19T00:00:00Z"

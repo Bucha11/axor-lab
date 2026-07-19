@@ -9,34 +9,17 @@ on the same seed produce the discordant pairs McNemar needs.
 
 from __future__ import annotations
 
-import hashlib
-import re
 from dataclasses import dataclass, field
 
-from .canonical import content_hash
+from lab_contracts.canonical import content_hash
+
+from .agents import AgentAdapter, ScriptedAgent
 from .kernel import Kernel, KernelRegistry
 from .ledger import ValueLedger
 from .predicates import evaluate
 from .simulator import SimulatedToolHost
 
-_IBAN_RE = re.compile(r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b")
-DEFAULT_ATTACK_RATE = 0.6
-RUNTIME_ID = "labref@0.1"
-
-
-@dataclass(frozen=True)
-class ScriptedAgent:
-    """Deterministic stand-in for the model layer."""
-
-    attack_rate: float = DEFAULT_ATTACK_RATE
-
-    def follows_injection(self, scenario_name: str, seed: str) -> bool:
-        digest = hashlib.sha256(f"{scenario_name}:{seed}".encode()).hexdigest()
-        return int(digest, 16) % 1000 < int(self.attack_rate * 1000)
-
-    def attacker_target(self, injection_text: str) -> str:
-        match = _IBAN_RE.search(injection_text)
-        return match.group(0) if match else "ATTACKER-TARGET"
+RUNTIME_ID = "lab-runner@0.1"
 
 
 @dataclass(frozen=True)
@@ -61,7 +44,7 @@ def run_trial(
     run_id: str,
     seed: str,
     repeat_index: int,
-    agent: ScriptedAgent,
+    agent: AgentAdapter,
     host: SimulatedToolHost | None = None,
 ) -> TrialOutcome:
     """Execute one (scenario × condition × seed × repeat) → trace/v1."""
@@ -187,7 +170,7 @@ def run_experiment(
     kernel_registry: KernelRegistry,
     repeats: int,
     run_id: str,
-    agent: ScriptedAgent | None = None,
+    agent: AgentAdapter | None = None,
 ) -> ExperimentResult:
     agent = agent or ScriptedAgent()
     result = ExperimentResult(run_id=run_id)
@@ -273,3 +256,45 @@ def _expand_field(node: object, path: str) -> list[tuple[str, str]]:
             for sub, text in _expand_field(node[head], rest)
         ]
     return []
+
+
+def run_experiment_suite(
+    scenarios: list[dict[str, object]],
+    manifests: dict[str, dict[str, object]],
+    conditions: list[dict[str, object]],
+    kernel_registry: KernelRegistry,
+    repeats: int,
+    run_id: str,
+    agent: AgentAdapter | None = None,
+) -> ExperimentResult:
+    """Benchmark-suite run: every scenario × condition × repeat, one result.
+
+    Pooled per statistics.md: unit = one task attempt; n = repeats × scenarios.
+    Pairing stays per (scenario, seed, repeat) across conditions.
+    """
+    agent = agent or ScriptedAgent()
+    result = ExperimentResult(run_id=run_id)
+    for scenario in scenarios:
+        scenario_id = str(scenario["name"])
+        for condition in conditions:
+            kernel = kernel_registry.get(str(condition["kernel"]))
+            for repeat_index in range(repeats):
+                seed = f"s{repeat_index:03d}"
+                outcome = run_trial(
+                    scenario, manifests, condition, kernel, run_id, seed, repeat_index, agent
+                )
+                trial_key = trial_id_for(scenario_id, str(condition["id"]), seed, repeat_index)
+                result.add(
+                    trial_key,
+                    {
+                        "trial_id": trial_key,
+                        "scenario_id": scenario_id,
+                        "condition_id": str(condition["id"]),
+                        "seed": seed,
+                        "repeat_index": repeat_index,
+                        "status": "completed",
+                        "trace_ref": content_hash(outcome.trace),
+                    },
+                    outcome,
+                )
+    return result
