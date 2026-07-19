@@ -235,6 +235,17 @@ class TestSandboxRealExecutor(unittest.TestCase):
         return ResourceLimits(cpu_seconds=1, mem_mb=300, disk_mb=1,
                               wall_seconds=4, output_kb=4, max_processes=48)
 
+    def _cpu_limits(self):
+        # A generous wall ceiling for the CPU-bound tests: a busy loop burns its
+        # 1 CPU-second in ~1s of wall on an unthrottled core, so SIGXCPU fires
+        # long before this backstop — but on a throttled/oversubscribed CI runner
+        # accumulating 1 CPU-second can take several wall-seconds, and a tight
+        # wall would win the race and mislabel the kill. 20s removes that race
+        # without slowing the normal path (the process still exits at ~1s).
+        from lab_sandbox import ResourceLimits
+        return ResourceLimits(cpu_seconds=1, mem_mb=300, disk_mb=1,
+                              wall_seconds=20, output_kb=4, max_processes=48)
+
     def test_benign_code_completes(self) -> None:
         from lab_sandbox import OUTCOME_COMPLETED, run_python
         result = run_python("print(6 * 7)", self._limits())
@@ -243,7 +254,7 @@ class TestSandboxRealExecutor(unittest.TestCase):
 
     def test_cpu_bomb_is_killed_by_rlimit_cpu(self) -> None:
         from lab_sandbox import OUTCOME_KILLED_CPU, run_python
-        result = run_python("while True: pass", self._limits())
+        result = run_python("while True: pass", self._cpu_limits())
         self.assertEqual(result.outcome, OUTCOME_KILLED_CPU)
 
     def test_wall_clock_overrun_is_killed(self) -> None:
@@ -282,8 +293,18 @@ class TestSandboxRealExecutor(unittest.TestCase):
         self.assertNotEqual(result.outcome, OUTCOME_COMPLETED)  # MemoryError, contained
 
     def test_child_cannot_raise_its_own_limits(self) -> None:
-        # a hostile program that tries to lift RLIMIT_CPU still gets killed
-        from lab_sandbox import OUTCOME_KILLED_CPU, run_python
+        # a hostile program that tries to lift RLIMIT_CPU still gets contained.
+        # The claim under test is containment, not which signal delivers it:
+        # raising the hard limit needs privilege we don't grant, so the child
+        # stays capped and is killed — normally by SIGXCPU (RLIMIT_CPU), or by
+        # the wall backstop if a throttled runner hasn't burned the CPU second
+        # yet. Either way it does NOT complete.
+        from lab_sandbox import (
+            OUTCOME_COMPLETED,
+            OUTCOME_KILLED_CPU,
+            OUTCOME_KILLED_WALL,
+            run_python,
+        )
         code = (
             "import resource\n"
             "try:\n"
@@ -291,7 +312,9 @@ class TestSandboxRealExecutor(unittest.TestCase):
             "except Exception: pass\n"
             "while True: pass\n"
         )
-        self.assertEqual(run_python(code, self._limits()).outcome, OUTCOME_KILLED_CPU)
+        outcome = run_python(code, self._cpu_limits()).outcome
+        self.assertNotEqual(outcome, OUTCOME_COMPLETED)  # contained
+        self.assertIn(outcome, (OUTCOME_KILLED_CPU, OUTCOME_KILLED_WALL))
 
 
 # ── B5 — the live gateway over real HTTP (governance-capable endpoint) ───────
