@@ -10,11 +10,29 @@ this layer is what that runtime consults, and the red-team suite drives it.
 """
 
 from .errors import SandboxDenied, SandboxError
+from .executor import (
+    HAS_RESOURCE,
+    OUTCOME_COMPLETED,
+    OUTCOME_KILLED_CPU,
+    OUTCOME_KILLED_FSIZE,
+    OUTCOME_KILLED_WALL,
+    OUTCOME_OUTPUT_CAPPED,
+    ExecutionResult,
+    run_python,
+)
 from .policy import ResourceLimits, SandboxPolicy
 
 __all__ = [
+    "ExecutionResult",
+    "HAS_RESOURCE",
+    "OUTCOME_COMPLETED",
+    "OUTCOME_KILLED_CPU",
+    "OUTCOME_KILLED_FSIZE",
+    "OUTCOME_KILLED_WALL",
+    "OUTCOME_OUTPUT_CAPPED",
     "ResourceLimits",
     "SandboxDenied",
     "SandboxError",
     "SandboxPolicy",
+    "run_python",
 ]

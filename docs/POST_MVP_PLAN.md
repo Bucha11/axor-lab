@@ -227,8 +227,11 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 > `heuristic_attribution`. Black-box mode produces NO trace and is labeled
 > "evaluation-only — not governance". SSRF/private-network/DNS-rebinding guard
 > (`ssrf_check`) blocks loopback, link-local, private, and rebound addresses.
-> The live gateway transport (SSE + tool proxy) is the remaining infra piece.
-> Covered by `test_later_tier.py`.
+> **The live gateway ships** (`make_gateway`): a real HTTP surface — `POST
+> /runs`, `POST /runs/{id}/events`, `GET /runs/{id}/trace` — that gates a sink
+> intent SYNCHRONOUSLY (the tool-proxy dispatch point returns ALLOW/DENY before
+> the tool runs), tested over real HTTP. SSE streaming on top is the only
+> remaining transport nicety. Covered by `test_later_tier.py`.
 
 - **Contract anchor:** `endpoint-protocol.md` (the split: instrumented =
   governance-capable via `POST /runs` + `SSE /runs/{id}/events` + tool gateway;
@@ -256,15 +259,20 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 ### B6 — Sandbox + arbitrary cloud code — ◐ policy layer implemented
 *The single most expensive subsystem; gates every "run untrusted code on Lab infra" path.*
 
-> **Status:** `lab_sandbox` ships the policy DECISION layer the isolation
-> runtime consults: egress deny-by-default + API allowlist, CPU/RAM/disk/
-> wall-time/output/process caps, no host mounts, secret injection without
-> persisting the value, and an audit trail on every decision. A red-team suite
-> (`test_later_tier.py`) drives it: egress exfiltration, fork bomb, disk fill,
-> output flood, host mount, and secret-value leakage are each denied and
-> audited. The actual gVisor/Firecracker isolation runtime is the deferred
-> infra that enforces these decisions — until it lands, code execution stays
-> local-only (the MVP posture).
+> **Status:** two layers ship. (1) The policy DECISION layer (`policy.py`):
+> egress deny-by-default + API allowlist, caps, no host mounts, secret
+> injection without persisting the value, audit on every decision. (2) A
+> **real OS-level executor** (`executor.py`, `run_python`): a subprocess with
+> hard `RLIMIT_CPU`/`RLIMIT_AS`/`RLIMIT_FSIZE`/`RLIMIT_NPROC` set in a
+> `preexec_fn` before exec, plus a wall-clock timeout and a capped output read.
+> The red-team suite ACTUALLY triggers them: a CPU bomb is killed by
+> `RLIMIT_CPU` (SIGXCPU), a wall-clock overrun is killed, an output flood is
+> capped, a disk-fill and a memory bomb are contained, and a child that tries
+> to raise its own `RLIMIT_CPU` is still killed. The one thing this can't do
+> without kernel namespaces/seccomp — network egress isolation and a truly
+> ephemeral FS — stays a policy decision until the gVisor/Firecracker runtime
+> lands; that runtime enforces the same decisions this layer already makes.
+> Covered by `test_later_tier.py` (Unix-guarded).
 
 - **Contract anchor:** `spec-lab.md` §9 ("Sandbox is a real subsystem, not a
   phrase" — the full enumerated list), `threat-model.md` §2 (untrusted code).
@@ -286,14 +294,15 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 ### B7 — Multi-agent game runtime — ◐ core + honest stats implemented
 *Players are singles or federations; composition is a variable.*
 
-> **Status:** `lab_games` ships a deterministic iterated-game runtime (players
-> are reproducible strategies) and per-run statistics: a run's cooperation
-> rate is the run's SINGLE value, `n` = runs, CI is a paired bootstrap that
-> narrows with runs, and a round-level `unit_of_analysis` is rejected by
-> `lab_analysis` — a game can never fabricate precision by counting rounds
-> (`statistics.md` §1). Covered by `test_later_tier.py`. Federation players,
-> arbitrary topology, and cloud-executed games (behind B6) are the deferred
-> extensions.
+> **Status:** `lab_games` ships a deterministic iterated-game runtime and
+> honest per-run statistics: a run's cooperation rate is the run's SINGLE
+> value, `n` = runs, CI narrows with runs, a round-level `unit_of_analysis` is
+> rejected. **Federation players + topology ship** (`federation.py`,
+> `run_federation`): members act as one player, the unit is one run of the
+> federation (per-member values are structure within the observation), and
+> ring/star/complete topologies are supported. Cloud-executed games (behind
+> B6's isolation) are the only deferred extension. Covered by
+> `test_later_tier.py`.
 
 - **Contract anchor:** `spec-lab.md` §5 (Game experiment type),
   `statistics.md` §1 (the unit-of-analysis error that invalidates iterated
@@ -316,15 +325,16 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   structure-within-observation (a property test asserts a round-level n is
   rejected at aggregate time).
 
-### B8 — Population scale + arbitrary topology — ○ designed, blocked by B6/B7
+### B8 — Population scale + arbitrary topology — ◐ population model implemented
 *Towns of N agents, arbitrary interaction graphs (the outreach targets).*
 
-> **Status:** intentionally not started — it is blocked by the sandbox (B6, for
-> scale-out execution) and the game runtime (B7, for federation players). The
-> `lab_games` per-run statistics and the federation-aware trace model
-> (`node`/`spawn`/`death`/`cross_process_in`) are the foundation it builds on;
-> population-scale spawn and arbitrary topology are the remaining work, gated
-> by B6.
+> **Status:** `run_federation` scales to a town of N members and demonstrates
+> the outreach-target property (Prompt Infection / topology attacks): with
+> carried taint, a single compromised member is CONTAINED at the first
+> boundary (`contained_at`, bounded `compromised_spread`) instead of infecting
+> the population; without it the defection spreads. Tested at N=200. The only
+> deferred piece is executing such populations as real isolated processes at
+> cloud scale — that rides on B6's isolation runtime.
 
 - **Contract anchor:** `spec-lab.md` §9 (population-scale is Vision), Prompt
   Infection / topology-attack outreach targets (`outreach-targets.md`).

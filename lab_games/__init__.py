@@ -9,14 +9,28 @@ values and hands them to `lab_analysis` with `unit_of_analysis="run"`.
 """
 
 from .errors import GameError
+from .federation import (
+    TOPOLOGY_COMPLETE,
+    TOPOLOGY_RING,
+    TOPOLOGY_STAR,
+    FederationRun,
+    Member,
+    run_federation,
+)
 from .runtime import GameResult, IteratedGame, Player, run_game
 from .stats import game_rate_aggregate
 
 __all__ = [
+    "FederationRun",
     "GameError",
     "GameResult",
     "IteratedGame",
+    "Member",
     "Player",
+    "TOPOLOGY_COMPLETE",
+    "TOPOLOGY_RING",
+    "TOPOLOGY_STAR",
     "game_rate_aggregate",
+    "run_federation",
     "run_game",
 ]

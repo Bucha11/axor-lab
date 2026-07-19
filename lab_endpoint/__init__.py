@@ -14,6 +14,7 @@ Plus the shared endpoint safety checks (SSRF / private-network / DNS-rebinding).
 
 from .black_box import BLACK_BOX_LABEL, BlackBoxResult, score_black_box
 from .errors import EndpointError, GovernanceUnavailable, UnsafeEndpoint
+from .gateway import make_gateway
 from .instrumented import EmittedEvent, assemble_and_gate
 from .safety import ssrf_check
 
@@ -25,6 +26,7 @@ __all__ = [
     "GovernanceUnavailable",
     "UnsafeEndpoint",
     "assemble_and_gate",
+    "make_gateway",
     "score_black_box",
     "ssrf_check",
 ]

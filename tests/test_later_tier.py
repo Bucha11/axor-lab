@@ -9,6 +9,7 @@ B7 — a game's statistic is per-run: n = runs (never rounds), CI narrows with
 
 from __future__ import annotations
 
+import sys
 import unittest
 
 from tests import support
@@ -217,3 +218,176 @@ class TestGamePerRunStatistics(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── B6 — REAL OS-level enforcement (subprocess + RLIMIT) ────────────────────
+class TestSandboxRealExecutor(unittest.TestCase):
+    """The sandbox policy layer backed by actual OS resource limits — the
+    controls the kernel enforces today, without the full isolation runtime."""
+
+    def setUp(self) -> None:
+        from lab_sandbox import HAS_RESOURCE
+        if not HAS_RESOURCE:
+            self.skipTest("resource limits require a Unix host")
+
+    def _limits(self):
+        from lab_sandbox import ResourceLimits
+        return ResourceLimits(cpu_seconds=1, mem_mb=300, disk_mb=1,
+                              wall_seconds=4, output_kb=4, max_processes=48)
+
+    def test_benign_code_completes(self) -> None:
+        from lab_sandbox import OUTCOME_COMPLETED, run_python
+        result = run_python("print(6 * 7)", self._limits())
+        self.assertEqual(result.outcome, OUTCOME_COMPLETED)
+        self.assertEqual(result.stdout.strip(), "42")
+
+    def test_cpu_bomb_is_killed_by_rlimit_cpu(self) -> None:
+        from lab_sandbox import OUTCOME_KILLED_CPU, run_python
+        result = run_python("while True: pass", self._limits())
+        self.assertEqual(result.outcome, OUTCOME_KILLED_CPU)
+
+    def test_wall_clock_overrun_is_killed(self) -> None:
+        from lab_sandbox import OUTCOME_KILLED_WALL, run_python
+        result = run_python("import time; time.sleep(30)", self._limits())
+        self.assertEqual(result.outcome, OUTCOME_KILLED_WALL)
+
+    def test_output_flood_is_capped(self) -> None:
+        from lab_sandbox import OUTCOME_OUTPUT_CAPPED, run_python
+        result = run_python("print('A' * 200000)", self._limits())
+        self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
+        self.assertTrue(result.truncated)
+        self.assertLessEqual(len(result.stdout), 4 * 1024)
+
+    def test_disk_fill_is_contained(self) -> None:
+        # RLIMIT_FSIZE (1 MB) prevents a 50 MB write; the run does NOT complete
+        from lab_sandbox import OUTCOME_COMPLETED, run_python
+        result = run_python(
+            "open('/tmp/axor_sbx_probe','wb').write(b'A' * (50 * 1024 * 1024))",
+            self._limits(),
+        )
+        self.assertNotEqual(result.outcome, OUTCOME_COMPLETED)  # contained
+
+    def test_fsize_limit_is_actually_set_in_the_child(self) -> None:
+        from lab_sandbox import run_python
+        result = run_python(
+            "import resource;print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])",
+            self._limits(),
+        )
+        self.assertEqual(result.stdout.strip(), str(1 * 1024 * 1024))  # 1 MB cap in effect
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "RLIMIT_AS enforced on Linux")
+    def test_memory_bomb_is_contained(self) -> None:
+        from lab_sandbox import OUTCOME_COMPLETED, run_python
+        result = run_python("x = bytearray(2_000_000_000)", self._limits())
+        self.assertNotEqual(result.outcome, OUTCOME_COMPLETED)  # MemoryError, contained
+
+    def test_child_cannot_raise_its_own_limits(self) -> None:
+        # a hostile program that tries to lift RLIMIT_CPU still gets killed
+        from lab_sandbox import OUTCOME_KILLED_CPU, run_python
+        code = (
+            "import resource\n"
+            "try:\n"
+            "    resource.setrlimit(resource.RLIMIT_CPU, (9999, 9999))\n"
+            "except Exception: pass\n"
+            "while True: pass\n"
+        )
+        self.assertEqual(run_python(code, self._limits()).outcome, OUTCOME_KILLED_CPU)
+
+
+# ── B5 — the live gateway over real HTTP (governance-capable endpoint) ───────
+class TestInstrumentedGateway(unittest.TestCase):
+    def test_gateway_gates_the_sink_intent_synchronously(self) -> None:
+        import json
+        import threading
+        import urllib.request
+
+        from lab_endpoint import make_gateway
+
+        server = make_gateway(
+            support.conditions()[1], support.manifests(),
+            support.banking_scenario()["inputs"], scenario_id="banking-exfil-01",
+        )
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            def post(path, obj):
+                req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req) as r:
+                    return json.loads(r.read())
+
+            run_id = post("/runs", {})["run_id"]
+            # emit the untrusted read value, then the sink intent bound to it
+            post(f"/runs/{run_id}/events", {
+                "type": "tool_result", "tool": "read_txns",
+                "values": [{"value_id": "v_r", "preview": support.ATTACKER_IBAN,
+                            "labels": ["untrusted_derived"],
+                            "sources": [{"kind": "external_read",
+                                         "origin_ref": "tool_result:read_txns:transactions[1].description"}]}],
+            })
+            resp = post(f"/runs/{run_id}/events", {
+                "type": "tool_call_intent", "tool": "send_money",
+                "arg_bindings": {"recipient": "v_r"},
+                "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
+            })
+            # the tool proxy verdict came back BEFORE the tool would run
+            self.assertEqual(resp["decision"]["verdict"], "DENY")
+
+            with urllib.request.urlopen(base + f"/runs/{run_id}/trace") as r:
+                trace = json.loads(r.read())
+            self.assertEqual(trace["producer"]["mode"], "instrumented_endpoint")
+            self.assertEqual(support.schema_errors(trace, "trace"), [])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+# ── B7 federation + B8 population scale ──────────────────────────────────────
+class TestFederationAndPopulation(unittest.TestCase):
+    def _members(self, n: int, compromised: int = 1):
+        from lab_games import Member
+        from lab_games.runtime import tit_for_tat
+
+        def coop(my_past, neighbor_signal):
+            return neighbor_signal  # cooperate iff the (carried) signal is clean
+        return [Member(f"m{i}", coop, compromised=(i < compromised)) for i in range(n)]
+
+    def test_federation_unit_is_one_run_not_per_member(self) -> None:
+        from lab_games import game_rate_aggregate, run_federation
+
+        # n=20 runs of a 10-member federation; unit = run of the federation
+        values = [
+            run_federation(self._members(10), rounds=15, run_id=f"f{i}").cooperation_rate()
+            for i in range(20)
+        ]
+        agg = game_rate_aggregate("cooperation", "governed", values)
+        self.assertEqual(agg["n"], 20)               # runs, NOT 20*10 members
+        self.assertEqual(agg["unit_of_analysis"], "run")
+
+    def test_carried_taint_contains_a_compromised_member(self) -> None:
+        from lab_games import run_federation
+
+        governed = run_federation(self._members(20, compromised=1), rounds=10,
+                                  topology="ring", carried_taint=True)
+        ungoverned = run_federation(self._members(20, compromised=1), rounds=10,
+                                    topology="ring", carried_taint=False)
+        # governance contains the blast radius; without it the defection spreads
+        self.assertIsNotNone(governed.contained_at)
+        self.assertLess(governed.compromised_spread(), ungoverned.compromised_spread())
+
+    def test_population_scales_to_many_members(self) -> None:
+        from lab_games import run_federation
+
+        run = run_federation(self._members(200, compromised=1), rounds=5,
+                             topology="star", carried_taint=True)
+        self.assertEqual(len(run.member_moves), 200)  # town of N
+        # a single compromise stays contained even at population scale
+        self.assertLessEqual(run.compromised_spread(), 2)
+
+    def test_topologies_are_supported(self) -> None:
+        from lab_games import TOPOLOGY_COMPLETE, TOPOLOGY_RING, TOPOLOGY_STAR, run_federation
+
+        for topology in (TOPOLOGY_RING, TOPOLOGY_STAR, TOPOLOGY_COMPLETE):
+            run = run_federation(self._members(8), rounds=6, topology=topology)
+            self.assertEqual(len(run.member_moves), 8)
