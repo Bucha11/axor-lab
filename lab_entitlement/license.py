@@ -44,8 +44,14 @@ class License:
     def enables(self, feature: str, today: str) -> bool:
         return feature in self.features and not self.is_expired(today)
 
-    def allows_nodes(self, count: int) -> bool:
-        return count <= self.governed_node_ceiling
+    def allows_nodes(self, count: int, today: str, module: str = "private_lab") -> bool:
+        """Governed-node scaling is an ORG capability: it is allowed only under a
+        non-expired license that flags the module AND within the ceiling.
+
+        The ceiling alone was a bypass — an expired (or module-less) license kept
+        returning True for any count under the number, so a caller using this
+        method standalone would grant org scaling it no longer holds."""
+        return self.module_enabled(module, today) and count <= self.governed_node_ceiling
 
 
 def canonical_payload(license_fields: dict[str, object]) -> bytes:

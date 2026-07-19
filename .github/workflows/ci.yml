@@ -95,6 +95,22 @@ jobs:
           pip install "axor-core>=0.9" || echo "axor-core unavailable — integration will skip"
           python -m unittest tests.test_real_kernel -v
 
+  crypto:
+    name: Signing tests actually run (PyNaCl installed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyNaCl so the Ed25519 bundle + license signing tests do NOT skip
+        # the stdlib CI job runs everything but skips the crypto paths; this job
+        # exists so those paths are exercised in CI, not silently skipped
+        run: |
+          pip install "pynacl>=1.5"
+          python -m unittest tests.test_hardening tests.test_entitlement -v
+          python -c "import importlib.util as u; assert u.find_spec('nacl'), 'PyNaCl must be present'"
+
   packaging:
     name: Wheel installs and runs outside the checkout
     runs-on: ubuntu-latest

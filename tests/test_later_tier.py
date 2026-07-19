@@ -269,6 +269,29 @@ class TestSandboxRealExecutor(unittest.TestCase):
         self.assertTrue(result.truncated)
         self.assertLessEqual(len(result.stdout), 4 * 1024)
 
+    def test_output_flood_does_not_accumulate_in_parent_memory(self) -> None:
+        # a child that would print ~1 GiB: the executor reads incrementally and
+        # kills the process group at the cap, so the PARENT never buffers it all
+        # (the old capture_output would have). The returned string stays bounded.
+        from lab_sandbox import OUTCOME_OUTPUT_CAPPED, run_python
+        result = run_python(
+            "import sys\n"
+            "chunk = 'A' * 65536\n"
+            "for _ in range(16384): sys.stdout.write(chunk)\n",
+            self._limits(),
+        )
+        self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
+        self.assertLessEqual(len(result.stdout), 4 * 1024)
+
+    def test_stderr_is_also_capped(self) -> None:
+        # stderr shares the same capped stream — it used to accumulate unbounded
+        from lab_sandbox import OUTCOME_OUTPUT_CAPPED, run_python
+        result = run_python(
+            "import sys; sys.stderr.write('E' * 200000)", self._limits()
+        )
+        self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
+        self.assertLessEqual(len(result.stdout), 4 * 1024)
+
     def test_disk_fill_is_contained(self) -> None:
         # RLIMIT_FSIZE (1 MB) prevents a 50 MB write; the run does NOT complete
         from lab_sandbox import OUTCOME_COMPLETED, run_python

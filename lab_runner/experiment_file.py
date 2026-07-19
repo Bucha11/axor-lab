@@ -77,20 +77,29 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
         raise ExperimentFileError(tuple(errors))
 
     errors += [f"[validating] experiment: {e}" for e in validate_artifact(experiment, "experiment")]
+    # duplicate ids must be an error, not a silent last-wins overwrite
+    manifests: dict[str, dict[str, object]] = {}
     for manifest in manifests_list:
         errors += [
             f"[validating] tool_manifest {manifest.get('id')}: {e}"
             for e in validate_artifact(manifest, "tool-manifest")
         ]
-    manifests = {str(m["id"]): m for m in manifests_list}
+        mid = str(manifest.get("id"))
+        if mid in manifests:
+            errors.append(f"[validating] duplicate tool_manifest id '{mid}'")
+        else:
+            manifests[mid] = manifest
+
+    from lab_contracts import validate_scenario
 
     by_name: dict[str, dict[str, object]] = {}
     for scenario in scenarios:
         name = str(scenario.get("name"))
-        by_name[name] = scenario
-        errors += [
-            f"[validating] scenario {name}: {e}" for e in validate_artifact(scenario, "scenario")
-        ]
+        if name in by_name:
+            errors.append(f"[validating] duplicate scenario name '{name}'")
+        scenario_errors = validate_artifact(scenario, "scenario")
+        errors += [f"[validating] scenario {name}: {e}" for e in scenario_errors]
+        by_name.setdefault(name, scenario)
         # inline tool manifests (a full manifest in scenario.tools, not just a
         # $ref) are registered alongside top-level tool_manifests (review §4.5)
         for tool in scenario.get("tools", []):  # type: ignore[union-attr]
@@ -100,12 +109,15 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
                     for e in validate_artifact(tool, "tool-manifest")
                 ]
                 manifests.setdefault(str(tool["id"]), tool)
-        try:
-            from lab_contracts import validate_scenario
-
-            validate_scenario(scenario, manifests)
-        except ScenarioValidationError as exc:
-            errors += [f"scenario {name}: {e}" for e in exc.errors]
+        # two-stage: only run the semantic validator on a SCHEMA-VALID scenario.
+        # validate_scenario dereferences scenario['violation'] / ['task_success']
+        # unconditionally, so on a schema-invalid scenario it would raise a raw
+        # KeyError instead of a clean [validating] error (review r2 §validation).
+        if not scenario_errors:
+            try:
+                validate_scenario(scenario, manifests)
+            except ScenarioValidationError as exc:
+                errors += [f"scenario {name}: {e}" for e in exc.errors]
 
     wanted = [str(s) for s in experiment.get("scenario_ids", [])]  # type: ignore[union-attr]
     for scenario_id in wanted:

@@ -21,8 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lab_analysis import binary_aggregate, mcnemar_test, missingness
+from lab_analysis.errors import AnalysisError
+from lab_agent.errors import AgentError
 from lab_contracts import (
     BundleIntegrityError,
+    ContractsError,
     build_bundle,
     build_publication,
     content_hash,
@@ -39,6 +42,10 @@ from .kernel import Kernel, default_registry
 from .regression import STATUS_DIFFERS, RegressionPin, check_pins
 from .replay import replay_bundle
 from .runner import run_experiment_suite
+
+# BYOK backend + statistics failures are separate hierarchies from RunnerError;
+# main() maps them to stable exit codes instead of leaking a traceback
+_AGENT_ANALYSIS_ERRORS = (AgentError, AnalysisError)
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -66,6 +73,17 @@ def main(argv: list[str] | None = None) -> int:
     except RunnerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAILURE
+    except _AGENT_ANALYSIS_ERRORS as exc:
+        # BYOK backend / analysis failures (BackendUnavailable, CassetteExhausted,
+        # ProtocolViolation, AnalysisError, InsufficientDataError) are their own
+        # hierarchies, not RunnerError — catch them so the user gets a stable
+        # message + exit code instead of a Python traceback (review r2 §BYOK)
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    except ContractsError as exc:
+        # claim typing / contract-layer errors surface as validation failures
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
 
 
 # -- commands -----------------------------------------------------------------
