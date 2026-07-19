@@ -42,15 +42,25 @@ class StoredPublication:
 
 @dataclass
 class PublicationStore:
-    """File-backed store of published bundles + append-only attestations."""
+    """File-backed store of published bundles + append-only attestations.
+
+    Optional `known_keys` maps author id → Ed25519 public key (hex); a bundle
+    that arrives with a `signature` verifying against one upgrades the
+    publication's integrity axis to `signed` (never changes `origin`).
+    """
 
     root: Path
+    known_keys: dict[str, str] = field(default_factory=dict)
     _cache: dict[str, StoredPublication] = field(default_factory=dict)
+    _tombstones: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         for directory in sorted(self.root.glob("*/")):
-            if (directory / "publication.json").is_file():
+            if (directory / "tombstone.json").is_file():
+                self._tombstones.add(directory.name)
+                self._load_reproductions_only(directory.name)
+            elif (directory / "publication.json").is_file():
                 self._load(directory.name)
 
     # -- publish handshake ------------------------------------------------
@@ -62,6 +72,8 @@ class PublicationStore:
         question: str,
         license_id: str = "CC-BY-4.0",
         visibility: str = "public",
+        signature: str | None = None,
+        author: str | None = None,
     ) -> StoredPublication:
         errors = validate_artifact(bundle, "bundle")
         if errors:
@@ -81,7 +93,8 @@ class PublicationStore:
                 "server replay does not match recorded verdicts — refusing to publish"
             )
 
-        publication = self._mint(bundle, traces, question, license_id, visibility)
+        integrity = self._integrity(bundle, signature, author)
+        publication = self._mint(bundle, traces, question, license_id, visibility, integrity)
         errors = validate_artifact(publication, "publication")
         if errors:
             raise PublishRejected(f"publication failed schema validation: {errors}")
@@ -90,6 +103,44 @@ class PublicationStore:
         self._persist(stored)
         self._cache[str(publication["publication_id"])] = stored
         return stored
+
+    def _integrity(
+        self, bundle: dict[str, object], signature: str | None, author: str | None
+    ) -> str:
+        """hash_verified by default; signed if a KNOWN author key verifies the
+        detached signature over content_hashes. Never claims signed on an
+        unknown key — the catalog must not equate that with a verified one."""
+        if not signature or not author:
+            return "hash_verified"
+        pubkey = self.known_keys.get(author)
+        if pubkey is None:
+            raise PublishRejected(f"unknown author key {author!r}; cannot claim 'signed'")
+        from lab_contracts.signing import SignatureInvalid, verify_bundle_signature
+
+        try:
+            verify_bundle_signature(bundle, signature, pubkey)
+        except SignatureInvalid as exc:
+            raise PublishRejected(str(exc)) from exc
+        return "signed"
+
+    def takedown(self, publication_id: str) -> None:
+        """Remove a publication from the catalog while PRESERVING its
+        append-only attestation record (plan B4 DoD, threat-model §4). The
+        bundle/traces/publication body are removed; reproductions.json stays."""
+        stored = self._cache.pop(publication_id, None)
+        if stored is None and publication_id not in self._tombstones:
+            raise NotFound(f"publication {publication_id} not found")
+        directory = self._dir(publication_id)
+        for name in ("publication.json", "bundle.json"):
+            (directory / name).unlink(missing_ok=True)
+        traces_dir = directory / "traces"
+        if traces_dir.is_dir():
+            for path in traces_dir.glob("*.json"):
+                path.unlink()
+        (directory / "tombstone.json").write_text(
+            json.dumps({"publication_id": publication_id, "status": "taken_down"})
+        )
+        self._tombstones.add(publication_id)
 
     def add_attestation(self, publication_id: str, attestation: dict[str, object]) -> StoredPublication:
         stored = self.get(publication_id)
@@ -117,6 +168,20 @@ class PublicationStore:
             s for s in self._cache.values() if s.publication.get("visibility") != "private"
         ]
 
+    def is_taken_down(self, publication_id: str) -> bool:
+        return publication_id in self._tombstones
+
+    def reproductions_of(self, publication_id: str) -> list[dict[str, object]]:
+        """The append-only attestation record — survives a takedown."""
+        stored = self._cache.get(publication_id)
+        if stored is not None:
+            return stored.reproductions
+        directory = self._dir(publication_id)
+        reproductions_file = directory / "reproductions.json"
+        if reproductions_file.is_file():
+            return json.loads(reproductions_file.read_text())
+        raise NotFound(f"publication {publication_id} not found")
+
     # -- internals --------------------------------------------------------
 
     def _mint(
@@ -126,6 +191,7 @@ class PublicationStore:
         question: str,
         license_id: str,
         visibility: str,
+        integrity: str = "hash_verified",
     ) -> dict[str, object]:
         bundle_ref = content_hash(bundle)
         trace_refs = frozenset(content_hash(t) for t in traces.values())
@@ -166,7 +232,7 @@ class PublicationStore:
             bundle_ref=bundle_ref,
             question=question,
             origin="local",
-            integrity="hash_verified",
+            integrity=integrity,
             claims=claims,
             license_id=license_id,
             visibility=visibility,
@@ -216,3 +282,9 @@ class PublicationStore:
         self._cache[publication_id] = StoredPublication(
             publication=publication, bundle=bundle, traces=traces, reproductions=reproductions
         )
+
+    def _load_reproductions_only(self, publication_id: str) -> None:
+        """A taken-down publication keeps only its attestation record."""
+        directory = self._dir(publication_id)
+        # nothing to load into the catalog cache; reproductions_of reads lazily
+        _ = directory

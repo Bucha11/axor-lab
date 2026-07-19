@@ -29,6 +29,7 @@ _EVIDENCE_RE = re.compile(r"^/e/([A-Za-z0-9_]+)/evidence/([A-Za-z0-9_]+)$")
 _PUB_RE = re.compile(r"^/e/([A-Za-z0-9_]+)$")
 _API_PUB_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)$")
 _API_REPRO_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/reproductions$")
+_API_TAKEDOWN_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/takedown$")
 
 
 def make_server(store_root: Path, host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
@@ -80,9 +81,22 @@ def make_server(store_root: Path, host: str = "127.0.0.1", port: int = 8000) -> 
                         question=str(payload.get("question", "")),
                         license_id=str(payload.get("license", "CC-BY-4.0")),
                         visibility=str(payload.get("visibility", "public")),
+                        signature=payload.get("signature"),  # type: ignore[arg-type]
+                        author=payload.get("author"),  # type: ignore[arg-type]
                     )
                     pid = stored.publication["publication_id"]
-                    self._json(201, {"publication_id": pid, "url": f"/e/{pid}"})
+                    self._json(201, {
+                        "publication_id": pid, "url": f"/e/{pid}",
+                        "integrity": stored.publication["integrity"],
+                    })
+                    return
+                takedown = _API_TAKEDOWN_RE.match(self.path)
+                if takedown:
+                    store.takedown(takedown.group(1))
+                    self._json(200, {
+                        "publication_id": takedown.group(1), "status": "taken_down",
+                        "reproductions_preserved": len(store.reproductions_of(takedown.group(1))),
+                    })
                     return
                 repro = _API_REPRO_RE.match(self.path)
                 if repro:

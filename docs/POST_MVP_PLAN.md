@@ -170,8 +170,22 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   modes with the counterfactual labeled — Playwright drives it headless
   (Chromium is pre-installed).
 
-### B4 — Production hardening (original plan Phase 6)
+### B4 — Production hardening (original plan Phase 6) — ◐ code slices implemented
 *The "-ready" in production-ready; no new product surface.*
+
+> **Status (code-level slices done; infra deferred):** the `integrity=signed`
+> path ships — `lab_contracts/signing.py` (optional Ed25519 over the bundle's
+> `content_hashes`, same crypto as CP); the server upgrades `hash_verified →
+> signed` only for a KNOWN author key, refuses an unknown key, and never
+> changes `origin`. Takedown removes a publication from the catalog while
+> preserving its append-only attestation record (survives a store reload).
+> CI gained a cross-OS replay-determinism matrix and a schema-compat gate (a
+> schema change that breaks the slice examples or the AgentDojo import fails
+> CI). Covered by `test_hardening.py` + a takedown HTTP test.
+>
+> **Still infra-level (deferred):** Postgres + content-addressed object
+> storage, GitHub OAuth, observability/alerting, signed PyPI release. These
+> need a hosting target, not more contract code.
 
 - **Contract anchor:** original `IMPLEMENTATION_PLAN.md` Phase 6, `threat-model.md`
   §4–5 (untrusted payloads, trust in results), `axor-packaging.md` §3 (hosted

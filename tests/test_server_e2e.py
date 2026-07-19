@@ -169,6 +169,20 @@ class TestServerEndToEnd(unittest.TestCase):
         self.assertEqual(pub["origin"], "local")  # origin unchanged
         self.assertEqual(pub["provenance"]["reproductions"]["count"], 1)
 
+    def test_takedown_over_http_removes_page_but_preserves_attestations(self) -> None:
+        pid = self._publish()
+        self._post(f"/api/publications/{pid}/reproductions", {"attestation": {
+            "schema_version": "attestation/v1", "publication_id": pid, "by": "@ext",
+            "kind": "fresh_live", "created": "2026-07-20T00:00:00Z", "result": {"estimate": 0.0},
+        }})
+        status, body = self._post(f"/api/publications/{pid}/takedown", {})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["status"], "taken_down")
+        self.assertEqual(body["reproductions_preserved"], 1)
+        # the public page is gone
+        page_status, _ = self._get(f"/e/{pid}")
+        self.assertEqual(page_status, 404)
+
     def _get_json(self, path: str) -> tuple[int, dict[str, object]]:
         status, text = self._get(path)
         return status, json.loads(text)
