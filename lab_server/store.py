@@ -120,7 +120,7 @@ class PublicationStore:
         traces: dict[str, dict[str, object]],
         question: str,
         license_id: str = "CC-BY-4.0",
-        visibility: str = "public",
+        visibility: str = "unlisted",  # safe default: NOT public unless asked (review r4)
         signature: str | None = None,
         author: str | None = None,
     ) -> StoredPublication:
@@ -176,12 +176,19 @@ class PublicationStore:
         pubkey = self.known_keys.get(author)
         if pubkey is None:
             raise PublishRejected(f"unknown author key {author!r}; cannot claim 'signed'")
-        from lab_contracts.signing import SignatureInvalid, verify_bundle_signature
+        from lab_contracts.signing import (
+            SignatureInvalid,
+            SignatureUnavailable,
+            verify_bundle_signature,
+        )
 
         try:
             verify_bundle_signature(bundle, signature, pubkey)
         except SignatureInvalid as exc:
             raise PublishRejected(str(exc)) from exc
+        except SignatureUnavailable as exc:
+            # crypto not installed on the server: a clean rejection, not a 500
+            raise PublishRejected(f"cannot verify signature: {exc}") from exc
         return "signed"
 
     def takedown(self, publication_id: str) -> None:

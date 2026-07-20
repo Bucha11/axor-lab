@@ -309,6 +309,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         integrity="hash_verified",
         claims=claims,
         license_id=args.license,
+        visibility=getattr(args, "visibility", "unlisted"),
         # local publish reports its own numbers; only the server independently
         # recomputes them (→ recomputed_from_traces). Be honest about which.
         statistics_integrity="self_reported" if aggregates else None,
@@ -332,12 +333,16 @@ def _publish_to_server(
     import urllib.error
     import urllib.request
 
+    visibility = getattr(args, "visibility", "unlisted")
+    if visibility == "public":
+        print("NOTE: --visibility public — this artifact will be publicly listed on the server.")
     payload = json.dumps(
         {
             "bundle": bundle,
             "traces": traces,
             "question": args.question,
             "license": args.license,
+            "visibility": visibility,
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -829,6 +834,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument("--out", help="write publication/v1 JSON locally")
     p_publish.add_argument("--server", help="upload via the publish handshake to this base URL")
     p_publish.add_argument("--license", default="CC-BY-4.0")
+    p_publish.add_argument(
+        "--visibility", choices=["public", "unlisted", "private"], default="unlisted",
+        help="publication visibility; default unlisted (public must be explicit)",
+    )
     p_publish.set_defaults(func=_cmd_publish)
 
     p_export = sub.add_parser(
