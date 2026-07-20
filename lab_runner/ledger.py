@@ -48,10 +48,20 @@ def _value_fields(value: object, sensitive: bool) -> dict[str, object]:
 
 @dataclass
 class ValueLedger:
-    """Mints and stores every governed value of one trial."""
+    """Mints and stores every governed value of one trial.
+
+    Two representations are kept DELIBERATELY separate (review r7):
+    - ``values`` is the SERIALIZED evidence (redacted for sensitive values, no
+      raw decision_value) — this is what a trace carries;
+    - ``_runtime`` holds the RAW typed value in memory for the kernel to gate on,
+      and is NEVER serialized. Reading the raw value off the serialized dict
+      broke real-kernel runs on a sensitive value (its decision_value is gone),
+      so the kernel must read it via ``runtime_value``, not ``get(...)['...']``.
+    """
 
     values: list[dict[str, object]] = field(default_factory=list)
     _counter: int = 0
+    _runtime: dict[str, object] = field(default_factory=dict)
 
     def _next_id(self, hint: str) -> str:
         self._counter += 1
@@ -62,6 +72,14 @@ class ValueLedger:
             if value["value_id"] == value_id:
                 return value
         raise KeyError(value_id)
+
+    def runtime_value(self, value_id: str) -> object:
+        """The RAW typed value for the kernel — available even for a sensitive
+        value whose serialized form is redacted. In-memory only, never in a trace."""
+        return self._runtime[value_id]
+
+    def has_runtime_value(self, value_id: str) -> bool:
+        return value_id in self._runtime
 
     def labels_of(self, value_id: str) -> tuple[str, ...]:
         return tuple(self.get(value_id)["labels"])  # type: ignore[arg-type]
@@ -89,6 +107,7 @@ class ValueLedger:
                 "sources": [{"kind": "constant", "origin_ref": origin_ref}],
             }
         )
+        self._runtime[value_id] = value
         return value_id
 
     def mint_external_read(self, value: object, origin_ref: str, sensitive: bool = False) -> str:
@@ -106,6 +125,7 @@ class ValueLedger:
                 "sources": [{"kind": "external_read", "origin_ref": origin_ref}],
             }
         )
+        self._runtime[value_id] = value  # raw value stays in memory for the kernel
         return value_id
 
     def mint_model_extraction(self, value: object, context_value_ids: tuple[str, ...] | None = None) -> str:
@@ -165,6 +185,7 @@ class ValueLedger:
                 "derived_from": list(untrusted),
             }
         )
+        self._runtime[value_id] = value  # raw value stays in memory for the kernel
         return value_id
 
 

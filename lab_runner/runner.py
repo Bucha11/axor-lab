@@ -154,8 +154,11 @@ def run_trial(
     # 3. gate — the ONE decide implementation (also used by replay). The real
     # axor-core governor and the reference kernel share this dispatch.
     if isinstance(kernel, AxorKernel):
+        # read the RAW runtime value (in-memory), not decision_value off the
+        # serialized dict — a sensitive value is redacted there and has no
+        # decision_value, which used to KeyError and fail the whole trial (r7)
         registrations = [
-            (read_tool, ledger.get(vid)["decision_value"]) for vid in produced
+            (read_tool, ledger.runtime_value(vid)) for vid in produced
         ]
         decision = gate_with_governor(
             kernel.config, str(condition["enforcement"]), registrations,
