@@ -43,8 +43,14 @@ class WrappedModelAgent:
         read_result: object,
         inputs: dict[str, object],
         sink_manifest: dict[str, object],
+        *,
+        scenario_id: str = "",
     ) -> SinkDecision:
         """Run the loop until the model calls the sink; return that call.
+
+        `scenario_id` is unused here (a live model drives from the task/context),
+        but accepted to satisfy the DrivingAgent protocol and to be forwarded by
+        cassette wrappers.
 
         The read result is presented to the model verbatim — including any
         injected content — which is exactly why the recipient the model emits
@@ -131,16 +137,31 @@ class FileCassetteAgent:
         read_result: object,
         inputs: dict[str, object],
         sink_manifest: dict[str, object],
+        *,
+        scenario_id: str = "",
     ) -> SinkDecision:
-        records = self._records_for(task)
+        records = self._records_for(scenario_id)
         agent = WrappedModelAgent(backend=CassetteBackend.from_records(records))
-        return agent.decide_sink_call(task, read_result, inputs, sink_manifest)
+        return agent.decide_sink_call(task, read_result, inputs, sink_manifest, scenario_id=scenario_id)
 
-    def _records_for(self, task: str) -> list[dict[str, object]]:
+    def _records_for(self, scenario_id: str) -> list[dict[str, object]]:
+        """Select this scenario's transcript. A dict cassette is keyed by
+        SCENARIO NAME (matching the documented {scenario_name: [records]} form);
+        the old code looked up the task TEXT, which never matched a scenario_name
+        key, so every scenario silently fell through to the first entry and two
+        scenarios could share one transcript while looking valid (review r11).
+
+        A plain-list cassette still applies to every scenario. A dict cassette
+        with neither this scenario_id nor an explicit "default" key RAISES rather
+        than silently picking an arbitrary transcript."""
         data = json.loads(self.path.read_text())
         if isinstance(data, dict):
-            # per-scenario: fall back to a "default" key or the first entry
-            if task in data:
-                return list(data[task])
-            return list(data.get("default", next(iter(data.values()))))
+            if scenario_id and scenario_id in data:
+                return list(data[scenario_id])
+            if "default" in data:
+                return list(data["default"])
+            raise ProtocolViolation(
+                f"cassette has no transcript for scenario {scenario_id!r} and no 'default' key "
+                f"(available: {sorted(data)})"
+            )
         return list(data)

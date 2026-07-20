@@ -118,7 +118,8 @@ def run_trial(
         # untrusted value, it is model_extraction (conservative join). The
         # agent cannot launder taint by claiming the value is clean.
         decision_call = agent.decide_sink_call(
-            str(scenario["task"]), result, inputs, manifests[sink_tool]
+            str(scenario["task"]), result, inputs, manifests[sink_tool],
+            scenario_id=str(scenario["name"]),
         )
         recipient = decision_call.recipient
         amount = decision_call.amount
