@@ -172,19 +172,28 @@ class TestFinalizeValidatesTheTrace(_Base):
 class TestRunEviction(_Base):
     max_runs = 2
 
-    def test_finalized_runs_are_evicted_to_admit_new_runs(self) -> None:
+    def test_finalized_undelivered_trace_is_not_evicted(self) -> None:
+        # A finalized but NEVER read; B active. A third open must NOT evict A
+        # (its trace was never delivered) — losing an unread trace is the bug (r15)
         a_id, a_secret = self._open()
-        b_id, b_secret = self._open()
-        # quota is full and both are ACTIVE → a third open is refused
+        self._open()
+        self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
         status, body = self._post("/runs", {})
         self.assertEqual(status, 429, body)
-        self.assertIn("all runs active", body["error"])
-        # finalize A → it is terminal and now evictable
+        self.assertIn("no delivered finalized run", body["error"])
+        # A's trace is still there to be read
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
+
+    def test_trace_is_evicted_only_after_delivery(self) -> None:
+        a_id, a_secret = self._open()
+        b_id, b_secret = self._open()
+        # finalize AND read A → now delivered, hence evictable
         self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
-        # a new open now succeeds by evicting the finalized run A
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
+        # a new open now succeeds by evicting the delivered run A
         status, opened = self._post("/runs", {})
         self.assertEqual(status, 201, opened)
-        # A is gone (evicted) — its trace can no longer be read; B still lives
+        # A is gone (evicted); B still lives
         self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 404)
         self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 409)  # live, not finalized
 

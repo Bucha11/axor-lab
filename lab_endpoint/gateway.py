@@ -42,7 +42,6 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from lab_contracts import validate_artifact, world_digest
-from lab_contracts.semantics import trace_semantics
 from lab_runner.kernel import Kernel, default_registry
 
 from .gating import GatingError, gated_args, normalize_value_hash, provenance_fidelity
@@ -81,6 +80,11 @@ class _Run:
     seq: int = 0
     labels_carried: bool = True
     finalized: bool = False
+    # delivery lifecycle (review r15): a finalized run is FINALIZED_UNDELIVERED
+    # until its trace has actually been fetched at least once, then DELIVERED.
+    # Only a DELIVERED run is safe to evict for quota — a finalized-but-unread
+    # trace must never be discarded before the client can read it.
+    delivered: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
     def labels_of(self, value_id: str) -> tuple[str, ...]:
@@ -198,17 +202,20 @@ def make_gateway(
                     return
                 with global_lock:
                     if len(runs) >= max_runs:
-                        # a FINALIZED run is terminal — its trace was assembled and
-                        # is meant to have been read; evict the oldest one (LRU,
-                        # dict is insertion-ordered) to admit a new run, and drop
-                        # its secret. Only ACTIVE runs hold the quota, so a client
-                        # cannot permanently exhaust it with dead finalized runs
-                        # (review r14). If every run is still live, refuse (429).
+                        # evict the oldest run that is finalized AND DELIVERED — its
+                        # trace was assembled and actually read, so discarding it is
+                        # safe (LRU, dict is insertion-ordered). A finalized run
+                        # whose trace was never fetched is NOT evicted: losing it
+                        # before the client reads it is the round-15 bug. If nothing
+                        # is delivered-and-finalized, refuse (429) rather than drop
+                        # an unread trace.
                         evicted = next(
-                            (rid for rid, r in runs.items() if r.finalized), None
+                            (rid for rid, r in runs.items() if r.finalized and r.delivered), None
                         )
                         if evicted is None:
-                            self._json(429, {"error": "run quota exceeded (all runs active)"})
+                            self._json(429, {
+                                "error": "run quota exceeded (no delivered finalized run to evict)"
+                            })
                             return
                         del runs[evicted]
                         run_secrets.pop(evicted, None)
@@ -235,7 +242,10 @@ def make_gateway(
                     # published as evidence (review r14). Fail closed: the run
                     # stays open so the caller can see exactly what is wrong.
                     trace = run.trace()
-                    errors = validate_artifact(trace, "trace") + trace_semantics(trace)
+                    # validate_artifact("trace") already runs trace_semantics, so
+                    # calling it again would surface every semantic error twice and
+                    # crowd out other causes in details[:10] (review r15 P2)
+                    errors = validate_artifact(trace, "trace")
                     if errors:
                         self._json(422, {
                             "error": "assembled trace is not a conformant trace/v1",
@@ -399,6 +409,9 @@ def make_gateway(
                     self._json(409, {"error": "run not finalized; POST /finalize first"})
                     return
                 trace = run.trace()  # consistent snapshot under the lock
+                # the trace has now been delivered at least once → the run becomes
+                # evictable for quota (review r15)
+                run.delivered = True
             self._json(200, trace)
 
         def _read_body(self) -> dict[str, object]:
