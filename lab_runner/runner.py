@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from lab_contracts.canonical import content_hash
+from lab_contracts.canonical import content_hash, world_digest
 
 from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
 from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
@@ -207,7 +207,7 @@ def run_trial(
             "kernel_version": str(condition["kernel"]),
             "runtime": RUNTIME_ID,
         },
-        "inputs_digest": content_hash({"inputs": inputs, "fixtures": scenario.get("fixtures", {})}),
+        "inputs_digest": world_digest(inputs, scenario.get("fixtures", {})),  # type: ignore[arg-type]
         "events": events,
         "values": ledger.values,
     }

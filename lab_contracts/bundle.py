@@ -8,7 +8,7 @@ canonical serialization. `verify_bundle` is what the server runs on upload
 
 from __future__ import annotations
 
-from .canonical import content_hash
+from .canonical import content_hash, world_digest
 from .errors import BundleIntegrityError
 
 
@@ -198,10 +198,17 @@ def _verify_trace_metadata(
                 f"{cond.get('id')!r} kernel {cond.get('kernel')!r}"
             )
         scen = scenarios.get(str(trial.get("scenario_id")))
-        if scen is not None and "inputs_digest" in trace:
-            expected = content_hash(
-                {"inputs": scen.get("inputs", {}), "fixtures": scen.get("fixtures", {})}
+        # inputs_digest is REQUIRED for a producer that claims to track the world
+        # it ran in (wrapped_code, instrumented_endpoint) — otherwise a caller
+        # could drop the field to dodge the binding (review r9). It must equal the
+        # ONE world_digest over the scenario's inputs + fixtures.
+        mode = str(producer.get("mode", ""))
+        if "inputs_digest" not in trace and mode in ("wrapped_code", "instrumented_endpoint"):
+            errors.append(
+                f"trace {trace.get('trace_id')}: producer.mode {mode!r} requires an inputs_digest"
             )
+        if scen is not None and "inputs_digest" in trace:
+            expected = world_digest(scen.get("inputs", {}), scen.get("fixtures", {}))  # type: ignore[arg-type]
             if str(trace.get("inputs_digest")) != expected:
                 errors.append(
                     f"trace {trace.get('trace_id')}: inputs_digest does not bind "

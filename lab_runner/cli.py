@@ -34,7 +34,7 @@ from lab_contracts import (
 )
 
 from .axor_backend import resolve_kernel
-from .bundle_io import PACKAGING, read_bundle_dir, write_bundle_dir
+from .bundle_io import PACKAGING, read_bundle_dir, write_bundle_dir, write_superseded_attempts
 from .claims import deny_claim_text
 from .errors import ExperimentFileError, RunnerError
 from .evidence import build_evidence_case
@@ -167,6 +167,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     out = Path(args.out)
     write_bundle_dir(out, bundle, result.traces, overwrite=bool(getattr(args, "overwrite", False)))
+    # superseded retry attempts are NOT publishable evidence (they would orphan
+    # the bundle graph), but they ARE the audit trail — persist them beside the
+    # bundle so "both attempts are preserved" holds on disk, not only in the
+    # in-memory result (review r9)
+    attempt_log = write_superseded_attempts(out, result.superseded)
+    if attempt_log is not None:
+        print(f"  superseded attempts: {attempt_log} ({len(result.superseded)})")
     print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
     print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")

@@ -27,6 +27,7 @@ class TestInstrumentedEndpoint(unittest.TestCase):
                 type="tool_result", tool="read_txns",
                 values=[{
                     "value_id": "v_inj", "preview": support.INJECTION_TEXT,
+                    "decision_value": support.INJECTION_TEXT,
                     "labels": ["untrusted_derived"],
                     "sources": [{"kind": "external_read",
                                  "origin_ref": "tool_result:read_txns:transactions[1].description"}],
@@ -36,6 +37,7 @@ class TestInstrumentedEndpoint(unittest.TestCase):
                 type="tool_result", tool="read_txns",
                 values=[{
                     "value_id": "v_recipient", "preview": support.ATTACKER_IBAN,
+                    "decision_value": support.ATTACKER_IBAN,
                     "labels": ["untrusted_derived"], "transformations": ["model_extraction"],
                     "derived_from": ["v_inj"],
                     "sources": [{"kind": "external_read",
@@ -53,10 +55,12 @@ class TestInstrumentedEndpoint(unittest.TestCase):
         from lab_endpoint import assemble_and_gate
 
         kernel = support.kernel_registry().get(support.KERNEL_PINNED)
+        scenario = support.banking_scenario()
         trace = assemble_and_gate(
             self._emitted(), support.conditions()[1], support.manifests(),
-            support.banking_scenario()["inputs"], kernel,
+            scenario["inputs"], kernel,
             run_id="r_ep", scenario_id="banking-exfil-01",
+            fixtures=scenario.get("fixtures", {}), trusted_runtime=True,
         )
         self.assertEqual(trace["producer"]["mode"], "instrumented_endpoint")
         self.assertEqual(trace["producer"]["provenance_fidelity"], "explicit_flow_tracked")

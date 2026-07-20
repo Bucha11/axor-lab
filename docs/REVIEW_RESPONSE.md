@@ -208,3 +208,27 @@ multi-tenant gateway caller can earn `explicit_flow_tracked`; a server-signed
 acceptance receipt so a store directory without one never loads (stronger than
 re-mint-and-compare for a forged integrity badge); a first-class `attempts`
 graph in the bundle contract; and hash-chained append-only attestation logs.
+
+## Ninth review round — the second endpoint path + cold-load trust
+
+Round 8 fixed the "verify one value, allow another" bypass in the HTTP gateway
+but left the in-process `assemble_and_gate` path with the identical bug, and the
+new metadata binding shipped a regression. This round finishes the endpoint
+unification and closes the remaining cold-load trust holes. Suite green (406
+tests).
+
+| Round-9 finding | Fix | Proof |
+|---|---|---|
+| **P0** `assemble_and_gate` (the in-process SDK path) still took the concrete `item.args` independently of the bindings, passed them to the kernel, and recorded only bindings — the same laundering bypass r8 fixed in only ONE of the two endpoint paths; it also self-set `explicit_flow_tracked` from a bare boolean | extracted the rules into one shared `lab_endpoint/gating.py` (`gated_args` + `provenance_fidelity`) that BOTH the HTTP gateway and assemble_and_gate call, so they can't drift again; a clean binding + malicious concrete arg fails closed, fidelity needs an attested runtime | `test_instrumented_args_binding.py` |
+| **P1 (regression)** the r8 `inputs_digest` verifier expected `hash(inputs+fixtures)` but both endpoint paths hashed inputs only, so a conformant instrumented trace for a fixture-bearing scenario FAILED verify_bundle; and a producer could drop the field to dodge the check | one `world_digest(inputs, fixtures)` in lab_contracts used by runner, gateway and instrumented SDK; verify_bundle REQUIRES inputs_digest for wrapped_code / instrumented_endpoint | `test_world_digest.py` |
+| **P1** cold load re-minted with `integrity` taken from publication.json, so a from-scratch publication could claim `integrity: signed` (valid bundle, recomputed id) and load with an author-signed badge it never earned — replay/recompute pass and there was no signature to re-check | persist an author+signature `receipt.json` (signed pubs only); on load `_integrity_on_load` re-earns `signed` only if the receipt verifies against a known key, else hash_verified; re-mint folds integrity in, so a forged badge with no receipt is dropped | `test_publication_immutable.py` |
+| **P1** a valid SIGNED attestation for publication A could be copied into B's reproductions.json — reload re-checked signature/kind/dedup but never bound the entry to THIS publication or re-ran schema validation | `rebuild_reproduction_log` takes `expected_publication_id` (drops a transplanted attestation) and schema-validates each entry (junk fields / bad kind rejected), stripping the server-computed `verified` first | `test_reproduction_verification.py` |
+| **P0/P1 (honesty)** the gateway docstring claimed the gate "can stop a sink before it fires" — too strong: it's a decision point, not a tool executor, so enforcement depends on a cooperating caller, and an untrusted client can mislabel a value | the intent response returns `authoritative_args` (so a cooperating proxy runs the bound value), and the docstring states the trust model plainly — advisory for an untrusted client (hence heuristic_attribution), real enforcement needs a trusted runtime / signed envelope (roadmap); what IS unconditional is that the gate decides on the bound value | `test_gateway_args_binding.py` |
+| **P2** superseded retry attempts lived only in the in-memory result — the CLI never persisted them, so the audit history vanished on exit | `axor-lab run` writes a `superseded_attempts.json` sidecar (each attempt with its trace), kept OUT of the publishable bundle so it can't orphan the graph | `test_superseded_persistence.py` |
+
+Still deferred (documented): a trusted-runtime that mints labels from the tool
+manifest / observed execution graph (so an untrusted gateway client can't get a
+governance-grade verdict from self-reported labels), plus a cryptographic
+per-event envelope; a server-signed acceptance receipt covering the WHOLE record
+(stronger than the author-signature receipt for integrity); a first-class
+`attempts` graph in the bundle contract; and hash-chained attestation logs.

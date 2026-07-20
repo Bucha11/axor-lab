@@ -118,19 +118,36 @@ def add_reproduction(
 
 
 def rebuild_reproduction_log(
-    raw: tuple[dict[str, object], ...], known_keys: dict[str, str] | None = None
+    raw: tuple[dict[str, object], ...],
+    known_keys: dict[str, str] | None = None,
+    expected_publication_id: str | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Re-derive a trusted attestation log from persisted (untrusted) entries.
 
     On restart the on-disk reproductions.json is just bytes — a hand-edit could
-    add duplicates, an invalid kind, or a forged `verified`. Folding every raw
-    entry back through add_reproduction re-checks kind, re-deduplicates, and
-    RE-VERIFIES each signature, so `verified` reflects cryptography, not the
-    file. An entry that no longer validates is dropped rather than trusted."""
+    add duplicates, an invalid kind, a forged `verified`, junk fields, or a valid
+    signed attestation TRANSPLANTED from another publication. Each raw entry is
+    therefore (1) bound to `expected_publication_id` (a signed reproduction of A
+    copied into B's log is dropped — its signature still names A), (2) schema-
+    validated (the `verified` flag is server-computed and not part of the
+    attestation contract, so it is stripped before the check), then (3) folded
+    through add_reproduction, which re-checks kind, re-deduplicates, and RE-
+    VERIFIES the signature so `verified` reflects cryptography, not the file.
+    Anything that fails is dropped rather than trusted (review r8/r9)."""
+    from .semantics import validate_artifact  # lazy: avoid an import cycle
+
     log: tuple[dict[str, object], ...] = ()
     for entry in raw:
+        if (
+            expected_publication_id is not None
+            and str(entry.get("publication_id")) != str(expected_publication_id)
+        ):
+            continue  # an attestation for a DIFFERENT publication cannot be transplanted here
+        candidate = {k: v for k, v in entry.items() if k != "verified"}
+        if validate_artifact(candidate, "attestation"):
+            continue  # schema-invalid (junk field / missing required / bad kind) → dropped
         try:
-            log = add_reproduction(log, entry, known_keys)
+            log = add_reproduction(log, candidate, known_keys)
         except ClaimTypingError:
             continue  # a corrupt/forged persisted entry is dropped, not trusted
     return log

@@ -92,6 +92,9 @@ class TestGatewayArgsBinding(unittest.TestCase):
         }, secret)
         self.assertEqual(status, 200, body)
         self.assertEqual(body["decision"]["verdict"], "ALLOW")
+        # the gateway returns the AUTHORITATIVE args a cooperating proxy must run
+        # (the bound value), so an honest client executes the value that was gated
+        self.assertEqual(body["authoritative_args"], {"recipient": SAFE_IBAN})
 
     def test_tainted_binding_is_denied_even_with_an_allowlisted_assertion(self) -> None:
         run_id, secret = self._open()

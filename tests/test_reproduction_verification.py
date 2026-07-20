@@ -67,6 +67,19 @@ class TestReproductionVerification(unittest.TestCase):
         bys = sorted(str(a["by"]) for a in rebuilt)
         self.assertEqual(bys, ["@a", "@c"])  # dedup collapsed @a, dropped bad kind
 
+    def test_reload_binds_attestation_to_expected_publication(self) -> None:
+        # a valid attestation whose publication_id names a DIFFERENT publication
+        # cannot be transplanted into this one's log (review r9)
+        raw = (_att(by="@x", publication_id="e_OTHER"), _att(by="@y", publication_id="e_1"))
+        rebuilt = rebuild_reproduction_log(raw, expected_publication_id="e_1")
+        self.assertEqual([str(a["by"]) for a in rebuilt], ["@y"])
+
+    def test_reload_drops_schema_invalid_junk(self) -> None:
+        # a hand-added junk field is forbidden by additionalProperties:false
+        raw = (_att(by="@a", publication_id="e_1", junk="x"), _att(by="@b", publication_id="e_1"))
+        rebuilt = rebuild_reproduction_log(raw, expected_publication_id="e_1")
+        self.assertEqual([str(a["by"]) for a in rebuilt], ["@b"])
+
     @unittest.skipUnless(_HAS_NACL, "PyNaCl required for signed-attestation path")
     def test_signed_attestation_is_verified_and_survives_reload(self) -> None:
         from nacl.signing import SigningKey

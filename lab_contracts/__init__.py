@@ -8,7 +8,7 @@ lab_analysis.
 """
 
 from .bundle import build_bundle, verify_bundle
-from .canonical import canonical_json, condition_config_hash, content_hash
+from .canonical import canonical_json, condition_config_hash, content_hash, world_digest
 from .errors import (
     BundleIntegrityError,
     ClaimTypingError,
@@ -44,6 +44,7 @@ __all__ = [
     "canonical_json",
     "condition_config_hash",
     "content_hash",
+    "world_digest",
     "contracts_dir",
     "load_schemas",
     "make_claim",

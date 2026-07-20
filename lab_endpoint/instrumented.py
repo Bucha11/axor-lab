@@ -15,8 +15,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from lab_contracts import content_hash
+from lab_contracts import world_digest
 from lab_runner.kernel import Kernel
+
+from .gating import gated_args, provenance_fidelity
 
 PRODUCER_MODE = "instrumented_endpoint"
 
@@ -45,8 +47,17 @@ def assemble_and_gate(
     scenario_id: str,
     seed: str = "s000",
     labels_carried: bool = True,
+    fixtures: dict[str, object] | None = None,
+    trusted_runtime: bool = False,
 ) -> dict[str, object]:
-    """Build a trace/v1 from emitted events and gate each sink call intent."""
+    """Build a trace/v1 from emitted events and gate each sink call intent.
+
+    Like the HTTP gateway, the gate decides on the args assembled from the
+    bindings (`gated_args`), NOT the caller's concrete `item.args`; a mismatched
+    concrete arg raises GatingError (fail closed), so a clean binding paired with
+    a malicious value cannot launder an ALLOW between live decision and replay
+    (review r9). Provenance fidelity comes from the trusted-runtime context, not
+    a bare boolean."""
     values: list[dict[str, object]] = []
     events: list[dict[str, object]] = []
     seq = 0
@@ -68,13 +79,20 @@ def assemble_and_gate(
                 "arg_bindings": dict(item.arg_bindings),
             })
             seq += 1
+            values_by_id = {str(v["value_id"]): v for v in values}
+            # authoritative args from the bindings; a conflicting concrete
+            # assertion fails closed (shared with the HTTP gateway)
+            authoritative = gated_args(
+                manifests[item.tool], dict(item.arg_bindings), values_by_id,
+                asserted=item.args or None,
+            )
             arg_labels = {
                 name: tuple(_labels_of(values, vid)) for name, vid in item.arg_bindings.items()
             }
             decision = kernel.decide(
                 enforcement=str(condition["enforcement"]),
                 manifest=manifests[item.tool],
-                args=item.args,
+                args=authoritative,
                 arg_labels=arg_labels,
                 arg_bindings=item.arg_bindings,
                 inputs=inputs,
@@ -92,11 +110,11 @@ def assemble_and_gate(
         },
         "producer": {
             "mode": PRODUCER_MODE,
-            "provenance_fidelity": "explicit_flow_tracked" if labels_carried else "heuristic_attribution",
+            "provenance_fidelity": provenance_fidelity(trusted_runtime, labels_carried),
             "kernel_version": str(condition["kernel"]),
             "runtime": "lab-gateway@0.1",
         },
-        "inputs_digest": content_hash({"inputs": inputs}),
+        "inputs_digest": world_digest(inputs, fixtures),
         "events": events,
         "values": values,
     }
