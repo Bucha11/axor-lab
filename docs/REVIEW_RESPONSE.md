@@ -273,3 +273,34 @@ Still deferred (documented): full process-tree containment against a child that
 calls `setsid()` itself, and a real total-disk quota — both need a cgroup PID/IO
 scope or a namespace/container runtime; and a token-accurate cost model (the
 ceiling uses the same rough price table as the estimate).
+
+## Twelfth review round — false regressions, unproven claims, and mislabeled measures
+
+This pass targeted the paths where an OFFICIAL, honest operator could still emit
+a false result — a regression that isn't one, a "statistically reproducible"
+claim the evidence doesn't prove, an EvidenceCase reasoning with the wrong
+kernel, or a measure whose name overstated it. No new P0 bypass; twelve findings
+(eleven P1, one P2), each enforced or honestly named. Suite green (464 tests).
+
+| Round-12 finding | Fix | Proof |
+|---|---|---|
+| **P1** the CLI regression pin stored only the final verdict, so a multi-call trace's real sequence (ALLOW, ALLOW, DENY) was compared to a singleton (DENY) and cried regression on an unchanged trace/kernel | `pin()` records the whole ordered `expected_sequence`; the CLI persists it and `check_pins` compares sequences | `test_regression_pin_fidelity.py` |
+| **P1** every pin replayed under the FIRST scenario's inputs, so pin B in a multi-scenario bundle ran against scenario A's allowlist/effect inputs → false regression or false pass | `check_pins(inputs_for=…)` supplies each trace's OWN scenario inputs; the CLI resolves per-trace | `test_regression_pin_fidelity.py` |
+| **P1** local `publish` minted a `statistically_reproducible` claim from the bundle's self-reported aggregates without recomputing them — the exact fabrication the server rejects | local publish proves REPLAY only (`exactly_replayable`); it no longer asserts any statistical claim over self-reported numbers (that is the server's recompute) | `test_cli_e2e.py::test_publish_mints_a_schema_valid_typed_publication` |
+| **P1** two local publications of the SAME bundle with different question/visibility got the same id (id addressed only part of the body) | id content-addresses the WHOLE publication body via shared `lab_contracts.derive_publication_id`, used by both the CLI and the server store | `test_cli_e2e.py::test_local_publication_id_content_addresses_the_whole_body` |
+| **P1** an EvidenceCase for a real-axor-core trace silently reasoned with the reference kernel (`default_registry(...).get`) | CLI and server EvidenceCase build the kernel via `resolve_kernel`, exactly as replay/regress — the real governor when the condition pins the installed build | `test_evidence_rendering.py`, `test_server_e2e.py` |
+| **P1** `_chain` paired the first intent with the first decision independently, so a DENY on call B rendered call A's tool/lineage in a multi-call trace | the chain targets the DENY decision and correlates ITS intent by call_id (fallback to the sole intent for legacy traces) | `test_evidence_rendering.py::TestChainCallIdCorrelation` |
+| **P1** the server recomputed the matched-pairs marginal over the all-conditions intersection, so one failed baseline trial shrank every condition's n and the server REJECTED an honest runner bundle at missingness | the server marginal is the completed trials OF THAT CONDITION for both designs (mirroring the runner); pairing lives only in the test object | `test_hosted_stats_integrity.py::TestMatchedPairsParityAtMissingness` |
+| **P1** `verify_bundle` never checked that a trial's scenario/condition exist or that a trace's tools have manifests — a failed trial could cite a phantom scenario/condition and a trace could invoke an unmanifested sink | `_verify_cross_references` resolves every trial coordinate and every event tool in-bundle | `test_bundle_graph_integrity.py::TestCrossReferenceIntegrity` |
+| **P1** CP export carried regression pins verbatim — a pin for a trace not in the bundle, or asserting a sequence the trace never produced, shipped into a production config | `_validate_pins` binds each pin to a real bundle trace (id, content hash, completed-trial citation, verdict, recorded sequence) and carries the full validated shape | `test_cp_export.py` |
+| **P1** CP export synthesized a `config_hash` (`get(..., recomputed)`) and presented it as "the config the researcher measured" | export requires a PRESENT recorded config_hash, verifies it, and emits the recorded value | `test_cp_export.py::test_export_requires_a_recorded_config_hash` |
+| **P1** the cost ceiling was checked only between trials, so one trial's up-to-8 provider calls could overshoot before the check ran | the budget is consulted BEFORE the first trial and BEFORE every provider call inside the loop (a `CostCeilingReached` halts the whole run); limits ≤ 0 are rejected; the remaining output budget caps the next call's `max_tokens`; reached-vs-overshot distinguished | `test_cost_ceiling.py::TestWithinTrialGuard` |
+| **P2** the federation model's `carried_taint` flag, `contained_at` field, and `compromised_spread` all had names that overstated or inverted what they measured | renamed to `governed`; replaced with `contained()` and `blast_radius()` (spread BEYOND the recorded origin compromise) | `test_later_tier.py::TestFederationAndPopulation` |
+
+Still deferred (unchanged in spirit): the larger reproduce-from-scratch loop, a
+cryptographic per-event envelope / trusted-runtime for governance-grade labels
+from an untrusted gateway client, a server-signed acceptance receipt over the
+whole record, a first-class content-hashed `attempts` graph in the bundle
+contract, and a token-accurate cost model. The load-bearing round-12 goal — no
+official path can emit a regression, statistical claim, or evidence view the
+frozen evidence does not support — is closed.
