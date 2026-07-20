@@ -122,12 +122,19 @@ class ValueLedger:
         untrusted value ever minted). If omitted, falls back to all untrusted
         values (correct for a single-model-call trial).
         """
-        if context_value_ids is None:
-            untrusted = self.untrusted_ids()
-        else:
-            untrusted = tuple(
-                vid for vid in context_value_ids if LABEL_UNTRUSTED in self.labels_of(vid)
-            )
+        # the context the model actually saw (all values if unscoped)
+        context = (
+            context_value_ids
+            if context_value_ids is not None
+            else tuple(str(v["value_id"]) for v in self.values)
+        )
+        untrusted = tuple(vid for vid in context if LABEL_UNTRUSTED in self.labels_of(vid))
+        # CONSERVATIVE JOIN OVER THE LABEL LATTICE: a model output inherits every
+        # security label present on ANY context value it may depend on — not just
+        # untrusted_derived but SENSITIVE too. Otherwise a model that copies a
+        # redacted secret into a sink arg would re-expose it in the clear (the
+        # derived value would carry its raw preview/decision_value). (review r6)
+        sensitive = any(LABEL_SENSITIVE in self.labels_of(vid) for vid in context)
         sources: list[dict[str, object]] = []
         seen: set[str] = set()
         for uid in untrusted:
@@ -136,16 +143,22 @@ class ValueLedger:
                 if key not in seen:
                     seen.add(key)
                     sources.append(dict(src))  # type: ignore[arg-type]
-        labels = [LABEL_UNTRUSTED] if untrusted else ["mint"]
+        labels: list[str] = []
+        if untrusted:
+            labels.append(LABEL_UNTRUSTED)
+        if sensitive:
+            labels.append(LABEL_SENSITIVE)
+        if not labels:
+            labels = ["mint"]
         if not sources:
             sources = [{"kind": "mint"}]
         value_id = self._next_id("model")
         self.values.append(
             {
                 "value_id": value_id,
-                "preview": _preview_of(value),
-                "decision_value": value,
-                "canonical_value_hash": content_hash(value),
+                # a derived value that inherits `sensitive` is redacted exactly
+                # like a sensitive source: masked preview, no raw decision_value
+                **_value_fields(value, sensitive),
                 "labels": labels,
                 "sources": sources,
                 "transformations": ["model_extraction"],
