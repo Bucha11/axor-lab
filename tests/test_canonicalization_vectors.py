@@ -40,6 +40,20 @@ class TestCanonicalizationVectors(unittest.TestCase):
         with self.assertRaises(ValueError):
             canonical_json({"x": float("nan")})
 
+    def test_floats_use_rfc8785_ecmascript_form_not_python_repr(self) -> None:
+        # the divergent cases where Python's repr is NOT RFC 8785 — a bundle's
+        # aggregate floats must serialize the ECMAScript way so a TS/Rust
+        # verifier computes the same hash (review r13)
+        cases = {
+            0.0: "0", -0.0: "0", 1.0: "1", 100.0: "100", 1.5: "1.5",
+            0.0001: "0.0001", 1e-7: "1e-7", 1e21: "1e+21",
+            1e16: "10000000000000000", 0.6: "0.6",
+        }
+        for value, expected in cases.items():
+            self.assertEqual(canonical_json(value), expected, f"float {value!r}")
+        # and a float 0.0 hashes identically to the int 0 (JSON has one number type)
+        self.assertEqual(content_hash({"n": 0.0}), content_hash({"n": 0}))
+
 
 if __name__ == "__main__":
     unittest.main()
