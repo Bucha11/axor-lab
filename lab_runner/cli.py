@@ -29,6 +29,7 @@ from lab_contracts import (
     build_bundle,
     build_publication,
     content_hash,
+    finalize_publication_id,
     make_claim,
     validate_artifact,
 )
@@ -354,23 +355,20 @@ def _cmd_publish(args: argparse.Namespace) -> int:
                 aggregate_refs=aggregate_refs,
             )
         )
-    provider = str(bundle.get("environment", {}).get("model", {}).get("provider", ""))  # type: ignore[union-attr]
-    agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
-    for aggregate in aggregates:
-        interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
-        claims.append(
-            make_claim(
-                "statistically_reproducible",
-                f"{aggregate['metric']} under {aggregate['condition_id']}: "
-                f"{aggregate['estimate']:.2f} "
-                f"[{interval['low']:.2f}, {interval['high']:.2f}] over {aggregate['n']} trials{agent_note}.",
-                f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
-                trace_refs=trace_refs,
-                aggregate_refs=aggregate_refs,
-            )
+    # local publish proves REPLAY (it re-ran the verdicts above), NOT statistics:
+    # it does not independently recompute the aggregates, so it must NOT mint a
+    # `statistically_reproducible` claim over self-reported numbers — the schema
+    # forbids self_reported backing that claim, and a hand-edited bundle could
+    # carry a fabricated aggregate. Statistical claims are minted only by the
+    # server, which recomputes from the traces (→ recomputed_from_traces, r12).
+    stat_note = ""
+    if aggregates:
+        stat_note = (
+            f"  ({len(aggregates)} aggregate(s) in the bundle are NOT published as claims — "
+            "host with --server for server-recomputed statistical claims)"
         )
     publication = build_publication(
-        publication_id=f"e_{bundle_ref.removeprefix('sha256:')[:32]}",  # 128-bit id (§6.3)
+        publication_id="e_pending",  # placeholder; content-addressed below
         bundle_ref=bundle_ref,
         question=args.question,
         origin="local",
@@ -378,16 +376,20 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         claims=claims,
         license_id=args.license,
         visibility=getattr(args, "visibility", "unlisted"),
-        # local publish reports its own numbers; only the server independently
-        # recomputes them (→ recomputed_from_traces). Be honest about which.
-        statistics_integrity="self_reported" if aggregates else None,
+        statistics_integrity=None,  # no statistical claims are asserted locally
     )
+    # content-address the WHOLE body (the shared definition), so the same bundle
+    # published with a different question/visibility/license is a genuinely
+    # different publication with its own id, not an id-colliding overwrite (r12)
+    finalize_publication_id(publication)
     errors = validate_artifact(publication, "publication")
     if errors:
         raise RunnerError(f"publication failed schema validation: {errors}")
     Path(args.out).write_text(json.dumps(publication, indent=2, ensure_ascii=False))
     print(f"publication {publication['publication_id']} -> {args.out}")
     print("origin=local integrity=hash_verified")
+    if stat_note:
+        print(stat_note)
     print(f"host it: axor-lab publish {args.bundle} --question ... --server <url>")
     return EXIT_OK
 

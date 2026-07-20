@@ -76,6 +76,36 @@ def build_publication(
     return publication
 
 
+def derive_publication_id(publication: dict[str, object]) -> str:
+    """A 128-bit id (32 hex chars) that content-addresses the WHOLE publication
+    body — every field except the two that are themselves derived from the id
+    (publication_id, reproductions_ref). The id COMMITS to the body, so the same
+    evidence answering a different question / at a different visibility / with
+    different claims is a genuinely different publication (review §6.3, r7).
+
+    Shared by the hosted server store AND the local CLI publish so both mint
+    identical ids — the local path used to key only on the bundle hash, so one
+    bundle published with different question/visibility/license collided on a
+    single id and reproductions_ref despite having different immutable bodies
+    (review r12)."""
+    from .canonical import content_hash
+
+    body = {
+        k: v for k, v in publication.items()
+        if k not in ("publication_id", "reproductions_ref")
+    }
+    return f"e_{content_hash(body).removeprefix('sha256:')[:32]}"
+
+
+def finalize_publication_id(publication: dict[str, object]) -> dict[str, object]:
+    """Set publication_id (and its derived reproductions_ref) from the content
+    address of the body. Call after building a publication with a placeholder id."""
+    pid = derive_publication_id(publication)
+    publication["publication_id"] = pid
+    publication["reproductions_ref"] = f"attlog:{pid}"
+    return publication
+
+
 def add_reproduction(
     log: tuple[dict[str, object], ...],
     attestation: dict[str, object],

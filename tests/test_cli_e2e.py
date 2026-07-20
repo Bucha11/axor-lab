@@ -183,7 +183,27 @@ class TestCliEndToEnd(unittest.TestCase):
         self.assertEqual(publication["origin"], "local")
         self.assertEqual(publication["integrity"], "hash_verified")
         kinds = {c["kind"] for c in publication["claims"]}
-        self.assertEqual(kinds, {"exactly_replayable", "statistically_reproducible"})
+        # local publish proves REPLAY only — it does not recompute the aggregates,
+        # so it must NOT assert a statistically_reproducible claim over
+        # self-reported numbers (that's the server's job). Only the replay claim
+        # is minted; statistics_integrity is absent (review r12).
+        self.assertEqual(kinds, {"exactly_replayable"})
+        self.assertNotIn("statistics_integrity", publication)
+
+    def test_local_publication_id_content_addresses_the_whole_body(self) -> None:
+        # the SAME bundle published with different metadata is a genuinely
+        # different publication — different id + reproductions_ref (review r12).
+        out_a = Path(self.tmp.name) / "pub_a.json"
+        out_b = Path(self.tmp.name) / "pub_b.json"
+        _cli("publish", str(self.bundle_dir), "--question", "Question A",
+             "--visibility", "public", "--out", str(out_a))
+        _cli("publish", str(self.bundle_dir), "--question", "Completely different claim",
+             "--visibility", "private", "--out", str(out_b))
+        a = json.loads(out_a.read_text())
+        b = json.loads(out_b.read_text())
+        self.assertNotEqual(a["publication_id"], b["publication_id"])
+        self.assertNotEqual(a["reproductions_ref"], b["reproductions_ref"])
+        self.assertEqual(a["bundle_ref"], b["bundle_ref"])  # same evidence
 
 
 if __name__ == "__main__":
