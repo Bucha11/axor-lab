@@ -83,3 +83,27 @@ proving test; the whole suite stays stdlib-only and green.
 Still deferred (unchanged from round 1): the generic multi-tool runner loop,
 end-to-end typed models, the hosted SaaS surface, and the real
 gVisor/Firecracker isolation runtime.
+
+## Third review round — evidence-graph integrity
+
+The third pass audited the ARROWS between artifacts (Trial → Trace →
+Aggregate → Claim → Export), not individual JSON validity. Five ordered
+patches, each with a proving test; suite green throughout.
+
+| Round-3 finding | Fix | Proof |
+|---|---|---|
+| **P0** a Trial is not bound to its Trace — one trace could back many fabricated trials, or a trial could cite a trace from another scenario/condition | `verify_bundle` verifies the evidence graph: completed-trial↔trace binding on every coordinate, one-to-one (no reuse, no orphans), and uniqueness of all display ids | `test_bundle_graph_integrity.py` |
+| **P0** CP export ships the first enforcing condition while the earned bridge measured a different one | explicit `--condition`; ambiguity error when several enforce; earned bridge computed for the SELECTED condition; source records baseline + supporting aggregate refs | `test_cp_export.py::TestMultiConditionExport` |
+| **P0/P1** earned_bridge hardcoded the literal baseline id `ungoverned` | baseline resolved by role (`enforcement == off`) | `test_cp_export.py` |
+| **P0** endpoint gateway races (shared run state, no locks) → duplicate ids, duplicate seq, intent-before-value fail-open, mid-write trace read | global + per-run locks; atomic seq; `expected_seq` → 409; finalize-before-read; negative/oversized Content-Length → 400/413 | `test_gateway_concurrency.py` |
+| **P1** server invents the DENY reason ("untrusted_derived") regardless of the real gate | the claim is built from the recorded decision (gate, driving value, labels, reason); no causal invention | `test_evidence_rendering.py` |
+| **P1** EvidenceCase replays under an arbitrary first enforcing condition | replay under the trace's own / `?policy=` condition; a replay link per enforcing condition; the condition + config_hash shown | `test_evidence_rendering.py` |
+| **P1** methodology always says "conditions differ only in enforcement"; HTML always prints "No exact claims" | real per-condition diff table; `extend()/append()` branch fixed | `test_evidence_rendering.py` |
+| **P1** run/trial/trace identity ignores the agent — different `--agent` looked like retries | run_id folds in the agent content fingerprint; trial_id is scoped to the run | `test_run_identity.py` |
+| **P1** validator accepts any value for a `null`-typed field; unknown type matches everything | `null` → `is None`; unknown type → no match | `test_contract_validator_types.py` |
+
+Acknowledged, deferred by design: publication identity is currently the
+128-bit bundle-hash id with idempotent re-publish (round 1); the round-3
+suggestion to split artifact identity (full bundle hash) from publication
+identity (UUID) so one bundle can carry several distinct publications is a
+data-model change, not a correctness fix, and is left for the hosted surface.
