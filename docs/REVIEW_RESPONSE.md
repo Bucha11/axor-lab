@@ -252,3 +252,24 @@ manifest / observed execution graph (and/or a signed per-event envelope, and/or 
 genuine server-side dispatch route) so an untrusted gateway client can earn a
 governance-grade verdict; a server-signed acceptance receipt over the whole
 record; and a first-class, content-hashed `attempts` graph in the bundle contract.
+
+## Eleventh review round — sandbox / SSRF / cassette / license / cost
+
+A pass over the newer subsystems. No new P0. Seven findings, all where a
+component promised more than it delivered; each is now either enforced or
+honestly named. Suite green (442 tests).
+
+| Round-11 finding | Fix | Proof |
+|---|---|---|
+| **P1** the sandbox left forked descendants running: the finally block only killed the group when the MAIN process was still alive, so `subprocess.Popen(["sleep","3600"])` + exit 0 orphaned the sleep, unbounded by wall_seconds | capture pgid at spawn and ALWAYS sweep the whole process group on return (even after a clean exit) | `test_later_tier.py::...forked_descendant_does_not_outlive_the_run` |
+| **P1** the output cap could be crossed while reporting completed/truncated=False — a boundary-crossing chunk dropped its overflow silently | mark capped when a chunk exceeds the remaining space; exactly cap+1 bytes is now OUTPUT_CAPPED | `test_later_tier.py::...output_one_byte_over_cap...` |
+| **P1** `disk_mb` was `RLIMIT_FSIZE` (a per-FILE cap), not a disk quota, and only the workdir was cleaned — the name over-promised | renamed to `max_file_mb` with a docstring saying it is per-file only; README/test say a real disk cap needs fs/project quotas | `test_later_tier.py::test_single_file_size_is_capped` |
+| **P1** `ssrf_check` only validated caller-supplied IP strings and was never wired into a fetcher — the validated IP and the actual connect were unrelated (rebinding), redirects unhandled | new `safe_open()` resolves DNS itself, validates every address, connects PINNED to a validated IP (no library re-resolution), keeps Host/SNI, and re-checks each redirect; `ssrf_check` documented as an address validator | `test_ssrf_safe_open.py` |
+| **P1** the per-scenario cassette looked up the TASK TEXT, never a scenario_name key, so every scenario silently shared the first transcript | thread `scenario_id` through `decide_sink_call`; a dict cassette keys on it (then an explicit "default"), else raises — no silent collapse | `test_cassette_per_scenario.py` |
+| **P1/P2** license validation coerced everything (`bool("false")` → True; unknown tier / negative ceiling / bogus "never" expiry accepted; errors leaked) | strict schema validation — JSON booleans only, tier enum, ceiling int ≥ 0, YYYY-MM-DD expiry, features list-of-strings — raising LicenseError; PyNaCl hint fixed to `[crypto]` | `test_license_validation.py` |
+| **P1** the cost layer promised a hard ceiling but only printed an estimate | `CostBudget` (max_usd / max_input_tokens / max_output_tokens) enforced against ACTUAL usage between trials so the run stops before the next provider call; actual usage + spend recorded in the bundle environment; `--max-usd/--max-input-tokens/--max-output-tokens` CLI flags | `test_cost_ceiling.py` |
+
+Still deferred (documented): full process-tree containment against a child that
+calls `setsid()` itself, and a real total-disk quota — both need a cgroup PID/IO
+scope or a namespace/container runtime; and a token-accurate cost model (the
+ceiling uses the same rough price table as the estimate).
