@@ -20,6 +20,7 @@ from pathlib import Path
 from tests import support
 from lab_contracts import build_bundle
 from lab_runner import ScriptedAgent, run_experiment_suite, run_trial
+from lab_runner.evidence import _chain
 from lab_server.html import render_evidence, render_publication
 from lab_server.store import PublicationStore, StoredPublication, _deny_claim_text
 
@@ -88,6 +89,61 @@ class TestPublicationRendering(unittest.TestCase):
         self.assertNotIn("differ only in enforcement", html)
         for condition in self.stored.bundle["conditions"]:
             self.assertIn(str(condition["config_hash"]), html)
+
+
+class TestChainCallIdCorrelation(unittest.TestCase):
+    """The chain must pair the DENY decision with ITS OWN intent by call_id.
+
+    Picking `first intent` + `first decision` independently rendered call A's
+    call/lineage for a DENY that actually landed on call B in a multi-call
+    trace (review r12)."""
+
+    def _multi_call_trace(self) -> dict:
+        return {
+            "trace_id": "t_multi",
+            "trial": {"condition_id": "governed_taint_floor"},
+            "producer": {"provenance_fidelity": "sound_attribution"},
+            "values": [
+                {"value_id": "vA", "labels": ["clean"], "derived_from": []},
+                {"value_id": "vB", "labels": ["untrusted"], "derived_from": []},
+            ],
+            "events": [
+                {"seq": 0, "type": "tool_call_intent", "tool": "read_email",
+                 "call_id": "call_A", "arg_bindings": {"folder": "vA"}},
+                {"seq": 1, "type": "gate_decision", "call_id": "call_A",
+                 "decision": {"verdict": "ALLOW", "driving_value_id": "vA",
+                              "gate": "taint_floor"}},
+                {"seq": 2, "type": "tool_call_intent", "tool": "send_money",
+                 "call_id": "call_B", "arg_bindings": {"recipient": "vB"}},
+                {"seq": 3, "type": "gate_decision", "call_id": "call_B",
+                 "decision": {"verdict": "DENY", "driving_value_id": "vB",
+                              "gate": "taint_floor"}},
+            ],
+        }
+
+    def test_deny_on_second_call_shows_second_calls_intent_and_lineage(self) -> None:
+        scenario = {"injection": {"text": "exfil"}, "inputs": {}}
+        chain = _chain(self._multi_call_trace(), scenario)
+        # the DENY landed on call_B (send_money), NOT the first intent (read_email)
+        self.assertEqual(chain["gated_call"]["tool"], "send_money")
+        self.assertEqual(chain["verdict"]["verdict"], "DENY")
+        self.assertEqual(chain["verdict"]["driving_value_id"], "vB")
+        provenance_ids = {v["value_id"] for v in chain["provenance"]}
+        self.assertIn("vB", provenance_ids)
+        self.assertNotIn("vA", provenance_ids)  # call A's value is not the driver
+
+    def test_order_swapped_still_pairs_by_call_id_not_position(self) -> None:
+        # put the DENY call FIRST in event order: correlation must still follow
+        # driving/call_id, and here the first (and only) DENY is the sole decision
+        trace = self._multi_call_trace()
+        # flip which call denies: now call_A denies, call_B allows
+        trace["events"][1]["decision"] = {"verdict": "DENY", "driving_value_id": "vA",
+                                           "gate": "taint_floor"}
+        trace["events"][3]["decision"] = {"verdict": "ALLOW", "driving_value_id": "vB",
+                                          "gate": "taint_floor"}
+        chain = _chain(trace, {"injection": {"text": "exfil"}, "inputs": {}})
+        self.assertEqual(chain["gated_call"]["tool"], "read_email")  # call_A now
+        self.assertEqual(chain["verdict"]["driving_value_id"], "vA")
 
 
 class TestEvidenceConditionSelection(unittest.TestCase):

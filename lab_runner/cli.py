@@ -315,8 +315,14 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         raise RunnerError(f"twin trace {args.twin} not found in bundle")
     scenario = _scenario_for(bundle, trace)
     condition = _enforcing_condition(bundle, None)
-    kernel = default_registry((str(condition["kernel"]),)).get(str(condition["kernel"]))
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    # resolve the SAME kernel replay/regress use — the REAL axor-core governor
+    # when the condition pins the installed build — not always the reference
+    # kernel via default_registry, which would render reference-kernel verdicts
+    # under a production kernel version (review r12)
+    version = str(condition["kernel"])
+    kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
+                            default_registry((version,)))
     case = build_evidence_case(trace, scenario, condition, kernel, manifests, governed_twin=twin)
     print(json.dumps(case, indent=2, ensure_ascii=False))
     return EXIT_OK
