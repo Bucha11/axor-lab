@@ -75,8 +75,34 @@ class TestRunStopsAtCeiling(unittest.TestCase):
             support.kernel_registry(), repeats=6, run_id="r_budget", budget_check=check,
         )
         self.assertEqual(result.stopped_reason, "ceiling reached")
-        # stopped before the full 2 conditions x 6 repeats = 12 trials
-        self.assertLess(len(result.trials), 12)
+        completed = [t for t in result.trials if t["status"] == "completed"]
+        excluded = [t for t in result.trials if t["status"] == "excluded"]
+        # execution stopped early — fewer than the full 12 trials actually ran ...
+        self.assertLess(len(completed), 12)
+        # ... but the DENOMINATOR is honest: the plan is fully accounted for
+        # (completed + excluded == 2 conditions x 6 repeats), so missingness
+        # cannot report n=1/1 for a 12-trial plan (review r13)
+        self.assertEqual(len(result.trials), 12)
+        self.assertTrue(excluded)
+        self.assertTrue(all("cost_ceiling" in str(t["failure_reason"]) for t in excluded))
+
+    def test_missingness_denominator_reflects_the_full_plan(self) -> None:
+        from lab_analysis import missingness
+
+        stop = {"n": 0}
+
+        def check():
+            stop["n"] += 1
+            return "ceiling reached" if stop["n"] >= 2 else None
+
+        result = run_experiment_suite(
+            [support.banking_scenario()], support.manifests(), support.conditions(),
+            support.kernel_registry(), repeats=6, run_id="r_denom", budget_check=check,
+        )
+        summary = missingness(result.trials)
+        self.assertEqual(summary.n_total, 12)      # the FULL plan, not just what ran
+        self.assertLess(summary.n_completed, 12)
+        self.assertGreater(summary.n_missing, 0)
 
     def test_no_budget_check_runs_to_completion(self) -> None:
         result = run_experiment_suite(
@@ -132,7 +158,12 @@ class TestWithinTrialGuard(unittest.TestCase):
         )
         self.assertIsNotNone(result.stopped_reason)
         self.assertIn("cost ceiling", result.stopped_reason)
-        self.assertEqual(len(result.trials), 0)  # halted before recording any trial
+        # nothing COMPLETED, but the full 12-trial plan is recorded as excluded
+        # so the denominator is honest (review r13)
+        completed = [t for t in result.trials if t["status"] == "completed"]
+        self.assertEqual(completed, [])
+        self.assertEqual(len(result.trials), 12)
+        self.assertTrue(all(t["status"] == "excluded" for t in result.trials))
 
 
 class TestUsageRecorded(unittest.TestCase):
