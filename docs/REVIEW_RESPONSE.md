@@ -156,3 +156,29 @@ load; strict verified-vs-submitted attestation counting; a downloadable
 reproduction-bundle endpoint; an agent-factory protocol for per-trial isolation;
 condition/model/order-aware missingness; and license-schema validation without
 coercion — tracked for a later "Execution Semantics Integrity" milestone.
+
+## Seventh review round — the evidence trust boundary
+
+Each subsystem had become more correct on its own, but the guarantees leaked at
+the *seams* between them: a hosted server certified statistics it never checked,
+private publications escaped through non-HTML routes, the real kernel crashed on
+a redacted secret, one failed trial sank a whole analysis, and a "published"
+record was not actually immutable. Six patches; the most urgent were hosted
+statistical verification, the private/auth bypasses, and separating a sensitive
+value's runtime form from its serialized form. Suite green (367 tests).
+
+| Round-7 finding | Fix | Proof |
+|---|---|---|
+| **P0 (most urgent)** the publish handshake re-ran replay and re-hashed, but never recomputed the statistical *test* — a bundle could carry a fabricated McNemar p / an unknown "metric" and be certified `statistics_integrity: recomputed_from_traces` | a closed metric registry; the server recomputes every aggregate AND its test (McNemar discordants/p, two-proportion difference/p), rejects an unknown metric, and rejects `matched_pairs` on a live environment | `test_hosted_stats_test_verification.py` |
+| **P0** a `private` publication was hidden only on the HTML page — the JSON API and EvidenceCase routes still served it; appending a reproduction attestation (a write) required no token | one `_readable` guard raises NotFound for `private` on every read route; the reproductions POST requires the write token; raw traces are schema-validated on publish | `test_hosted_trust_boundary.py` |
+| **P0** redacting a `sensitive` value dropped its `decision_value`, so the real axor-core path — which read `decision_value` off the serialized dict — hit a KeyError and failed the whole trial | the ledger keeps the raw value in an in-memory `runtime_value` map (never serialized); the real kernel registers from that, so the secret stays out of the trace/bundle while the kernel still sees it | `test_sensitive_propagation.py` |
+| **P0** one trial raising crashed the command after execution (`outcomes[trial_id]` KeyError on the failed trial) — no bundle, no missingness | analysis uses completed-only outcomes, `pairs()` skips failed trials, missingness is reported first (before aggregates), and a zero-data condition is handled | `test_failure_complete_analysis.py` |
+| **P0** a "published" record was not immutable: re-publishing could silently overwrite metadata or wipe the attestation log, and a hand-edited `publication.json` was trusted on load | the id content-addresses the WHOLE publication body — re-publish is idempotent (identical) or a distinct publication (any change); load recomputes the id, so a disk-edited visibility/integrity/question/claims no longer matches and is dropped | `test_publication_immutable.py` |
+| **P1** a predicate `count: {}` was a no-op tautology; the DENY claim named the first intent (wrong tool on a multi-call trace); a malformed `.axl` envelope raised a raw AttributeError; the auto run_id was a 32-bit slice | `count` requires min/max (non-negative) in schema + validator; the DENY claim correlates the tool by call_id; the envelope is type-checked before iteration; run_id widened to 128-bit | `test_patch26_hardening.py` |
+
+Still deferred (documented, unchanged in spirit): an execution digest binding the
+injection text + manifests + agent into the trial identity; a downloadable
+reproduction-bundle endpoint; an agent-factory protocol for per-trial isolation;
+condition/model/order-aware missingness; cross-language float canonicalization
+vectors; and a signed, verified-vs-submitted attestation count — the seams are
+now guarded, but the larger "reproduce-from-scratch" loop remains future work.
