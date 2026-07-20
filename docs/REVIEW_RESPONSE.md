@@ -131,3 +131,28 @@ bundle endpoint, an agent-factory protocol for per-trial isolation, a
 schema-set digest in the bundle environment, and the full entitlement packaging
 (SSO/RBAC tiers). The load-bearing methodological blocker — never publishing a
 paired significance claim for an independently-sampled live run — is closed.
+
+## Sixth review round — execution-semantics integrity
+
+This pass targeted the gap between what the contracts describe and what the
+runtime executes (simulated ≠ modelled, ALLOW ≠ executed, redacted source ≠
+redacted derived, schema-defined ≠ runtime-validated). Five ordered patches; the
+most urgent was a secret re-appearing through model output. Suite green.
+
+| Round-6 finding | Fix | Proof |
+|---|---|---|
+| **P0 (most urgent)** a `sensitive` source was redacted, but the model copying the secret into a sink arg produced a derived value carrying only `untrusted_derived` + the raw preview/decision_value — the secret re-appeared in the clear | the conservative join covers the whole security-label lattice: a derived value inherits `sensitive` from any context value and is redacted like a sensitive source | `test_sensitive_propagation.py` |
+| **P0** an allowlisted first driving arg returned ALLOW without checking the other driving args (a tainted `body` unexamined); empty `driving_args` on an egress sink fell through to ALLOW | the gate checks EVERY driving arg (per-arg supersession); an egress sink with no driving_args fails closed | `test_multi_driving_gate.py` |
+| **P0** the simulator declared any side-effecting tool "simulated" (noop_stub), ignoring `simulation.supported`, the adapter, and args_schema | execute() validates args_schema and requires a simulatable manifest (supported + known adapter); fixtures validate against result_schema at resolve; the BYOK agent rejects malformed model calls instead of coercing | `test_simulator_contract.py` |
+| **P1** `count` was evaluated at runtime but the validator still forbade it; duplicate condition ids and conflicting inline manifests were accepted; regress used the reference kernel even for a real-kernel pin; local vs server DENY claims diverged | validator accepts count (rejects malformed); duplicate condition id + conflicting inline manifest rejected; regress routes through resolve_kernel; one shared `deny_claim_text` for CLI and server | `test_contract_parity*.py` |
+| **P1** the real-kernel CI job swallowed a failed install and went green on skipped tests; a token-protected server was unreachable with the CLI | CI installs without swallowing + asserts `import axor_core`; CLI `publish --token-env/--author/--signature-file` (token from the env, not argv) | `test_secure_publish_cli.py`, ci.yml |
+
+Still deferred (documented): explicit tool completion/started/failed events so
+ALLOW is not equated with execution; an execution digest including the injection
+text + manifests + agent; binding Trial↔Trace↔Environment↔Kernel with a run_id
+on the trial; float cross-language canonicalization vectors (real JCS /
+fixed-point statistics); persisted signature/author with re-verification on
+load; strict verified-vs-submitted attestation counting; a downloadable
+reproduction-bundle endpoint; an agent-factory protocol for per-trial isolation;
+condition/model/order-aware missingness; and license-schema validation without
+coercion — tracked for a later "Execution Semantics Integrity" milestone.

@@ -15,7 +15,7 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 
 | Area | Maturity | Notes |
 |---|---|---|
-| contracts, local runner, replay, EvidenceCase, regression, analysis | **beta** | the vertical-slice spine; correctness-hardened per three review rounds (typed replay values, replay rejects malformed traces, predicate completion fail-closed, and a bundle **evidence-graph verifier** binding every completed trial to its own trace one-to-one) |
+| contracts, local runner, replay, EvidenceCase, regression, analysis | **beta** | the vertical-slice spine; correctness-hardened over multiple review rounds (typed replay values, replay rejects malformed traces, predicate completion fail-closed, evidence-graph verifier, **sensitive labels propagate through model output**, **per-driving-arg allowlist supersession**, **the simulator honors its manifest contract**) |
 | multi-scenario benchmark bundle | **beta** | trace ids carry the full trial coordinate; a 3-scenario suite survives a build→write→read→verify→replay roundtrip (`tests/test_multiscenario_bundle.py`) — the round-2 P0 that used to corrupt it is fixed |
 | AgentDojo adapter | **beta** | curated **banking** subset (3 tasks), not arbitrary-dataset import |
 | server / catalog | **beta (local)** | token-gated writes, content-hash filenames, atomic writes, **recomputes every statistical aggregate from the traces** (rejects fabricated estimates/n), and builds each DENY claim from the **recorded decision** (never a templated reason); not yet a public SaaS (no OAuth/DB/object-store) |
