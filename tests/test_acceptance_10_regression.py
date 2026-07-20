@@ -49,7 +49,10 @@ class TestRegressionPinning(unittest.TestCase):
         self.assertEqual(result["status"], STATUS_DIFFERS)
         self.assertEqual(result["expected"], "DENY")
         self.assertEqual(result["actual"], "ALLOW")
-        self.assertEqual(result["kernel"], support.KERNEL_NO_TAINT_FLOOR)
+        # the regression reports the BEHAVIOR fingerprint (version + flags), so a
+        # taint_floor-off variant is visibly a different kernel (review r4)
+        self.assertIn(support.KERNEL_NO_TAINT_FLOOR, result["kernel"])
+        self.assertIn("taint_floor=off", result["kernel"])
         # surfaced for the user to label — never auto-resolved
         self.assertEqual(result["resolution"], "user_labels_required")
 

@@ -91,10 +91,13 @@ class TestServerEndToEnd(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode()
 
-    def _publish(self, question: str = "Does governance stop the exfil?") -> str:
+    def _publish(
+        self, question: str = "Does governance stop the exfil?", visibility: str = "public"
+    ) -> str:
         status, body = self._post(
             "/api/publications",
-            {"bundle": self.bundle, "traces": self.traces, "question": question},
+            {"bundle": self.bundle, "traces": self.traces, "question": question,
+             "visibility": visibility},
         )
         self.assertEqual(status, 201, body)
         return str(body["publication_id"])

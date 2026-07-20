@@ -30,7 +30,7 @@ from lab_contracts import (
 
 from .agents import AgentAdapter, resolve_agent
 from .errors import ExperimentFileError, UnknownAgentError
-from .kernel import KernelRegistry, default_registry
+from .kernel import KernelRegistry, default_registry, unsupported_reference_policy_fields
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,36 @@ class ResolvedExperiment:
     @property
     def trial_count(self) -> int:
         return len(self.scenarios) * len(self.conditions) * self.repeats
+
+
+def _pins_real_kernel(condition: dict[str, object]) -> bool:
+    """True when the condition pins an installed axor-core build that executes
+    its own policy (so the reference-kernel parity check does not apply)."""
+    from .axor_backend import HAS_AXOR_CORE, real_kernel_version
+
+    if not HAS_AXOR_CORE:
+        return False
+    return str(condition.get("kernel", "")) == real_kernel_version()
+
+
+def _apply_run_mode(
+    conditions: list[dict[str, object]], run_mode: str, errors: list[str]
+) -> list[dict[str, object]]:
+    """run_mode selects which conditions actually run (it is EXECUTED, not
+    decorative): governed → enforcing only, ungoverned → baseline only,
+    compare → all (review r4)."""
+    if run_mode == "compare":
+        return conditions
+    if run_mode == "governed":
+        selected = [c for c in conditions if str(c.get("enforcement")) == "on"]
+    elif run_mode == "ungoverned":
+        selected = [c for c in conditions if str(c.get("enforcement")) == "off"]
+    else:
+        errors.append(f"[validating] unknown run_mode {run_mode!r}")
+        return conditions
+    if not selected:
+        errors.append(f"[validating] run_mode {run_mode!r} selects no condition")
+    return selected
 
 
 def load_axl(path: Path) -> dict[str, object]:
@@ -126,6 +156,15 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
                 f"[validating] experiment.scenario_ids: '{scenario_id}' not among scenarios"
             )
 
+    # the benchmark runner executes type=benchmark only; games run through
+    # lab_games, so a type it does not execute is rejected, not silently ignored
+    exp_type = str(experiment.get("type", "benchmark"))
+    if exp_type != "benchmark":
+        errors.append(
+            f"[validating] experiment.type {exp_type!r} is not executed by the benchmark "
+            "runner (games run through lab_games)"
+        )
+
     conditions: list[dict[str, object]] = list(experiment.get("conditions", []))  # type: ignore[arg-type]
     pinned: list[dict[str, object]] = []
     for condition in conditions:
@@ -140,8 +179,20 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
                 f"[validating] condition '{entry.get('id')}': config_hash {entry['config_hash']} "
                 f"does not match its kernel+policy ({computed})"
             )
+        # policy/runtime parity: reject a policy field the reference kernel does
+        # not execute (would be hashed but ignored) unless the condition pins a
+        # real axor-core build that executes its own policy (review r4)
+        if str(entry.get("enforcement")) == "on" and not _pins_real_kernel(entry):
+            errors += [
+                f"[validating] condition '{entry.get('id')}': {e}"
+                for e in unsupported_reference_policy_fields(entry.get("policy"))  # type: ignore[arg-type]
+            ]
         entry["config_hash"] = computed
         pinned.append(entry)
+
+    # run_mode is EXECUTED: it selects which conditions actually run
+    run_mode = str(experiment.get("run_mode", "compare"))
+    pinned = _apply_run_mode(pinned, run_mode, errors)
 
     agent: AgentAdapter | None = None
     try:

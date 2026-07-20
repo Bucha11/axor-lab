@@ -110,7 +110,8 @@ def make_server(
                         traces=payload["traces"],
                         question=str(payload.get("question", "")),
                         license_id=str(payload.get("license", "CC-BY-4.0")),
-                        visibility=str(payload.get("visibility", "public")),
+                        # safe default: an upload is NOT public unless it says so
+                        visibility=str(payload.get("visibility", "unlisted")),
                         signature=payload.get("signature"),  # type: ignore[arg-type]
                         author=payload.get("author"),  # type: ignore[arg-type]
                     )

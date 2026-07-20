@@ -27,6 +27,8 @@ def wilson_interval(successes: int, n: int, z: float = WILSON_Z_95) -> tuple[flo
     """Wilson score 95% interval — well-behaved near 0/1, where ASR lives."""
     if n <= 0:
         raise InsufficientDataError("n must be positive")
+    if successes < 0 or successes > n:
+        raise InsufficientDataError(f"successes {successes} must be in [0, {n}]")
     p = successes / n
     denom = 1 + z * z / n
     center = (p + z * z / (2 * n)) / denom
@@ -41,12 +43,56 @@ def mcnemar_exact(b: int, c: int) -> float:
     c = baseline-fail/treated-success) — two marginal proportions are
     insufficient, which is why the bundle stores discordant counts.
     """
+    if b < 0 or c < 0:
+        raise InsufficientDataError(f"discordant counts must be non-negative, got b={b} c={c}")
     n = b + c
     if n == 0:
         return 1.0
     k = min(b, c)
     tail = sum(math.comb(n, i) for i in range(k + 1)) / (2 ** n)
     return min(1.0, 2 * tail)
+
+
+def two_proportion_test(
+    baseline_successes: int, baseline_n: int,
+    treated_successes: int, treated_n: int, vs: str,
+) -> dict[str, object]:
+    """Unpaired comparison of two INDEPENDENT proportions (review r4).
+
+    For live-model runs the two conditions are independently sampled — there is
+    no matched pair — so McNemar's paired test does not apply. This reports the
+    difference (baseline − treated), a Newcombe score interval for that
+    difference (well-behaved near 0/1), and a two-sided two-proportion z-test
+    p-value. It is named `two_proportion`, never `mcnemar`, so a reader is never
+    told an independent-samples comparison was paired."""
+    if baseline_n <= 0 or treated_n <= 0:
+        raise InsufficientDataError("both arms need n > 0")
+    for s, n in ((baseline_successes, baseline_n), (treated_successes, treated_n)):
+        if s < 0 or s > n:
+            raise InsufficientDataError(f"successes {s} must be in [0, {n}]")
+    p_b, p_t = baseline_successes / baseline_n, treated_successes / treated_n
+    diff = p_b - p_t
+    # Newcombe method-10 interval for the difference of two independent proportions
+    l1, u1 = wilson_interval(baseline_successes, baseline_n)
+    l2, u2 = wilson_interval(treated_successes, treated_n)
+    low = diff - math.sqrt((p_b - l1) ** 2 + (u2 - p_t) ** 2)
+    high = diff + math.sqrt((u1 - p_b) ** 2 + (p_t - l2) ** 2)
+    # pooled two-proportion z-test, two-sided
+    pooled = (baseline_successes + treated_successes) / (baseline_n + treated_n)
+    se = math.sqrt(pooled * (1 - pooled) * (1 / baseline_n + 1 / treated_n))
+    if se == 0:
+        p_value = 1.0
+    else:
+        z = diff / se
+        p_value = math.erfc(abs(z) / math.sqrt(2))  # 2 * (1 - Phi(|z|))
+    return {
+        "name": "two_proportion",
+        "vs": vs,
+        "difference": diff,
+        "interval": {"method": "newcombe", "low": max(-1.0, low), "high": min(1.0, high)},
+        "p": min(1.0, p_value),
+        "design": "independent_samples",
+    }
 
 
 def paired_bootstrap_ci(
@@ -57,6 +103,10 @@ def paired_bootstrap_ci(
     """Bootstrap 95% CI of the mean, resampling RUNS (never rounds)."""
     if not values:
         raise InsufficientDataError("no values")
+    if resamples <= 0:
+        raise InsufficientDataError("resamples must be positive")
+    if any(not math.isfinite(v) for v in values):
+        raise InsufficientDataError("values must be finite (no NaN/Infinity)")
     rng = random.Random(seed)
     n = len(values)
     means = sorted(
@@ -74,6 +124,7 @@ def binary_aggregate(
     n: int,
     unit_of_analysis: str = UNIT_TRIAL,
     test: dict[str, object] | None = None,
+    comparison_design: str | None = None,
 ) -> dict[str, object]:
     """A bundle/v1 aggregate for a binary per-trial outcome (ASR, utility)."""
     if unit_of_analysis not in _VALID_UNITS:
@@ -81,6 +132,16 @@ def binary_aggregate(
             f"unit_of_analysis must be one of {sorted(_VALID_UNITS)}, got {unit_of_analysis!r} "
             "(rounds within a run are serially correlated, not independent observations)"
         )
+    if n <= 0 or successes < 0 or successes > n:
+        raise InsufficientDataError(f"successes {successes} must be in [0, {n}] with n > 0")
+    # a test must have been computed over a sample no larger than this aggregate's:
+    # a McNemar over 1 pair must not ride along on an n=100 aggregate (review r4)
+    if test is not None:
+        paired_n = test.get("paired_n")
+        if paired_n is not None and int(paired_n) > n:  # type: ignore[arg-type]
+            raise InsufficientDataError(
+                f"test paired_n {paired_n} exceeds aggregate n {n} — mismatched sample"
+            )
     low, high = wilson_interval(successes, n)
     aggregate: dict[str, object] = {
         "metric": metric,
@@ -90,6 +151,8 @@ def binary_aggregate(
         "n": n,
         "unit_of_analysis": unit_of_analysis,
     }
+    if comparison_design is not None:
+        aggregate["comparison_design"] = comparison_design
     if test is not None and not is_inconclusive(aggregate):
         aggregate["test"] = test
     return aggregate
@@ -97,13 +160,18 @@ def binary_aggregate(
 
 def mcnemar_test(pairs: Sequence[tuple[bool, bool]], vs: str) -> dict[str, object]:
     """The paired test payload stored in an aggregate. ``pairs`` are
-    (baseline_outcome, treated_outcome) per trial, same scenario/seed."""
+    (baseline_outcome, treated_outcome) per trial, same scenario/seed.
+
+    Valid ONLY when the pair is a real matched pair (a deterministic agent whose
+    behavior is fixed by scenario+seed). For independently-sampled live-model
+    runs use two_proportion_test — the pairing there is nominal, not real."""
     b = sum(1 for base, treated in pairs if base and not treated)
     c = sum(1 for base, treated in pairs if not base and treated)
     return {
         "name": "mcnemar",
         "vs": vs,
         "discordant": {"b": b, "c": c},
+        "paired_n": len(pairs),
         "p": mcnemar_exact(b, c),
     }
 

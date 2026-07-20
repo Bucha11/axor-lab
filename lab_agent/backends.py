@@ -62,6 +62,9 @@ class CassetteBackend:
     turns: tuple[ModelAction, ...]
     _cursor: int = 0
     _tokens: int = 0
+    # a recorded transcript replays identically, so a per-call fresh cassette
+    # yields the same model behavior in both conditions — a real matched pair
+    is_deterministic: bool = True
 
     @classmethod
     def from_records(cls, records: list[dict[str, object]]) -> "CassetteBackend":
@@ -104,6 +107,9 @@ class AnthropicBackend:
     api_key_env: str = "ANTHROPIC_API_KEY"
     _tokens_in: int = 0
     _tokens_out: int = 0
+    # live model sampling: each condition is an INDEPENDENT draw (no shared seed),
+    # so ungoverned/governed are not matched pairs — McNemar does not apply
+    is_deterministic: bool = False
 
     def next_action(
         self, messages: list[dict[str, object]], tools: list[dict[str, object]]

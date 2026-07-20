@@ -16,7 +16,12 @@ from lab_runner import (
     replay_trace_status,
     run_trial,
 )
-from lab_runner.regression import STATUS_MATCHES, STATUS_MISSING, STATUS_TAMPERED
+from lab_runner.regression import (
+    STATUS_DIFFERS,
+    STATUS_MATCHES,
+    STATUS_MISSING,
+    STATUS_TAMPERED,
+)
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 
@@ -116,6 +121,32 @@ class TestMalformedTraceIsNotReproduced(unittest.TestCase):
             if event.get("type") == "gate_decision":
                 event["call_id"] = "call_does_not_exist"
         self.assertEqual(self._status(broken), REPLAY_MALFORMED_TRACE)
+
+
+class TestKernelBehaviorIsPartOfIdentity(unittest.TestCase):
+    """A behavior-changing flag must change the kernel identity (review r4):
+    two kernels with the SAME version string but different gates must not share
+    an identity, and regression must report the behavior fingerprint."""
+
+    def test_same_version_different_flag_is_a_different_identity(self) -> None:
+        standard = Kernel(version=support.KERNEL_PINNED)
+        variant = Kernel(version=support.KERNEL_PINNED, taint_floor_enabled=False)
+        self.assertEqual(standard.version, variant.version)  # same version string
+        self.assertNotEqual(standard.behavior_version, variant.behavior_version)
+        self.assertIn("taint_floor=off", variant.behavior_version)
+
+    def test_regression_reports_the_behavior_fingerprint(self) -> None:
+        trace = _governed_trace()
+        p = pin(trace, "DENY")
+        variant = Kernel(version=support.KERNEL_PINNED, taint_floor_enabled=False)
+        results = check_pins(
+            (p,), {"t": trace}, support.conditions()[1], variant,
+            support.manifests(), support.banking_scenario()["inputs"],
+        )
+        # taint_floor off → ALLOW instead of DENY → surfaced as differs, and the
+        # reported kernel is the behavior fingerprint, not the bare version
+        self.assertEqual(results[0]["status"], STATUS_DIFFERS)
+        self.assertIn("taint_floor=off", results[0]["kernel"])
 
 
 class TestRegressionRobustness(unittest.TestCase):

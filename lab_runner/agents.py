@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import ClassVar, Protocol, runtime_checkable
 
 from .errors import UnknownAgentError
 
@@ -76,6 +76,9 @@ class ScriptedAgent:
     """
 
     attack_rate: float = DEFAULT_ATTACK_RATE
+    # behavior is fixed by (scenario, seed), so ungoverned/governed on the same
+    # seed IS a real matched pair — McNemar is valid (review r4)
+    is_deterministic: ClassVar[bool] = True
 
     def follows_injection(self, scenario_name: str, seed: str) -> bool:
         digest = hashlib.sha256(f"{scenario_name}:{seed}".encode()).hexdigest()

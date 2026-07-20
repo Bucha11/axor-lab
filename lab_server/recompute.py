@@ -66,12 +66,20 @@ def recompute_aggregates(
         metric = str(agg["metric"])
         cid = str(agg["condition_id"])
         field = _metric_field(metric)
-        cond_ids = metric_conditions[metric]
-        # complete pairs only: a trial counts toward n once it exists under every
-        # condition this metric is compared across (the paired unit of analysis)
-        complete = [r for r in rows.values() if cond_ids <= r.keys()]
-        n = len(complete)
-        successes = sum(1 for r in complete if r[cid][field])
+        design = str(agg.get("comparison_design", "matched_pairs"))
+        if design == "independent_samples":
+            # independent samples: n is the MARGINAL count for this condition,
+            # not the paired intersection
+            marg = [r[cid] for r in rows.values() if cid in r]
+            n = len(marg)
+            successes = sum(1 for o in marg if o[field])
+        else:
+            # matched pairs: a trial counts once it exists under every condition
+            # this metric is compared across (the paired unit of analysis)
+            cond_ids = metric_conditions[metric]
+            complete = [r for r in rows.values() if cond_ids <= r.keys()]
+            n = len(complete)
+            successes = sum(1 for r in complete if r[cid][field])
         out[(metric, cid)] = binary_aggregate(metric, cid, successes, n)
     return out
 

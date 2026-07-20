@@ -20,7 +20,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lab_analysis import binary_aggregate, mcnemar_test, missingness
+from lab_analysis import binary_aggregate, mcnemar_test, missingness, two_proportion_test
 from lab_analysis.errors import AnalysisError
 from lab_agent.errors import AgentError
 from lab_contracts import (
@@ -136,7 +136,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     print(f"  {len(result.trials)} trials completed")
 
     print("[analyzing]")
-    aggregates = _aggregates(resolved, result)
+    aggregates = _aggregates(resolved, result, agent)
     summary = missingness(result.trials)
     print(f"  {summary.display()}")
     for aggregate in aggregates:
@@ -309,6 +309,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         integrity="hash_verified",
         claims=claims,
         license_id=args.license,
+        visibility=getattr(args, "visibility", "unlisted"),
         # local publish reports its own numbers; only the server independently
         # recomputes them (→ recomputed_from_traces). Be honest about which.
         statistics_integrity="self_reported" if aggregates else None,
@@ -332,12 +333,16 @@ def _publish_to_server(
     import urllib.error
     import urllib.request
 
+    visibility = getattr(args, "visibility", "unlisted")
+    if visibility == "public":
+        print("NOTE: --visibility public — this artifact will be publicly listed on the server.")
     payload = json.dumps(
         {
             "bundle": bundle,
             "traces": traces,
             "question": args.question,
             "license": args.license,
+            "visibility": visibility,
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -614,28 +619,72 @@ def _confirmed(args: argparse.Namespace) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def _agent_is_deterministic(agent: object) -> bool:
+    return bool(getattr(agent, "is_deterministic", False))
+
+
+def _effective_design(resolved: ResolvedExperiment, agent: object) -> str:
+    """paired (McNemar) only when the agent's behavior is fixed by scenario+seed.
+
+    A live model draws each condition independently — the 'pairs' are nominal, so
+    McNemar's paired test is invalid and the comparison is independent samples. A
+    declared matched_pairs design is rejected for a non-deterministic agent
+    rather than silently producing a spurious paired p-value (review r4)."""
+    declared = None
+    design_obj = resolved.experiment.get("comparison_design")  # type: ignore[union-attr]
+    if isinstance(design_obj, dict):
+        declared = design_obj.get("kind")
+    deterministic = _agent_is_deterministic(agent)
+    if declared == "matched_pairs":
+        if not deterministic:
+            raise RunnerError(
+                "comparison_design=matched_pairs requires a deterministic agent; a live "
+                "model is sampled independently per condition — use independent_samples"
+            )
+        return "matched_pairs"
+    if declared == "independent_samples":
+        return "independent_samples"
+    return "matched_pairs" if deterministic else "independent_samples"
+
+
 def _aggregates(
-    resolved: ResolvedExperiment, result: "object"
+    resolved: ResolvedExperiment, result: "object", agent: object
 ) -> list[dict[str, object]]:
+    design = _effective_design(resolved, agent)
     aggregates: list[dict[str, object]] = []
     baseline = next(
         (str(c["id"]) for c in resolved.conditions if c["enforcement"] == "off"), None
     )
+    counts = {
+        str(c["id"]): _condition_counts(result, str(c["id"])) for c in resolved.conditions
+    }
     for condition in resolved.conditions:
         condition_id = str(condition["id"])
-        trials = [t for t in result.trials if t["condition_id"] == condition_id]  # type: ignore[attr-defined]
-        outcomes = [result.outcomes[str(t["trial_id"])] for t in trials]  # type: ignore[attr-defined]
-        n = len(outcomes)
-        for metric, successes in (
-            (_METRIC_ASR, sum(1 for o in outcomes if o.violation)),
-            (_METRIC_UTILITY, sum(1 for o in outcomes if o.task_success)),
-        ):
+        n, asr_succ, util_succ = counts[condition_id]
+        for metric, successes in ((_METRIC_ASR, asr_succ), (_METRIC_UTILITY, util_succ)):
             test = None
-            if baseline is not None and condition_id != baseline and metric == _METRIC_ASR:
+            is_treated = baseline is not None and condition_id != baseline and metric == _METRIC_ASR
+            if is_treated and design == "matched_pairs":
                 pairs = result.pairs(baseline, condition_id, metric="ASR")  # type: ignore[attr-defined]
                 test = mcnemar_test(pairs, vs=baseline)
-            aggregates.append(binary_aggregate(metric, condition_id, successes, n, test=test))
+            elif is_treated and design == "independent_samples":
+                base_n, base_asr, _ = counts[baseline]  # type: ignore[index]
+                test = two_proportion_test(base_asr, base_n, successes, n, vs=baseline)
+            aggregates.append(
+                binary_aggregate(metric, condition_id, successes, n, test=test,
+                                 comparison_design=design)
+            )
     return aggregates
+
+
+def _condition_counts(result: "object", condition_id: str) -> tuple[int, int, int]:
+    trials = [t for t in result.trials if t["condition_id"] == condition_id]  # type: ignore[attr-defined]
+    outcomes = [result.outcomes[str(t["trial_id"])] for t in trials]  # type: ignore[attr-defined]
+    return (
+        len(outcomes),
+        sum(1 for o in outcomes if o.violation),
+        sum(1 for o in outcomes if o.task_success),
+    )
 
 
 def _print_aggregate(aggregate: dict[str, object]) -> None:
@@ -645,11 +694,16 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
         f"[{interval['low']:.2f}, {interval['high']:.2f}] n={aggregate['n']}"
     )
     test: dict[str, object] | None = aggregate.get("test")  # type: ignore[assignment]
-    if test is not None:
+    if test is not None and test.get("name") == "mcnemar":
         discordant: dict[str, object] = test["discordant"]  # type: ignore[assignment]
         line += (
-            f"  mcnemar vs {test['vs']}: b={discordant['b']} c={discordant['c']} "
+            f"  mcnemar (paired) vs {test['vs']}: b={discordant['b']} c={discordant['c']} "
             f"p={float(test['p']):.2g}"  # type: ignore[arg-type]
+        )
+    elif test is not None and test.get("name") == "two_proportion":
+        line += (
+            f"  two-proportion (independent, exploratory) vs {test['vs']}: "
+            f"Δ={float(test['difference']):.2f} p={float(test['p']):.2g}"  # type: ignore[arg-type]
         )
     print(line)
 
@@ -780,6 +834,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument("--out", help="write publication/v1 JSON locally")
     p_publish.add_argument("--server", help="upload via the publish handshake to this base URL")
     p_publish.add_argument("--license", default="CC-BY-4.0")
+    p_publish.add_argument(
+        "--visibility", choices=["public", "unlisted", "private"], default="unlisted",
+        help="publication visibility; default unlisted (public must be explicit)",
+    )
     p_publish.set_defaults(func=_cmd_publish)
 
     p_export = sub.add_parser(

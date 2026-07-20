@@ -58,7 +58,10 @@ def check_pins(
     reported status, not a KeyError — and (2) verified against its pinned
     content hash — a trace edited under the same id is surfaced as tampered
     rather than silently re-run (review §5.3)."""
-    version = getattr(kernel, "version", "unknown")
+    # report the BEHAVIOR fingerprint (version + behavior-changing flags), not
+    # just the version string — a taint_floor-off variant must be visibly a
+    # different kernel, never the same identity with different verdicts (r4)
+    version = getattr(kernel, "behavior_version", None) or getattr(kernel, "version", "unknown")
     results: list[dict[str, object]] = []
     by_id = {str(t["trace_id"]): t for t in traces.values()}
     for pinned in pins:

@@ -120,7 +120,7 @@ class PublicationStore:
         traces: dict[str, dict[str, object]],
         question: str,
         license_id: str = "CC-BY-4.0",
-        visibility: str = "public",
+        visibility: str = "unlisted",  # safe default: NOT public unless asked (review r4)
         signature: str | None = None,
         author: str | None = None,
     ) -> StoredPublication:
@@ -176,12 +176,19 @@ class PublicationStore:
         pubkey = self.known_keys.get(author)
         if pubkey is None:
             raise PublishRejected(f"unknown author key {author!r}; cannot claim 'signed'")
-        from lab_contracts.signing import SignatureInvalid, verify_bundle_signature
+        from lab_contracts.signing import (
+            SignatureInvalid,
+            SignatureUnavailable,
+            verify_bundle_signature,
+        )
 
         try:
             verify_bundle_signature(bundle, signature, pubkey)
         except SignatureInvalid as exc:
             raise PublishRejected(str(exc)) from exc
+        except SignatureUnavailable as exc:
+            # crypto not installed on the server: a clean rejection, not a 500
+            raise PublishRejected(f"cannot verify signature: {exc}") from exc
         return "signed"
 
     def takedown(self, publication_id: str) -> None:
@@ -295,6 +302,13 @@ class PublicationStore:
         agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
         for aggregate in aggregates:
             interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
+            # an independent-samples comparison is exploratory — never present it
+            # as a paired significance result (review r4)
+            design = str(aggregate.get("comparison_design", "matched_pairs"))
+            design_note = (
+                " independent-samples comparison (exploratory; not a paired significance test)"
+                if design == "independent_samples" else ""
+            )
             claims.append(
                 make_claim(
                     "statistically_reproducible",
@@ -302,7 +316,7 @@ class PublicationStore:
                     f"{float(aggregate['estimate']):.2f} "
                     f"[{float(interval['low']):.2f}, {float(interval['high']):.2f}] "
                     f"over {aggregate['n']} trials{agent_note}, "
-                    "server-recomputed from the traces.",
+                    f"server-recomputed from the traces.{design_note}",
                     f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
                     trace_refs=trace_refs,
                     aggregate_refs=aggregate_refs,

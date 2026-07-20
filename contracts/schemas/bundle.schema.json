@@ -198,8 +198,12 @@
           },
           "test": {
             "type": "object",
-            "description": "pairwise test vs a baseline condition, if computed",
+            "description": "comparison vs a baseline condition, if computed (mcnemar for matched pairs, two_proportion for independent samples)",
             "additionalProperties": true
+          },
+          "comparison_design": {
+            "enum": ["matched_pairs", "independent_samples"],
+            "description": "matched_pairs → the treated/baseline pairs are real (deterministic agent), McNemar valid; independent_samples → live-model draws, a two-proportion comparison reported as exploratory"
           }
         }
       }

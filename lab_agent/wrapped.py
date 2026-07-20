@@ -31,6 +31,12 @@ class WrappedModelAgent:
 
     backend: ModelBackend
 
+    @property
+    def is_deterministic(self) -> bool:
+        """Whether the two conditions form real matched pairs — delegated to the
+        backend (a replayed cassette does; a live model does not)."""
+        return bool(getattr(self.backend, "is_deterministic", False))
+
     def decide_sink_call(
         self,
         task: str,
@@ -106,6 +112,7 @@ class FileCassetteAgent:
     """
 
     path: Path
+    is_deterministic: bool = True  # fresh cassette per trial → identical behavior
 
     def decide_sink_call(
         self,
