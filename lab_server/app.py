@@ -102,6 +102,10 @@ def make_server(
                     self._json(200, {
                         "bundle": stored.bundle,
                         "traces": list(stored.traces.values()),
+                        # a PORTABLE verification receipt so a reader can verify
+                        # the download offline (author/key_id/signature/signed_ref)
+                        # without trusting this server (review r14)
+                        "receipt": stored.receipt(),
                     })
                     return
                 api_pub = _API_PUB_RE.match(path)
@@ -142,9 +146,23 @@ def make_server(
                         author=payload.get("author"),  # type: ignore[arg-type]
                     )
                     pid = stored.publication["publication_id"]
+                    # ACCEPTANCE receipt: the server states what it verified before
+                    # accepting the upload (schema, content hashes, replay, stat
+                    # recompute) plus the integrity it earned. The publisher keeps
+                    # this as proof the server checked the bundle, distinct from the
+                    # portable verification receipt served with the download (r14).
                     self._json(201, {
                         "publication_id": pid, "url": f"/e/{pid}",
                         "integrity": stored.publication["integrity"],
+                        "acceptance": {
+                            "publication_id": pid,
+                            "bundle_ref": stored.publication.get("bundle_ref"),
+                            "integrity": stored.publication["integrity"],
+                            "verified": [
+                                "bundle_schema", "trace_schema", "content_hashes",
+                                "replay_bit_identical", "statistics_recomputed",
+                            ],
+                        },
                     })
                     return
                 takedown = _API_TAKEDOWN_RE.match(self.path)

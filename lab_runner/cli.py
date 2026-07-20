@@ -273,6 +273,64 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _package_receipt(path: Path) -> dict[str, object] | None:
+    """The portable verification receipt from a downloaded `.json` package, or
+    None for a bundle DIRECTORY (which ships no receipt)."""
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    receipt = data.get("receipt") if isinstance(data, dict) else None
+    return receipt if isinstance(receipt, dict) else None
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """Standalone, offline verification of a downloaded reproduction package —
+    NO server trusted (review r14). Confirms: content hashes verify, verdicts
+    replay bit-identically, and (for a downloaded package) the portable receipt's
+    signed_ref matches the bundle and any author signature verifies."""
+    path = Path(args.package)
+    # read_bundle_source runs schema validation + verify_bundle (content hashes);
+    # a corrupt package is a clean RunnerError → exit 1, not a traceback
+    bundle, traces = read_bundle_source(path)
+    print(f"content hashes: OK ({len(traces)} trace(s), {len(bundle['conditions'])} conditions)")  # type: ignore[arg-type]
+    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
+    kernels = {k.version: k for k in default_registry(versions).kernels}
+    report = replay_bundle(bundle, traces, kernels)
+    if not report.bit_identical:
+        print("replay MISMATCH: recomputed verdicts differ from recorded", file=sys.stderr)
+        return EXIT_FAILURE
+    print(f"replay: bit-identical over {len(report.decisions)} trace(s)")
+
+    receipt = _package_receipt(path)
+    if receipt is None:
+        print("receipt: none (a bundle directory carries no portable receipt)")
+        return EXIT_OK
+    from lab_contracts.signing import SignatureInvalid, SignatureUnavailable, verify_receipt
+
+    pubkey = getattr(args, "pubkey", None)
+    try:
+        verify_receipt(bundle, receipt, pubkey)
+    except SignatureInvalid as exc:
+        print(f"receipt: INVALID — {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    except SignatureUnavailable as exc:
+        # signed_ref matched (checked first), but the signature could not be
+        # verified (no key supplied / PyNaCl absent) — say so, don't claim a pass
+        print(f"receipt: signed_ref OK; signature UNVERIFIED — {exc}", file=sys.stderr)
+        return EXIT_OK
+    if receipt.get("signature"):
+        print(
+            f"receipt: signature VERIFIED (author {receipt.get('author')!r}, "
+            f"key {receipt.get('key_id')!r})"
+        )
+    else:
+        print(f"receipt: signed_ref OK ({receipt.get('integrity')}; no signature to verify)")
+    return EXIT_OK
+
+
 def _cmd_pin(args: argparse.Namespace) -> int:
     _, traces = read_bundle_dir(Path(args.bundle))
     trace = traces.get(args.trace_id)
@@ -1036,6 +1094,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_replay = sub.add_parser("replay", help="recompute verdicts over frozen traces (exact)")
     p_replay.add_argument("bundle")
     p_replay.set_defaults(func=_cmd_replay)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="offline-verify a downloaded reproduction package (hashes + replay + receipt)",
+    )
+    p_verify.add_argument("package", help="a downloaded .json package or a bundle directory")
+    p_verify.add_argument(
+        "--pubkey", help="author Ed25519 public key (hex) to verify a signed receipt"
+    )
+    p_verify.set_defaults(func=_cmd_verify)
 
     p_pin = sub.add_parser("pin", help="pin (trace, expected verdict) as a regression case")
     p_pin.add_argument("bundle")

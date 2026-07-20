@@ -91,6 +91,20 @@ class StoredPublication:
     def axes(self) -> dict[str, object]:
         return provenance_axes(self.publication, tuple(self.reproductions))
 
+    def receipt(self) -> dict[str, object]:
+        """A PORTABLE verification receipt served alongside the bundle download,
+        so a reader can verify integrity offline without trusting the server
+        (review r14). It carries the author/key_id/signature ONLY when the
+        publication earned integrity=signed; otherwise just the content-addressed
+        signed_ref for a hash-only check."""
+        from lab_contracts.signing import build_receipt
+
+        integrity = str(self.publication.get("integrity", "hash_verified"))
+        return build_receipt(
+            self.bundle, integrity=integrity, author=self.author,
+            key_id=self.author, signature=self.signature,
+        )
+
 
 @dataclass
 class PublicationStore:

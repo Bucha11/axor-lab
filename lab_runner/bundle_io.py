@@ -180,16 +180,27 @@ def read_bundle_package(path: Path) -> tuple[dict[str, object], dict[str, dict[s
     """Load a downloaded reproduction PACKAGE — a single JSON `{bundle, traces}`,
     the shape the server's `/api/publications/{id}/bundle` route returns (review
     r13). Same schema + integrity checks as a bundle directory, so a downloaded
-    package is verified before it is trusted."""
-    data = json.loads(Path(path).read_text())
+    package is verified before it is trusted.
+
+    A corrupt download (bad JSON, wrong shape, traces that aren't a list of trace
+    objects) is a clean RunnerError → exit 1, never a raw traceback (review r14)."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise RunnerError(f"{path} is not readable JSON: {exc}") from exc
     if not isinstance(data, dict) or "bundle" not in data or "traces" not in data:
         raise RunnerError(
             f"{path} is not a reproduction package (expected a JSON object with "
             "'bundle' and 'traces')"
         )
-    bundle: dict[str, object] = data["bundle"]
+    bundle = data["bundle"]
+    raw_traces = data["traces"]
+    if not isinstance(bundle, dict) or not isinstance(raw_traces, list):
+        raise RunnerError(f"{path} is malformed: 'bundle' must be an object and 'traces' a list")
     traces: dict[str, dict[str, object]] = {}
-    for trace in data["traces"]:
+    for trace in raw_traces:
+        if not isinstance(trace, dict) or "trace_id" not in trace:
+            raise RunnerError(f"{path} contains a trace that is not a trace object")
         trace_id = str(trace["trace_id"])
         if trace_id in traces:
             raise RunnerError(f"duplicate trace_id {trace_id!r} in package — corrupt")

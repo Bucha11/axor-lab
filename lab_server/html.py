@@ -100,10 +100,7 @@ def render_publication(stored: StoredPublication) -> str:
         body.append("<p class='note'>No exact claims.</p>")
 
     body.append("<h2>Statistically reproducible</h2>")
-    body.append(
-        "<p class='note'>Aggregates over live runs. Stochastic, carry a CI, "
-        "reproduced by re-running — matched within the interval, never bit-for-bit.</p>"
-    )
+    body.append(f"<p class='note'>{esc(_statistical_note(stored.bundle))}</p>")
     body.extend(
         f"<div class='claim stat'>{esc(c['text'])}</div>" for c in statistical
     )
@@ -133,9 +130,11 @@ def render_publication(stored: StoredPublication) -> str:
     pid_txt = esc(pub["publication_id"])
     body.append("<h2>Reproduce</h2>")
     body.append(
-        "<pre># download the reproduction package (bundle + every frozen trace)\n"
-        f"curl -s ./api/publications/{pid_txt}/bundle -o {pid_txt}.json\n\n"
-        "# replay the governance verdicts over the frozen evidence (EXACT)\n"
+        "<pre># download the reproduction package (bundle + frozen traces + receipt)\n"
+        f"curl -s /api/publications/{pid_txt}/bundle -o {pid_txt}.json\n\n"
+        "# verify it offline — content hashes, replay, and the portable receipt\n"
+        f"axor-lab verify {pid_txt}.json\n\n"
+        "# or replay just the governance verdicts over the frozen evidence (EXACT)\n"
         f"axor-lab replay {pid_txt}.json</pre>"
     )
     body.append(
@@ -254,6 +253,43 @@ def _provenance_badges(axes: dict[str, object]) -> str:
     if unverified:
         badges += f"<span class='note'>+{esc(unverified)} unverified self-report(s)</span>"
     return badges
+
+
+def _statistical_note(bundle: dict[str, object]) -> str:
+    """An HONEST header for the statistical claims, split by how the run was
+    produced and by comparison design (review r14). The old text asserted
+    'Aggregates over live runs' unconditionally, but the default runner drives a
+    DETERMINISTIC scripted agent (reproduces exactly on re-run, not merely within
+    a CI), and an independent-samples design is exploratory, not a paired test."""
+    environment: dict[str, object] = bundle.get("environment", {})  # type: ignore[assignment]
+    model: dict[str, object] = environment.get("model", {})  # type: ignore[assignment]
+    provider = str(model.get("provider", ""))
+    deterministic = provider in ("", "scripted", "cassette")
+    aggregates: list[dict[str, object]] = bundle.get("aggregates", [])  # type: ignore[assignment]
+    designs = {str(a.get("comparison_design", "matched_pairs")) for a in aggregates}
+    if deterministic:
+        origin = (
+            "Aggregates recomputed from the frozen traces of a DETERMINISTIC "
+            f"({provider or 'scripted'}) agent — re-running reproduces them exactly, "
+            "not merely within the interval."
+        )
+    else:
+        origin = (
+            "Aggregates over LIVE runs. Stochastic, carry a CI, reproduced by "
+            "re-running — matched within the interval, never bit-for-bit."
+        )
+    design_notes = []
+    if "matched_pairs" in designs:
+        design_notes.append(
+            "matched-pairs designs report a paired test (uploader-declared pairing)"
+        )
+    if "independent_samples" in designs:
+        design_notes.append(
+            "independent-samples designs are EXPLORATORY, not a paired significance test"
+        )
+    if design_notes:
+        origin += " " + "; ".join(design_notes) + "."
+    return origin
 
 
 def _final_verdict(trace: dict[str, object]) -> str:
