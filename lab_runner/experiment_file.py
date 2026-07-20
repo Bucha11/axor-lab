@@ -77,26 +77,47 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
         raise ExperimentFileError(tuple(errors))
 
     errors += [f"[validating] experiment: {e}" for e in validate_artifact(experiment, "experiment")]
+    # duplicate ids must be an error, not a silent last-wins overwrite
+    manifests: dict[str, dict[str, object]] = {}
     for manifest in manifests_list:
         errors += [
             f"[validating] tool_manifest {manifest.get('id')}: {e}"
             for e in validate_artifact(manifest, "tool-manifest")
         ]
-    manifests = {str(m["id"]): m for m in manifests_list}
+        mid = str(manifest.get("id"))
+        if mid in manifests:
+            errors.append(f"[validating] duplicate tool_manifest id '{mid}'")
+        else:
+            manifests[mid] = manifest
+
+    from lab_contracts import validate_scenario
 
     by_name: dict[str, dict[str, object]] = {}
     for scenario in scenarios:
         name = str(scenario.get("name"))
-        by_name[name] = scenario
-        errors += [
-            f"[validating] scenario {name}: {e}" for e in validate_artifact(scenario, "scenario")
-        ]
-        try:
-            from lab_contracts import validate_scenario
-
-            validate_scenario(scenario, manifests)
-        except ScenarioValidationError as exc:
-            errors += [f"scenario {name}: {e}" for e in exc.errors]
+        if name in by_name:
+            errors.append(f"[validating] duplicate scenario name '{name}'")
+        scenario_errors = validate_artifact(scenario, "scenario")
+        errors += [f"[validating] scenario {name}: {e}" for e in scenario_errors]
+        by_name.setdefault(name, scenario)
+        # inline tool manifests (a full manifest in scenario.tools, not just a
+        # $ref) are registered alongside top-level tool_manifests (review §4.5)
+        for tool in scenario.get("tools", []):  # type: ignore[union-attr]
+            if isinstance(tool, dict) and "$ref" not in tool and "id" in tool:
+                errors += [
+                    f"[validating] inline manifest {tool['id']}: {e}"
+                    for e in validate_artifact(tool, "tool-manifest")
+                ]
+                manifests.setdefault(str(tool["id"]), tool)
+        # two-stage: only run the semantic validator on a SCHEMA-VALID scenario.
+        # validate_scenario dereferences scenario['violation'] / ['task_success']
+        # unconditionally, so on a schema-invalid scenario it would raise a raw
+        # KeyError instead of a clean [validating] error (review r2 §validation).
+        if not scenario_errors:
+            try:
+                validate_scenario(scenario, manifests)
+            except ScenarioValidationError as exc:
+                errors += [f"scenario {name}: {e}" for e in exc.errors]
 
     wanted = [str(s) for s in experiment.get("scenario_ids", [])]  # type: ignore[union-attr]
     for scenario_id in wanted:
@@ -109,10 +130,17 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
     pinned: list[dict[str, object]] = []
     for condition in conditions:
         entry = dict(condition)
-        if "config_hash" not in entry:
-            entry["config_hash"] = condition_config_hash(
-                str(entry.get("kernel", "")), entry.get("policy")  # type: ignore[arg-type]
+        computed = condition_config_hash(
+            str(entry.get("kernel", "")), entry.get("policy")  # type: ignore[arg-type]
+        )
+        # verify on EVERY resolve, not only when absent (review §4.6): a stale
+        # or wrong config_hash must not silently flow into runs/replay/publish
+        if "config_hash" in entry and entry["config_hash"] != computed:
+            errors.append(
+                f"[validating] condition '{entry.get('id')}': config_hash {entry['config_hash']} "
+                f"does not match its kernel+policy ({computed})"
             )
+        entry["config_hash"] = computed
         pinned.append(entry)
 
     agent: AgentAdapter | None = None

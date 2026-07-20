@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/condition.schema.json",
+  "title": "Axor Lab Condition",
+  "description": "A condition is a versionable object, not a display string. To reproduce a result, compute a config hash, carry a config into the Control Plane, or compare two policy versions, the runner must know exactly what 'governed' meant: which kernel, which policy profile, which overrides, and whether gates enforced at all.",
+  "type": "object",
+  "required": ["schema_version", "id", "enforcement", "kernel"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "condition/v1" },
+    "id": { "type": "string", "description": "stable id used in trace.trial.condition_id and in result tables" },
+    "label": { "type": "string", "description": "human display, e.g. 'governed + allowlist'; canonical run-mode vocab is ungoverned/governed" },
+    "enforcement": {
+      "enum": ["off", "on"],
+      "description": "off = observe-only (proxy records, enforces nothing — ungoverned). on = gates enforce (governed). Observation is always on regardless."
+    },
+    "kernel": { "type": "string", "description": "e.g. axor-core@0.4.2 — pinned; the same trace under a different kernel can yield a different verdict" },
+    "policy": {
+      "type": "object",
+      "description": "the policy configuration when enforcement is on; omitted/ignored when off",
+      "additionalProperties": false,
+      "properties": {
+        "profile": { "type": "string", "description": "named policy profile, e.g. 'strict', 'default'" },
+        "allowlist": { "type": "array", "items": { "type": "string" }, "description": "operator-declared trusted set for enum-supersession; static, attacker-inaccessible (paper §6.3)" },
+        "criticality_overrides": { "type": "object", "additionalProperties": { "enum": ["BENIGN", "REVERSIBLE", "CONSEQUENTIAL", "CATASTROPHIC"] }, "description": "per-sink consequence-class overrides" },
+        "trust_model": { "type": "string", "description": "the ValueProvenance backend, e.g. 'content-ledger' or a CaMeL-style backend (paper §5.6)" }
+      }
+    },
+    "config_hash": { "type": "string", "description": "sha256 over the normalized (kernel + policy) — the reproducibility anchor and the Control-Plane carry-over key" }
+  },
+  "$comment": "Two conditions are comparable only if they differ in exactly the axis under study: comparing enforcement off vs on with the same kernel isolates governance; comparing two kernels with enforcement on isolates a kernel change. A published comparison must state which axis varied."
+}

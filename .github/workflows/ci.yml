@@ -39,6 +39,20 @@ jobs:
       - name: Smoke-check the shipped example resolves
         run: python -m lab_runner validate examples/banking-exfil-01.axl
 
+  lint:
+    name: Lint (ruff — correctness rules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ruff (pyflakes + bugbear; no style noise)
+        run: |
+          pip install ruff
+          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server \
+            lab_agent lab_entitlement lab_endpoint lab_sandbox lab_games
+
   determinism:
     name: Replay determinism matrix (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -64,4 +78,58 @@ jobs:
       - name: A schema change that breaks the slice examples or AgentDojo import fails CI
         run: |
           cd contracts && python validate_slice.py && cd ..
-          python -m unittest tests.test_agentdojo_adapter -v
+          python -m unittest tests.test_agentdojo_adapter tests.test_packaging -v
+
+  real-kernel:
+    name: Real axor-core kernel integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the real kernel and run the integration tests
+        # if axor-core is unavailable the tests skip (optional dependency); when
+        # present they prove Lab governs with the production ToolCallGovernor
+        run: |
+          pip install "axor-core>=0.9" || echo "axor-core unavailable — integration will skip"
+          python -m unittest tests.test_real_kernel -v
+
+  crypto:
+    name: Signing tests actually run (PyNaCl installed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyNaCl so the Ed25519 bundle + license signing tests do NOT skip
+        # the stdlib CI job runs everything but skips the crypto paths; this job
+        # exists so those paths are exercised in CI, not silently skipped
+        run: |
+          pip install "pynacl>=1.5"
+          python -m unittest tests.test_hardening tests.test_entitlement -v
+          python -c "import importlib.util as u; assert u.find_spec('nacl'), 'PyNaCl must be present'"
+
+  packaging:
+    name: Wheel installs and runs outside the checkout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build + install the wheel into a clean venv, run outside the source tree
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl
+          # run from / with no AXOR_LAB_CONTRACTS and no contracts/ nearby:
+          # the schemas must load from package data
+          cd / && /tmp/venv/bin/python -c "
+          from lab_contracts import load_schemas, validate_artifact
+          s = load_schemas(); assert set(s) >= {'trace','bundle','scenario'}, s
+          print('schemas loaded from package data:', len(s))
+          "
+          cd / && /tmp/venv/bin/axor-lab --help >/dev/null && echo 'axor-lab console script works'

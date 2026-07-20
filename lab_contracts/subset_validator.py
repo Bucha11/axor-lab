@@ -64,6 +64,14 @@ def _check(
     if "anyOf" in schema:
         if not any(_matches(node, sub, root, schemas) for sub in schema["anyOf"]):  # type: ignore[union-attr]
             errors.append(f"{path}: anyOf matched 0 branches")
+    if "allOf" in schema:
+        for sub in schema["allOf"]:  # type: ignore[union-attr]
+            _check(node, sub, path, root, schemas, errors)
+    if "if" in schema:
+        # conditional application: if `if` matches, `then` must hold, else `else`
+        branch = "then" if _matches(node, schema["if"], root, schemas) else "else"  # type: ignore[arg-type]
+        if branch in schema:
+            _check(node, schema[branch], path, root, schemas, errors)  # type: ignore[arg-type]
 
     declared = schema.get("type")
     if declared:
@@ -74,16 +82,29 @@ def _check(
     if "pattern" in schema and isinstance(node, str):
         if not re.search(str(schema["pattern"]), node):
             errors.append(f"{path}: pattern {schema['pattern']} no match")
+    if "minLength" in schema and isinstance(node, str) and len(node) < int(schema["minLength"]):  # type: ignore[arg-type]
+        errors.append(f"{path}: minLength {schema['minLength']}, got {len(node)}")
+
+    # numeric bounds (review §3.1: the schemas use `minimum` etc.)
+    if isinstance(node, (int, float)) and not isinstance(node, bool):
+        if "minimum" in schema and node < schema["minimum"]:  # type: ignore[operator]
+            errors.append(f"{path}: minimum {schema['minimum']}, got {node}")
+        if "maximum" in schema and node > schema["maximum"]:  # type: ignore[operator]
+            errors.append(f"{path}: maximum {schema['maximum']}, got {node}")
+        if "exclusiveMinimum" in schema and node <= schema["exclusiveMinimum"]:  # type: ignore[operator]
+            errors.append(f"{path}: exclusiveMinimum {schema['exclusiveMinimum']}, got {node}")
 
     if isinstance(node, dict):
         if "minProperties" in schema and len(node) < int(schema["minProperties"]):  # type: ignore[arg-type]
             errors.append(f"{path}: minProperties {schema['minProperties']}, got {len(node)}")
         if "maxProperties" in schema and len(node) > int(schema["maxProperties"]):  # type: ignore[arg-type]
             errors.append(f"{path}: maxProperties {schema['maxProperties']}, got {len(node)}")
+        # `required` applies whenever present (e.g. a bare {"required": [...]} in an
+        # if/then branch), independent of type/properties
+        for required in schema.get("required", []):  # type: ignore[union-attr]
+            if required not in node:
+                errors.append(f"{path}: missing required '{required}'")
         if schema.get("type") == "object" or "properties" in schema:
-            for required in schema.get("required", []):  # type: ignore[union-attr]
-                if required not in node:
-                    errors.append(f"{path}: missing required '{required}'")
             props: dict[str, dict[str, object]] = schema.get("properties", {})  # type: ignore[assignment]
             additional = schema.get("additionalProperties", True)
             for key, value in node.items():
@@ -94,9 +115,14 @@ def _check(
                 elif isinstance(additional, dict):
                     _check(value, additional, f"{path}.{key}", root, schemas, errors)
 
-    if isinstance(node, list) and "items" in schema:
-        for i, item in enumerate(node):
-            _check(item, schema["items"], f"{path}[{i}]", root, schemas, errors)  # type: ignore[arg-type]
+    if isinstance(node, list):
+        if "minItems" in schema and len(node) < int(schema["minItems"]):  # type: ignore[arg-type]
+            errors.append(f"{path}: minItems {schema['minItems']}, got {len(node)}")
+        if "maxItems" in schema and len(node) > int(schema["maxItems"]):  # type: ignore[arg-type]
+            errors.append(f"{path}: maxItems {schema['maxItems']}, got {len(node)}")
+        if "items" in schema:
+            for i, item in enumerate(node):
+                _check(item, schema["items"], f"{path}[{i}]", root, schemas, errors)  # type: ignore[arg-type]
 
 
 def _resolve_ref(
@@ -141,9 +167,14 @@ def _matches(
 
 
 def _is_type(node: object, type_name: str) -> bool:
+    # "null" was not in the map, so it fell through to "unknown type → accept
+    # anything" — a schema requiring null would pass for ANY value. And an
+    # unknown/misspelled type silently matched everything. Both now fail closed.
+    if type_name == "null":
+        return node is None
     expected = _TYPE_MAP.get(type_name)
     if expected is None:
-        return True
+        return False  # unknown type name is never a match
     if type_name in ("number", "integer") and isinstance(node, bool):
-        return False
+        return False  # bool is an int subclass in Python; not a number here
     return isinstance(node, expected)

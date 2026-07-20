@@ -32,6 +32,28 @@ def _security_license(expires_at: str = FUTURE) -> License:
     })
 
 
+class TestNodeCeilingRespectsExpiryAndModule(unittest.TestCase):
+    """allows_nodes used to check only the numeric ceiling — an expired or
+    module-less license kept allowing nodes (review r2, Patch 6)."""
+
+    def test_valid_license_allows_within_ceiling(self) -> None:
+        self.assertTrue(_security_license().allows_nodes(10, TODAY))
+
+    def test_over_ceiling_is_denied(self) -> None:
+        self.assertFalse(_security_license().allows_nodes(999, TODAY))
+
+    def test_expired_license_denies_even_within_ceiling(self) -> None:
+        self.assertFalse(_security_license(expires_at=PAST).allows_nodes(10, TODAY))
+
+    def test_missing_module_denies(self) -> None:
+        lic = parse_license_fields({
+            "organization": "acme", "workspace_tier": "security",
+            "modules": {"control_plane": True},  # no private_lab
+            "governed_node_ceiling": 20, "expires_at": FUTURE, "features": [],
+        })
+        self.assertFalse(lic.allows_nodes(10, TODAY))
+
+
 class TestSafetyIsFreeForever(unittest.TestCase):
     def test_safety_features_free_with_no_license(self) -> None:
         gate = FeatureGate(license=None)

@@ -11,11 +11,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from lab_contracts.canonical import content_hash
+
 LABEL_UNTRUSTED = "untrusted_derived"
 LABEL_PROMPT_GIVEN = "prompt_given"
 LABEL_TRUSTED = "trusted"
+LABEL_SENSITIVE = "sensitive"
 
 _PREVIEW_MAX = 120
+REDACTED_PREVIEW = "[redacted]"
+
+
+def _preview_of(value: object) -> str:
+    """A short, lossy UI string — NEVER the replay source."""
+    text = value if isinstance(value, str) else repr(value)
+    return text[:_PREVIEW_MAX]
+
+
+def _value_fields(value: object, sensitive: bool) -> dict[str, object]:
+    """Preview + replay-authoritative value fields, redacted when sensitive.
+
+    A sensitive value (declared via tool-manifest `sensitive_fields`, review
+    §7.4) never carries its raw content into the trace: the preview is masked
+    and the exact `decision_value` is omitted, leaving only the
+    `canonical_value_hash` to bind it. A value-dependent policy therefore
+    cannot be replayed exactly on a redacted value — the honest tradeoff the
+    trace schema already documents."""
+    fields: dict[str, object] = {"canonical_value_hash": content_hash(value)}
+    if sensitive:
+        fields["preview"] = REDACTED_PREVIEW
+    else:
+        fields["preview"] = _preview_of(value)
+        fields["decision_value"] = value
+    return fields
 
 
 @dataclass
@@ -44,42 +72,62 @@ class ValueLedger:
             str(v["value_id"]) for v in self.values if LABEL_UNTRUSTED in v["labels"]  # type: ignore[operator]
         )
 
-    def mint_constant(self, preview: str, origin_ref: str, label: str = LABEL_PROMPT_GIVEN) -> str:
-        """`constant` constructor: literal / prompt-given (trusted side)."""
+    def mint_constant(self, value: object, origin_ref: str, label: str = LABEL_PROMPT_GIVEN) -> str:
+        """`constant` constructor: literal / prompt-given (trusted side).
+
+        ``value`` is the EXACT typed value (string/number/list/…); it is stored
+        as the replay-authoritative `decision_value`, with a truncated
+        `preview` alongside for the UI."""
         value_id = self._next_id("const")
         self.values.append(
             {
                 "value_id": value_id,
-                "preview": preview[:_PREVIEW_MAX],
+                "preview": _preview_of(value),
+                "decision_value": value,
+                "canonical_value_hash": content_hash(value),
                 "labels": [label],
                 "sources": [{"kind": "constant", "origin_ref": origin_ref}],
             }
         )
         return value_id
 
-    def mint_external_read(self, preview: str, origin_ref: str) -> str:
-        """`external_read` constructor: roots a taint (untrusted tool field)."""
+    def mint_external_read(self, value: object, origin_ref: str, sensitive: bool = False) -> str:
+        """`external_read` constructor: roots a taint (untrusted tool field).
+
+        A ``sensitive`` field additionally arms the confidentiality floor and
+        is redacted in the trace (review §7.4)."""
         value_id = self._next_id("ext")
+        labels = [LABEL_UNTRUSTED, LABEL_SENSITIVE] if sensitive else [LABEL_UNTRUSTED]
         self.values.append(
             {
                 "value_id": value_id,
-                "preview": preview[:_PREVIEW_MAX],
-                "labels": [LABEL_UNTRUSTED],
+                **_value_fields(value, sensitive),
+                "labels": labels,
                 "sources": [{"kind": "external_read", "origin_ref": origin_ref}],
             }
         )
         return value_id
 
-    def mint_model_extraction(self, preview: str) -> str:
+    def mint_model_extraction(self, value: object, context_value_ids: tuple[str, ...] | None = None) -> str:
         """`model_extraction` constructor (Lab addition).
 
         Conservative join: the produced value inherits `untrusted_derived`
-        with ``derived_from`` = ALL untrusted values live in context and
-        ``sources`` = the union of their sources. We do not claim the model
-        copied any particular span — any output may depend on any untrusted
-        input in context.
+        with ``derived_from`` = the untrusted values live in THIS model call's
+        context and ``sources`` = the union of their sources. We do not claim
+        the model copied any particular span — any output may depend on any
+        untrusted input in context.
+
+        ``context_value_ids`` scopes the join to the values the model actually
+        saw at this call (review §4.2 — the ledger no longer joins over every
+        untrusted value ever minted). If omitted, falls back to all untrusted
+        values (correct for a single-model-call trial).
         """
-        untrusted = self.untrusted_ids()
+        if context_value_ids is None:
+            untrusted = self.untrusted_ids()
+        else:
+            untrusted = tuple(
+                vid for vid in context_value_ids if LABEL_UNTRUSTED in self.labels_of(vid)
+            )
         sources: list[dict[str, object]] = []
         seen: set[str] = set()
         for uid in untrusted:
@@ -95,7 +143,9 @@ class ValueLedger:
         self.values.append(
             {
                 "value_id": value_id,
-                "preview": preview[:_PREVIEW_MAX],
+                "preview": _preview_of(value),
+                "decision_value": value,
+                "canonical_value_hash": content_hash(value),
                 "labels": labels,
                 "sources": sources,
                 "transformations": ["model_extraction"],

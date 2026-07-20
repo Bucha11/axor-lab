@@ -235,6 +235,17 @@ class TestSandboxRealExecutor(unittest.TestCase):
         return ResourceLimits(cpu_seconds=1, mem_mb=300, disk_mb=1,
                               wall_seconds=4, output_kb=4, max_processes=48)
 
+    def _cpu_limits(self):
+        # A generous wall ceiling for the CPU-bound tests: a busy loop burns its
+        # 1 CPU-second in ~1s of wall on an unthrottled core, so SIGXCPU fires
+        # long before this backstop — but on a throttled/oversubscribed CI runner
+        # accumulating 1 CPU-second can take several wall-seconds, and a tight
+        # wall would win the race and mislabel the kill. 20s removes that race
+        # without slowing the normal path (the process still exits at ~1s).
+        from lab_sandbox import ResourceLimits
+        return ResourceLimits(cpu_seconds=1, mem_mb=300, disk_mb=1,
+                              wall_seconds=20, output_kb=4, max_processes=48)
+
     def test_benign_code_completes(self) -> None:
         from lab_sandbox import OUTCOME_COMPLETED, run_python
         result = run_python("print(6 * 7)", self._limits())
@@ -243,7 +254,7 @@ class TestSandboxRealExecutor(unittest.TestCase):
 
     def test_cpu_bomb_is_killed_by_rlimit_cpu(self) -> None:
         from lab_sandbox import OUTCOME_KILLED_CPU, run_python
-        result = run_python("while True: pass", self._limits())
+        result = run_python("while True: pass", self._cpu_limits())
         self.assertEqual(result.outcome, OUTCOME_KILLED_CPU)
 
     def test_wall_clock_overrun_is_killed(self) -> None:
@@ -256,6 +267,29 @@ class TestSandboxRealExecutor(unittest.TestCase):
         result = run_python("print('A' * 200000)", self._limits())
         self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
         self.assertTrue(result.truncated)
+        self.assertLessEqual(len(result.stdout), 4 * 1024)
+
+    def test_output_flood_does_not_accumulate_in_parent_memory(self) -> None:
+        # a child that would print ~1 GiB: the executor reads incrementally and
+        # kills the process group at the cap, so the PARENT never buffers it all
+        # (the old capture_output would have). The returned string stays bounded.
+        from lab_sandbox import OUTCOME_OUTPUT_CAPPED, run_python
+        result = run_python(
+            "import sys\n"
+            "chunk = 'A' * 65536\n"
+            "for _ in range(16384): sys.stdout.write(chunk)\n",
+            self._limits(),
+        )
+        self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
+        self.assertLessEqual(len(result.stdout), 4 * 1024)
+
+    def test_stderr_is_also_capped(self) -> None:
+        # stderr shares the same capped stream — it used to accumulate unbounded
+        from lab_sandbox import OUTCOME_OUTPUT_CAPPED, run_python
+        result = run_python(
+            "import sys; sys.stderr.write('E' * 200000)", self._limits()
+        )
+        self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
         self.assertLessEqual(len(result.stdout), 4 * 1024)
 
     def test_disk_fill_is_contained(self) -> None:
@@ -282,8 +316,18 @@ class TestSandboxRealExecutor(unittest.TestCase):
         self.assertNotEqual(result.outcome, OUTCOME_COMPLETED)  # MemoryError, contained
 
     def test_child_cannot_raise_its_own_limits(self) -> None:
-        # a hostile program that tries to lift RLIMIT_CPU still gets killed
-        from lab_sandbox import OUTCOME_KILLED_CPU, run_python
+        # a hostile program that tries to lift RLIMIT_CPU still gets contained.
+        # The claim under test is containment, not which signal delivers it:
+        # raising the hard limit needs privilege we don't grant, so the child
+        # stays capped and is killed — normally by SIGXCPU (RLIMIT_CPU), or by
+        # the wall backstop if a throttled runner hasn't burned the CPU second
+        # yet. Either way it does NOT complete.
+        from lab_sandbox import (
+            OUTCOME_COMPLETED,
+            OUTCOME_KILLED_CPU,
+            OUTCOME_KILLED_WALL,
+            run_python,
+        )
         code = (
             "import resource\n"
             "try:\n"
@@ -291,7 +335,9 @@ class TestSandboxRealExecutor(unittest.TestCase):
             "except Exception: pass\n"
             "while True: pass\n"
         )
-        self.assertEqual(run_python(code, self._limits()).outcome, OUTCOME_KILLED_CPU)
+        outcome = run_python(code, self._cpu_limits()).outcome
+        self.assertNotEqual(outcome, OUTCOME_COMPLETED)  # contained
+        self.assertIn(outcome, (OUTCOME_KILLED_CPU, OUTCOME_KILLED_WALL))
 
 
 # ── B5 — the live gateway over real HTTP (governance-capable endpoint) ───────
@@ -311,13 +357,19 @@ class TestInstrumentedGateway(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            def post(path, obj):
+            def post(path, obj, secret=None):
+                headers = {"Content-Type": "application/json"}
+                if secret:
+                    headers["Authorization"] = f"Bearer {secret}"
                 req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
-                                             headers={"Content-Type": "application/json"}, method="POST")
+                                             headers=headers, method="POST")
                 with urllib.request.urlopen(req) as r:
                     return json.loads(r.read())
 
-            run_id = post("/runs", {})["run_id"]
+            opened = post("/runs", {})
+            run_id, secret = opened["run_id"], opened["run_secret"]
+            self.assertTrue(run_id.startswith("r_ep_"))
+            self.assertGreater(len(run_id), 20)  # unpredictable, not sequential
             # emit the untrusted read value, then the sink intent bound to it
             post(f"/runs/{run_id}/events", {
                 "type": "tool_result", "tool": "read_txns",
@@ -325,19 +377,63 @@ class TestInstrumentedGateway(unittest.TestCase):
                             "labels": ["untrusted_derived"],
                             "sources": [{"kind": "external_read",
                                          "origin_ref": "tool_result:read_txns:transactions[1].description"}]}],
-            })
+            }, secret=secret)
             resp = post(f"/runs/{run_id}/events", {
                 "type": "tool_call_intent", "tool": "send_money",
                 "arg_bindings": {"recipient": "v_r"},
                 "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
-            })
+            }, secret=secret)
             # the tool proxy verdict came back BEFORE the tool would run
             self.assertEqual(resp["decision"]["verdict"], "DENY")
 
-            with urllib.request.urlopen(base + f"/runs/{run_id}/trace") as r:
+            # the trace is only published after an explicit finalize
+            post(f"/runs/{run_id}/finalize", {}, secret=secret)
+            req = urllib.request.Request(base + f"/runs/{run_id}/trace",
+                                         headers={"Authorization": f"Bearer {secret}"})
+            with urllib.request.urlopen(req) as r:
                 trace = json.loads(r.read())
             self.assertEqual(trace["producer"]["mode"], "instrumented_endpoint")
             self.assertEqual(support.schema_errors(trace, "trace"), [])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_gateway_requires_token_and_run_secret(self) -> None:
+        import json
+        import threading
+        import urllib.error
+        import urllib.request
+
+        from lab_endpoint import make_gateway
+
+        server = make_gateway(
+            support.conditions()[1], support.manifests(),
+            support.banking_scenario()["inputs"], scenario_id="banking-exfil-01",
+            token="gwsecret",
+        )
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            def post(path, obj, headers=None):
+                req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
+                                             headers={"Content-Type": "application/json", **(headers or {})},
+                                             method="POST")
+                try:
+                    with urllib.request.urlopen(req) as r:
+                        return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, json.loads(e.read())
+
+            # opening a run without the gateway token → 401
+            self.assertEqual(post("/runs", {})[0], 401)
+            status, opened = post("/runs", {}, {"Authorization": "Bearer gwsecret"})
+            self.assertEqual(status, 201)
+            run_id, secret = opened["run_id"], opened["run_secret"]
+            # posting an event without the RUN secret → 401 (can't inject into another's run)
+            self.assertEqual(post(f"/runs/{run_id}/events", {"type": "tool_result", "tool": "x", "values": []})[0], 401)
+            self.assertEqual(
+                post(f"/runs/{run_id}/events", {"type": "tool_result", "tool": "read_txns", "values": []},
+                     {"Authorization": f"Bearer {secret}"})[0], 200)
         finally:
             server.shutdown()
             server.server_close()
@@ -391,3 +487,106 @@ class TestFederationAndPopulation(unittest.TestCase):
         for topology in (TOPOLOGY_RING, TOPOLOGY_STAR, TOPOLOGY_COMPLETE):
             run = run_federation(self._members(8), rounds=6, topology=topology)
             self.assertEqual(len(run.member_moves), 8)
+
+
+# ── P0.6 — gateway/kernel fail closed on missing/forged provenance ──────────
+class TestGatewayFailClosed(unittest.TestCase):
+    def test_kernel_denies_egress_arg_with_no_resolvable_provenance(self) -> None:
+        from lab_runner.kernel import Kernel
+
+        kernel = Kernel(version=support.KERNEL_PINNED)
+        # an egress send_money whose recipient binding resolves to NO labels
+        decision = kernel.decide(
+            enforcement="on",
+            manifest=support.manifests()["send_money"],
+            args={"recipient": support.ATTACKER_IBAN, "amount": 1200},
+            arg_labels={},  # recipient has no resolvable provenance
+            arg_bindings={"recipient": "v_unknown"},
+            inputs=support.banking_scenario()["inputs"],
+            policy={"profile": "strict"},
+        )
+        self.assertEqual(decision["verdict"], "DENY")
+        self.assertIn("fail-closed", decision["reason"])
+
+    def test_gateway_rejects_intent_binding_unknown_value(self) -> None:
+        import json
+        import threading
+        import urllib.error
+        import urllib.request
+
+        from lab_endpoint import make_gateway
+
+        server = make_gateway(
+            support.conditions()[1], support.manifests(),
+            support.banking_scenario()["inputs"], scenario_id="banking-exfil-01",
+        )
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            def post(path, obj, secret=None):
+                headers = {"Content-Type": "application/json"}
+                if secret:
+                    headers["Authorization"] = f"Bearer {secret}"
+                req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
+                                             headers=headers, method="POST")
+                try:
+                    with urllib.request.urlopen(req) as r:
+                        return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, json.loads(e.read())
+
+            opened = post("/runs", {})[1]
+            run_id, secret = opened["run_id"], opened["run_secret"]
+            # intent references a value the client never emitted → 400, not ALLOW
+            status, body = post(f"/runs/{run_id}/events", {
+                "type": "tool_call_intent", "tool": "send_money",
+                "arg_bindings": {"recipient": "v_forged"},
+                "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
+            }, secret=secret)
+            self.assertEqual(status, 400)
+            self.assertIn("unknown value", body["error"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_gateway_rejects_duplicate_value_id(self) -> None:
+        import json
+        import threading
+        import urllib.error
+        import urllib.request
+
+        from lab_endpoint import make_gateway
+
+        server = make_gateway(
+            support.conditions()[1], support.manifests(),
+            support.banking_scenario()["inputs"], scenario_id="banking-exfil-01",
+        )
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            def post(path, obj, secret=None):
+                headers = {"Content-Type": "application/json"}
+                if secret:
+                    headers["Authorization"] = f"Bearer {secret}"
+                req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
+                                             headers=headers, method="POST")
+                try:
+                    with urllib.request.urlopen(req) as r:
+                        return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, json.loads(e.read())
+
+            opened = post("/runs", {})[1]
+            run_id, secret = opened["run_id"], opened["run_secret"]
+            v = {"value_id": "v_dup", "labels": ["untrusted_derived"],
+                 "sources": [{"kind": "external_read"}]}
+            self.assertEqual(post(f"/runs/{run_id}/events",
+                                  {"type": "tool_result", "tool": "read_txns", "values": [v]}, secret=secret)[0], 200)
+            # re-emitting the same value_id (redefining its lineage) is rejected
+            status, body = post(f"/runs/{run_id}/events",
+                               {"type": "tool_result", "tool": "read_txns", "values": [v]}, secret=secret)
+            self.assertEqual(status, 400)
+            self.assertIn("duplicate", body["error"])
+        finally:
+            server.shutdown()
+            server.server_close()

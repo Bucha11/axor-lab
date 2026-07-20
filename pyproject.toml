@@ -30,13 +30,31 @@ packages = [
     "lab_games",
 ]
 
+# ship the contract schemas as package data so an installed wheel is
+# self-contained (no AXOR_LAB_CONTRACTS needed outside a checkout). The source
+# of truth is contracts/schemas/; lab_contracts/schemas/ is a build-time copy
+# kept byte-identical by tests/test_packaging.py.
+[tool.setuptools.package-data]
+lab_contracts = ["schemas/*.schema.json"]
+
 [project.optional-dependencies]
 # the BYOK Anthropic backend; the cassette path and everything else is stdlib
 byok = ["anthropic>=0.40"]
 # Ed25519 license + bundle signing (same crypto as the Control Plane license)
 crypto = ["pynacl>=1.5"]
+# the REAL production kernel: govern with axor_core.ToolCallGovernor instead of
+# the reference taint_floor. Without it, Lab falls back to the reference kernel.
+kernel = ["axor-core>=0.9"]
 
-# NOTE: installed wheels need the contract schemas next to the code; until
-# schemas ship as package data (Phase 4 packaging work), point
-# AXOR_LAB_CONTRACTS at a checkout's contracts/ directory when running
-# outside the repo.
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+# meaningful correctness rules (pyflakes + bugbear + comprehensions), not style
+# noise; the codebase uses dict[str, object] at contract boundaries by design.
+select = ["F", "E9", "B", "C4", "UP032", "PLE"]
+ignore = ["B008", "B905", "C401", "C408"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "F841"]

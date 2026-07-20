@@ -8,6 +8,13 @@ lab_contracts; statistics in lab_analysis.
 """
 
 from .agents import AgentAdapter, ScriptedAgent, resolve_agent
+from .axor_backend import (
+    AxorKernel,
+    axor_available,
+    governor_config,
+    real_kernel_version,
+    resolve_kernel,
+)
 from .errors import (
     ConfirmationRequired,
     ExperimentFileError,
@@ -22,7 +29,16 @@ from .kernel import Kernel, KernelRegistry, default_registry
 from .ledger import ValueLedger
 from .predicates import evaluate
 from .regression import RegressionPin, check_pins, pin
-from .replay import ReplayReport, replay_bundle, replay_trace
+from .replay import (
+    REPLAY_MALFORMED_TRACE,
+    REPLAY_MATCH,
+    REPLAY_MISMATCH,
+    REPLAY_UNSUPPORTED_KERNEL,
+    ReplayReport,
+    replay_bundle,
+    replay_trace,
+    replay_trace_status,
+)
 from .runner import (
     ExperimentResult,
     TrialOutcome,
@@ -35,11 +51,20 @@ from .simulator import SimulatedToolHost
 
 __all__ = [
     "AgentAdapter",
+    "AxorKernel",
     "ConfirmationRequired",
+    "axor_available",
+    "governor_config",
+    "real_kernel_version",
+    "resolve_kernel",
     "ExperimentFileError",
     "ExperimentResult",
     "Kernel",
     "KernelRegistry",
+    "REPLAY_MALFORMED_TRACE",
+    "REPLAY_MATCH",
+    "REPLAY_MISMATCH",
+    "REPLAY_UNSUPPORTED_KERNEL",
     "RealExecutionBlocked",
     "RegressionPin",
     "ReplayReport",
@@ -58,6 +83,7 @@ __all__ = [
     "pin",
     "replay_bundle",
     "replay_trace",
+    "replay_trace_status",
     "resolve_agent",
     "run_experiment",
     "run_experiment_suite",

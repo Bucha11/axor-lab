@@ -1,10 +1,19 @@
-"""The reference `decide` — one pure implementation used by BOTH the live
-runner and replay (axor-core architecture rule 0: two implementations of the
-pipeline would diverge and counterfactual replay would silently lie).
+"""A REFERENCE `decide`, not the production axor-core kernel (review P0.2).
 
-Reference gate set: `taint_floor` only — DENY when an egress-class call's
-driving argument carries `untrusted_derived`. Enforcement `off` records the
-decision but always ALLOWs (ungoverned = observation on, enforcement off).
+Honest scope: this is `reference_taint_floor_kernel` — a single pure `decide`
+used by BOTH the live runner and replay (so the two never diverge and
+counterfactual replay cannot silently lie), implementing ONE gate: `taint_floor`
+(DENY an egress-class call whose driving argument carries `untrusted_derived`,
+with allowlist enum-supersession). It is NOT the paper's full 9-gate kernel,
+and `default_registry` returns the SAME behavior for every pinned version
+string — the version is recorded metadata, not a loaded historical kernel.
+
+Therefore Lab currently verifies *this reference kernel*, not a specific
+production axor-core build. Real cross-version fidelity (loading
+axor-core@X.Y.Z and replaying under it) is the integration tracked in
+POST_MVP_PLAN.md; until then, a bundle's `kernel_version` documents intent, and
+a KernelRegistry with genuinely different behaviors per version must be
+constructed explicitly (regression checks do exactly that).
 """
 
 from __future__ import annotations
@@ -38,9 +47,14 @@ def _resolve_allowlist(
     return frozenset(expand_list(list(entries), inputs))  # type: ignore[arg-type]
 
 
+REFERENCE_KERNEL = "reference_taint_floor_kernel"
+
+
 @dataclass(frozen=True)
 class Kernel:
-    """A pinned kernel version's pure decision behavior."""
+    """A reference kernel's pure decision behavior (see module docstring —
+    this is the taint_floor reference, not the production axor-core build the
+    `version` string names)."""
 
     version: str
     taint_floor_enabled: bool = True
@@ -69,7 +83,23 @@ class Kernel:
         allowlist = _resolve_allowlist(policy, inputs)
         if self.taint_floor_enabled and effect_class in EGRESS_CLASSES:
             for arg_name in driving_args:
-                if LABEL_UNTRUSTED in arg_labels.get(arg_name, ()):
+                labels = arg_labels.get(arg_name, ())
+                # FAIL-CLOSED: an egress driving arg with no resolvable
+                # provenance (missing binding / unknown or unlabeled value) is
+                # DENIED, never allowed. A client cannot launder a value past
+                # the gate by omitting its lineage (review P0.6).
+                if not labels:
+                    return {
+                        "verdict": "DENY",
+                        "gate": GATE_TAINT_FLOOR,
+                        "driving_value_id": arg_bindings.get(arg_name, "v_unresolved"),
+                        "projection": PROJECTION_UNTRUSTED,
+                        "reason": (
+                            f"egress sink {manifest['id']}: driving arg '{arg_name}' has no "
+                            "resolvable provenance (fail-closed)"
+                        ),
+                    }
+                if LABEL_UNTRUSTED in labels:
                     # enum-supersession: an operator-declared allowlisted target
                     # supersedes the taint floor (paper §6.3) — this is the
                     # only sanctioned way to recover the over-taint utility cost.

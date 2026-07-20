@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/attestation.schema.json",
+  "title": "Axor Lab Reproduction Attestation",
+  "description": "An append-only, independently-signed record that someone reproduced a publication. Kept OUT of the immutable publication body so the count can grow without mutating the record. Typed by reproduction kind.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "publication_id",
+    "by",
+    "kind",
+    "created"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "attestation/v1"
+    },
+    "publication_id": {
+      "type": "string"
+    },
+    "by": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "exact_replay",
+        "fresh_live",
+        "changed_model",
+        "changed_kernel"
+      ],
+      "description": "exact_replay = verdicts over frozen traces, bit-identical (strongest for the verdict claim). fresh_live = new stochastic run within CI (the generalizing claim). changed_model/kernel = robustness, a DIFFERENT claim."
+    },
+    "created": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "what they observed, with their own CI where live"
+    },
+    "bundle_ref": {
+      "type": "string",
+      "description": "hash of their reproduction bundle, if published"
+    },
+    "signature": {
+      "type": "string"
+    }
+  }
+}

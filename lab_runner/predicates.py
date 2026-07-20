@@ -35,22 +35,42 @@ class TraceView:
         return {str(v["value_id"]): v for v in self.trace["values"]}  # type: ignore[union-attr]
 
     def executed_tool_calls(self) -> list[dict[str, object]]:
-        """tool_call_intent events whose following gate_decision is ALLOW (or absent)."""
+        """tool_call_intent events that were ALLOWED and thus actually executed.
+
+        An intent whose gate_decision is missing is INCOMPLETE, not executed:
+        the process may have died before the gate ran. Treating a decision-less
+        intent as executed (the old `verdict = "ALLOW"` default) was fail-open —
+        an incomplete trace could be scored as a violation or a task success. So
+        an intent counts as executed ONLY when it has an explicit ALLOW decision.
+        Intent↔decision pair by call_id when present, else by the next decision
+        before the following intent on the event stream."""
         events: list[dict[str, object]] = list(self.trace["events"])  # type: ignore[arg-type]
         executed: list[dict[str, object]] = []
         for i, event in enumerate(events):
             if event.get("type") != "tool_call_intent":
                 continue
-            verdict = "ALLOW"
-            for later in events[i + 1:]:
-                if later.get("type") == "gate_decision":
-                    verdict = str(later["decision"]["verdict"])  # type: ignore[index]
-                    break
-                if later.get("type") == "tool_call_intent":
-                    break
+            verdict = self._decision_verdict(event, events, i)
             if verdict == "ALLOW":
                 executed.append(event)
         return executed
+
+    @staticmethod
+    def _decision_verdict(
+        intent: dict[str, object], events: list[dict[str, object]], i: int
+    ) -> str | None:
+        """The verdict of this intent's gate_decision, or None if it has none."""
+        call_id = intent.get("call_id")
+        if call_id is not None:
+            for later in events:
+                if later.get("type") == "gate_decision" and later.get("call_id") == call_id:
+                    return str(later["decision"]["verdict"])  # type: ignore[index]
+            return None
+        for later in events[i + 1:]:
+            if later.get("type") == "gate_decision":
+                return str(later["decision"]["verdict"])  # type: ignore[index]
+            if later.get("type") == "tool_call_intent":
+                return None
+        return None
 
 
 def evaluate(predicate: dict[str, object], trace: dict[str, object], inputs: dict[str, object]) -> bool:
@@ -65,8 +85,24 @@ def evaluate(predicate: dict[str, object], trace: dict[str, object], inputs: dic
     if "sequence" in predicate:
         return _evaluate_sequence(list(predicate["sequence"]), view, inputs)  # type: ignore[arg-type]
     if "event" in predicate:
-        return len(_matching_seqs(predicate, view, inputs)) > 0
+        n = len(_matching_seqs(predicate, view, inputs))
+        return _count_satisfied(predicate.get("count"), n)  # type: ignore[arg-type]
     raise UnsupportedPredicateError(f"unknown predicate shape: {sorted(predicate)}")
+
+
+def _count_satisfied(count: dict[str, object] | None, n: int) -> bool:
+    """Honor a predicate's `count` cardinality bound.
+
+    Without `count`, "at least one match" is the default. With it, `min`/`max`
+    are enforced — the evaluator used to ignore `count` entirely, so a
+    'at least three calls' predicate fired on a single match."""
+    if count is None:
+        return n > 0
+    lo = int(count.get("min", 0))  # type: ignore[arg-type]
+    if n < lo:
+        return False
+    hi = count.get("max")
+    return not (hi is not None and n > int(hi))  # type: ignore[arg-type]
 
 
 def _evaluate_sequence(parts: list[dict[str, object]], view: TraceView, inputs: dict[str, object]) -> bool:
@@ -118,7 +154,9 @@ def _where_matches(
             value_id = bindings.get(arg_match.group(1))
             if value_id is None:
                 return False
-            actual = values[value_id].get("preview")
+            # the exact typed value, never the truncated UI preview (review P0.1)
+            bound = values[value_id]
+            actual = bound["decision_value"] if "decision_value" in bound else bound.get("preview")
         else:
             raise UnsupportedPredicateError(f"unsupported field address {field!r}")
         if not _matcher_holds(matcher, actual, inputs, is_provenance=bool(prov_match)):
@@ -139,15 +177,22 @@ def _matcher_holds(
             raise UnsupportedPredicateError("provenance_is requires a prov(args.x) address")
         return str(operand) in actual  # type: ignore[operator]
     if op == "equal":
-        return _coerced(actual) == _coerced(resolve_operand(operand, inputs))
+        return _typed_eq(actual, resolve_operand(operand, inputs))
     if op == "not_equal":
-        return _coerced(actual) != _coerced(resolve_operand(operand, inputs))
+        return not _typed_eq(actual, resolve_operand(operand, inputs))
     if op == "in":
-        return _coerced(actual) in [_coerced(x) for x in expand_list(list(operand), inputs)]  # type: ignore[arg-type]
+        return any(_typed_eq(actual, x) for x in expand_list(list(operand), inputs))  # type: ignore[arg-type]
     if op == "not_in":
-        return _coerced(actual) not in [_coerced(x) for x in expand_list(list(operand), inputs)]  # type: ignore[arg-type]
+        return not any(_typed_eq(actual, x) for x in expand_list(list(operand), inputs))  # type: ignore[arg-type]
     if op == "matches":
-        return isinstance(actual, str) and re.search(str(operand), actual) is not None
+        if not isinstance(actual, str):
+            return False
+        try:
+            return re.search(str(operand), actual) is not None
+        except re.error as exc:
+            # a bad pattern is an authoring error — surface it as a stable
+            # predicate error (caught by the CLI), not a raw re.error traceback
+            raise UnsupportedPredicateError(f"invalid regex {operand!r}: {exc}") from exc
     if op in ("gt", "lt"):
         try:
             number = float(actual)  # type: ignore[arg-type]
@@ -157,15 +202,28 @@ def _matcher_holds(
     raise UnsupportedPredicateError(op)
 
 
+def _typed_eq(a: object, b: object) -> bool:
+    """Type-aware equality: a boolean never equals a number.
+
+    Python makes ``True == 1.0`` true, so without this guard a typed predicate
+    could score a boolean ``true`` as equal to the number ``1``. Bool only
+    matches bool; otherwise numbers compare numerically (strings that parse as
+    numbers included) and everything else compares by value."""
+    ca, cb = _coerced(a), _coerced(b)
+    if isinstance(ca, bool) or isinstance(cb, bool):
+        return isinstance(ca, bool) and isinstance(cb, bool) and ca == cb
+    return ca == cb
+
+
 def _coerced(value: object) -> object:
     """Previews are strings; compare numbers numerically when both sides parse."""
+    if isinstance(value, bool):
+        return value
     if isinstance(value, str):
         try:
             return float(value)
         except ValueError:
             return value
-    if isinstance(value, bool):
-        return value
     if isinstance(value, (int, float)):
         return float(value)
     return value

@@ -1,12 +1,15 @@
-"""lab_sandbox — the sandbox POLICY layer (plan B6, spec-lab.md §9).
+"""lab_sandbox — resource-limited execution + the sandbox POLICY layer.
 
-"Runs in the lab sandbox" is a real subsystem, not a phrase. The actual
-isolation is gVisor/Firecracker-class at the runtime; this module is the
-*policy decision layer* it enforces: egress deny-by-default + API allowlist,
-CPU/RAM/disk/wall-time caps, no host mounts, secret injection without
-persistence, output-size caps, an audit trail, and kill/cancel. Until the
-isolation runtime lands, code execution stays local-only (the MVP posture) —
-this layer is what that runtime consults, and the red-team suite drives it.
+⚠️ MATURITY: experimental. This is NOT a security boundary for hostile code
+from untrusted users. It provides (1) real OS resource limits via subprocess +
+RLIMIT (`run_python`: CPU/mem/disk/wall/output/process caps that the kernel
+actually enforces) and (2) the *policy decision layer* a real isolation
+runtime would consult (egress allowlist, no host mounts, non-persistent
+secrets, audit). It does NOT provide namespace/seccomp/gVisor isolation:
+network egress and the host filesystem are not sandboxed at the process level.
+Do not run untrusted arbitrary code with this alone — the MVP posture stays
+local-only trusted execution until the isolation runtime (plan B6) lands, at
+which point that runtime enforces exactly these decisions.
 """
 
 from .errors import SandboxDenied, SandboxError

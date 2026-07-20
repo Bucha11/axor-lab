@@ -85,9 +85,12 @@ def render_publication(stored: StoredPublication) -> str:
         "<p class='note'>Governance verdicts over frozen traces. Deterministic, "
         "no confidence interval, reproducible bit-for-bit given the pinned kernel.</p>"
     )
-    body.extend(
-        f"<div class='claim'>{esc(c['text'])}</div>" for c in exact
-    ) or body.append("<p class='note'>No exact claims.</p>")
+    # NOTE: list.extend() returns None, so `extend(...) or append(...)` used to
+    # append "No exact claims" even when there WERE exact claims. Branch explicitly.
+    if exact:
+        body.extend(f"<div class='claim'>{esc(c['text'])}</div>" for c in exact)
+    else:
+        body.append("<p class='note'>No exact claims.</p>")
 
     body.append("<h2>Statistically reproducible</h2>")
     body.append(
@@ -102,9 +105,12 @@ def render_publication(stored: StoredPublication) -> str:
     environment: dict[str, object] = stored.bundle["environment"]  # type: ignore[assignment]
     body.append(
         f"<p>Kernel <code>{esc(environment['kernel_version'])}</code>; "
-        f"model <code>{esc(environment['model']['id'])}</code>. "  # type: ignore[index]
-        "Conditions differ only in enforcement (ungoverned vs governed).</p>"
+        f"model <code>{esc(environment['model']['id'])}</code>.</p>"  # type: ignore[index]
     )
+    # show what ACTUALLY differs between conditions — the contract supports
+    # allowlists, profiles, kernels and several enforcing conditions, so
+    # "differ only in enforcement" was only true for the simplest slice
+    body.append(_conditions_diff(stored.bundle))
     body.append("<table><tr><th>Trial</th><th>Condition</th><th>Verdict (replayed)</th></tr>")
     for trace in sorted(stored.traces.values(), key=lambda t: str(t["trace_id"]))[:12]:
         verdict = _final_verdict(trace)
@@ -137,11 +143,15 @@ def render_publication(stored: StoredPublication) -> str:
     return _page(str(pub["question"]), "".join(body))
 
 
-def render_evidence(stored: StoredPublication, trace_id: str) -> str:
+def render_evidence(stored: StoredPublication, trace_id: str, policy_id: str | None = None) -> str:
     trace = stored.traces[trace_id]
     bundle = stored.bundle
     scenario = _scenario_for(bundle, trace)
-    condition = _enforcing_condition(bundle)
+    # replay under the condition the counterfactual is ABOUT: the ?policy= choice
+    # if given and enforcing; else the trace's OWN condition when it is enforcing
+    # (so a governed_allowlist trace is not silently replayed under strict); else
+    # the first enforcing candidate for an ungoverned trace.
+    condition = _evidence_condition(bundle, trace, policy_id)
     kernel = default_registry((str(condition["kernel"]),)).get(str(condition["kernel"]))
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     case = build_evidence_case(trace, scenario, condition, kernel, manifests)
@@ -150,6 +160,21 @@ def render_evidence(stored: StoredPublication, trace_id: str) -> str:
 
     body = [f"<h1>EvidenceCase <code>{esc(trace_id)}</code></h1>"]
     body.append(f"<p><b>Injection:</b> {esc(chain['injection']['text'])}</p>")  # type: ignore[index]
+    # be explicit about WHICH policy the counterfactual replay used, and offer
+    # the other enforcing conditions as alternative replays
+    pid = esc(stored.publication["publication_id"])
+    body.append(
+        f"<p class='note'>Policy replay under <code>{esc(condition['id'])}</code> "
+        f"(kernel <code>{esc(condition['kernel'])}</code>, "
+        f"config_hash <code>{esc(condition.get('config_hash', 'n/a'))}</code>).</p>"
+    )
+    enforcing = [c for c in bundle["conditions"] if c["enforcement"] == "on"]  # type: ignore[union-attr]
+    if len(enforcing) > 1:
+        links = " · ".join(
+            f"<a href='/e/{pid}/evidence/{esc(trace_id)}?policy={esc(c['id'])}'>{esc(c['id'])}</a>"
+            for c in enforcing
+        )
+        body.append(f"<p class='note'>Replay under another policy: {links}</p>")
 
     body.append("<h2>Provenance chain</h2><table><tr><th>value</th><th>labels</th><th>sources</th></tr>")
     for value in chain["provenance"]:  # type: ignore[union-attr]
@@ -221,3 +246,50 @@ def _enforcing_condition(bundle: dict[str, object]) -> dict[str, object]:
         if condition["enforcement"] == "on":
             return condition
     raise KeyError("no enforcement-on condition")
+
+
+def _evidence_condition(
+    bundle: dict[str, object], trace: dict[str, object], policy_id: str | None
+) -> dict[str, object]:
+    """The condition to replay this trace's counterfactual under.
+
+    A `?policy=` selection wins (if it names an enforcing condition); otherwise
+    the trace's OWN condition when it enforces (never silently swap a governed
+    trace's policy); otherwise the first enforcing candidate."""
+    conditions: list[dict[str, object]] = list(bundle["conditions"])  # type: ignore[arg-type]
+    by_id = {str(c["id"]): c for c in conditions}
+    if policy_id and policy_id in by_id and by_id[policy_id]["enforcement"] == "on":
+        return by_id[policy_id]
+    own = by_id.get(str(trace["trial"]["condition_id"]))  # type: ignore[index]
+    if own is not None and own["enforcement"] == "on":
+        return own
+    for condition in conditions:
+        if condition["enforcement"] == "on":
+            return condition
+    if own is not None:
+        return own
+    raise KeyError("no condition to replay under")
+
+
+def _conditions_diff(bundle: dict[str, object]) -> str:
+    """A table of every condition with what actually differs — enforcement,
+    policy, kernel, config hash — instead of asserting 'differ only in
+    enforcement' (which only held for the simplest slice)."""
+    rows = [
+        "<table><tr><th>Condition</th><th>Enforcement</th><th>Policy</th>"
+        "<th>Kernel</th><th>config_hash</th></tr>"
+    ]
+    import json as _json
+
+    for condition in bundle["conditions"]:  # type: ignore[union-attr]
+        policy = condition.get("policy") or {}
+        policy_txt = esc(_json.dumps(policy, sort_keys=True)) if policy else "—"
+        rows.append(
+            f"<tr><td>{esc(condition['id'])}</td>"
+            f"<td>{esc(condition['enforcement'])}</td>"
+            f"<td><code>{policy_txt}</code></td>"
+            f"<td><code>{esc(condition['kernel'])}</code></td>"
+            f"<td><code>{esc(condition.get('config_hash', 'n/a'))}</code></td></tr>"
+        )
+    rows.append("</table>")
+    return "".join(rows)

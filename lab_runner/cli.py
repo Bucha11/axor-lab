@@ -21,8 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lab_analysis import binary_aggregate, mcnemar_test, missingness
+from lab_analysis.errors import AnalysisError
+from lab_agent.errors import AgentError
 from lab_contracts import (
     BundleIntegrityError,
+    ContractsError,
     build_bundle,
     build_publication,
     content_hash,
@@ -30,6 +33,7 @@ from lab_contracts import (
     validate_artifact,
 )
 
+from .axor_backend import resolve_kernel
 from .bundle_io import PACKAGING, read_bundle_dir, write_bundle_dir
 from .errors import ExperimentFileError, RunnerError
 from .evidence import build_evidence_case
@@ -38,6 +42,10 @@ from .kernel import Kernel, default_registry
 from .regression import STATUS_DIFFERS, RegressionPin, check_pins
 from .replay import replay_bundle
 from .runner import run_experiment_suite
+
+# BYOK backend + statistics failures are separate hierarchies from RunnerError;
+# main() maps them to stable exit codes instead of leaking a traceback
+_AGENT_ANALYSIS_ERRORS = (AgentError, AnalysisError)
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -65,6 +73,17 @@ def main(argv: list[str] | None = None) -> int:
     except RunnerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAILURE
+    except _AGENT_ANALYSIS_ERRORS as exc:
+        # BYOK backend / analysis failures (BackendUnavailable, CassetteExhausted,
+        # ProtocolViolation, AnalysisError, InsufficientDataError) are their own
+        # hierarchies, not RunnerError — catch them so the user gets a stable
+        # message + exit code instead of a Python traceback (review r2 §BYOK)
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    except ContractsError as exc:
+        # claim typing / contract-layer errors surface as validation failures
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
 
 
 # -- commands -----------------------------------------------------------------
@@ -82,7 +101,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     print("[validating]")
-    resolved = resolve(load_axl(Path(args.file)))
+    document = load_axl(Path(args.file))
+    if args.real_kernel:
+        _repin_to_real_kernel(document)
+    resolved = resolve(document)
 
     print("[estimate]")
     _print_estimate(resolved, _estimate_model(args, resolved))
@@ -94,7 +116,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return EXIT_UNCONFIRMED
 
     print("[running_local]")
-    run_id = args.run_id or f"r_{content_hash(resolved.experiment)[7:15]}"
+    # run identity includes the ACTUAL agent — otherwise two runs of the same
+    # experiment with different --agent get the same run_id (and, before, the
+    # same trial/trace ids), so different executions looked like retries of one
+    # trial (review r3). The fingerprint is the agent's CONTENT (cassette bytes /
+    # model id), so identical agents reproduce the same id and different ones don't.
+    fingerprint = _agent_fingerprint(args, resolved)
+    run_id = args.run_id or f"r_{content_hash({'experiment': resolved.experiment, 'agent': fingerprint})[7:15]}"
     agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     result = run_experiment_suite(
         list(resolved.scenarios),
@@ -122,14 +150,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         scenarios=list(resolved.scenarios),
         conditions=list(resolved.conditions),
         tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved),
+        environment=_environment(resolved, _estimate_model(args, resolved)),
         trials=result.trials,
         aggregates=aggregates,
         traces=result.traces,
         packaging=dict(PACKAGING),
     )
     out = Path(args.out)
-    write_bundle_dir(out, bundle, result.traces)
+    write_bundle_dir(out, bundle, result.traces, overwrite=bool(getattr(args, "overwrite", False)))
     print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
     print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")
@@ -147,7 +175,8 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     if not report.bit_identical:
         print("MISMATCH: recomputed verdicts differ from recorded", file=sys.stderr)
         return EXIT_FAILURE
-    print("bit-identical: recomputed verdicts match the recorded traces exactly")
+    print("bit-identical: verdict-core (verdict+gate+driving value) matches the "
+          "recorded traces; the replay report is byte-identical across machines")
     print("(exact claim — no CI; behavioral outcomes reproduce statistically via `run`)")
     return EXIT_OK
 
@@ -257,6 +286,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
                 aggregate_refs=aggregate_refs,
             )
         )
+    provider = str(bundle.get("environment", {}).get("model", {}).get("provider", ""))  # type: ignore[union-attr]
+    agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
     for aggregate in aggregates:
         interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
         claims.append(
@@ -264,20 +295,23 @@ def _cmd_publish(args: argparse.Namespace) -> int:
                 "statistically_reproducible",
                 f"{aggregate['metric']} under {aggregate['condition_id']}: "
                 f"{aggregate['estimate']:.2f} "
-                f"[{interval['low']:.2f}, {interval['high']:.2f}] over {aggregate['n']} live trials.",
+                f"[{interval['low']:.2f}, {interval['high']:.2f}] over {aggregate['n']} trials{agent_note}.",
                 f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
                 trace_refs=trace_refs,
                 aggregate_refs=aggregate_refs,
             )
         )
     publication = build_publication(
-        publication_id=f"e_{bundle_ref[7:15]}",
+        publication_id=f"e_{bundle_ref.removeprefix('sha256:')[:32]}",  # 128-bit id (§6.3)
         bundle_ref=bundle_ref,
         question=args.question,
         origin="local",
         integrity="hash_verified",
         claims=claims,
         license_id=args.license,
+        # local publish reports its own numbers; only the server independently
+        # recomputes them (→ recomputed_from_traces). Be honest about which.
+        statistics_integrity="self_reported" if aggregates else None,
     )
     errors = validate_artifact(publication, "publication")
     if errors:
@@ -336,20 +370,22 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
             for p in json.loads(Path(args.pins).read_text())
         ]
     try:
-        export = export_cp(bundle, regressions)
+        export = export_cp(bundle, regressions, condition_id=args.condition)
     except CPExportError as exc:
         raise RunnerError(str(exc)) from exc
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
     (out / "production-todo.md").write_text(export.production_todo)
+    source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
+    print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
     print(f"  config_hash (carry-over key): {export.config['config_hash']}")
     print(f"  regressions carried: {len(export.config['regressions'])}")  # type: ignore[arg-type]
     print(f"  production-todo (NOT reused): {out}/production-todo.md")
     if export.earned_bridge:
-        print("  earned bridge: governance changed the outcome on your agent — "
-              "run this governed config in production.")
+        print(f"  earned bridge: {source['condition_id']} changed the outcome vs "
+              f"{source['baseline_condition_id']} — run THIS governed config in production.")
     else:
         print("  note: no aggregate shows governance changed an outcome yet "
               "(the bridge surfaces once one does).")
@@ -358,22 +394,82 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
 
 def _cmd_import_incident(args: argparse.Namespace) -> int:
     """Second funnel: a production trace -> a trace-replay bundle you can test a
-    policy against, pin, and export (control-plane-handoff.md §Second funnel)."""
-    from lab_contracts import build_bundle, content_hash, validate_artifact
+    policy against, pin, and export (control-plane-handoff.md §Second funnel).
+
+    The recorded condition is REQUIRED and used verbatim — reconstructing it
+    (enforcement=on, kernel from the trace) silently loses enforcement mode,
+    policy, allowlist, criticality overrides and the config hash, so replay
+    could then yield a different verdict than the incident actually produced.
+    Everything is validated (schema + semantics + cross-references + config
+    hash) and REPLAYED before anything is written."""
+    from datetime import datetime, timezone
+
+    from lab_contracts import (
+        ScenarioValidationError,
+        build_bundle,
+        condition_config_hash,
+        content_hash,
+        validate_artifact,
+        validate_scenario,
+    )
+
+    from .replay import REPLAY_MATCH, replay_trace_status
 
     trace: dict[str, object] = json.loads(Path(args.trace).read_text())
-    errors = validate_artifact(trace, "trace")
-    if errors:
-        raise RunnerError(f"incident trace is not a conformant trace/v1: {errors}")
     scenario: dict[str, object] = json.loads(Path(args.scenario).read_text())
     manifests: list[dict[str, object]] = json.loads(Path(args.manifests).read_text())
+    condition: dict[str, object] = json.loads(Path(args.condition).read_text())
+
+    # 1. schema validation of every artifact
+    for obj, name in ((trace, "trace"), (scenario, "scenario"), (condition, "condition")):
+        errors = validate_artifact(obj, name)
+        if errors:
+            raise RunnerError(f"incident {name} is not conformant: {errors}")
+    manifests_by_id: dict[str, dict[str, object]] = {}
+    for manifest in manifests:
+        errors = validate_artifact(manifest, "tool-manifest")
+        if errors:
+            raise RunnerError(f"incident manifest {manifest.get('id')} is not conformant: {errors}")
+        manifests_by_id[str(manifest["id"])] = manifest
+
+    # 2. semantic + cross-reference validation
+    try:
+        validate_scenario(scenario, manifests_by_id)
+    except ScenarioValidationError as exc:
+        raise RunnerError(f"incident scenario failed semantic validation: {exc}") from exc
     trial: dict[str, object] = trace["trial"]  # type: ignore[assignment]
-    condition = {
-        "schema_version": "condition/v1",
-        "id": str(trial["condition_id"]),
-        "enforcement": "on",
-        "kernel": str(trace["producer"]["kernel_version"]),  # type: ignore[index]
-    }
+    if str(condition["id"]) != str(trial["condition_id"]):
+        raise RunnerError(
+            f"condition.id {condition['id']!r} != trace condition_id {trial['condition_id']!r}"
+        )
+    if str(scenario["name"]) != str(trial["scenario_id"]):
+        raise RunnerError(
+            f"scenario.name {scenario['name']!r} != trace scenario_id {trial['scenario_id']!r}"
+        )
+
+    # 3. config-hash verification (if the recorded condition carries one)
+    if "config_hash" in condition:
+        expected = condition_config_hash(str(condition["kernel"]), condition.get("policy"))  # type: ignore[arg-type]
+        if str(condition["config_hash"]) != expected:
+            raise RunnerError(
+                f"condition config_hash {condition['config_hash']!r} != recomputed {expected!r}"
+            )
+
+    # 4. replay the incident under its OWN recorded condition before writing — a
+    # wrong/reconstructed condition would surface here as a mismatch
+    kernel = resolve_kernel(
+        str(condition["kernel"]), manifests_by_id, condition.get("policy"),  # type: ignore[arg-type]
+        default_registry((str(condition["kernel"]),)),
+    )
+    _, status = replay_trace_status(
+        trace, condition, kernel, manifests_by_id, scenario.get("inputs", {}),  # type: ignore[arg-type]
+    )
+    if status != REPLAY_MATCH:
+        raise RunnerError(
+            f"incident trace does not replay under its condition (status={status}) — "
+            "refusing to import a bundle whose verdicts don't reproduce"
+        )
+
     trials = [{
         "trial_id": content_hash(trace), "scenario_id": str(trial["scenario_id"]),
         "condition_id": str(trial["condition_id"]), "seed": str(trial["seed"]),
@@ -382,14 +478,15 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
     }]
     bundle = build_bundle(
         bundle_id=f"b_incident_{content_hash(trace)[7:13]}",
-        created=args.created or "1970-01-01T00:00:00Z",
+        created=args.created or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         scenarios=[scenario], conditions=[condition], tool_manifests=manifests,
         environment={"kernel_version": str(trace["producer"]["kernel_version"]),  # type: ignore[index]
                      "model": {"provider": "imported", "id": "production-incident"}},
         trials=trials, aggregates=[], traces={str(trace["trace_id"]): trace},
         packaging=dict(PACKAGING),
     )
-    write_bundle_dir(Path(args.out), bundle, {str(trace["trace_id"]): trace})
+    write_bundle_dir(Path(args.out), bundle, {str(trace["trace_id"]): trace},
+                     overwrite=bool(getattr(args, "overwrite", False)))
     print(f"imported incident -> {args.out} (trace-replay bundle)")
     print(f"  replay it:  axor-lab replay {args.out}")
     print(f"  pin + export:  axor-lab pin ... && axor-lab export-cp {args.out} --pins pins.json")
@@ -445,6 +542,23 @@ def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
 # -- helpers ------------------------------------------------------------------
 
 
+def _repin_to_real_kernel(document: dict[str, object]) -> None:
+    """Repin every enforcement-on condition to the installed axor-core version,
+    so the run governs with the REAL kernel (not the reference)."""
+    from lab_contracts import condition_config_hash
+    from lab_runner import axor_available, real_kernel_version
+
+    if not axor_available():
+        raise RunnerError("--real-kernel requested but axor-core is not installed")
+    version = real_kernel_version()
+    experiment: dict[str, object] = document["experiment"]  # type: ignore[assignment]
+    for condition in experiment.get("conditions", []):  # type: ignore[union-attr]
+        if condition.get("enforcement") == "on":
+            condition["kernel"] = version
+            condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
+    print(f"  repinned governed condition(s) to the real kernel: {version}")
+
+
 def _resolve_agent_override(spec: str) -> object:
     """Build a BYOK agent from --agent (cassette:<file> | anthropic:<model>)."""
     from lab_agent import AnthropicBackend, FileCassetteAgent, WrappedModelAgent
@@ -455,6 +569,20 @@ def _resolve_agent_override(spec: str) -> object:
     if kind == "anthropic":
         return WrappedModelAgent(backend=AnthropicBackend(model=param or "claude-opus-4-8"))
     raise RunnerError(f"unknown --agent {spec!r}; use cassette:<file> or anthropic:<model>")
+
+
+def _agent_fingerprint(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
+    """A content fingerprint of the agent that will actually run — folded into
+    run identity so different agents are different runs (review r3)."""
+    if not args.agent:
+        return str(resolved.experiment["agent_ref"])
+    kind, _, param = args.agent.partition(":")
+    if kind == "cassette":
+        try:
+            return "cassette:" + content_hash({"cassette": Path(param).read_text()})
+        except OSError:
+            return f"cassette:{param}"
+    return args.agent  # e.g. anthropic:<model>
 
 
 def _estimate_model(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
@@ -482,7 +610,7 @@ def _confirmed(args: argparse.Namespace) -> bool:
         return True
     if not sys.stdin.isatty():
         return False
-    answer = input(f"Proceed with the run? [y/N] ")
+    answer = input("Proceed with the run? [y/N] ")
     return answer.strip().lower() in ("y", "yes")
 
 
@@ -526,15 +654,22 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
     print(line)
 
 
-def _environment(resolved: ResolvedExperiment) -> dict[str, object]:
+def _environment(resolved: ResolvedExperiment, model: str) -> dict[str, object]:
+    """Record the ACTUAL agent that ran — not always 'scripted' (review §6.1).
+    The bundle stays self-describing: kernel, the real model provider/id, the
+    experiment id, and (when imported) the dataset version."""
     kernels = sorted({str(c["kernel"]) for c in resolved.conditions})
-    return {
+    provider = model.split(":", 1)[0] if ":" in model else (
+        "scripted" if model.startswith("scripted") else
+        "anthropic" if model.startswith("claude") else
+        "cassette" if model.startswith("cassette") else "unknown"
+    )
+    env: dict[str, object] = {
         "kernel_version": kernels[0] if len(kernels) == 1 else ",".join(kernels),
-        "model": {
-            "provider": "scripted",
-            "id": str(resolved.experiment["agent_ref"]),
-        },
+        "model": {"provider": provider, "id": model,
+                  "inference_params": {"experiment_id": str(resolved.experiment["id"])}},
     }
+    return env
 
 
 def _enforcing_condition(
@@ -601,6 +736,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--agent", default=None,
         help="BYOK agent override: cassette:<file> (offline) or anthropic:<model>",
     )
+    p_run.add_argument(
+        "--real-kernel", action="store_true",
+        help="govern with the installed axor-core kernel (not the reference)",
+    )
+    p_run.add_argument(
+        "--overwrite", action="store_true",
+        help="replace a non-empty --out directory (clears stale traces first)",
+    )
     p_run.set_defaults(func=_cmd_run)
 
     p_replay = sub.add_parser("replay", help="recompute verdicts over frozen traces (exact)")
@@ -645,6 +788,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("bundle")
     p_export.add_argument("--out", required=True, help="output directory for cp-deploy.json")
     p_export.add_argument("--pins", default=None, help="regression pins to carry over")
+    p_export.add_argument(
+        "--condition", default=None,
+        help="which enforcing condition to deploy (required when several enforce)",
+    )
     p_export.set_defaults(func=_cmd_export_cp)
 
     p_incident = sub.add_parser(
@@ -653,8 +800,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_incident.add_argument("--trace", required=True, help="a conformant trace/v1 JSON")
     p_incident.add_argument("--scenario", required=True, help="scenario/v1 JSON")
     p_incident.add_argument("--manifests", required=True, help="tool-manifest/v1 list JSON")
+    p_incident.add_argument(
+        "--condition", required=True,
+        help="the EXACT recorded condition/v1 (enforcement, policy, kernel, config_hash)",
+    )
     p_incident.add_argument("--out", required=True)
     p_incident.add_argument("--created", default=None)
+    p_incident.add_argument("--overwrite", action="store_true", help="replace a non-empty --out")
     p_incident.set_defaults(func=_cmd_import_incident)
 
     p_import = sub.add_parser(

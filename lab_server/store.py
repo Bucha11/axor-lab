@@ -11,6 +11,8 @@ separate append-only attestation log, so the publication body stays immutable.
 from __future__ import annotations
 
 import json
+import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +29,52 @@ from lab_contracts.publication import add_reproduction
 from lab_runner import default_registry, replay_bundle
 
 from .errors import NotFound, PublishRejected
+from .recompute import check_aggregates
+
+_ATTESTATION_ID_MAX = 128
+
+
+def _deny_claim_text(trace: dict[str, object]) -> str:
+    """Build the exact DENY claim from the RECORDED decision, never a template.
+
+    The old text always said 'the driving argument is untrusted_derived' — but a
+    kernel can DENY for criticality, a rate limit, budget, missing approval, etc.
+    Here we report the decision's own gate + driving value + labels + recorded
+    reason, and if none is recorded we say so rather than inventing causality."""
+    kernel_version = str(trace["producer"]["kernel_version"])  # type: ignore[index]
+    trace_id = str(trace["trace_id"])
+    values = {str(v["value_id"]): v for v in trace["values"]}  # type: ignore[union-attr]
+    events: list[dict[str, object]] = list(trace["events"])  # type: ignore[arg-type]
+    decision: dict[str, object] | None = None
+    for event in events:
+        if event.get("type") == "gate_decision" and event["decision"]["verdict"] == "DENY":  # type: ignore[index]
+            decision = event["decision"]  # type: ignore[assignment]
+            break
+    if decision is None:
+        return f"On trace {trace_id}, {kernel_version} returns DENY."
+    gate = str(decision.get("gate", "unknown"))
+    tool = next((e.get("tool") for e in events if e.get("type") == "tool_call_intent"), None)
+    driving_id = str(decision.get("driving_value_id", ""))
+    labels = tuple(values.get(driving_id, {}).get("labels", []))  # type: ignore[union-attr]
+    parts = [f"On trace {trace_id}, {kernel_version} returns DENY by gate '{gate}'"]
+    if tool:
+        parts.append(f"on {tool}")
+    if driving_id and driving_id != "v_none":
+        parts.append(f"; driving value {driving_id}")
+        parts.append(f"labelled [{', '.join(labels)}]" if labels else "has no recorded labels")
+    reason = decision.get("reason") or decision.get("projection")
+    tail = f" ({reason})" if reason else ". No further causal explanation was recorded."
+    return " ".join(parts) + tail
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write via a temp file + rename so a crash never leaves partial JSON
+    (review §7.2). The temp file lives in the same directory for an atomic
+    same-filesystem rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 @dataclass
@@ -53,6 +101,7 @@ class PublicationStore:
     known_keys: dict[str, str] = field(default_factory=dict)
     _cache: dict[str, StoredPublication] = field(default_factory=dict)
     _tombstones: set[str] = field(default_factory=set)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -93,6 +142,17 @@ class PublicationStore:
                 "server replay does not match recorded verdicts — refusing to publish"
             )
 
+        # recompute every statistical aggregate from the evidence and reject a
+        # bundle whose uploaded numbers do not follow from its own traces — hash
+        # verification proves internal consistency, NOT that the estimates and n
+        # were actually measured (review r2 Patch 4)
+        mismatches = check_aggregates(bundle, traces)
+        if mismatches:
+            raise PublishRejected(
+                "uploaded aggregates do not match server recomputation: "
+                + "; ".join(mismatches[:5])
+            )
+
         integrity = self._integrity(bundle, signature, author)
         publication = self._mint(bundle, traces, question, license_id, visibility, integrity)
         errors = validate_artifact(publication, "publication")
@@ -100,8 +160,9 @@ class PublicationStore:
             raise PublishRejected(f"publication failed schema validation: {errors}")
 
         stored = StoredPublication(publication=publication, bundle=bundle, traces=traces)
-        self._persist(stored)
-        self._cache[str(publication["publication_id"])] = stored
+        with self._lock:
+            self._persist(stored)
+            self._cache[str(publication["publication_id"])] = stored
         return stored
 
     def _integrity(
@@ -127,33 +188,36 @@ class PublicationStore:
         """Remove a publication from the catalog while PRESERVING its
         append-only attestation record (plan B4 DoD, threat-model §4). The
         bundle/traces/publication body are removed; reproductions.json stays."""
-        stored = self._cache.pop(publication_id, None)
-        if stored is None and publication_id not in self._tombstones:
-            raise NotFound(f"publication {publication_id} not found")
-        directory = self._dir(publication_id)
-        for name in ("publication.json", "bundle.json"):
-            (directory / name).unlink(missing_ok=True)
-        traces_dir = directory / "traces"
-        if traces_dir.is_dir():
-            for path in traces_dir.glob("*.json"):
-                path.unlink()
-        (directory / "tombstone.json").write_text(
-            json.dumps({"publication_id": publication_id, "status": "taken_down"})
-        )
-        self._tombstones.add(publication_id)
+        with self._lock:
+            stored = self._cache.pop(publication_id, None)
+            if stored is None and publication_id not in self._tombstones:
+                raise NotFound(f"publication {publication_id} not found")
+            directory = self._dir(publication_id)
+            for name in ("publication.json", "bundle.json"):
+                (directory / name).unlink(missing_ok=True)
+            traces_dir = directory / "traces"
+            if traces_dir.is_dir():
+                for path in traces_dir.glob("*.json"):
+                    path.unlink()
+            _write_atomic(
+                directory / "tombstone.json",
+                json.dumps({"publication_id": publication_id, "status": "taken_down"}),
+            )
+            self._tombstones.add(publication_id)
 
     def add_attestation(self, publication_id: str, attestation: dict[str, object]) -> StoredPublication:
-        stored = self.get(publication_id)
         errors = validate_artifact(attestation, "attestation")
         if errors:
             raise PublishRejected(f"attestation failed schema validation: {errors}")
         if attestation.get("publication_id") != publication_id:
             raise PublishRejected("attestation.publication_id does not match the target")
-        stored.reproductions = list(
-            add_reproduction(tuple(stored.reproductions), attestation)
-        )
-        self._persist_reproductions(stored)
-        return stored
+        with self._lock:  # serialize the read-modify-write so concurrent attestations don't race
+            stored = self.get(publication_id)
+            stored.reproductions = list(
+                add_reproduction(tuple(stored.reproductions), attestation, self.known_keys)
+            )
+            self._persist_reproductions(stored)
+            return stored
 
     # -- reads ------------------------------------------------------------
 
@@ -164,9 +228,21 @@ class PublicationStore:
         return stored
 
     def catalog(self) -> list[StoredPublication]:
-        return [
-            s for s in self._cache.values() if s.publication.get("visibility") != "private"
-        ]
+        # ONLY public: unlisted is capability-URL-reachable but never listed,
+        # private is never served (review §7 / P0.5)
+        return [s for s in self._cache.values() if s.publication.get("visibility") == "public"]
+
+    def _mint_id(self, bundle_ref: str) -> str:
+        """A 128-bit id (32 hex chars) from the bundle hash (review §6.3 — the
+        old 32-bit id was collision-searchable). Re-publishing the SAME bundle
+        is idempotent (same id); a genuine collision — the id already exists for
+        a DIFFERENT bundle — is rejected."""
+        digest = bundle_ref.removeprefix("sha256:")
+        candidate = f"e_{digest[:32]}"
+        existing = self._cache.get(candidate)
+        if existing is not None and existing.publication.get("bundle_ref") != bundle_ref:
+            raise PublishRejected(f"publication id collision for {candidate}")
+        return candidate
 
     def is_taken_down(self, publication_id: str) -> bool:
         return publication_id in self._tombstones
@@ -202,17 +278,21 @@ class PublicationStore:
         claims: list[dict[str, object]] = []
         denied = self._first_denied(traces)
         if denied is not None:
-            kernel_version = str(denied["producer"]["kernel_version"])  # type: ignore[index]
             claims.append(
                 make_claim(
                     "exactly_replayable",
-                    f"On trace {denied['trace_id']}, {kernel_version} returns DENY; "
-                    "the driving argument is untrusted_derived.",
+                    _deny_claim_text(denied),
                     content_hash(denied),
                     trace_refs=trace_refs,
                     aggregate_refs=aggregate_refs,
                 )
             )
+        # honest agent wording: the default runner drives a deterministic
+        # scripted agent, so the claim says "trials", not "live trials"
+        provider = str(
+            bundle.get("environment", {}).get("model", {}).get("provider", "")  # type: ignore[union-attr]
+        )
+        agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
         for aggregate in aggregates:
             interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
             claims.append(
@@ -221,14 +301,18 @@ class PublicationStore:
                     f"{aggregate['metric']} under {aggregate['condition_id']}: "
                     f"{float(aggregate['estimate']):.2f} "
                     f"[{float(interval['low']):.2f}, {float(interval['high']):.2f}] "
-                    f"over {aggregate['n']} live trials.",
+                    f"over {aggregate['n']} trials{agent_note}, "
+                    "server-recomputed from the traces.",
                     f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
                     trace_refs=trace_refs,
                     aggregate_refs=aggregate_refs,
                 )
             )
+        # the server only reaches here after check_aggregates matched, so every
+        # statistical claim is backed by a server recomputation, not the upload
+        statistics_integrity = "recomputed_from_traces" if aggregates else None
         return build_publication(
-            publication_id=f"e_{bundle_ref[7:15]}",
+            publication_id=self._mint_id(bundle_ref),
             bundle_ref=bundle_ref,
             question=question,
             origin="local",
@@ -236,7 +320,10 @@ class PublicationStore:
             claims=claims,
             license_id=license_id,
             visibility=visibility,
+            statistics_integrity=statistics_integrity,
         )
+
+    # (module-level helper below is used here)
 
     @staticmethod
     def _first_denied(traces: dict[str, dict[str, object]]) -> dict[str, object] | None:
@@ -255,15 +342,18 @@ class PublicationStore:
     def _persist(self, stored: StoredPublication) -> None:
         directory = self._dir(str(stored.publication["publication_id"]))
         (directory / "traces").mkdir(parents=True, exist_ok=True)
-        (directory / "publication.json").write_text(json.dumps(stored.publication, indent=2))
-        (directory / "bundle.json").write_text(json.dumps(stored.bundle, indent=2))
+        _write_atomic(directory / "publication.json", json.dumps(stored.publication, indent=2))
+        _write_atomic(directory / "bundle.json", json.dumps(stored.bundle, indent=2))
         for trace in stored.traces.values():
-            (directory / "traces" / f"{trace['trace_id']}.json").write_text(json.dumps(trace))
+            # filename is a server-computed content hash, NEVER the caller-supplied
+            # trace_id — a hostile trace_id like '../../x' cannot escape traces/
+            name = content_hash(trace).removeprefix("sha256:")
+            _write_atomic(directory / "traces" / f"{name}.json", json.dumps(trace))
         self._persist_reproductions(stored)
 
     def _persist_reproductions(self, stored: StoredPublication) -> None:
         directory = self._dir(str(stored.publication["publication_id"]))
-        (directory / "reproductions.json").write_text(json.dumps(stored.reproductions, indent=2))
+        _write_atomic(directory / "reproductions.json", json.dumps(stored.reproductions, indent=2))
 
     def _load(self, publication_id: str) -> None:
         directory = self._dir(publication_id)
@@ -275,6 +365,12 @@ class PublicationStore:
             for path in sorted(traces_dir.glob("*.json")):
                 trace = json.loads(path.read_text())
                 traces[str(trace["trace_id"])] = trace
+        # re-verify integrity on load: a locally tampered file must not become
+        # trusted catalog state (review §7.3)
+        try:
+            verify_bundle(bundle, traces)
+        except BundleIntegrityError:
+            return  # skip a tampered/corrupt publication rather than trust it
         reproductions_file = directory / "reproductions.json"
         reproductions = (
             json.loads(reproductions_file.read_text()) if reproductions_file.is_file() else []
