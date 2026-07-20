@@ -4,14 +4,26 @@ A live HTTP surface an instrumented agent talks to:
 
   POST /runs                          → { run_id, run_secret }
   POST /runs/{run_id}/events          ← tool_result (values+labels) | tool_call_intent
-       (a tool_call_intent is GATED synchronously — this is the tool proxy
-        dispatch point: the gateway returns ALLOW/DENY before the tool runs)
+       (a tool_call_intent is GATED synchronously — the gateway returns
+        ALLOW/DENY + the authoritative args BEFORE the tool runs)
   POST /runs/{run_id}/finalize        → freeze the run; no further events
   GET  /runs/{run_id}/trace           → the assembled trace/v1 (only after finalize)
 
-The synchronous gate on each intent is what makes an instrumented endpoint
-governance-capable: Lab sees value lineage (carried on the events) and can stop
-a sink before it fires.
+TRUST MODEL — read before calling this a "hard" enforcement boundary. The
+gateway is a synchronous DECISION point, not a tool executor: it returns a
+verdict + the authoritative args a caller must run, but it does not itself invoke
+the caller's tool. Enforcement therefore depends on the caller ROUTING execution
+through the verdict (a cooperating / attested SDK). An untrusted client can
+still ignore an ALLOW's authoritative_args and run something else, and — because
+it supplies the value labels — can mislabel an attacker value as prompt_given,
+which the reference kernel would treat as trusted. That is why an untrusted
+client's trace is `heuristic_attribution` (review r8/r9): the verdict is only as
+sound as the labels, and the labels are self-reported. A real enforcement
+boundary for an untrusted agent needs a trusted runtime that mints labels from
+the tool manifest / observed execution graph, or a signed per-event envelope —
+tracked as roadmap. What the gate DOES guarantee unconditionally: it decides on
+the value the BINDING names (never a client-forged concrete arg, review r8), so
+the recorded evidence and replay can never diverge from the decision.
 
 Concurrency (review r3): the server is threaded, so every run's mutable state is
 guarded. Run creation takes a global lock; all reads/writes of one run take that
