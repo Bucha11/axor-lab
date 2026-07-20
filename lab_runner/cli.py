@@ -137,11 +137,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # so the run stops before the next provider call (review r11). Unset → no bind.
     from lab_agent.cost import CostBudget
 
-    budget = CostBudget(
-        max_usd=getattr(args, "max_usd", None),
-        max_input_tokens=getattr(args, "max_input_tokens", None),
-        max_output_tokens=getattr(args, "max_output_tokens", None),
-    )
+    try:
+        budget = CostBudget(
+            max_usd=getattr(args, "max_usd", None),
+            max_input_tokens=getattr(args, "max_input_tokens", None),
+            max_output_tokens=getattr(args, "max_output_tokens", None),
+        )
+    except ValueError as exc:
+        raise RunnerError(str(exc)) from exc
+
+    # thread the ceiling INTO the agent so its multi-turn loop is guarded before
+    # every provider call — the between-trials check below only bounds overshoot
+    # to whole trials, not to a single trial's fan-out of calls (review r12)
+    if budget.is_set() and hasattr(agent, "budget"):
+        agent.budget = budget  # type: ignore[attr-defined]
+        agent.model = model  # type: ignore[attr-defined]
 
     def _budget_check() -> str | None:
         if not budget.is_set() or not hasattr(agent, "usage"):

@@ -41,7 +41,8 @@ class ModelBackend(Protocol):
     """Turns (messages, tools) into the next `ModelAction` (structural)."""
 
     def next_action(
-        self, messages: list[dict[str, object]], tools: list[dict[str, object]]
+        self, messages: list[dict[str, object]], tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> ModelAction:
         ...
 
@@ -80,8 +81,11 @@ class CassetteBackend:
         return cls(turns=tuple(actions))
 
     def next_action(
-        self, messages: list[dict[str, object]], tools: list[dict[str, object]]
+        self, messages: list[dict[str, object]], tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> ModelAction:
+        # max_output_tokens is honored by the live backend; a cassette replays a
+        # fixed transcript, so it is accepted (protocol parity) and ignored
         if self._cursor >= len(self.turns):
             raise CassetteExhausted(f"cassette has only {len(self.turns)} turn(s)")
         action = self.turns[self._cursor]
@@ -112,12 +116,18 @@ class AnthropicBackend:
     is_deterministic: bool = False
 
     def next_action(
-        self, messages: list[dict[str, object]], tools: list[dict[str, object]]
+        self, messages: list[dict[str, object]], tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> ModelAction:
         client = self._client()
+        # cap this call's output at the budget's remaining output tokens, so a
+        # single call cannot blow far past an output/USD ceiling (review r12).
+        # A remaining budget of 0 would be caught by the pre-call guard before we
+        # get here, so clamp to at least 1 for a well-formed request.
+        cap = 1024 if max_output_tokens is None else max(1, min(1024, max_output_tokens))
         response = client.messages.create(
             model=self.model,
-            max_tokens=1024,
+            max_tokens=cap,
             messages=messages,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
         )
