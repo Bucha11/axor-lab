@@ -8,15 +8,20 @@ deployment topology, notifications/owners. This module emits the first as an
 handoff never reads as "nothing is re-done."
 
 The `config_hash` is the carry-over KEY: it is emitted byte-identical to the
-condition the researcher measured, so the Control Plane governs under exactly
-the config Lab validated.
+RECORDED hash on the condition the researcher measured (never synthesized here),
+so the Control Plane governs under exactly the config Lab validated. Regression
+pins are validated against the bundle's own traces before they carry over — a
+pin for a trace this bundle never contained, or one asserting a verdict sequence
+the frozen trace never produced, is rejected rather than shipped as a CP test.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lab_contracts import condition_config_hash
+from lab_contracts import condition_config_hash, content_hash
+
+_VALID_VERDICTS = frozenset({"ALLOW", "DENY"})
 
 # The four categories that are deliberately NOT reused (control-plane-handoff.md).
 PRODUCTION_TODO = (
@@ -44,6 +49,7 @@ def export_cp(
     bundle: dict[str, object],
     regressions: list[dict[str, object]] | None = None,
     condition_id: str | None = None,
+    traces: dict[str, dict[str, object]] | None = None,
 ) -> CPExport:
     """Build the CP deploy config + production-todo from a verified bundle.
 
@@ -54,28 +60,35 @@ def export_cp(
     governed = _select_condition(bundle, condition_id)
     policy: dict[str, object] = governed.get("policy", {})  # type: ignore[assignment]
     kernel = str(governed["kernel"])
-    # recompute the carry-over key from policy+kernel; assert it matches what the
-    # bundle recorded, so the exported hash is provably the measured config
+    # The carry-over key must be a RECORDED measurement, not a value we
+    # synthesize here and then present as "the config the researcher measured".
+    # A condition with no config_hash means the bundle never fingerprinted the
+    # config it ran under — exporting a freshly-computed hash would fabricate the
+    # provenance the whole handoff rests on (review r12).
+    recorded_raw = governed.get("config_hash")
+    if recorded_raw is None:
+        raise CPExportError(
+            f"condition {governed['id']!r} has no recorded config_hash; refusing to "
+            "synthesize the carry-over key and present it as the measured config"
+        )
     recomputed = condition_config_hash(kernel, policy)
-    recorded = str(governed.get("config_hash", recomputed))
+    recorded = str(recorded_raw)
     if recorded != recomputed:
         raise CPExportError(
             f"condition config_hash {recorded} does not match its policy+kernel "
             f"({recomputed}); refusing to export a config the researcher did not measure"
         )
 
+    carried_pins = _validate_pins(bundle, regressions or [], traces or {})
     baseline_id = _baseline_condition_id(bundle)
     earned, supporting = _earned_for(bundle, str(governed["id"]), baseline_id)
     config: dict[str, object] = {
         "schema_version": EXPORT_SCHEMA,
         "kernel": kernel,
         "policy": policy,
-        "config_hash": recomputed,  # the carry-over key, byte-identical
+        "config_hash": recorded,  # the carry-over key, the RECORDED measurement
         "tool_manifests": bundle["tool_manifests"],
-        "regressions": [
-            {"trace_id": r["trace_id"], "expected_verdict": r["expected_verdict"]}
-            for r in (regressions or [])
-        ],
+        "regressions": carried_pins,
         "source": {
             "bundle_id": bundle.get("bundle_id"),
             "condition_id": governed["id"],
@@ -90,6 +103,89 @@ def export_cp(
         production_todo=_render_todo(),
         earned_bridge=earned,
     )
+
+
+def _validate_pins(
+    bundle: dict[str, object],
+    regressions: list[dict[str, object]],
+    traces: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    """Every carried regression pin must bind to a REAL trace in this bundle.
+
+    The old export copied {trace_id, expected_verdict} verbatim from whatever pin
+    file it was handed — so a pin for a trace this bundle never contained, or one
+    whose claimed verdict sequence the frozen trace never produced, would ride
+    into the production Control Plane config as a governance regression test that
+    can never actually run (or, worse, one asserting the wrong expected outcome).
+    Each pin is now validated against the evidence (review r12):
+      - trace_id names a trace in the bundle;
+      - trace_ref (if present) equals that trace's content hash — no stale/tampered pin;
+      - the trace is cited by a completed trial (so scenario/condition resolve);
+      - expected_verdict is a real verdict;
+      - expected_sequence (if present) equals the trace's recorded gate verdicts.
+    The carried pin records the FULL validated shape (ref, ordered sequence,
+    scenario, condition) so the CP re-runs exactly the pinned incident."""
+    if not regressions:
+        return []
+    if not traces:
+        raise CPExportError(
+            "regression pins were supplied but no bundle traces to validate them "
+            "against — refusing to carry unvalidated pins into a production config"
+        )
+    by_id = {str(t["trace_id"]): t for t in traces.values()}
+    trials_by_ref: dict[str, dict[str, object]] = {}
+    for trial in bundle["trials"]:  # type: ignore[union-attr]
+        if trial.get("status") == "completed":
+            trials_by_ref[str(trial.get("trace_ref"))] = trial
+    carried: list[dict[str, object]] = []
+    for i, raw in enumerate(regressions):
+        if not isinstance(raw, dict):
+            raise CPExportError(f"regression pin #{i} is not an object")
+        tid = str(raw.get("trace_id", ""))
+        if not tid:
+            raise CPExportError(f"regression pin #{i} has no trace_id")
+        verdict = str(raw.get("expected_verdict", ""))
+        if verdict not in _VALID_VERDICTS:
+            raise CPExportError(
+                f"pin {tid!r}: expected_verdict {verdict!r} is not one of {sorted(_VALID_VERDICTS)}"
+            )
+        trace = by_id.get(tid)
+        if trace is None:
+            raise CPExportError(
+                f"pin {tid!r}: no such trace in the bundle — refusing to carry a pin "
+                "for a trace this bundle does not contain"
+            )
+        actual_ref = content_hash(trace)
+        if "trace_ref" in raw and str(raw["trace_ref"]) != actual_ref:
+            raise CPExportError(
+                f"pin {tid!r}: trace_ref does not match the trace's content hash "
+                "(stale or tampered pin)"
+            )
+        trial = trials_by_ref.get(actual_ref)
+        if trial is None:
+            raise CPExportError(
+                f"pin {tid!r}: trace is not cited by any completed trial (orphan pin)"
+            )
+        recorded_sequence = [
+            str(e["decision"]["verdict"]) for e in trace["events"]  # type: ignore[index,union-attr]
+            if e.get("type") == "gate_decision"
+        ]
+        if "expected_sequence" in raw:
+            claimed = [str(v) for v in raw["expected_sequence"]]  # type: ignore[union-attr]
+            if claimed != recorded_sequence:
+                raise CPExportError(
+                    f"pin {tid!r}: expected_sequence {claimed} does not match the frozen "
+                    f"trace's recorded verdicts {recorded_sequence}"
+                )
+        carried.append({
+            "trace_id": tid,
+            "trace_ref": actual_ref,
+            "expected_verdict": verdict,
+            "expected_sequence": recorded_sequence,
+            "scenario_id": str(trial.get("scenario_id")),
+            "condition_id": str(trial.get("condition_id")),
+        })
+    return carried
 
 
 def earned_bridge(bundle: dict[str, object], condition_id: str | None = None) -> bool:

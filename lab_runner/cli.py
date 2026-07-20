@@ -456,15 +456,15 @@ def _publish_to_server(
 def _cmd_export_cp(args: argparse.Namespace) -> int:
     from .cp_export import CPExportError, export_cp
 
-    bundle, _ = read_bundle_dir(Path(args.bundle))
+    bundle, traces = read_bundle_dir(Path(args.bundle))
     regressions: list[dict[str, object]] = []
     if args.pins:
-        regressions = [
-            {"trace_id": p["trace_id"], "expected_verdict": p["expected_verdict"]}
-            for p in json.loads(Path(args.pins).read_text())
-        ]
+        # pass the FULL pin objects (trace_ref + expected_sequence too) so
+        # export_cp can validate each against the bundle's traces before it
+        # carries the pin into a production Control Plane config (review r12)
+        regressions = list(json.loads(Path(args.pins).read_text()))
     try:
-        export = export_cp(bundle, regressions, condition_id=args.condition)
+        export = export_cp(bundle, regressions, condition_id=args.condition, traces=traces)
     except CPExportError as exc:
         raise RunnerError(str(exc)) from exc
     out = Path(args.out)
