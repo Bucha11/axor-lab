@@ -18,6 +18,12 @@ FIDELITY_WARNING = (
     "provenance fidelity is heuristic_attribution: lineage is best-effort, "
     "not sound; this chain is not presented as a guarantee"
 )
+EXPLICIT_UNVERIFIED_WARNING = (
+    "provenance fidelity 'explicit_flow_tracked' is SELF-REPORTED by the trace "
+    "producer and is NOT cryptographically verified — Lab has no attestation "
+    "binding this lineage to a trusted runtime, so it is treated as heuristic "
+    "for this evidence view (a forged claim would otherwise render as sound)"
+)
 COUNTERFACTUAL_CAVEAT = (
     "exact for the verdict over the recorded events; does not assert the "
     "governed agent would have reached an identical call (behavioral "
@@ -70,8 +76,25 @@ def build_evidence_case(
         "note": EXPLICIT_FLOW_NOTE,
     }
     producer: dict[str, object] = trace["producer"]  # type: ignore[assignment]
-    if producer.get("provenance_fidelity") == "heuristic_attribution":
+    # CLAIMED vs VERIFIED fidelity (review r13). The producer self-declares
+    # provenance_fidelity, and the schema only checks the enum — nothing binds an
+    # `explicit_flow_tracked` claim to a trusted runtime that actually tracked the
+    # flow, and the server's hash/replay checks prove only that the bytes are
+    # self-consistent, not that the lineage was soundly assembled. Lab has no
+    # attestation mechanism for that yet, so an explicit claim is reported as
+    # self_reported (unverified) and STILL carries a warning — otherwise a forged
+    # explicit_flow_tracked renders as a sound provenance chain with no caveat.
+    claimed = str(producer.get("provenance_fidelity", "heuristic_attribution"))
+    # no attestation path exists yet, so an explicit claim is never VERIFIED from
+    # stored bytes — it is downgraded to self_reported; a heuristic claim is
+    # already honest and stays as-is
+    if claimed == "heuristic_attribution":
+        verified = "heuristic_attribution"
         case["fidelity_warning"] = FIDELITY_WARNING
+    else:
+        verified = "self_reported"
+        case["fidelity_warning"] = EXPLICIT_UNVERIFIED_WARNING
+    case["fidelity"] = {"claimed": claimed, "verified": verified}
     return case
 
 

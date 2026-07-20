@@ -79,6 +79,23 @@ class TestEvidenceCase(unittest.TestCase):
             degraded, self.scenario, self.governed, self.kernel, self.manifests
         )
         self.assertIn("fidelity_warning", case)
+        self.assertEqual(case["fidelity"]["claimed"], "heuristic_attribution")  # type: ignore[index]
+        self.assertEqual(case["fidelity"]["verified"], "heuristic_attribution")  # type: ignore[index]
+
+    def test_self_reported_explicit_fidelity_is_not_presented_as_verified(self) -> None:
+        # a producer can WRITE provenance_fidelity=explicit_flow_tracked, but the
+        # bundle carries no attestation that a trusted runtime tracked the flow —
+        # so the EvidenceCase must NOT render it as sound: verified downgrades to
+        # self_reported and a warning still fires (review r13)
+        claimed = support.deep(self.ungoverned_trace)
+        claimed["producer"]["provenance_fidelity"] = "explicit_flow_tracked"  # type: ignore[index]
+        case = build_evidence_case(
+            claimed, self.scenario, self.governed, self.kernel, self.manifests
+        )
+        self.assertEqual(case["fidelity"]["claimed"], "explicit_flow_tracked")  # type: ignore[index]
+        self.assertEqual(case["fidelity"]["verified"], "self_reported")  # type: ignore[index]
+        self.assertIn("fidelity_warning", case)  # a forged claim is NOT silently sound
+        self.assertIn("SELF-REPORTED", case["fidelity_warning"])  # type: ignore[index]
 
 
 if __name__ == "__main__":
