@@ -407,10 +407,23 @@ class PublicationStore:
             # an independent-samples comparison is exploratory — never present it
             # as a paired significance result (review r4)
             design = str(aggregate.get("comparison_design", "matched_pairs"))
-            design_note = (
-                " independent-samples comparison (exploratory; not a paired significance test)"
-                if design == "independent_samples" else ""
-            )
+            if design == "independent_samples":
+                design_note = (
+                    " independent-samples comparison (exploratory; not a paired significance test)"
+                )
+            elif design == "matched_pairs":
+                # the server recomputes the McNemar ARITHMETIC over the stored
+                # pairing, but it cannot PROVE the observations are truly paired —
+                # that rests on environment.model.provider, an uploader-controlled
+                # string. Say so, so a paired p-value is never read as attested
+                # (review r14).
+                design_note = (
+                    " matched-pairs design is UPLOADER-DECLARED, not attested: the recompute "
+                    "verifies the arithmetic over the stored pairing, not that the observations "
+                    "are genuinely paired (no signed execution receipt)"
+                )
+            else:
+                design_note = ""
             claims.append(
                 make_claim(
                     "statistically_reproducible",
