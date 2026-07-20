@@ -40,7 +40,7 @@ from .errors import ExperimentFileError, RunnerError
 from .evidence import build_evidence_case
 from .experiment_file import ResolvedExperiment, load_axl, resolve
 from .kernel import Kernel, default_registry
-from .regression import STATUS_DIFFERS, RegressionPin, check_pins
+from .regression import STATUS_DIFFERS, RegressionPin, check_pins, pin
 from .replay import replay_bundle
 from .runner import run_experiment_suite
 
@@ -235,15 +235,21 @@ def _cmd_pin(args: argparse.Namespace) -> int:
     out = Path(args.out)
     pins: list[dict[str, object]] = json.loads(out.read_text()) if out.is_file() else []
     pins = [p for p in pins if p["trace_id"] != args.trace_id]
+    # use the regression model's pin(), which records the WHOLE ordered verdict
+    # sequence — not just the final verdict. Persisting only expected_verdict made
+    # regress compare a multi-call trace's real sequence (ALLOW, ALLOW, DENY) to a
+    # singleton (DENY) and cry regression on an unchanged trace/kernel (review r12).
+    p = pin(trace, args.expected)
     pins.append(
         {
-            "trace_id": args.trace_id,
-            "trace_ref": content_hash(trace),
-            "expected_verdict": args.expected,
+            "trace_id": p.trace_id,
+            "trace_ref": p.trace_ref,
+            "expected_verdict": p.expected_verdict,
+            "expected_sequence": list(p.expected_sequence),
         }
     )
     out.write_text(json.dumps(pins, indent=2))
-    print(f"pinned {args.trace_id} -> expected {args.expected} ({out})")
+    print(f"pinned {args.trace_id} -> expected {list(p.expected_sequence)} ({out})")
     return EXIT_OK
 
 
@@ -255,12 +261,14 @@ def _cmd_regress(args: argparse.Namespace) -> int:
             trace_id=str(p["trace_id"]),
             trace_ref=str(p["trace_ref"]),
             expected_verdict=str(p["expected_verdict"]),
+            # restore the pinned ORDERED sequence (default to the singleton for
+            # older pin files) so a multi-call trace is compared correctly (r12)
+            expected_sequence=tuple(str(v) for v in p.get("expected_sequence", ())),
         )
         for p in pins_raw
     )
     condition = _enforcing_condition(bundle, args.condition)
     version = args.kernel or str(condition["kernel"])
-    inputs = _scenario_inputs(bundle, traces, pins)
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     if args.disable_taint_floor:
         # explicit variant demonstration: force the reference kernel with the
@@ -272,7 +280,13 @@ def _cmd_regress(args: argparse.Namespace) -> int:
         # taint-floor kernel (review r6: one kernel path everywhere)
         kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
                                 default_registry((version,)))
-    results = check_pins(pins, traces, condition, kernel, manifests, inputs)
+    # each pinned trace replays against ITS OWN scenario's inputs — a single
+    # shared inputs dict would replay every pin under the first scenario's
+    # allowlist / effect-resolution inputs (review r12)
+    results = check_pins(
+        pins, traces, condition, kernel, manifests,
+        inputs_for=lambda trace: _scenario_for(bundle, trace).get("inputs", {}),  # type: ignore[union-attr,arg-type]
+    )
     differs = [r for r in results if r["status"] == STATUS_DIFFERS]
     for result in results:
         print(
@@ -829,19 +843,6 @@ def _scenario_for(bundle: dict[str, object], trace: dict[str, object]) -> dict[s
         if scenario["name"] == scenario_id:
             return scenario
     raise RunnerError(f"scenario {scenario_id} not in bundle")
-
-
-def _scenario_inputs(
-    bundle: dict[str, object],
-    traces: dict[str, dict[str, object]],
-    pins: tuple[RegressionPin, ...],
-) -> dict[str, object]:
-    if not pins:
-        raise RunnerError("no pins to check")
-    trace = traces.get(pins[0].trace_id)
-    if trace is None:
-        raise RunnerError(f"pinned trace {pins[0].trace_id} not found in bundle")
-    return _scenario_for(bundle, trace).get("inputs", {})  # type: ignore[return-value]
 
 
 def _first_denied_trace(traces: dict[str, dict[str, object]]) -> dict[str, object] | None:
