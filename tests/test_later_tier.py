@@ -374,6 +374,7 @@ class TestInstrumentedGateway(unittest.TestCase):
             post(f"/runs/{run_id}/events", {
                 "type": "tool_result", "tool": "read_txns",
                 "values": [{"value_id": "v_r", "preview": support.ATTACKER_IBAN,
+                            "decision_value": support.ATTACKER_IBAN,
                             "labels": ["untrusted_derived"],
                             "sources": [{"kind": "external_read",
                                          "origin_ref": "tool_result:read_txns:transactions[1].description"}]}],
@@ -578,8 +579,8 @@ class TestGatewayFailClosed(unittest.TestCase):
 
             opened = post("/runs", {})[1]
             run_id, secret = opened["run_id"], opened["run_secret"]
-            v = {"value_id": "v_dup", "labels": ["untrusted_derived"],
-                 "sources": [{"kind": "external_read"}]}
+            v = {"value_id": "v_dup", "decision_value": support.ATTACKER_IBAN,
+                 "labels": ["untrusted_derived"], "sources": [{"kind": "external_read"}]}
             self.assertEqual(post(f"/runs/{run_id}/events",
                                   {"type": "tool_result", "tool": "read_txns", "values": [v]}, secret=secret)[0], 200)
             # re-emitting the same value_id (redefining its lineage) is rejected

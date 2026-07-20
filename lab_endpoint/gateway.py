@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from lab_runner.kernel import Kernel, default_registry
+from lab_runner.replay import resolve_args
 
 from .instrumented import PRODUCER_MODE
 
@@ -113,9 +114,13 @@ def make_gateway(
 
     def gate_intent(run: _Run, tool: str, arg_bindings: dict[str, str],
                     args: dict[str, object]) -> dict[str, object]:
-        run.events.append({"seq": run.seq, "node": "root", "type": "tool_call_intent",
-                           "tool": tool, "call_id": f"call_root_{run.seq}", "arg_bindings": arg_bindings})
+        """Gate an intent. `args` are the AUTHORITATIVE args assembled from the
+        bound ledger values (resolve_args) — never the caller's concrete args,
+        which are validated as an assertion by the handler before we get here.
+        So the value the gate decides on is the value the labels describe."""
         call_id = f"call_root_{run.seq}"
+        run.events.append({"seq": run.seq, "node": "root", "type": "tool_call_intent",
+                           "tool": tool, "call_id": call_id, "arg_bindings": arg_bindings})
         run.seq += 1
         decision = kernel.decide(
             enforcement=str(condition["enforcement"]), manifest=manifests[tool], args=args,
@@ -214,6 +219,13 @@ def make_gateway(
                     if "labels" not in value:
                         self._json(400, {"error": f"value {vid!r} has no labels"})
                         return
+                    # a value must carry its authoritative decision_value so the
+                    # gate can reconstruct the args from bindings alone (r8 P0) —
+                    # unless it is sensitive (redacted), where the sentinel makes
+                    # the gate fail closed on that value
+                    if "decision_value" not in value and "sensitive" not in value.get("labels", []):
+                        self._json(400, {"error": f"value {vid!r} has no decision_value (and is not sensitive)"})
+                        return
                     known.add(vid)
                     run.values.append(value)
                 run.events.append({"seq": run.seq, "node": "root", "type": "tool_result",
@@ -226,14 +238,39 @@ def make_gateway(
                 return
             if event.get("type") == "tool_call_intent":
                 bindings = dict(event.get("arg_bindings", {}))
-                known = {v["value_id"] for v in run.values}
-                unknown = [vid for vid in bindings.values() if vid not in known]
+                values_by_id = {str(v["value_id"]): v for v in run.values}
+                unknown = [vid for vid in bindings.values() if vid not in values_by_id]
                 if unknown:
                     # an intent binding an unknown value id fails closed; also a
                     # protocol violation (the value must be registered first)
                     self._json(400, {"error": f"arg_bindings reference unknown value ids {unknown}"})
                     return
-                decision = gate_intent(run, str(event["tool"]), bindings, dict(event.get("args", {})))
+                # EVERY decision-relevant arg (driving args + args named in a
+                # resolve rule) must be bound — otherwise a client could dodge an
+                # escalation rule by leaving the arg unbound, so the gate decides
+                # over one effect class while the tool runs another (r8 P0).
+                tool = str(event["tool"])
+                relevant = _decision_relevant_args(manifests.get(tool, {}))
+                unbound_relevant = sorted(relevant - set(bindings))
+                if unbound_relevant:
+                    self._json(409, {"error": f"decision-relevant args must be bound to values: {unbound_relevant}"})
+                    return
+                # the gate decides on args assembled from the bound ledger values
+                # ONLY — assembled the same way exact replay does (r8 P0). A
+                # client cannot make the gate see a clean value while the tool
+                # would receive a tainted one.
+                authoritative = resolve_args(bindings, values_by_id)
+                # a client-supplied `args` is accepted ONLY as an assertion of
+                # what it will execute; any BOUND arg must canonical-hash-match
+                # its provenance value, else the intent is refused (no ALLOW, no
+                # trace mutation). Unbound asserted args can't change the verdict
+                # (all decision-relevant args are bound, checked above).
+                if "args" in event:
+                    mismatch = _assertion_mismatch(dict(event.get("args", {})), authoritative)
+                    if mismatch is not None:
+                        self._json(409, {"error": f"args assertion conflicts with bound provenance: {mismatch}"})
+                        return
+                decision = gate_intent(run, tool, bindings, authoritative)
                 self._json(200, {"decision": decision})  # the tool proxy verdict
                 return
             self._json(400, {"error": "unknown event type"})
@@ -284,6 +321,37 @@ def make_gateway(
             self.wfile.write(body)
 
     return ThreadingHTTPServer((host, port), Handler)
+
+
+def _decision_relevant_args(manifest: dict[str, object]) -> set[str]:
+    """The arg names that can change the gate's verdict for this tool: its
+    declared driving args plus any arg named in an effect-resolve rule's
+    `when`. These MUST be bound to ledger values so the gate decides over the
+    same concrete values the tool will run — an unbound one could dodge an
+    escalation rule (r8 P0)."""
+    effect: dict[str, object] = manifest.get("effect", {})  # type: ignore[assignment]
+    names: set[str] = set(effect.get("driving_args", []))  # type: ignore[arg-type]
+    for rule in effect.get("resolve", []):  # type: ignore[union-attr]
+        names |= set(rule.get("when", {}).keys())
+    return names
+
+
+def _assertion_mismatch(
+    asserted: dict[str, object], authoritative: dict[str, object]
+) -> str | None:
+    """Compare the caller's asserted concrete args against the authoritative
+    args derived from the ledger bindings. Every arg that is BOTH asserted and
+    bound must be equal by JCS content hash (so typing/ordering can't smuggle a
+    difference past a shallow ==); returns a reason string on the first
+    mismatch, else None. Unbound asserted args are ignored here — the handler
+    has already required every decision-relevant arg to be bound, so an unbound
+    asserted arg cannot influence the verdict."""
+    from lab_contracts import content_hash
+
+    for name, value in authoritative.items():
+        if name in asserted and content_hash(asserted[name]) != content_hash(value):
+            return f"arg {name!r} concrete value does not match its bound provenance value"
+    return None
 
 
 def _reject_constant(_name: str) -> object:
