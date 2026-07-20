@@ -250,7 +250,12 @@ def _cmd_pin(args: argparse.Namespace) -> int:
     # sequence — not just the final verdict. Persisting only expected_verdict made
     # regress compare a multi-call trace's real sequence (ALLOW, ALLOW, DENY) to a
     # singleton (DENY) and cry regression on an unchanged trace/kernel (review r12).
-    p = pin(trace, args.expected)
+    # pin() also rejects an expected_verdict that contradicts the trace's final
+    # recorded verdict (review r13) — surface that as a clean CLI error.
+    try:
+        p = pin(trace, args.expected)
+    except ValueError as exc:
+        raise RunnerError(str(exc)) from exc
     pins.append(
         {
             "trace_id": p.trace_id,

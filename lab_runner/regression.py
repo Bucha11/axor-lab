@@ -40,15 +40,30 @@ class RegressionPin:
 
 
 def pin(trace: dict[str, object], expected_verdict: str) -> RegressionPin:
+    """Pin a frozen trace to its recorded verdict sequence.
+
+    `expected_verdict` is the headline verdict the user asserts. It MUST equal
+    the trace's final recorded verdict — a `pin deny-trace ALLOW` used to produce
+    a pin whose `expected_verdict` (ALLOW) contradicted its `expected_sequence`
+    ([DENY]); since regression treats the sequence as authoritative, that pin
+    reported a MATCH while printing "expected ALLOW", an internally inconsistent
+    result (review r13). Reject the contradiction at pin time."""
     recorded = tuple(
         str(e["decision"]["verdict"]) for e in trace["events"]  # type: ignore[index,union-attr]
         if e.get("type") == "gate_decision"
     )
+    sequence = recorded or (expected_verdict,)
+    if expected_verdict != sequence[-1]:
+        raise ValueError(
+            f"expected_verdict {expected_verdict!r} does not match the trace's final "
+            f"recorded verdict {sequence[-1]!r}; a pin cannot assert a headline verdict "
+            "the frozen trace never produced"
+        )
     return RegressionPin(
         trace_id=str(trace["trace_id"]),
         trace_ref=content_hash(trace),
         expected_verdict=expected_verdict,
-        expected_sequence=recorded or (expected_verdict,),
+        expected_sequence=sequence,
     )
 
 

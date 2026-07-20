@@ -79,6 +79,19 @@ class TestPerScenarioInputs(unittest.TestCase):
         self.assertEqual(wrong[0]["actual"], "ALLOW")
 
 
+class TestPinVerdictConsistency(unittest.TestCase):
+    """A pin cannot assert a headline verdict the frozen trace never produced
+    (review r13)."""
+
+    def test_pin_rejects_a_verdict_that_contradicts_the_final_recorded_one(self) -> None:
+        deny_trace = _synthetic_multi_decision_trace()  # sequence ends in DENY
+        with self.assertRaises(ValueError) as ctx:
+            pin(deny_trace, "ALLOW")
+        self.assertIn("final recorded verdict", str(ctx.exception))
+        # the consistent pin is fine
+        self.assertEqual(pin(deny_trace, "DENY").expected_sequence[-1], "DENY")
+
+
 class TestRegressionHonorsReplayStatus(unittest.TestCase):
     """A structurally MALFORMED trace whose recomputed verdict sequence happens
     to equal the pin must NOT be reported as a match (review r13)."""

@@ -177,6 +177,14 @@ def _validate_pins(
                     f"pin {tid!r}: expected_sequence {claimed} does not match the frozen "
                     f"trace's recorded verdicts {recorded_sequence}"
                 )
+        # the headline expected_verdict must equal the final recorded verdict —
+        # a pin asserting ALLOW over a trace whose sequence ends in DENY is
+        # internally contradictory and must not become a CP regression (r13)
+        if recorded_sequence and verdict != recorded_sequence[-1]:
+            raise CPExportError(
+                f"pin {tid!r}: expected_verdict {verdict!r} contradicts the trace's final "
+                f"recorded verdict {recorded_sequence[-1]!r}"
+            )
         carried.append({
             "trace_id": tid,
             "trace_ref": actual_ref,
