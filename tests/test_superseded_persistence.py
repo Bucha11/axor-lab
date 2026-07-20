@@ -51,6 +51,8 @@ class TestSupersededPersistence(unittest.TestCase):
             out.mkdir()
             path = write_superseded_attempts(out, result.superseded)
             self.assertIsNotNone(path)
+            # honest naming: it is an unverified audit trail, not signed evidence
+            self.assertTrue(path.name.endswith(".unverified.json"))
             # the audit log persists the prior attempt AND its trace on disk
             persisted = json.loads(path.read_text())
             self.assertEqual(len(persisted), 1)
