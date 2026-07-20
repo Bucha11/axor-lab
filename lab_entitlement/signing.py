@@ -40,14 +40,22 @@ def verify_license(license_json: str, vendor_pubkey_hex: str) -> License:
         )
     except (bad_signature, ValueError) as exc:
         raise LicenseError("license signature invalid (not signed by the vendor)") from exc
-    return parse_license_fields(fields)
+    # the signature only proves authorship of the bytes, not that the fields are
+    # well-formed — validate strictly and normalize any error to LicenseError
+    # (never leak a raw KeyError/TypeError) (review r11)
+    try:
+        return parse_license_fields(fields)
+    except LicenseError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LicenseError(f"malformed license fields: {exc}") from exc
 
 
 def _signing_key(privkey_hex: str) -> object:
     try:
         from nacl.signing import SigningKey  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover - exercised only without PyNaCl
-        raise CryptoUnavailable("PyNaCl not installed; `pip install axor-lab[byok]`") from exc
+        raise CryptoUnavailable("PyNaCl not installed; `pip install axor-lab[crypto]`") from exc
     return SigningKey(bytes.fromhex(privkey_hex))
 
 
@@ -56,5 +64,5 @@ def _nacl() -> tuple[object, type[BaseException]]:
         from nacl.exceptions import BadSignatureError  # noqa: PLC0415
         from nacl.signing import VerifyKey  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover
-        raise CryptoUnavailable("PyNaCl not installed; `pip install axor-lab[byok]`") from exc
+        raise CryptoUnavailable("PyNaCl not installed; `pip install axor-lab[crypto]`") from exc
     return VerifyKey, BadSignatureError
