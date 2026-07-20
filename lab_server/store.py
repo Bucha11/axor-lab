@@ -302,9 +302,10 @@ class PublicationStore:
         reproductions_file = directory / "reproductions.json"
         if reproductions_file.is_file():
             # re-derive a TRUSTED log from the on-disk bytes: re-check kind,
-            # re-dedup, re-verify signatures (review r8) rather than trust the file
+            # re-dedup, re-verify signatures, and bind to THIS publication_id
+            # (review r8/r9) rather than trust the file
             raw = tuple(json.loads(reproductions_file.read_text()))
-            return list(rebuild_reproduction_log(raw, self.known_keys))
+            return list(rebuild_reproduction_log(raw, self.known_keys, publication_id))
         raise NotFound(f"publication {publication_id} not found")
 
     # -- internals --------------------------------------------------------
@@ -486,9 +487,10 @@ class PublicationStore:
             return
         reproductions_file = directory / "reproductions.json"
         # re-derive a trusted log from disk: re-check kind, re-dedup, re-verify
-        # signatures — never trust a persisted `verified` flag (review r8)
+        # signatures, bind to THIS publication — never trust a persisted `verified`
+        # flag or an attestation transplanted from another publication (review r8/r9)
         raw = tuple(json.loads(reproductions_file.read_text())) if reproductions_file.is_file() else ()
-        reproductions = list(rebuild_reproduction_log(raw, self.known_keys))
+        reproductions = list(rebuild_reproduction_log(raw, self.known_keys, publication_id))
         self._cache[publication_id] = StoredPublication(
             publication=publication, bundle=bundle, traces=traces, reproductions=reproductions,
             author=author if integrity == "signed" else None,
