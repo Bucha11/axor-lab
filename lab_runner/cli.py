@@ -647,8 +647,21 @@ def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
 
 
 def _repin_to_real_kernel(document: dict[str, object]) -> None:
-    """Repin every enforcement-on condition to the installed axor-core version,
-    so the run governs with the REAL kernel (not the reference)."""
+    """Repin EVERY condition — baseline included — to the installed axor-core
+    version, so the run governs with the real kernel.
+
+    Repinning only the enforcement-on conditions left the baseline on the
+    reference kernel, so the compare no longer isolated enforcement: it mixed an
+    enforcement change WITH a kernel change (the condition contract wants one
+    kernel across the compared conditions). It also produced a bundle with two
+    distinct condition kernels, so `_environment` wrote a comma-joined
+    `kernel_version` that `verify_bundle` rejects — meaning the command ran every
+    trial (paid model calls included) and only THEN failed at save (review r13).
+
+    The real backend handles `enforcement == "off"` as observe-only (an ALLOW
+    with observation still on, no gates applied), so a baseline on the real
+    kernel behaves identically to one on the reference kernel — but now both
+    arms share one kernel, and the bundle has a single kernel_version."""
     from lab_contracts import condition_config_hash
     from lab_runner import axor_available, real_kernel_version
 
@@ -657,10 +670,9 @@ def _repin_to_real_kernel(document: dict[str, object]) -> None:
     version = real_kernel_version()
     experiment: dict[str, object] = document["experiment"]  # type: ignore[assignment]
     for condition in experiment.get("conditions", []):  # type: ignore[union-attr]
-        if condition.get("enforcement") == "on":
-            condition["kernel"] = version
-            condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
-    print(f"  repinned governed condition(s) to the real kernel: {version}")
+        condition["kernel"] = version
+        condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
+    print(f"  repinned ALL conditions (baseline + governed) to the real kernel: {version}")
 
 
 def _resolve_agent_override(spec: str) -> object:
@@ -834,9 +846,15 @@ def _environment(
     if usage is not None:
         inference_params["usage"] = usage  # actual tokens + spend, recorded in the bundle
     env: dict[str, object] = {
-        "kernel_version": kernels[0] if len(kernels) == 1 else ",".join(kernels),
         "model": {"provider": provider, "id": model, "inference_params": inference_params},
     }
+    # the global kernel_version is a convenience that only makes sense when every
+    # condition shares one kernel — verify_bundle requires it to equal a condition
+    # kernel. Emitting a comma-joined pseudo-value for a mixed-kernel bundle would
+    # fail that check AFTER every (paid) trial ran; omit it instead (each trace's
+    # producer.kernel_version, bound to its own condition, stays authoritative).
+    if len(kernels) == 1:
+        env["kernel_version"] = kernels[0]
     return env
 
 
