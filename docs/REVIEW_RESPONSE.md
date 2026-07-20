@@ -232,3 +232,23 @@ governance-grade verdict from self-reported labels), plus a cryptographic
 per-event envelope; a server-signed acceptance receipt covering the WHOLE record
 (stronger than the author-signature receipt for integrity); a first-class
 `attempts` graph in the bundle contract; and hash-chained attestation logs.
+
+## Tenth review round — contract-doc drift + complete tool calls + cold-load resilience
+
+No new P0 bypass this round. The fixes: bring the endpoint CONTRACT into line
+with the advisory-model code, make the authoritative call complete, harden
+startup against a single corrupt file, and name the audit artifact honestly.
+Suite green (410 tests).
+
+| Round-10 finding | Fix | Proof |
+|---|---|---|
+| **P1** `contracts/endpoint-protocol.md` still described a system that doesn't exist — "governance-capable", a nonexistent `POST /runs/{id}/tools/{call_id}/result` dispatch route, "gateway dispatches the tool", SSE events, and `explicit_flow_tracked` "if the SDK carries labels" — while the README was honest | rewrote the protocol as the real advisory decision API: actual POST /events (intent → `{decision, authoritative_args}`) / finalize / trace routes; decision point, not executor; fidelity is heuristic by default, `explicit_flow_tracked` only under an attested `trusted_runtime`; roadmap options listed | `contracts/endpoint-protocol.md` |
+| **P1** `authoritative_args` was only the decision-relevant args — for send_money (required recipient+amount, driving recipient) an ALLOW returned `{recipient}` and dropped the required `amount`, so a proxy had to top it up with an unbound, unrecorded value | `gated_args` now requires a binding for the union of decision-relevant args, `args_schema.required`, and every arg the caller will pass; `authoritative_args` is the complete executable call, each arg a bound ledger value | `test_gateway_args_binding.py::test_required_arg_must_be_bound_for_a_complete_call` |
+| **P1/P2** `PublicationStore.__post_init__` called `_load` with no error isolation, and `_load` / `rebuild_reproduction_log` did unguarded `json.loads` + `.get()` on each entry — one `{broken` file or a non-object array element could crash the WHOLE catalog on startup | each directory load is isolated (quarantine-not-fatal); `rebuild_reproduction_log` skips non-dict entries; a corrupt reproductions/receipt file degrades gracefully instead of dropping the publication | `test_cold_load_resilience.py` |
+| **P2** the superseded audit sidecar was a non-atomic `superseded_attempts.json` with no hash/schema — its name implied bundle-grade integrity | renamed to `superseded_attempts.unverified.json`, written atomically (temp + rename); a content-hashed, schema-validated attempts graph inside the bundle contract is the stronger follow-up | `test_superseded_persistence.py` |
+
+Still deferred (documented): a trusted runtime that mints labels from the tool
+manifest / observed execution graph (and/or a signed per-event envelope, and/or a
+genuine server-side dispatch route) so an untrusted gateway client can earn a
+governance-grade verdict; a server-signed acceptance receipt over the whole
+record; and a first-class, content-hashed `attempts` graph in the bundle contract.
