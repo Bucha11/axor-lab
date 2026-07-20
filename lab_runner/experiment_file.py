@@ -25,6 +25,7 @@ from pathlib import Path
 from lab_contracts import (
     ScenarioValidationError,
     condition_config_hash,
+    content_hash,
     validate_artifact,
 )
 
@@ -138,7 +139,16 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
                     f"[validating] inline manifest {tool['id']}: {e}"
                     for e in validate_artifact(tool, "tool-manifest")
                 ]
-                manifests.setdefault(str(tool["id"]), tool)
+                tid = str(tool["id"])
+                # same id + same content = harmless alias; same id + DIFFERENT
+                # content = the scenario shows one manifest but the runner would
+                # execute another — a conflict, not a silent setdefault loss (r6)
+                if tid in manifests and content_hash(manifests[tid]) != content_hash(tool):
+                    errors.append(
+                        f"[validating] inline manifest {tid} conflicts with a different "
+                        "manifest already registered under the same id"
+                    )
+                manifests.setdefault(tid, tool)
         # two-stage: only run the semantic validator on a SCHEMA-VALID scenario.
         # validate_scenario dereferences scenario['violation'] / ['task_success']
         # unconditionally, so on a schema-invalid scenario it would raise a raw
@@ -171,8 +181,16 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
 
     conditions: list[dict[str, object]] = list(experiment.get("conditions", []))  # type: ignore[arg-type]
     pinned: list[dict[str, object]] = []
+    seen_condition_ids: set[str] = set()
     for condition in conditions:
         entry = dict(condition)
+        cid = str(entry.get("id"))
+        # duplicate condition ids collide the trial id (which includes condition_id
+        # but not the policy hash), so two policies would supersede each other and
+        # the aggregate would mix them — reject, don't silently merge (review r6)
+        if cid in seen_condition_ids:
+            errors.append(f"[validating] duplicate condition id '{cid}'")
+        seen_condition_ids.add(cid)
         computed = condition_config_hash(
             str(entry.get("kernel", "")), entry.get("policy")  # type: ignore[arg-type]
         )

@@ -35,6 +35,7 @@ from lab_contracts import (
 
 from .axor_backend import resolve_kernel
 from .bundle_io import PACKAGING, read_bundle_dir, write_bundle_dir
+from .claims import deny_claim_text
 from .errors import ExperimentFileError, RunnerError
 from .evidence import build_evidence_case
 from .experiment_file import ResolvedExperiment, load_axl, resolve
@@ -214,9 +215,18 @@ def _cmd_regress(args: argparse.Namespace) -> int:
     )
     condition = _enforcing_condition(bundle, args.condition)
     version = args.kernel or str(condition["kernel"])
-    kernel = Kernel(version=version, taint_floor_enabled=not args.disable_taint_floor)
     inputs = _scenario_inputs(bundle, traces, pins)
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    if args.disable_taint_floor:
+        # explicit variant demonstration: force the reference kernel with the
+        # gate off (the fingerprint marks it a different kernel, review r4)
+        kernel: object = Kernel(version=version, taint_floor_enabled=False)
+    else:
+        # regress under the SAME kernel run/replay would use — so a real
+        # axor-core pin regresses under the real governor, not the reference
+        # taint-floor kernel (review r6: one kernel path everywhere)
+        kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
+                                default_registry((version,)))
     results = check_pins(pins, traces, condition, kernel, manifests, inputs)
     differs = [r for r in results if r["status"] == STATUS_DIFFERS]
     for result in results:
@@ -275,12 +285,11 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     claims: list[dict[str, object]] = []
     denied = _first_denied_trace(traces)
     if denied is not None:
-        kernel_version = str(denied["producer"]["kernel_version"])  # type: ignore[index]
         claims.append(
             make_claim(
                 "exactly_replayable",
-                f"On trace {denied['trace_id']}, {kernel_version} returns DENY; "
-                "the driving argument is untrusted_derived.",
+                # same decision-derived text the server uses — not a template
+                deny_claim_text(denied),
                 content_hash(denied),
                 trace_refs=trace_refs,
                 aggregate_refs=aggregate_refs,

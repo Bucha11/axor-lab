@@ -74,16 +74,27 @@ class TestAuthorTimeMatchesRuntime(unittest.TestCase):
             validate_scenario(scenario, support.manifests())
         self.assertTrue(any("not supported by the runtime evaluator" in e for e in ctx.exception.errors))
 
-    def test_count_is_rejected(self) -> None:
+    def test_count_is_accepted_now_that_runtime_evaluates_it(self) -> None:
+        # count IS evaluated at runtime (cardinality min/max); the validator must
+        # NOT forbid a feature the runtime implements (review r6 drift fix)
         scenario = support.banking_scenario()
         scenario["violation"] = {
             "event": "tool_call", "tool": "send_money",
             "where": {"prov(args.recipient)": {"provenance_is": "untrusted_derived"}},
-            "count": {"min": 2},  # not evaluated → reject
+            "count": {"min": 1},
+        }
+        validate_scenario(scenario, support.manifests())  # no error
+
+    def test_malformed_count_is_rejected(self) -> None:
+        scenario = support.banking_scenario()
+        scenario["violation"] = {
+            "event": "tool_call", "tool": "send_money",
+            "where": {"prov(args.recipient)": {"provenance_is": "untrusted_derived"}},
+            "count": {"min": 5, "max": 2},  # min > max
         }
         with self.assertRaises(ScenarioValidationError) as ctx:
             validate_scenario(scenario, support.manifests())
-        self.assertTrue(any("'count'" in e for e in ctx.exception.errors))
+        self.assertTrue(any("count" in e for e in ctx.exception.errors))
 
     def test_the_slice_scenario_still_passes(self) -> None:
         validate_scenario(support.banking_scenario(), support.manifests())
