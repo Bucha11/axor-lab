@@ -41,11 +41,16 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from lab_contracts import world_digest
+from lab_contracts import validate_artifact, world_digest
+from lab_contracts.semantics import trace_semantics
 from lab_runner.kernel import Kernel, default_registry
 
 from .gating import GatingError, gated_args, normalize_value_hash, provenance_fidelity
 from .instrumented import PRODUCER_MODE
+
+# malformed-event exceptions we translate to a clean 400; anything else is an
+# unexpected server fault and becomes an opaque 500 (never leak a traceback).
+_CLIENT_FAULTS = (KeyError, TypeError, ValueError, AttributeError)
 
 _RUNS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
 _TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trace$")
@@ -157,6 +162,8 @@ def make_gateway(
         return decision
 
     class Handler(BaseHTTPRequestHandler):
+        _sent = False
+
         def log_message(self, *args: object) -> None:
             pass
 
@@ -168,7 +175,21 @@ def make_gateway(
             try:
                 self._route_post()
             except _BodyError as exc:
-                self._json(exc.status, {"error": exc.message})
+                self._safe_error(exc.status, exc.message)
+            except _CLIENT_FAULTS as exc:
+                # a malformed event (missing/wrong-typed field) is the client's
+                # fault → a clean 400, never a stack trace or a 500
+                self._safe_error(400, f"malformed event: {type(exc).__name__}: {exc}")
+            except Exception:  # noqa: BLE001 — last-resort boundary
+                # an unexpected server fault: fail closed with an OPAQUE 500 so
+                # internal details never leak to the caller
+                self._safe_error(500, "internal error")
+
+        def _safe_error(self, status: int, message: str) -> None:
+            # only emit if the handler has not already written a response (an
+            # error raised AFTER a partial success must not double-send)
+            if not self._sent:
+                self._json(status, {"error": message})
 
         def _route_post(self) -> None:
             if self.path == "/runs":
@@ -177,8 +198,20 @@ def make_gateway(
                     return
                 with global_lock:
                     if len(runs) >= max_runs:
-                        self._json(429, {"error": "run quota exceeded"})
-                        return
+                        # a FINALIZED run is terminal — its trace was assembled and
+                        # is meant to have been read; evict the oldest one (LRU,
+                        # dict is insertion-ordered) to admit a new run, and drop
+                        # its secret. Only ACTIVE runs hold the quota, so a client
+                        # cannot permanently exhaust it with dead finalized runs
+                        # (review r14). If every run is still live, refuse (429).
+                        evicted = next(
+                            (rid for rid, r in runs.items() if r.finalized), None
+                        )
+                        if evicted is None:
+                            self._json(429, {"error": "run quota exceeded (all runs active)"})
+                            return
+                        del runs[evicted]
+                        run_secrets.pop(evicted, None)
                     run_id = f"r_ep_{secrets.token_hex(16)}"  # unpredictable, not sequential
                     run_secret = secrets.token_hex(16)
                     runs[run_id] = _Run(run_id, condition, scenario_id, inputs, kernel,
@@ -193,6 +226,22 @@ def make_gateway(
                 if run is None:
                     return
                 with run.lock:
+                    if run.finalized:
+                        self._json(200, {"ok": True, "finalized": True})
+                        return
+                    # the assembled trace must be a CONFORMANT trace/v1 before we
+                    # freeze and serve it — validate schema AND semantics at the
+                    # finalize boundary so an out-of-spec accumulation can never be
+                    # published as evidence (review r14). Fail closed: the run
+                    # stays open so the caller can see exactly what is wrong.
+                    trace = run.trace()
+                    errors = validate_artifact(trace, "trace") + trace_semantics(trace)
+                    if errors:
+                        self._json(422, {
+                            "error": "assembled trace is not a conformant trace/v1",
+                            "details": errors[:10],
+                        })
+                        return
                     run.finalized = True
                 self._json(200, {"ok": True, "finalized": True})
                 return
@@ -235,37 +284,73 @@ def make_gateway(
                 return
 
             if event.get("type") == "tool_result":
+                # every event names a tool that must exist in the manifest set —
+                # a value minted "by" an unknown tool cannot be governed and is
+                # rejected, never silently accepted (review r14)
+                tool = event.get("tool")
+                if not isinstance(tool, str) or tool not in manifests:
+                    self._json(400, {"error": f"unknown or missing tool {tool!r}"})
+                    return
+                raw_values = event.get("values", [])
+                if not isinstance(raw_values, list):
+                    self._json(400, {"error": "tool_result.values must be a list"})
+                    return
                 known = {v["value_id"] for v in run.values}
-                for value in event.get("values", []):
+                for value in raw_values:
+                    if not isinstance(value, dict):
+                        self._json(400, {"error": "each tool_result value must be an object"})
+                        return
                     vid = value.get("value_id")
                     if not vid or vid in known:
                         self._json(400, {"error": f"duplicate or missing value_id {vid!r}"})
                         return
-                    if "labels" not in value:
-                        self._json(400, {"error": f"value {vid!r} has no labels"})
+                    labels = value.get("labels")
+                    if not isinstance(labels, list):
+                        self._json(400, {"error": f"value {vid!r} labels must be a list"})
                         return
                     # a value must carry its authoritative decision_value so the
                     # gate can reconstruct the args from bindings alone (r8 P0) —
-                    # unless it is sensitive (redacted), where the sentinel makes
-                    # the gate fail closed on that value
-                    if "decision_value" not in value and "sensitive" not in value.get("labels", []):
-                        self._json(400, {"error": f"value {vid!r} has no decision_value (and is not sensitive)"})
-                        return
+                    # unless it is sensitive (redacted). A redacted value still has
+                    # to PIN its bytes with a client-supplied canonical_value_hash
+                    # (the server can't derive one without the value), or the
+                    # assembled trace fails trace_semantics on finalize (review r14).
+                    if "decision_value" not in value:
+                        if "sensitive" not in labels:
+                            self._json(400, {"error": f"value {vid!r} has no decision_value (and is not sensitive)"})
+                            return
+                        if not value.get("canonical_value_hash"):
+                            self._json(400, {"error": f"redacted sensitive value {vid!r} must carry a canonical_value_hash"})
+                            return
                     known.add(vid)
                     # derive an authoritative canonical_value_hash from the
                     # decision_value (never trust a client-supplied hash) so every
                     # trace value is self-verifying (contracts trace_semantics, r13)
                     run.values.append(normalize_value_hash(value))
                 run.events.append({"seq": run.seq, "node": "root", "type": "tool_result",
-                                  "tool": event.get("tool"),
-                                  "produces_value_ids": [v["value_id"] for v in event.get("values", [])]})
+                                  "tool": tool,
+                                  "produces_value_ids": [v["value_id"] for v in raw_values]})
                 run.seq += 1
                 if event.get("labels_carried") is False:
                     run.labels_carried = False
                 self._json(200, {"ok": True, "seq": run.seq})
                 return
             if event.get("type") == "tool_call_intent":
-                bindings = dict(event.get("arg_bindings", {}))
+                tool_field = event.get("tool")
+                if not isinstance(tool_field, str) or tool_field not in manifests:
+                    # an intent for a tool with no manifest cannot be gated (no
+                    # effect / driving args to reason over) — fail closed with a
+                    # clean 400 rather than a KeyError→500 inside gate_intent (r14)
+                    self._json(400, {"error": f"unknown or missing tool {tool_field!r}"})
+                    return
+                raw_bindings = event.get("arg_bindings", {})
+                if not isinstance(raw_bindings, dict):
+                    self._json(400, {"error": "tool_call_intent.arg_bindings must be an object"})
+                    return
+                asserted_raw = event.get("args")
+                if "args" in event and not isinstance(asserted_raw, dict):
+                    self._json(400, {"error": "tool_call_intent.args must be an object"})
+                    return
+                bindings = dict(raw_bindings)
                 values_by_id = {str(v["value_id"]): v for v in run.values}
                 unknown = [vid for vid in bindings.values() if vid not in values_by_id]
                 if unknown:
@@ -273,20 +358,19 @@ def make_gateway(
                     # protocol violation (the value must be registered first)
                     self._json(400, {"error": f"arg_bindings reference unknown value ids {unknown}"})
                     return
-                tool = str(event["tool"])
                 # authoritative args come SOLELY from the bindings; every
                 # decision-relevant arg must be bound, and a conflicting concrete
                 # `args` assertion fails closed — shared with the in-process path
                 # so the two can't drift (review r8/r9)
                 try:
                     authoritative = gated_args(
-                        manifests.get(tool, {}), bindings, values_by_id,
-                        asserted=dict(event["args"]) if "args" in event else None,
+                        manifests[tool_field], bindings, values_by_id,
+                        asserted=dict(asserted_raw) if "args" in event else None,
                     )
                 except GatingError as exc:
                     self._json(409, {"error": str(exc)})
                     return
-                decision = gate_intent(run, tool, bindings, authoritative)
+                decision = gate_intent(run, tool_field, bindings, authoritative)
                 # return the AUTHORITATIVE args a cooperating proxy must execute,
                 # so an honest client runs the bound value, not its own (review r9)
                 self._json(200, {"decision": decision, "authoritative_args": authoritative})
@@ -294,6 +378,14 @@ def make_gateway(
             self._json(400, {"error": "unknown event type"})
 
         def do_GET(self) -> None:  # noqa: N802
+            try:
+                self._route_get()
+            except _CLIENT_FAULTS as exc:
+                self._safe_error(400, f"malformed request: {type(exc).__name__}: {exc}")
+            except Exception:  # noqa: BLE001 — last-resort boundary
+                self._safe_error(500, "internal error")
+
+        def _route_get(self) -> None:
             match = _TRACE_RE.match(self.path)
             if not match:
                 self._json(404, {"error": "no such run"})
@@ -331,6 +423,7 @@ def make_gateway(
             return obj
 
         def _json(self, status: int, obj: object) -> None:
+            self._sent = True
             body = json.dumps(obj).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
