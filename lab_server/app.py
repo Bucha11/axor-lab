@@ -67,22 +67,27 @@ def make_server(
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             try:
-                if self.path == "/" or self.path == "":
+                from urllib.parse import parse_qs, urlsplit
+
+                split = urlsplit(self.path)
+                path = split.path
+                if path == "/" or path == "":
                     self._html(render_catalog(store.catalog()))
                     return
-                evidence = _EVIDENCE_RE.match(self.path)
+                evidence = _EVIDENCE_RE.match(path)
                 if evidence:
                     stored = store.get(evidence.group(1))
                     if evidence.group(2) not in stored.traces:
                         raise NotFound("trace not found")
-                    self._html(render_evidence(stored, evidence.group(2)))
+                    policy = parse_qs(split.query).get("policy", [None])[0]
+                    self._html(render_evidence(stored, evidence.group(2), policy))
                     return
-                api_pub = _API_PUB_RE.match(self.path)
+                api_pub = _API_PUB_RE.match(path)
                 if api_pub:
                     stored = store.get(api_pub.group(1))
                     self._json(200, {**stored.publication, "provenance": stored.axes()})
                     return
-                page = _PUB_RE.match(self.path)
+                page = _PUB_RE.match(path)
                 if page:
                     stored = store.get(page.group(1))
                     if stored.publication.get("visibility") == "private":
