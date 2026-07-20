@@ -38,7 +38,7 @@ from .axor_backend import resolve_kernel
 from .bundle_io import PACKAGING, read_bundle_dir, write_bundle_dir, write_superseded_attempts
 from .claims import deny_claim_text
 from .errors import ExperimentFileError, RunnerError
-from .evidence import build_evidence_case
+from .evidence import build_evidence_case, evidence_condition, validate_twin
 from .experiment_file import ResolvedExperiment, load_axl, resolve
 from .kernel import Kernel, default_registry
 from .regression import STATUS_DIFFERS, STATUS_MATCHES, RegressionPin, check_pins, pin
@@ -341,8 +341,22 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
     twin = traces.get(args.twin) if args.twin else None
     if args.twin and twin is None:
         raise RunnerError(f"twin trace {args.twin} not found in bundle")
+    if twin is not None:
+        # a governed twin must be the SAME case under an enforcing policy — not
+        # any unrelated trace the caller happened to name (review r13)
+        try:
+            validate_twin(trace, twin, bundle)
+        except ValueError as exc:
+            raise RunnerError(str(exc)) from exc
     scenario = _scenario_for(bundle, trace)
-    condition = _enforcing_condition(bundle, None)
+    # the SAME condition resolver the HTML EvidenceCase uses: an explicit
+    # --policy wins, else the trace's own enforcing condition, else the first
+    # enforcing one — never just "the first enforcement-on condition", which
+    # rendered a strict counterfactual for an allowlist trace (review r13)
+    try:
+        condition = evidence_condition(bundle, trace, getattr(args, "policy", None))
+    except ValueError as exc:
+        raise RunnerError(str(exc)) from exc
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     # resolve the SAME kernel replay/regress use — the REAL axor-core governor
     # when the condition pins the installed build — not always the reference
@@ -971,6 +985,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_evidence.add_argument("bundle")
     p_evidence.add_argument("trace_id")
     p_evidence.add_argument("--twin", default=None, help="observed governed twin trace id")
+    p_evidence.add_argument(
+        "--policy", default=None,
+        help="condition id to replay the counterfactual under (must be enforcement-on)",
+    )
     p_evidence.set_defaults(func=_cmd_evidence)
 
     p_publish = sub.add_parser("publish", help="mint a publication/v1 from a verified bundle")

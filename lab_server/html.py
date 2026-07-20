@@ -13,8 +13,14 @@ from __future__ import annotations
 
 from html import escape
 
-from lab_runner import build_evidence_case, default_registry, resolve_kernel
+from lab_runner import (
+    build_evidence_case,
+    default_registry,
+    evidence_condition,
+    resolve_kernel,
+)
 
+from .errors import PublishRejected
 from .store import StoredPublication
 
 _STYLE = """
@@ -148,11 +154,15 @@ def render_evidence(stored: StoredPublication, trace_id: str, policy_id: str | N
     trace = stored.traces[trace_id]
     bundle = stored.bundle
     scenario = _scenario_for(bundle, trace)
-    # replay under the condition the counterfactual is ABOUT: the ?policy= choice
-    # if given and enforcing; else the trace's OWN condition when it is enforcing
-    # (so a governed_allowlist trace is not silently replayed under strict); else
-    # the first enforcing candidate for an ungoverned trace.
-    condition = _evidence_condition(bundle, trace, policy_id)
+    # replay under the condition the counterfactual is ABOUT, using the ONE
+    # resolver the CLI also uses (lab_runner.evidence_condition): the ?policy=
+    # choice if enforcing; else the trace's OWN enforcing condition (so a
+    # governed_allowlist trace is not silently replayed under strict); else the
+    # first enforcing candidate. A bad ?policy= is a clean 400, not a fallthrough.
+    try:
+        condition = evidence_condition(bundle, trace, policy_id)
+    except ValueError as exc:
+        raise PublishRejected(str(exc), status=400) from exc
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     # use the REAL axor-core governor when the condition pins the installed
     # version, exactly as replay/regress do — an EvidenceCase for a real-kernel
@@ -259,29 +269,6 @@ def _enforcing_condition(bundle: dict[str, object]) -> dict[str, object]:
         if condition["enforcement"] == "on":
             return condition
     raise KeyError("no enforcement-on condition")
-
-
-def _evidence_condition(
-    bundle: dict[str, object], trace: dict[str, object], policy_id: str | None
-) -> dict[str, object]:
-    """The condition to replay this trace's counterfactual under.
-
-    A `?policy=` selection wins (if it names an enforcing condition); otherwise
-    the trace's OWN condition when it enforces (never silently swap a governed
-    trace's policy); otherwise the first enforcing candidate."""
-    conditions: list[dict[str, object]] = list(bundle["conditions"])  # type: ignore[arg-type]
-    by_id = {str(c["id"]): c for c in conditions}
-    if policy_id and policy_id in by_id and by_id[policy_id]["enforcement"] == "on":
-        return by_id[policy_id]
-    own = by_id.get(str(trace["trial"]["condition_id"]))  # type: ignore[index]
-    if own is not None and own["enforcement"] == "on":
-        return own
-    for condition in conditions:
-        if condition["enforcement"] == "on":
-            return condition
-    if own is not None:
-        return own
-    raise KeyError("no condition to replay under")
 
 
 def _conditions_diff(bundle: dict[str, object]) -> str:

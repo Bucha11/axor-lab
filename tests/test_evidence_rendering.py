@@ -20,7 +20,7 @@ from pathlib import Path
 from tests import support
 from lab_contracts import build_bundle
 from lab_runner import ScriptedAgent, run_experiment_suite, run_trial
-from lab_runner.evidence import _chain
+from lab_runner.evidence import _chain, evidence_condition, validate_twin
 from lab_server.html import render_evidence, render_publication
 from lab_server.store import PublicationStore, StoredPublication, _deny_claim_text
 
@@ -144,6 +144,80 @@ class TestChainCallIdCorrelation(unittest.TestCase):
         chain = _chain(trace, {"injection": {"text": "exfil"}, "inputs": {}})
         self.assertEqual(chain["gated_call"]["tool"], "read_email")  # call_A now
         self.assertEqual(chain["verdict"]["driving_value_id"], "vA")
+
+
+class TestSharedEvidenceConditionResolver(unittest.TestCase):
+    """The CLI and HTML share ONE condition resolver, and it does not silently
+    show a strict counterfactual for an allowlist trace (review r13)."""
+
+    def _bundle_with_two_enforcing(self):
+        import copy
+        scenario = support.banking_scenario()
+        conditions = support.conditions()
+        allow = copy.deepcopy(next(c for c in conditions if c["enforcement"] == "on"))
+        allow["id"] = "governed_allowlist"
+        conditions = [*conditions, allow]
+        # a trace produced under governed_allowlist
+        kernel = support.kernel_registry().get(support.KERNEL_PINNED)
+        trace = run_trial(scenario, support.manifests(), allow, kernel,
+                          run_id="r", seed="s000", repeat_index=0,
+                          agent=ScriptedAgent(attack_rate=1.0)).trace
+        trace["trial"]["condition_id"] = "governed_allowlist"
+        bundle = {"conditions": conditions}
+        return bundle, trace
+
+    def test_own_enforcing_condition_wins_over_first(self) -> None:
+        bundle, trace = self._bundle_with_two_enforcing()
+        chosen = evidence_condition(bundle, trace, None)
+        # NOT "governed" (the first enforcing) — the trace's OWN allowlist policy
+        self.assertEqual(chosen["id"], "governed_allowlist")
+
+    def test_explicit_policy_wins(self) -> None:
+        bundle, trace = self._bundle_with_two_enforcing()
+        self.assertEqual(evidence_condition(bundle, trace, "governed")["id"], "governed")
+
+    def test_unknown_or_non_enforcing_policy_raises(self) -> None:
+        bundle, trace = self._bundle_with_two_enforcing()
+        with self.assertRaises(ValueError):
+            evidence_condition(bundle, trace, "nope")
+        bundle["conditions"][0]["id"]  # ungoverned is enforcement-off
+        with self.assertRaises(ValueError):
+            evidence_condition(bundle, trace, "ungoverned")
+
+
+class TestTwinValidation(unittest.TestCase):
+    """A governed twin must be the SAME case under an enforcing policy (r13)."""
+
+    def _pair(self):
+        scenario = support.banking_scenario()
+        conditions = support.conditions()  # ungoverned(off) + governed(on)
+        kernel = support.kernel_registry().get(support.KERNEL_PINNED)
+        base = run_trial(scenario, support.manifests(), conditions[0], kernel,
+                         run_id="r", seed="s000", repeat_index=0,
+                         agent=ScriptedAgent(attack_rate=1.0)).trace
+        twin = run_trial(scenario, support.manifests(), conditions[1], kernel,
+                         run_id="r", seed="s000", repeat_index=0,
+                         agent=ScriptedAgent(attack_rate=1.0)).trace
+        bundle = {"conditions": conditions}
+        return base, twin, bundle
+
+    def test_matching_governed_twin_is_accepted(self) -> None:
+        base, twin, bundle = self._pair()
+        validate_twin(base, twin, bundle)  # same scenario/seed/repeat, enforcing → ok
+
+    def test_twin_from_a_different_seed_is_rejected(self) -> None:
+        base, twin, bundle = self._pair()
+        twin["trial"]["seed"] = "s999"
+        with self.assertRaises(ValueError) as ctx:
+            validate_twin(base, twin, bundle)
+        self.assertIn("seed", str(ctx.exception))
+
+    def test_ungoverned_twin_is_rejected(self) -> None:
+        base, _, bundle = self._pair()
+        # use the ungoverned base itself as a "twin" — enforcement off → rejected
+        with self.assertRaises(ValueError) as ctx:
+            validate_twin(base, base, bundle)
+        self.assertIn("enforcement-on", str(ctx.exception))
 
 
 class TestEvidenceConditionSelection(unittest.TestCase):
