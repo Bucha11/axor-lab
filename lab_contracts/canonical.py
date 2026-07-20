@@ -40,3 +40,16 @@ def content_hash(obj: object) -> str:
 def condition_config_hash(kernel: str, policy: dict[str, object] | None) -> str:
     """The reproducibility anchor: sha256 over normalized (kernel + policy)."""
     return content_hash({"kernel": kernel, "policy": policy or {}})
+
+
+def world_digest(inputs: dict[str, object], fixtures: dict[str, object] | None) -> str:
+    """The ONE definition of a trace's `inputs_digest` — the exact world a trace
+    was produced in: the scenario's declared inputs AND its tool fixtures.
+
+    Every producer (local runner, HTTP gateway, in-process instrumented SDK) and
+    the bundle verifier compute it identically, so a conformant instrumented
+    trace binds to its scenario the same way a runner trace does. A prior split
+    (runner hashed inputs+fixtures, the endpoints hashed inputs only) let a
+    verifier reject conformant endpoint traces for a scenario with fixtures
+    (review r9)."""
+    return content_hash({"inputs": inputs, "fixtures": fixtures or {}})

@@ -29,9 +29,10 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from lab_contracts import world_digest
 from lab_runner.kernel import Kernel, default_registry
-from lab_runner.replay import resolve_args
 
+from .gating import GatingError, gated_args, provenance_fidelity
 from .instrumented import PRODUCER_MODE
 
 _RUNS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
@@ -57,6 +58,7 @@ class _Run:
     inputs: dict[str, object]
     kernel: Kernel
     trusted_runtime: bool = False
+    fixtures: dict[str, object] = field(default_factory=dict)
     values: list[dict[str, object]] = field(default_factory=list)
     events: list[dict[str, object]] = field(default_factory=list)
     seq: int = 0
@@ -70,21 +72,7 @@ class _Run:
                 return tuple(value["labels"])  # type: ignore[arg-type]
         return ()
 
-    def provenance_fidelity(self) -> str:
-        """explicit_flow_tracked is a claim that a trusted runtime built the
-        value lineage with closed constructors — NOT something an untrusted
-        client can self-assert (review r8). It is granted ONLY when the operator
-        constructed this gateway as an attested `trusted_runtime`; the client's
-        `labels_carried` flag can only DOWNGRADE (to heuristic_attribution), never
-        upgrade. An ordinary agent talking to the gateway is heuristic_attribution:
-        the labels are self-reported, so we do not dress them up as tracked flow."""
-        if self.trusted_runtime and self.labels_carried:
-            return "explicit_flow_tracked"
-        return "heuristic_attribution"
-
     def trace(self) -> dict[str, object]:
-        from lab_contracts import content_hash
-
         return {
             "schema_version": "trace/v1",
             "trace_id": f"t_{self.run_id}",
@@ -92,10 +80,11 @@ class _Run:
                       "condition_id": str(self.condition["id"]), "seed": "s000", "repeat_index": 0},
             "producer": {
                 "mode": PRODUCER_MODE,
-                "provenance_fidelity": self.provenance_fidelity(),
+                # fidelity is an operator-attested-runtime claim, not client-set
+                "provenance_fidelity": provenance_fidelity(self.trusted_runtime, self.labels_carried),
                 "kernel_version": str(self.condition["kernel"]), "runtime": "lab-gateway@0.1",
             },
-            "inputs_digest": content_hash({"inputs": self.inputs}),
+            "inputs_digest": world_digest(self.inputs, self.fixtures),
             "events": list(self.events),
             "values": list(self.values),
         }
@@ -112,6 +101,7 @@ def make_gateway(
     max_runs: int = 1000,
     max_events_per_run: int = 10000,
     trusted_runtime: bool = False,
+    fixtures: dict[str, object] | None = None,
 ) -> ThreadingHTTPServer:
     """Build (do not start) a gateway for one condition/scenario.
 
@@ -180,7 +170,7 @@ def make_gateway(
                     run_id = f"r_ep_{secrets.token_hex(16)}"  # unpredictable, not sequential
                     run_secret = secrets.token_hex(16)
                     runs[run_id] = _Run(run_id, condition, scenario_id, inputs, kernel,
-                                        trusted_runtime=trusted_runtime)
+                                        trusted_runtime=trusted_runtime, fixtures=dict(fixtures or {}))
                     run_secrets[run_id] = run_secret
                 self._json(201, {"run_id": run_id, "run_secret": run_secret})
                 return
@@ -268,33 +258,23 @@ def make_gateway(
                     # protocol violation (the value must be registered first)
                     self._json(400, {"error": f"arg_bindings reference unknown value ids {unknown}"})
                     return
-                # EVERY decision-relevant arg (driving args + args named in a
-                # resolve rule) must be bound — otherwise a client could dodge an
-                # escalation rule by leaving the arg unbound, so the gate decides
-                # over one effect class while the tool runs another (r8 P0).
                 tool = str(event["tool"])
-                relevant = _decision_relevant_args(manifests.get(tool, {}))
-                unbound_relevant = sorted(relevant - set(bindings))
-                if unbound_relevant:
-                    self._json(409, {"error": f"decision-relevant args must be bound to values: {unbound_relevant}"})
+                # authoritative args come SOLELY from the bindings; every
+                # decision-relevant arg must be bound, and a conflicting concrete
+                # `args` assertion fails closed — shared with the in-process path
+                # so the two can't drift (review r8/r9)
+                try:
+                    authoritative = gated_args(
+                        manifests.get(tool, {}), bindings, values_by_id,
+                        asserted=dict(event["args"]) if "args" in event else None,
+                    )
+                except GatingError as exc:
+                    self._json(409, {"error": str(exc)})
                     return
-                # the gate decides on args assembled from the bound ledger values
-                # ONLY — assembled the same way exact replay does (r8 P0). A
-                # client cannot make the gate see a clean value while the tool
-                # would receive a tainted one.
-                authoritative = resolve_args(bindings, values_by_id)
-                # a client-supplied `args` is accepted ONLY as an assertion of
-                # what it will execute; any BOUND arg must canonical-hash-match
-                # its provenance value, else the intent is refused (no ALLOW, no
-                # trace mutation). Unbound asserted args can't change the verdict
-                # (all decision-relevant args are bound, checked above).
-                if "args" in event:
-                    mismatch = _assertion_mismatch(dict(event.get("args", {})), authoritative)
-                    if mismatch is not None:
-                        self._json(409, {"error": f"args assertion conflicts with bound provenance: {mismatch}"})
-                        return
                 decision = gate_intent(run, tool, bindings, authoritative)
-                self._json(200, {"decision": decision})  # the tool proxy verdict
+                # return the AUTHORITATIVE args a cooperating proxy must execute,
+                # so an honest client runs the bound value, not its own (review r9)
+                self._json(200, {"decision": decision, "authoritative_args": authoritative})
                 return
             self._json(400, {"error": "unknown event type"})
 
@@ -344,37 +324,6 @@ def make_gateway(
             self.wfile.write(body)
 
     return ThreadingHTTPServer((host, port), Handler)
-
-
-def _decision_relevant_args(manifest: dict[str, object]) -> set[str]:
-    """The arg names that can change the gate's verdict for this tool: its
-    declared driving args plus any arg named in an effect-resolve rule's
-    `when`. These MUST be bound to ledger values so the gate decides over the
-    same concrete values the tool will run — an unbound one could dodge an
-    escalation rule (r8 P0)."""
-    effect: dict[str, object] = manifest.get("effect", {})  # type: ignore[assignment]
-    names: set[str] = set(effect.get("driving_args", []))  # type: ignore[arg-type]
-    for rule in effect.get("resolve", []):  # type: ignore[union-attr]
-        names |= set(rule.get("when", {}).keys())
-    return names
-
-
-def _assertion_mismatch(
-    asserted: dict[str, object], authoritative: dict[str, object]
-) -> str | None:
-    """Compare the caller's asserted concrete args against the authoritative
-    args derived from the ledger bindings. Every arg that is BOTH asserted and
-    bound must be equal by JCS content hash (so typing/ordering can't smuggle a
-    difference past a shallow ==); returns a reason string on the first
-    mismatch, else None. Unbound asserted args are ignored here — the handler
-    has already required every decision-relevant arg to be bound, so an unbound
-    asserted arg cannot influence the verdict."""
-    from lab_contracts import content_hash
-
-    for name, value in authoritative.items():
-        if name in asserted and content_hash(asserted[name]) != content_hash(value):
-            return f"arg {name!r} concrete value does not match its bound provenance value"
-    return None
 
 
 def _reject_constant(_name: str) -> object:
