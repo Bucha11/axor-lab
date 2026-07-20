@@ -12,6 +12,7 @@ The id content-addresses the WHOLE publication body, so:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -23,6 +24,7 @@ from lab_runner import run_experiment_suite
 from lab_server.store import PublicationStore
 
 CREATED = "2026-07-19T12:00:00+00:00"
+_HAS_NACL = importlib.util.find_spec("nacl") is not None
 
 
 def _bundle():
@@ -108,6 +110,29 @@ class TestPublicationImmutable(unittest.TestCase):
         with self.assertRaises(Exception):
             reloaded.get(pid)
 
+    @unittest.skipUnless(_HAS_NACL, "PyNaCl required for the signed-badge path")
+    def test_signed_publication_reverifies_on_load(self) -> None:
+        from nacl.signing import SigningKey
+        from lab_contracts.signing import sign_bundle
+
+        sk = SigningKey.generate()
+        known = {"@lab": sk.verify_key.encode().hex()}
+        signature = sign_bundle(self.bundle, sk.encode().hex())
+        store = PublicationStore(root=self.root, known_keys=known)
+        pub = store.publish(self.bundle, self.traces, question="q", visibility="public",
+                            signature=signature, author="@lab")
+        pid = str(pub.publication["publication_id"])
+        self.assertEqual(pub.publication["integrity"], "signed")
+        self.assertTrue((self.root / pid / "receipt.json").is_file())  # receipt persisted
+        # a server WITH the key re-verifies the receipt → signed survives
+        reloaded = PublicationStore(root=self.root, known_keys=known)
+        self.assertEqual(reloaded.get(pid).publication["integrity"], "signed")
+        # a server WITHOUT the key cannot re-earn the badge → the record is not
+        # trusted as signed (fail closed: dropped rather than served unverified)
+        keyless = PublicationStore(root=self.root)
+        with self.assertRaises(Exception):
+            keyless.get(pid)
+
     def test_untampered_publication_survives_restart(self) -> None:
         store = self._store()
         pub = store.publish(self.bundle, self.traces, question="q", visibility="public")
@@ -116,6 +141,35 @@ class TestPublicationImmutable(unittest.TestCase):
         reloaded = self._store()
         self.assertEqual(str(reloaded.get(pid).publication["publication_id"]), pid)
         self.assertEqual(len(reloaded.reproductions_of(pid)), 1)  # attestations persist
+
+    def test_forged_signed_badge_from_scratch_is_rejected_on_restart(self) -> None:
+        # a from-scratch forgery: valid bundle+traces, but a publication that
+        # claims integrity=signed with NO signing receipt, and a correctly
+        # recomputed id so the content-address check passes. Load must re-earn
+        # the badge from a receipt (none) → recompute hash_verified → re-mint
+        # mismatch → dropped, so a fake author-signed badge can't be planted.
+        from lab_contracts import content_hash
+        from lab_server.store import PublicationStore as _PS
+
+        store = self._store()
+        pub = store.publish(self.bundle, self.traces, question="q", visibility="public")
+        pid = str(pub.publication["publication_id"])
+        body = json.loads((self.root / pid / "publication.json").read_text())
+        body["integrity"] = "signed"  # forge the badge that means "author-signed"
+        new_id = _PS._derive_id(body)
+        body["publication_id"] = new_id
+        body["reproductions_ref"] = f"attlog:{new_id}"
+        forged = self.root / new_id
+        forged.mkdir()
+        (forged / "traces").mkdir()
+        (forged / "publication.json").write_text(json.dumps(body))
+        (forged / "bundle.json").write_text(json.dumps(self.bundle))
+        for t in self.traces.values():
+            (forged / "traces" / f"{content_hash(t).removeprefix('sha256:')}.json").write_text(json.dumps(t))
+        # NOTE: no receipt.json — there is no real signature
+        reloaded = self._store()
+        with self.assertRaises(Exception):
+            reloaded.get(new_id)
 
     def test_forged_claims_publication_is_rejected_on_restart(self) -> None:
         # a from-scratch publication that NEVER passed the handshake: fabricate a

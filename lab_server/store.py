@@ -82,6 +82,11 @@ class StoredPublication:
     bundle: dict[str, object]
     traces: dict[str, dict[str, object]]
     reproductions: list[dict[str, object]] = field(default_factory=list)
+    # the detached author signature that EARNED integrity=signed, persisted as a
+    # receipt so the badge can be RE-VERIFIED on load — never trusted from the
+    # publication.json integrity field alone (review r9)
+    author: str | None = None
+    signature: str | None = None
 
     def axes(self) -> dict[str, object]:
         return provenance_axes(self.publication, tuple(self.reproductions))
@@ -155,7 +160,13 @@ class PublicationStore:
         if errors:
             raise PublishRejected(f"publication failed schema validation: {errors}")
 
-        stored = StoredPublication(publication=publication, bundle=bundle, traces=traces)
+        # keep the signature+author ONLY when they earned integrity=signed, so a
+        # reload can re-verify the badge rather than trust the persisted field
+        signed = integrity == "signed"
+        stored = StoredPublication(
+            publication=publication, bundle=bundle, traces=traces,
+            author=author if signed else None, signature=signature if signed else None,
+        )
         pid = str(publication["publication_id"])
         with self._lock:
             existing = self._cache.get(pid)
@@ -199,6 +210,22 @@ class PublicationStore:
             # crypto not installed on the server: a clean rejection, not a 500
             raise PublishRejected(f"cannot verify signature: {exc}") from exc
         return "signed"
+
+    def _integrity_on_load(
+        self, bundle: dict[str, object], author: str | None, signature: str | None
+    ) -> str:
+        """Recompute the integrity badge on load. Unlike publish (which REJECTS
+        an unverifiable signature), load degrades gracefully to hash_verified —
+        a signed badge is granted only if the receipt's author signature still
+        verifies against a known key on this server (review r9)."""
+        if not author or not signature:
+            return "hash_verified"
+        try:
+            return self._integrity(bundle, signature, author)
+        except PublishRejected:
+            # unknown key on this server / bad signature / crypto absent → the
+            # signed badge cannot be re-earned here; fall back to hash_verified
+            return "hash_verified"
 
     def takedown(self, publication_id: str) -> None:
         """Remove a publication from the catalog while PRESERVING its
@@ -384,6 +411,13 @@ class PublicationStore:
             # trace_id — a hostile trace_id like '../../x' cannot escape traces/
             name = content_hash(trace).removeprefix("sha256:")
             _write_atomic(directory / "traces" / f"{name}.json", json.dumps(trace))
+        # the signing receipt: present ONLY for a signed publication, so load can
+        # re-verify the author signature instead of trusting integrity from disk
+        if stored.author and stored.signature:
+            _write_atomic(
+                directory / "receipt.json",
+                json.dumps({"author": stored.author, "signature": stored.signature}),
+            )
         self._persist_reproductions(stored)
 
     def _persist_reproductions(self, stored: StoredPublication) -> None:
@@ -426,15 +460,27 @@ class PublicationStore:
         # correctly (review r8). The content-address alone only catches EDITS.
         if _semantic_errors(bundle, traces):
             return
+        # RE-VERIFY the integrity badge from the persisted signing receipt rather
+        # than trust the disk field: integrity=signed is re-earned only if the
+        # detached author signature verifies against a known key on THIS load;
+        # absent/unverifiable → hash_verified. A from-scratch forgery that writes
+        # integrity:signed with no valid receipt recomputes to hash_verified, so
+        # the re-mint below no longer matches the stored body and is dropped (r9).
+        receipt_file = directory / "receipt.json"
+        author = signature = None
+        if receipt_file.is_file():
+            receipt = json.loads(receipt_file.read_text())
+            author, signature = receipt.get("author"), receipt.get("signature")
+        integrity = self._integrity_on_load(bundle, author, signature)
         # and re-MINT the publication from the evidence: the claims, aggregate
-        # refs and statistics_integrity must be exactly what the server would
-        # generate, so fabricated claim text / statistics_integrity is refused
-        # even when it is internally hash-consistent.
+        # refs, statistics_integrity AND integrity must be exactly what the server
+        # would generate, so a fabricated claim text or a forged signed badge is
+        # refused even when it is internally hash-consistent.
         expected = self._mint(
             bundle, traces, str(publication.get("question", "")),
             str(publication.get("license", "CC-BY-4.0")),
             str(publication.get("visibility", "unlisted")),
-            integrity=str(publication.get("integrity", "hash_verified")),
+            integrity=integrity,
         )
         if expected != publication:
             return
@@ -444,7 +490,9 @@ class PublicationStore:
         raw = tuple(json.loads(reproductions_file.read_text())) if reproductions_file.is_file() else ()
         reproductions = list(rebuild_reproduction_log(raw, self.known_keys))
         self._cache[publication_id] = StoredPublication(
-            publication=publication, bundle=bundle, traces=traces, reproductions=reproductions
+            publication=publication, bundle=bundle, traces=traces, reproductions=reproductions,
+            author=author if integrity == "signed" else None,
+            signature=signature if integrity == "signed" else None,
         )
 
     def _load_reproductions_only(self, publication_id: str) -> None:
