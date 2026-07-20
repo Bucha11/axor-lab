@@ -39,6 +39,33 @@ _ATTESTATION_ID_MAX = 128
 from lab_runner.claims import deny_claim_text as _deny_claim_text
 
 
+def _semantic_errors(
+    bundle: dict[str, object], traces: dict[str, dict[str, object]]
+) -> list[str]:
+    """The semantic checks a publication must clear: exact replay of every
+    recorded verdict, and statistical aggregates that follow from the traces.
+
+    Hash verification proves a bundle is internally consistent; it does NOT
+    prove the verdicts replay or the numbers were measured. Both the publish
+    handshake AND the load path run this, so a hand-assembled but hash-coherent
+    publication placed in the store directory (fabricated aggregates, arbitrary
+    claims, non-replaying decisions) is refused on restart, not trusted into the
+    catalog (review r8)."""
+    errors: list[str] = []
+    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
+    kernels = {k.version: k for k in default_registry(versions).kernels}
+    report = replay_bundle(bundle, traces, kernels)
+    if not report.bit_identical:
+        errors.append("server replay does not match recorded verdicts")
+    mismatches = check_aggregates(bundle, traces)
+    if mismatches:
+        errors.append(
+            "uploaded aggregates do not match server recomputation: "
+            + "; ".join(mismatches[:5])
+        )
+    return errors
+
+
 def _write_atomic(path: Path, text: str) -> None:
     """Write via a temp file + rename so a crash never leaves partial JSON
     (review §7.2). The temp file lives in the same directory for an atomic
@@ -115,24 +142,12 @@ class PublicationStore:
         except BundleIntegrityError as exc:
             raise PublishRejected(f"content hashes do not verify: {exc}") from exc
 
-        versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
-        kernels = {k.version: k for k in default_registry(versions).kernels}
-        report = replay_bundle(bundle, traces, kernels)
-        if not report.bit_identical:
-            raise PublishRejected(
-                "server replay does not match recorded verdicts — refusing to publish"
-            )
-
-        # recompute every statistical aggregate from the evidence and reject a
-        # bundle whose uploaded numbers do not follow from its own traces — hash
-        # verification proves internal consistency, NOT that the estimates and n
-        # were actually measured (review r2 Patch 4)
-        mismatches = check_aggregates(bundle, traces)
-        if mismatches:
-            raise PublishRejected(
-                "uploaded aggregates do not match server recomputation: "
-                + "; ".join(mismatches[:5])
-            )
+        # replay + statistical recomputation — the semantic checks a publication
+        # must pass; shared with the load path so a restart can't trust a record
+        # that never cleared them (review r8)
+        semantic = _semantic_errors(bundle, traces)
+        if semantic:
+            raise PublishRejected("; ".join(semantic[:5]))
 
         integrity = self._integrity(bundle, signature, author)
         publication = self._mint(bundle, traces, question, license_id, visibility, integrity)
@@ -404,6 +419,24 @@ class PublicationStore:
         if str(publication.get("bundle_ref")) != content_hash(bundle):
             return
         if publication_id != self._derive_id(publication):
+            return
+        # run the SAME semantic handshake publish ran — replay + aggregate
+        # recomputation — so a from-scratch, hash-coherent publication dropped
+        # into the store dir cannot be trusted just because its id is derived
+        # correctly (review r8). The content-address alone only catches EDITS.
+        if _semantic_errors(bundle, traces):
+            return
+        # and re-MINT the publication from the evidence: the claims, aggregate
+        # refs and statistics_integrity must be exactly what the server would
+        # generate, so fabricated claim text / statistics_integrity is refused
+        # even when it is internally hash-consistent.
+        expected = self._mint(
+            bundle, traces, str(publication.get("question", "")),
+            str(publication.get("license", "CC-BY-4.0")),
+            str(publication.get("visibility", "unlisted")),
+            integrity=str(publication.get("integrity", "hash_verified")),
+        )
+        if expected != publication:
             return
         reproductions_file = directory / "reproductions.json"
         # re-derive a trusted log from disk: re-check kind, re-dedup, re-verify
