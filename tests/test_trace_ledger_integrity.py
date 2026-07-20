@@ -85,5 +85,55 @@ class TestLedgerUnambiguity(unittest.TestCase):
         self.assertEqual(trace_semantics(trace), [])
 
 
+class TestFailClosedEvidenceRoundtrips(unittest.TestCase):
+    """A fail-closed DENY (no provenance value) must be representable as valid
+    evidence: null driving_value_id + a typed driving_unresolved, NOT a fake
+    ledger id that would fail validation (review r14)."""
+
+    def _fail_closed(self, unresolved) -> dict:
+        trace = copy.deepcopy(_real_trace())
+        for e in trace["events"]:
+            if e.get("type") == "gate_decision":
+                e["decision"]["driving_value_id"] = None
+                e["decision"]["driving_unresolved"] = unresolved
+        return trace
+
+    def test_no_driving_args_deny_roundtrips_through_bundle(self) -> None:
+        from lab_contracts import build_bundle, content_hash, validate_artifact, verify_bundle
+
+        trace = self._fail_closed({"kind": "no_driving_args"})
+        self.assertEqual(validate_artifact(trace, "trace"), [])
+        self.assertEqual(trace_semantics(trace), [])
+        # and it builds + verifies inside a bundle (the incident is publishable)
+        trial = {
+            "trial_id": content_hash(trace), "scenario_id": str(trace["trial"]["scenario_id"]),
+            "condition_id": str(trace["trial"]["condition_id"]), "seed": str(trace["trial"]["seed"]),
+            "repeat_index": int(trace["trial"]["repeat_index"]), "status": "completed",
+            "trace_ref": content_hash(trace),
+        }
+        bundle = build_bundle(
+            bundle_id="b_fc", created="2026-07-20T12:00:00+00:00",
+            scenarios=[support.banking_scenario()], conditions=support.conditions(),
+            tool_manifests=list(support.manifests().values()), environment=support.environment(),
+            trials=[trial], aggregates=[], traces={str(trace["trace_id"]): trace},
+        )
+        verify_bundle(bundle, {str(trace["trace_id"]): trace})  # must NOT raise
+
+    def test_unresolved_argument_deny_roundtrips(self) -> None:
+        from lab_contracts import validate_artifact
+
+        trace = self._fail_closed({"kind": "unresolved_argument", "arg": "recipient"})
+        self.assertEqual(validate_artifact(trace, "trace"), [])
+        self.assertEqual(trace_semantics(trace), [])
+
+    def test_null_driving_without_a_reason_is_rejected(self) -> None:
+        trace = copy.deepcopy(_real_trace())
+        for e in trace["events"]:
+            if e.get("type") == "gate_decision":
+                e["decision"]["driving_value_id"] = None  # no driving_unresolved
+        errors = trace_semantics(trace)
+        self.assertTrue(any("without a driving_unresolved reason" in e for e in errors), errors)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,6 @@ deferred; these are the behaviors that must hold regardless of backing store.
 from __future__ import annotations
 
 import importlib.util
-import json
 import tempfile
 import unittest
 from pathlib import Path

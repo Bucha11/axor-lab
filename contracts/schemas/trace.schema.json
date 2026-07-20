@@ -299,8 +299,8 @@
           "description": "the paper's 9-gate sequence; a DENY names the first gate that denied"
         },
         "driving_value_id": {
-          "type": "string",
-          "description": "the argument value the verdict turned on; links the decision to its provenance in the ledger"
+          "type": ["string", "null"],
+          "description": "the argument value the verdict turned on; links the decision to its provenance in the ledger. null ONLY for a fail-closed DENY where no provenance value exists (see driving_unresolved)."
         },
         "projection": {
           "type": "string",
@@ -308,6 +308,16 @@
         },
         "reason": {
           "type": "string"
+        },
+        "driving_unresolved": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "enum": ["no_driving_args", "unresolved_argument"] },
+            "arg": { "type": "string" }
+          },
+          "description": "present ONLY on a fail-closed DENY whose driving_value_id is null: why no provenance value could be resolved."
         }
       }
     }
