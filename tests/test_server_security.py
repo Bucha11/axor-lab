@@ -66,12 +66,15 @@ class TestPathTraversal(unittest.TestCase):
             trace = next(iter(result.traces.values()))
             trace["trace_id"] = "../../../../etc/pwned"
             traces = {trace["trace_id"]: trace}
+            # the trial must bind to THIS trace's own coordinates (graph verifier)
+            tt = trace["trial"]
             # rebuild the bundle so content hashes match the mutated trace
             bundle = build_bundle(
                 bundle_id="b_evil", created=CREATED, scenarios=[scenario], conditions=conditions,
                 tool_manifests=list(support.manifests().values()), environment=support.environment(),
-                trials=[{"trial_id": "t0", "scenario_id": scenario["name"],
-                         "condition_id": "governed", "seed": "s000", "repeat_index": 0,
+                trials=[{"trial_id": "t0", "scenario_id": tt["scenario_id"],
+                         "condition_id": tt["condition_id"], "seed": tt["seed"],
+                         "repeat_index": tt["repeat_index"],
                          "status": "completed", "trace_ref": content_hash(trace)}],
                 aggregates=[], traces=traces,
             )
