@@ -345,19 +345,32 @@ def _publish_to_server(
     visibility = getattr(args, "visibility", "unlisted")
     if visibility == "public":
         print("NOTE: --visibility public — this artifact will be publicly listed on the server.")
-    payload = json.dumps(
-        {
-            "bundle": bundle,
-            "traces": traces,
-            "question": args.question,
-            "license": args.license,
-            "visibility": visibility,
-        }
-    ).encode("utf-8")
+    body: dict[str, object] = {
+        "bundle": bundle,
+        "traces": traces,
+        "question": args.question,
+        "license": args.license,
+        "visibility": visibility,
+    }
+    # a signed, attributed upload: author + detached signature travel in the body
+    if getattr(args, "author", None):
+        body["author"] = args.author
+    if getattr(args, "signature_file", None):
+        body["signature"] = Path(args.signature_file).read_text().strip()
+    payload = json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    # the write token is read from the ENVIRONMENT, never a CLI arg, so it does
+    # not land in the process list or shell history (review r6)
+    if getattr(args, "token_env", None):
+        import os
+        token = os.environ.get(args.token_env)
+        if not token:
+            raise RunnerError(f"--token-env {args.token_env} is not set in the environment")
+        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         args.server.rstrip("/") + "/api/publications",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -846,6 +859,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument(
         "--visibility", choices=["public", "unlisted", "private"], default="unlisted",
         help="publication visibility; default unlisted (public must be explicit)",
+    )
+    p_publish.add_argument(
+        "--token-env", default=None,
+        help="ENV VAR holding the server write bearer token (never pass the token directly)",
+    )
+    p_publish.add_argument("--author", default=None, help="author id for a signed upload")
+    p_publish.add_argument(
+        "--signature-file", default=None,
+        help="path to the detached bundle signature (hex) for a signed upload",
     )
     p_publish.set_defaults(func=_cmd_publish)
 

@@ -89,10 +89,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install the real kernel and run the integration tests
-        # if axor-core is unavailable the tests skip (optional dependency); when
-        # present they prove Lab governs with the production ToolCallGovernor
+        # a job named "real-kernel integration" must not be green without
+        # running: no `|| echo` swallowing a failed install, and an explicit
+        # import assertion so the integration tests cannot silently skip
+        # (review r6). If axor-core is not installable here, this job fails
+        # loudly — configure the install source rather than skip past it.
         run: |
-          pip install "axor-core>=0.9" || echo "axor-core unavailable — integration will skip"
+          pip install "axor-core>=0.9"
+          python -c "import axor_core; print('axor-core', axor_core.__version__)"
           python -m unittest tests.test_real_kernel -v
 
   crypto:
