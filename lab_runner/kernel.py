@@ -126,12 +126,29 @@ class Kernel:
         effect_class = resolve_effect_class(manifest, args, inputs)
         allowlist = _resolve_allowlist(policy, inputs)
         if self.taint_floor_enabled and effect_class in EGRESS_CLASSES:
+            # an egress sink with NO declared driving args cannot be
+            # provenance-checked — fail closed rather than ALLOW an unverifiable
+            # call (review r6: allowlist/empty-driving-args fail-open)
+            if not driving_args:
+                return {
+                    "verdict": "DENY",
+                    "gate": GATE_TAINT_FLOOR,
+                    "driving_value_id": "v_none",
+                    "projection": PROJECTION_UNTRUSTED,
+                    "reason": (
+                        f"egress sink {manifest['id']} declares no driving_args; cannot "
+                        "verify provenance (fail-closed)"
+                    ),
+                }
+            # check EVERY driving arg: an allowlisted arg supersedes the taint
+            # floor for ITSELF only — it must not short-circuit ALLOW and leave a
+            # later tainted arg (e.g. an exfiltrated body) unexamined (review r6)
+            superseded: list[str] = []
             for arg_name in driving_args:
                 labels = arg_labels.get(arg_name, ())
                 # FAIL-CLOSED: an egress driving arg with no resolvable
                 # provenance (missing binding / unknown or unlabeled value) is
-                # DENIED, never allowed. A client cannot launder a value past
-                # the gate by omitting its lineage (review P0.6).
+                # DENIED, never allowed (review P0.6).
                 if not labels:
                     return {
                         "verdict": "DENY",
@@ -143,34 +160,36 @@ class Kernel:
                             "resolvable provenance (fail-closed)"
                         ),
                     }
-                if LABEL_UNTRUSTED in labels:
-                    # enum-supersession: an operator-declared allowlisted target
-                    # supersedes the taint floor (paper §6.3) — this is the
-                    # only sanctioned way to recover the over-taint utility cost.
-                    if args.get(arg_name) in allowlist:
-                        return {
-                            "verdict": "ALLOW",
-                            "gate": GATE_TAINT_FLOOR,
-                            "driving_value_id": arg_bindings[arg_name],
-                            "reason": (
-                                f"egress sink {manifest['id']}: driving arg is "
-                                "untrusted_derived but allowlisted (enum-supersession)"
-                            ),
-                        }
+                if LABEL_UNTRUSTED in labels and args.get(arg_name) not in allowlist:
+                    # untrusted AND not operator-allowlisted → DENY on this arg
                     return {
                         "verdict": "DENY",
                         "gate": GATE_TAINT_FLOOR,
                         "driving_value_id": arg_bindings[arg_name],
                         "projection": PROJECTION_UNTRUSTED,
                         "reason": (
-                            f"egress sink {manifest['id']} with {LABEL_UNTRUSTED} driving arg"
+                            f"egress sink {manifest['id']}: driving arg '{arg_name}' is "
+                            f"{LABEL_UNTRUSTED} and not allowlisted"
                         ),
                     }
+                # else: this arg is trusted, or untrusted-but-allowlisted
+                # (enum-supersession, paper §6.3) — continue checking the rest
+                if LABEL_UNTRUSTED in labels:
+                    superseded.append(arg_name)
+            reason = f"effect {effect_class}: every driving arg is trusted or allowlisted"
+            if superseded:
+                reason += f"; allowlisted (enum-supersession): {', '.join(superseded)}"
+            return {
+                "verdict": "ALLOW",
+                "gate": GATE_TAINT_FLOOR,
+                "driving_value_id": driving_value_id,
+                "reason": reason,
+            }
         return {
             "verdict": "ALLOW",
             "gate": GATE_TAINT_FLOOR,
             "driving_value_id": driving_value_id,
-            "reason": f"effect {effect_class}: no untrusted driving arg on an egress sink",
+            "reason": f"effect {effect_class}: no egress gate applies",
         }
 
 
