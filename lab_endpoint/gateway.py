@@ -56,6 +56,7 @@ class _Run:
     scenario_id: str
     inputs: dict[str, object]
     kernel: Kernel
+    trusted_runtime: bool = False
     values: list[dict[str, object]] = field(default_factory=list)
     events: list[dict[str, object]] = field(default_factory=list)
     seq: int = 0
@@ -69,6 +70,18 @@ class _Run:
                 return tuple(value["labels"])  # type: ignore[arg-type]
         return ()
 
+    def provenance_fidelity(self) -> str:
+        """explicit_flow_tracked is a claim that a trusted runtime built the
+        value lineage with closed constructors — NOT something an untrusted
+        client can self-assert (review r8). It is granted ONLY when the operator
+        constructed this gateway as an attested `trusted_runtime`; the client's
+        `labels_carried` flag can only DOWNGRADE (to heuristic_attribution), never
+        upgrade. An ordinary agent talking to the gateway is heuristic_attribution:
+        the labels are self-reported, so we do not dress them up as tracked flow."""
+        if self.trusted_runtime and self.labels_carried:
+            return "explicit_flow_tracked"
+        return "heuristic_attribution"
+
     def trace(self) -> dict[str, object]:
         from lab_contracts import content_hash
 
@@ -79,7 +92,7 @@ class _Run:
                       "condition_id": str(self.condition["id"]), "seed": "s000", "repeat_index": 0},
             "producer": {
                 "mode": PRODUCER_MODE,
-                "provenance_fidelity": "explicit_flow_tracked" if self.labels_carried else "heuristic_attribution",
+                "provenance_fidelity": self.provenance_fidelity(),
                 "kernel_version": str(self.condition["kernel"]), "runtime": "lab-gateway@0.1",
             },
             "inputs_digest": content_hash({"inputs": self.inputs}),
@@ -98,12 +111,21 @@ def make_gateway(
     token: str | None = None,
     max_runs: int = 1000,
     max_events_per_run: int = 10000,
+    trusted_runtime: bool = False,
 ) -> ThreadingHTTPServer:
     """Build (do not start) a gateway for one condition/scenario.
 
     Opening a run requires the bearer `token` (when set); each run gets an
     unpredictable id AND a per-run secret its subsequent events must present.
-    Quotas bound total runs and events per run."""
+    Quotas bound total runs and events per run.
+
+    `trusted_runtime` (operator-set, default False) governs provenance honesty:
+    only when the operator attests the caller is a first-party SDK that builds
+    the ledger with closed constructors may a trace claim explicit_flow_tracked.
+    For an ordinary untrusted agent it stays False, so labels are reported as
+    heuristic_attribution — the gateway never lets a client self-certify tracked
+    provenance (review r8). A cryptographic per-event envelope is the roadmap for
+    attesting an untrusted multi-tenant caller."""
     import hmac
     import secrets
 
@@ -157,7 +179,8 @@ def make_gateway(
                         return
                     run_id = f"r_ep_{secrets.token_hex(16)}"  # unpredictable, not sequential
                     run_secret = secrets.token_hex(16)
-                    runs[run_id] = _Run(run_id, condition, scenario_id, inputs, kernel)
+                    runs[run_id] = _Run(run_id, condition, scenario_id, inputs, kernel,
+                                        trusted_runtime=trusted_runtime)
                     run_secrets[run_id] = run_secret
                 self._json(201, {"run_id": run_id, "run_secret": run_secret})
                 return
