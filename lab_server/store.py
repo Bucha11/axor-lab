@@ -99,6 +99,15 @@ class PublicationStore:
         errors = validate_artifact(bundle, "bundle")
         if errors:
             raise PublishRejected(f"bundle failed schema validation: {errors}")
+        # raw traces live OUTSIDE the bundle schema — validate each one here too,
+        # matching the local read_bundle_dir pipeline, so a malformed/schema-
+        # invalid trace is a clean 4xx, not a deeper TypeError (review r7)
+        for trace in traces.values():
+            terrors = validate_artifact(trace, "trace")
+            if terrors:
+                raise PublishRejected(
+                    f"trace {trace.get('trace_id')} failed schema validation: {terrors[:5]}"
+                )
         # normalize to trace_id keys (runners key by content hash; pages address by id)
         traces = {str(t["trace_id"]): t for t in traces.values()}
         try:
