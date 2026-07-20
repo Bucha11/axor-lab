@@ -59,6 +59,16 @@ class Kernel:
     version: str
     taint_floor_enabled: bool = True
 
+    @property
+    def behavior_version(self) -> str:
+        """Identity that reflects behavior-changing flags — so two kernels with
+        the same version string but different gates cannot share a config
+        identity (review r4). A taint_floor-disabled variant is a DIFFERENT
+        kernel and says so, instead of masquerading as the pinned version."""
+        if not self.taint_floor_enabled:
+            return f"{self.version}+taint_floor=off"
+        return self.version
+
     def decide(
         self,
         enforcement: str,
