@@ -58,7 +58,7 @@ def _apply_limits(limits: ResourceLimits) -> None:  # pragma: no cover - runs in
     # the hard limit is the SIGKILL backstop if the child ignores SIGXCPU
     cpu = int(limits.cpu_seconds) + 1
     resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 2))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (limits.disk_mb * _MB, limits.disk_mb * _MB))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limits.max_file_mb * _MB, limits.max_file_mb * _MB))
     try:
         resource.setrlimit(resource.RLIMIT_NPROC, (limits.max_processes, limits.max_processes))
     except (ValueError, OSError):
@@ -184,6 +184,6 @@ def _classify(returncode: int, truncated: bool) -> str:
 def _limit_dict(limits: ResourceLimits) -> dict[str, object]:
     return {
         "cpu_seconds": limits.cpu_seconds, "mem_mb": limits.mem_mb,
-        "disk_mb": limits.disk_mb, "wall_seconds": limits.wall_seconds,
+        "max_file_mb": limits.max_file_mb, "wall_seconds": limits.wall_seconds,
         "output_kb": limits.output_kb, "max_processes": limits.max_processes,
     }
