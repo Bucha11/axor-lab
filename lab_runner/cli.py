@@ -60,6 +60,10 @@ EXIT_FAILURE = 1
 EXIT_VALIDATION = 2
 EXIT_UNCONFIRMED = 3
 EXIT_REGRESSION_DIFFERS = 4
+# a signed receipt whose signature could NOT be checked (no key supplied, or
+# PyNaCl absent) — distinct from a clean pass (0) and from a tampered/invalid
+# receipt (1), so automation never reads "unverified" as "verified" (review r15)
+EXIT_UNVERIFIED = 5
 
 _METRIC_ASR = "ASR"
 _METRIC_UTILITY = "task_success_rate"
@@ -311,23 +315,25 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     from lab_contracts.signing import SignatureInvalid, SignatureUnavailable, verify_receipt
 
     pubkey = getattr(args, "pubkey", None)
+    expected_author = getattr(args, "author", None)
     try:
-        verify_receipt(bundle, receipt, pubkey)
+        verify_receipt(bundle, receipt, pubkey, expected_author=expected_author)
     except SignatureInvalid as exc:
         print(f"receipt: INVALID — {exc}", file=sys.stderr)
         return EXIT_FAILURE
     except SignatureUnavailable as exc:
-        # signed_ref matched (checked first), but the signature could not be
-        # verified (no key supplied / PyNaCl absent) — say so, don't claim a pass
-        print(f"receipt: signed_ref OK; signature UNVERIFIED — {exc}", file=sys.stderr)
-        return EXIT_OK
-    if receipt.get("signature"):
+        # signed_ref + structure OK, but the signature itself could NOT be checked
+        # (no key supplied / PyNaCl absent). This is NOT a pass — return a distinct
+        # nonzero code so a CI gate never treats "unverified" as "verified" (r15)
+        print(f"receipt: UNVERIFIED (integrity OK, authenticity unchecked) — {exc}", file=sys.stderr)
+        return EXIT_UNVERIFIED
+    if str(receipt.get("integrity")) == "signed":
         print(
             f"receipt: signature VERIFIED (author {receipt.get('author')!r}, "
             f"key {receipt.get('key_id')!r})"
         )
     else:
-        print(f"receipt: signed_ref OK ({receipt.get('integrity')}; no signature to verify)")
+        print(f"receipt: signed_ref OK ({receipt.get('integrity')}; hash-only, no signature)")
     return EXIT_OK
 
 
@@ -1102,6 +1108,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("package", help="a downloaded .json package or a bundle directory")
     p_verify.add_argument(
         "--pubkey", help="author Ed25519 public key (hex) to verify a signed receipt"
+    )
+    p_verify.add_argument(
+        "--author", help="expected author id (trust anchor); the receipt's author must match it"
     )
     p_verify.set_defaults(func=_cmd_verify)
 
