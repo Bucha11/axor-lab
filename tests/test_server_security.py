@@ -136,6 +136,36 @@ class TestWriteAuth(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
+    def _post_raw(self, path, raw: bytes, token=None):
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(self.base + path, data=raw, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_non_object_body_is_a_clean_400_not_a_dropped_thread(self) -> None:
+        # a JSON array (or scalar) top-level would reach payload["bundle"] and
+        # raise a TypeError deep inside → 500/traceback before the fix (review r13)
+        status, body = self._post_raw("/api/publications", b"[]", token="wsecret")
+        self.assertEqual(status, 400, body)
+        self.assertIn("JSON object", body["error"])
+
+    def test_wrong_shaped_body_never_500s(self) -> None:
+        # a dict top-level with a mis-shaped bundle/traces must resolve to a clean
+        # client error (schema 422 or shape 400), never a 500 / dropped thread
+        for payload in ({"bundle": {}, "traces": []},
+                        {"bundle": [], "traces": {}},
+                        {"traces": {}}):
+            status, body = self._post_raw(
+                "/api/publications", json.dumps(payload).encode(), token="wsecret"
+            )
+            self.assertLess(status, 500, body)
+            self.assertGreaterEqual(status, 400, body)
+
     def test_publish_without_token_is_401(self) -> None:
         status, _ = self._post("/api/publications",
                                {"bundle": self.bundle, "traces": self.traces, "question": "q"})
