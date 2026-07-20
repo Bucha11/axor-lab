@@ -105,6 +105,11 @@ class PublicationStore:
     known_keys: dict[str, str] = field(default_factory=dict)
     _cache: dict[str, StoredPublication] = field(default_factory=dict)
     _tombstones: set[str] = field(default_factory=set)
+    # bundle_refs (evidence lineage) that were taken down — a takedown removes the
+    # EVIDENCE, so the same bundle cannot be re-published under altered metadata
+    # (a different question/visibility mints a different publication_id, which the
+    # id-only tombstone would not catch — review r14)
+    _evidence_tombstones: set[str] = field(default_factory=set)
     _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def __post_init__(self) -> None:
@@ -116,6 +121,10 @@ class PublicationStore:
             try:
                 if (directory / "tombstone.json").is_file():
                     self._tombstones.add(directory.name)
+                    tomb = json.loads((directory / "tombstone.json").read_text())
+                    bref = tomb.get("bundle_ref") if isinstance(tomb, dict) else None
+                    if bref:
+                        self._evidence_tombstones.add(str(bref))
                     self._load_reproductions_only(directory.name)
                 elif (directory / "publication.json").is_file():
                     self._load(directory.name)
@@ -191,6 +200,19 @@ class PublicationStore:
                     "restoring a taken-down record is an admin-only operation",
                     status=409,
                 )
+            # evidence-level takedown: the SAME bundle cannot be re-published under
+            # altered metadata (a different question/visibility mints a new id, so
+            # the id-only tombstone would miss it). takedown follows the evidence
+            # lineage, so "takedown is final" means the evidence is gone, not just
+            # one wording of it (review r14).
+            bundle_ref = str(publication.get("bundle_ref", ""))
+            if bundle_ref and bundle_ref in self._evidence_tombstones:
+                raise PublishRejected(
+                    f"the evidence (bundle {bundle_ref}) was taken down and cannot be "
+                    "re-published under any metadata; restoring taken-down evidence is an "
+                    "admin-only operation",
+                    status=409,
+                )
             existing = self._cache.get(pid)
             if existing is not None:
                 # a publication is immutable: re-publishing the SAME bundle with
@@ -257,6 +279,12 @@ class PublicationStore:
             stored = self._cache.pop(publication_id, None)
             if stored is None and publication_id not in self._tombstones:
                 raise NotFound(f"publication {publication_id} not found")
+            # the EVIDENCE lineage this publication rests on — takedown follows
+            # the evidence, not just the exact record, so the same bundle can't
+            # be re-published under a different question/visibility (review r14)
+            bundle_ref = (
+                str(stored.publication.get("bundle_ref", "")) if stored is not None else ""
+            )
             directory = self._dir(publication_id)
             for name in ("publication.json", "bundle.json"):
                 (directory / name).unlink(missing_ok=True)
@@ -266,9 +294,14 @@ class PublicationStore:
                     path.unlink()
             _write_atomic(
                 directory / "tombstone.json",
-                json.dumps({"publication_id": publication_id, "status": "taken_down"}),
+                json.dumps({
+                    "publication_id": publication_id, "status": "taken_down",
+                    "bundle_ref": bundle_ref,
+                }),
             )
             self._tombstones.add(publication_id)
+            if bundle_ref:
+                self._evidence_tombstones.add(bundle_ref)
 
     def add_attestation(self, publication_id: str, attestation: dict[str, object]) -> StoredPublication:
         errors = validate_artifact(attestation, "attestation")

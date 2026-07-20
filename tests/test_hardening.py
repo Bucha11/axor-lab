@@ -86,6 +86,37 @@ class TestTakedown(unittest.TestCase):
             self.assertEqual(reloaded.catalog(), [])
             self.assertEqual(len(reloaded.reproductions_of(pid)), 1)
 
+    def test_takedown_follows_the_evidence_not_just_the_exact_id(self) -> None:
+        # takedown removes the EVIDENCE: the same bundle re-published under a
+        # different question/visibility mints a different publication_id, but it
+        # must NOT bring the taken-down evidence back (review r14)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PublicationStore(root=Path(tmp))
+            bundle, traces = _bundle_and_traces()
+            pid_a = str(store.publish(bundle, traces, question="Did Axor stop exfiltration?",
+                                      visibility="public").publication["publication_id"])
+            store.takedown(pid_a)
+
+            with self.assertRaises(PublishRejected) as ctx:
+                # SAME bundle, DIFFERENT wording + visibility → different id
+                store.publish(bundle, traces, question="Did Axor stop data theft?",
+                              visibility="private")
+            self.assertEqual(ctx.exception.status, 409)
+            self.assertIn("evidence", str(ctx.exception).lower())
+            self.assertEqual(store.catalog(), [])
+
+    def test_evidence_takedown_survives_a_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PublicationStore(root=Path(tmp))
+            bundle, traces = _bundle_and_traces()
+            pid = str(store.publish(bundle, traces, question="Q1").publication["publication_id"])
+            store.takedown(pid)
+
+            reloaded = PublicationStore(root=Path(tmp))
+            with self.assertRaises(PublishRejected) as ctx:
+                reloaded.publish(bundle, traces, question="a different question")
+            self.assertEqual(ctx.exception.status, 409)
+
     def test_write_token_cannot_resurrect_a_taken_down_publication(self) -> None:
         # takedown is an ADMIN action; because the id content-addresses the body,
         # a lesser write-token holder who has the bytes could re-derive the same
