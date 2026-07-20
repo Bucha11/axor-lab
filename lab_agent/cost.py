@@ -55,3 +55,40 @@ def _price_key(model: str) -> str:
         if key in model:
             return key
     return "claude-opus-4-8"
+
+
+def actual_usd(input_tokens: int, output_tokens: int, model: str) -> float:
+    """USD for ACTUAL measured tokens (same price table as the estimate)."""
+    prices = _PRICES_PER_MTOK.get(_price_key(model), _PRICES_PER_MTOK["claude-opus-4-8"])
+    usd = (input_tokens / 1_000_000) * prices[0] + (output_tokens / 1_000_000) * prices[1]
+    return round(usd, 4)
+
+
+@dataclass(frozen=True)
+class CostBudget:
+    """A HARD run-wide ceiling — the enforcement half the cost layer promised but
+    never had (it only ever printed an estimate). Any set limit is checked
+    against ACTUAL usage between trials, so the run stops BEFORE the next provider
+    call once a ceiling is reached (review r11). Unset limits (None) don't bind."""
+
+    max_usd: float | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+
+    def is_set(self) -> bool:
+        return any(x is not None for x in (self.max_usd, self.max_input_tokens, self.max_output_tokens))
+
+    def exceeded(self, usage: dict[str, int], model: str) -> str | None:
+        """Return a human reason if actual `usage` has reached any ceiling, else
+        None. Uses >= so we stop AT the ceiling, not one call past it."""
+        in_tok = int(usage.get("input_tokens", 0))
+        out_tok = int(usage.get("output_tokens", 0))
+        if self.max_input_tokens is not None and in_tok >= self.max_input_tokens:
+            return f"input tokens {in_tok:,} reached ceiling {self.max_input_tokens:,}"
+        if self.max_output_tokens is not None and out_tok >= self.max_output_tokens:
+            return f"output tokens {out_tok:,} reached ceiling {self.max_output_tokens:,}"
+        if self.max_usd is not None:
+            spent = actual_usd(in_tok, out_tok, model)
+            if spent >= self.max_usd:
+                return f"spend ${spent:.2f} reached ceiling ${self.max_usd:.2f}"
+        return None

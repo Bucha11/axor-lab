@@ -131,6 +131,22 @@ def _cmd_run(args: argparse.Namespace) -> int:
         .removeprefix("sha256:")[:32]
     )
     agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
+    model = _estimate_model(args, resolved)
+    # a HARD run-wide cost ceiling: checked against ACTUAL usage between trials,
+    # so the run stops before the next provider call (review r11). Unset → no bind.
+    from lab_agent.cost import CostBudget
+
+    budget = CostBudget(
+        max_usd=getattr(args, "max_usd", None),
+        max_input_tokens=getattr(args, "max_input_tokens", None),
+        max_output_tokens=getattr(args, "max_output_tokens", None),
+    )
+
+    def _budget_check() -> str | None:
+        if not budget.is_set() or not hasattr(agent, "usage"):
+            return None
+        return budget.exceeded(agent.usage(), model)  # type: ignore[attr-defined]
+
     result = run_experiment_suite(
         list(resolved.scenarios),
         resolved.manifests,
@@ -139,8 +155,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         repeats=resolved.repeats,
         run_id=run_id,
         agent=agent,
+        budget_check=_budget_check,
     )
     print(f"  {len(result.trials)} trials completed")
+    if result.stopped_reason:
+        print(f"  [cost_ceiling] run stopped early: {result.stopped_reason}", file=sys.stderr)
 
     print("[analyzing]")
     # missingness FIRST (denominator honesty) — it must be reported even if a
@@ -153,13 +172,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     print("[uploading_artifacts]  (local: writing bundle directory)")
     created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # record ACTUAL usage + spend when the agent tracks it (BYOK); scripted/
+    # cassette report zero, which is correct (no paid inference)
+    usage = None
+    if hasattr(agent, "usage"):
+        from lab_agent.cost import actual_usd
+        u = agent.usage()  # type: ignore[attr-defined]
+        in_tok, out_tok = int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
+        usage = {"input_tokens": in_tok, "output_tokens": out_tok,
+                 "usd": actual_usd(in_tok, out_tok, model)}
+        if result.stopped_reason:
+            usage["stopped_reason"] = result.stopped_reason
     bundle = build_bundle(
         bundle_id=f"b_{run_id}",
         created=created,
         scenarios=list(resolved.scenarios),
         conditions=list(resolved.conditions),
         tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved, _estimate_model(args, resolved)),
+        environment=_environment(resolved, model, usage),
         trials=result.trials,
         aggregates=aggregates,
         traces=result.traces,
@@ -755,20 +785,25 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
     print(line)
 
 
-def _environment(resolved: ResolvedExperiment, model: str) -> dict[str, object]:
+def _environment(
+    resolved: ResolvedExperiment, model: str, usage: dict[str, object] | None = None
+) -> dict[str, object]:
     """Record the ACTUAL agent that ran — not always 'scripted' (review §6.1).
     The bundle stays self-describing: kernel, the real model provider/id, the
-    experiment id, and (when imported) the dataset version."""
+    experiment id, the ACTUAL token usage + spend (review r11), and (when
+    imported) the dataset version."""
     kernels = sorted({str(c["kernel"]) for c in resolved.conditions})
     provider = model.split(":", 1)[0] if ":" in model else (
         "scripted" if model.startswith("scripted") else
         "anthropic" if model.startswith("claude") else
         "cassette" if model.startswith("cassette") else "unknown"
     )
+    inference_params: dict[str, object] = {"experiment_id": str(resolved.experiment["id"])}
+    if usage is not None:
+        inference_params["usage"] = usage  # actual tokens + spend, recorded in the bundle
     env: dict[str, object] = {
         "kernel_version": kernels[0] if len(kernels) == 1 else ",".join(kernels),
-        "model": {"provider": provider, "id": model,
-                  "inference_params": {"experiment_id": str(resolved.experiment["id"])}},
+        "model": {"provider": provider, "id": model, "inference_params": inference_params},
     }
     return env
 
@@ -841,6 +876,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--real-kernel", action="store_true",
         help="govern with the installed axor-core kernel (not the reference)",
     )
+    # hard run-wide cost ceilings (review r11): checked against ACTUAL usage
+    # between trials, so the run stops before the next provider call
+    p_run.add_argument("--max-usd", type=float, default=None,
+                       help="stop the run once estimated spend reaches this USD ceiling")
+    p_run.add_argument("--max-input-tokens", type=int, default=None,
+                       help="stop the run once actual input tokens reach this ceiling")
+    p_run.add_argument("--max-output-tokens", type=int, default=None,
+                       help="stop the run once actual output tokens reach this ceiling")
     p_run.add_argument(
         "--overwrite", action="store_true",
         help="replace a non-empty --out directory (clears stale traces first)",
