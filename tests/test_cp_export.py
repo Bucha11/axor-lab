@@ -88,5 +88,65 @@ class TestCPExport(unittest.TestCase):
             export_cp(bundle)
 
 
+KERNEL = support.KERNEL_PINNED
+
+
+def _multi_enforcing_bundle() -> dict[str, object]:
+    """baseline (off) + two enforcing conditions; only `allowlist` improves ASR.
+    The baseline id is 'baseline', NOT the literal 'ungoverned'."""
+    conditions: list[dict[str, object]] = [
+        {"schema_version": "condition/v1", "id": "baseline", "enforcement": "off",
+         "kernel": KERNEL, "policy": {}},
+        {"schema_version": "condition/v1", "id": "strict", "enforcement": "on",
+         "kernel": KERNEL, "policy": {"profile": "strict"}},
+        {"schema_version": "condition/v1", "id": "allowlist", "enforcement": "on",
+         "kernel": KERNEL, "policy": {"profile": "strict", "allowlist": ["a@x"]}},
+    ]
+    for condition in conditions:
+        condition["config_hash"] = condition_config_hash(KERNEL, condition["policy"])
+    aggregates = [
+        binary_aggregate("ASR", "baseline", 8, 10),
+        binary_aggregate("ASR", "strict", 8, 10),      # no delta vs baseline
+        binary_aggregate("ASR", "allowlist", 1, 10),   # real delta vs baseline
+    ]
+    return {
+        "schema_version": "bundle/v1", "bundle_id": "b_multi",
+        "conditions": conditions, "aggregates": aggregates, "tool_manifests": [],
+    }
+
+
+class TestMultiConditionExport(unittest.TestCase):
+    def test_export_requires_condition_when_multiple_enforcing(self) -> None:
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(_multi_enforcing_bundle())
+        self.assertIn("multiple enforcing", str(ctx.exception))
+
+    def test_explicit_condition_is_exported_with_its_supporting_refs(self) -> None:
+        export = export_cp(_multi_enforcing_bundle(), condition_id="allowlist")
+        source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
+        self.assertEqual(source["condition_id"], "allowlist")
+        self.assertEqual(source["baseline_condition_id"], "baseline")
+        self.assertTrue(export.earned_bridge)
+        self.assertEqual(
+            source["supporting_aggregate_refs"], ["agg:ASR:baseline", "agg:ASR:allowlist"]
+        )
+
+    def test_exported_condition_without_delta_does_not_claim_the_bridge(self) -> None:
+        # strict is enforcing but did NOT change the outcome — the bridge must
+        # not fire just because SOME other condition did
+        export = export_cp(_multi_enforcing_bundle(), condition_id="strict")
+        self.assertEqual(export.config["source"]["condition_id"], "strict")  # type: ignore[index]
+        self.assertFalse(export.earned_bridge)
+
+    def test_unknown_condition_is_rejected(self) -> None:
+        with self.assertRaises(CPExportError):
+            export_cp(_multi_enforcing_bundle(), condition_id="nope")
+
+    def test_earned_bridge_uses_enforcement_off_baseline_not_literal_id(self) -> None:
+        # baseline id is 'baseline' (enforcement off); the old code hardcoded
+        # 'ungoverned' and would have returned False
+        self.assertTrue(earned_bridge(_multi_enforcing_bundle(), condition_id="allowlist"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -364,20 +364,22 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
             for p in json.loads(Path(args.pins).read_text())
         ]
     try:
-        export = export_cp(bundle, regressions)
+        export = export_cp(bundle, regressions, condition_id=args.condition)
     except CPExportError as exc:
         raise RunnerError(str(exc)) from exc
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
     (out / "production-todo.md").write_text(export.production_todo)
+    source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
+    print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
     print(f"  config_hash (carry-over key): {export.config['config_hash']}")
     print(f"  regressions carried: {len(export.config['regressions'])}")  # type: ignore[arg-type]
     print(f"  production-todo (NOT reused): {out}/production-todo.md")
     if export.earned_bridge:
-        print("  earned bridge: governance changed the outcome on your agent — "
-              "run this governed config in production.")
+        print(f"  earned bridge: {source['condition_id']} changed the outcome vs "
+              f"{source['baseline_condition_id']} — run THIS governed config in production.")
     else:
         print("  note: no aggregate shows governance changed an outcome yet "
               "(the bridge surfaces once one does).")
@@ -766,6 +768,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("bundle")
     p_export.add_argument("--out", required=True, help="output directory for cp-deploy.json")
     p_export.add_argument("--pins", default=None, help="regression pins to carry over")
+    p_export.add_argument(
+        "--condition", default=None,
+        help="which enforcing condition to deploy (required when several enforce)",
+    )
     p_export.set_defaults(func=_cmd_export_cp)
 
     p_incident = sub.add_parser(
