@@ -25,7 +25,7 @@ from lab_contracts import (
     validate_artifact,
     verify_bundle,
 )
-from lab_contracts.publication import add_reproduction
+from lab_contracts.publication import add_reproduction, rebuild_reproduction_log
 from lab_runner import default_registry, replay_bundle
 
 from .errors import NotFound, PublishRejected
@@ -259,7 +259,10 @@ class PublicationStore:
         directory = self._dir(publication_id)
         reproductions_file = directory / "reproductions.json"
         if reproductions_file.is_file():
-            return json.loads(reproductions_file.read_text())
+            # re-derive a TRUSTED log from the on-disk bytes: re-check kind,
+            # re-dedup, re-verify signatures (review r8) rather than trust the file
+            raw = tuple(json.loads(reproductions_file.read_text()))
+            return list(rebuild_reproduction_log(raw, self.known_keys))
         raise NotFound(f"publication {publication_id} not found")
 
     # -- internals --------------------------------------------------------
@@ -403,9 +406,10 @@ class PublicationStore:
         if publication_id != self._derive_id(publication):
             return
         reproductions_file = directory / "reproductions.json"
-        reproductions = (
-            json.loads(reproductions_file.read_text()) if reproductions_file.is_file() else []
-        )
+        # re-derive a trusted log from disk: re-check kind, re-dedup, re-verify
+        # signatures — never trust a persisted `verified` flag (review r8)
+        raw = tuple(json.loads(reproductions_file.read_text())) if reproductions_file.is_file() else ()
+        reproductions = list(rebuild_reproduction_log(raw, self.known_keys))
         self._cache[publication_id] = StoredPublication(
             publication=publication, bundle=bundle, traces=traces, reproductions=reproductions
         )
