@@ -167,9 +167,14 @@ def _matches(
 
 
 def _is_type(node: object, type_name: str) -> bool:
+    # "null" was not in the map, so it fell through to "unknown type → accept
+    # anything" — a schema requiring null would pass for ANY value. And an
+    # unknown/misspelled type silently matched everything. Both now fail closed.
+    if type_name == "null":
+        return node is None
     expected = _TYPE_MAP.get(type_name)
     if expected is None:
-        return True
+        return False  # unknown type name is never a match
     if type_name in ("number", "integer") and isinstance(node, bool):
-        return False
+        return False  # bool is an int subclass in Python; not a number here
     return isinstance(node, expected)

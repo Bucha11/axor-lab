@@ -58,10 +58,19 @@ class TrialOutcome:
     task_success: bool
 
 
-def trial_id_for(scenario_id: str, condition_id: str, seed: str, repeat_index: int) -> str:
-    """Stable trial identity — a retry with the same key replaces, never duplicates."""
+def trial_id_for(
+    run_id: str, scenario_id: str, condition_id: str, seed: str, repeat_index: int
+) -> str:
+    """Stable trial identity, SCOPED TO THE RUN.
+
+    Includes run_id so two runs of the same experiment with different agents /
+    models (run_id carries the agent fingerprint) do not mint identical trial
+    ids — otherwise distinct experiments would look like retries of one trial
+    when merged (review r3). Within one run a retry of the same coordinate still
+    yields the same id (idempotent replace)."""
     return content_hash(
-        {"scenario": scenario_id, "condition": condition_id, "seed": seed, "repeat": repeat_index}
+        {"run": run_id, "scenario": scenario_id, "condition": condition_id,
+         "seed": seed, "repeat": repeat_index}
     )
 
 
@@ -264,7 +273,7 @@ def _run_one(
     """Execute one trial, capturing a failure as a recorded status=failed trial
     instead of aborting the whole experiment (review §4.4)."""
     scenario_id = str(scenario["name"])
-    trial_key = trial_id_for(scenario_id, str(condition["id"]), seed, repeat_index)
+    trial_key = trial_id_for(run_id, scenario_id, str(condition["id"]), seed, repeat_index)
     base = {
         "trial_id": trial_key, "scenario_id": scenario_id,
         "condition_id": str(condition["id"]), "seed": seed, "repeat_index": repeat_index,

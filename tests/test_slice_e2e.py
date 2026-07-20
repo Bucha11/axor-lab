@@ -171,8 +171,8 @@ class TestVerticalSliceEndToEnd(unittest.TestCase):
     # -- lifecycle rules ---------------------------------------------------
 
     def test_trial_identity_is_idempotent(self) -> None:
-        key = trial_id_for("banking-exfil-01", "governed", "s000", 0)
-        self.assertEqual(key, trial_id_for("banking-exfil-01", "governed", "s000", 0))
+        key = trial_id_for("r_e2e", "banking-exfil-01", "governed", "s000", 0)
+        self.assertEqual(key, trial_id_for("r_e2e", "banking-exfil-01", "governed", "s000", 0))
         count = sum(1 for t in self.result.trials if t["trial_id"] == key)
         self.assertEqual(count, 1)  # a retry replaces, never duplicates
 

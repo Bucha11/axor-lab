@@ -116,7 +116,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return EXIT_UNCONFIRMED
 
     print("[running_local]")
-    run_id = args.run_id or f"r_{content_hash(resolved.experiment)[7:15]}"
+    # run identity includes the ACTUAL agent — otherwise two runs of the same
+    # experiment with different --agent get the same run_id (and, before, the
+    # same trial/trace ids), so different executions looked like retries of one
+    # trial (review r3). The fingerprint is the agent's CONTENT (cassette bytes /
+    # model id), so identical agents reproduce the same id and different ones don't.
+    fingerprint = _agent_fingerprint(args, resolved)
+    run_id = args.run_id or f"r_{content_hash({'experiment': resolved.experiment, 'agent': fingerprint})[7:15]}"
     agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     result = run_experiment_suite(
         list(resolved.scenarios),
@@ -563,6 +569,20 @@ def _resolve_agent_override(spec: str) -> object:
     if kind == "anthropic":
         return WrappedModelAgent(backend=AnthropicBackend(model=param or "claude-opus-4-8"))
     raise RunnerError(f"unknown --agent {spec!r}; use cassette:<file> or anthropic:<model>")
+
+
+def _agent_fingerprint(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
+    """A content fingerprint of the agent that will actually run — folded into
+    run identity so different agents are different runs (review r3)."""
+    if not args.agent:
+        return str(resolved.experiment["agent_ref"])
+    kind, _, param = args.agent.partition(":")
+    if kind == "cassette":
+        try:
+            return "cassette:" + content_hash({"cassette": Path(param).read_text()})
+        except OSError:
+            return f"cassette:{param}"
+    return args.agent  # e.g. anthropic:<model>
 
 
 def _estimate_model(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
