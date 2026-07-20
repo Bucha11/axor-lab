@@ -80,6 +80,22 @@ def write_bundle_dir(
             shutil.rmtree(staging, ignore_errors=True)
 
 
+def write_superseded_attempts(
+    directory: Path, superseded: list[dict[str, object]]
+) -> Path | None:
+    """Persist superseded retry attempts as a sidecar audit log, OUTSIDE the
+    publishable bundle (they would orphan the bundle graph, review r8/r9). Call
+    after write_bundle_dir so it lands in the final directory. Returns the path
+    written, or None when there is nothing to record."""
+    if not superseded:
+        return None
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "superseded_attempts.json"
+    path.write_text(json.dumps(superseded, indent=2, ensure_ascii=False))
+    return path
+
+
 def read_bundle_dir(directory: Path) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
     """Load, schema-validate, and hash-verify a bundle directory.
 
