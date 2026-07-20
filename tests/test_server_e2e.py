@@ -155,7 +155,7 @@ class TestServerEndToEnd(unittest.TestCase):
         self.assertIn("&lt;script&gt;", page)
 
     def test_reproduction_grows_axis_without_changing_origin(self) -> None:
-        pid = self._publish()
+        pid = self._publish(question="repro-growth isolation")
         attestation = {
             "schema_version": "attestation/v1",
             "publication_id": pid,
@@ -173,7 +173,7 @@ class TestServerEndToEnd(unittest.TestCase):
         self.assertEqual(pub["provenance"]["reproductions"]["count"], 1)
 
     def test_takedown_over_http_removes_page_but_preserves_attestations(self) -> None:
-        pid = self._publish()
+        pid = self._publish(question="takedown isolation")
         self._post(f"/api/publications/{pid}/reproductions", {"attestation": {
             "schema_version": "attestation/v1", "publication_id": pid, "by": "@ext",
             "kind": "fresh_live", "created": "2026-07-20T00:00:00Z", "result": {"estimate": 0.0},

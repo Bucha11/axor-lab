@@ -141,9 +141,22 @@ class PublicationStore:
             raise PublishRejected(f"publication failed schema validation: {errors}")
 
         stored = StoredPublication(publication=publication, bundle=bundle, traces=traces)
+        pid = str(publication["publication_id"])
         with self._lock:
+            existing = self._cache.get(pid)
+            if existing is not None:
+                # a publication is immutable: re-publishing the SAME bundle with
+                # IDENTICAL metadata is idempotent (return the existing record);
+                # re-publishing with DIFFERENT question/visibility/license/claims
+                # must not silently overwrite the public record (review r7)
+                if existing.publication == publication:
+                    return existing
+                raise PublishRejected(
+                    f"publication {pid} already exists and is immutable; a re-publish with "
+                    "different metadata (question/visibility/license) is refused"
+                )
             self._persist(stored)
-            self._cache[str(publication["publication_id"])] = stored
+            self._cache[pid] = stored
         return stored
 
     def _integrity(
@@ -220,17 +233,20 @@ class PublicationStore:
         # private is never served (review §7 / P0.5)
         return [s for s in self._cache.values() if s.publication.get("visibility") == "public"]
 
-    def _mint_id(self, bundle_ref: str) -> str:
-        """A 128-bit id (32 hex chars) from the bundle hash (review §6.3 — the
-        old 32-bit id was collision-searchable). Re-publishing the SAME bundle
-        is idempotent (same id); a genuine collision — the id already exists for
-        a DIFFERENT bundle — is rejected."""
-        digest = bundle_ref.removeprefix("sha256:")
-        candidate = f"e_{digest[:32]}"
-        existing = self._cache.get(candidate)
-        if existing is not None and existing.publication.get("bundle_ref") != bundle_ref:
-            raise PublishRejected(f"publication id collision for {candidate}")
-        return candidate
+    @staticmethod
+    def _derive_id(publication: dict[str, object]) -> str:
+        """A 128-bit id (32 hex chars) that content-addresses the WHOLE
+        publication body — every field except the two that are themselves
+        derived from the id (review §6.3 — the old 32-bit id was collision-
+        searchable; and r7 — the id must COMMIT to the body, so no hand-edit
+        of visibility/question/claims/integrity/license survives a reload).
+        Byte-identical publications get the same id (idempotent re-publish);
+        any changed field yields a different id, i.e. a different publication."""
+        body = {
+            k: v for k, v in publication.items()
+            if k not in ("publication_id", "reproductions_ref")
+        }
+        return f"e_{content_hash(body).removeprefix('sha256:')[:32]}"
 
     def is_taken_down(self, publication_id: str) -> bool:
         return publication_id in self._tombstones
@@ -306,8 +322,10 @@ class PublicationStore:
         # the server only reaches here after check_aggregates matched, so every
         # statistical claim is backed by a server recomputation, not the upload
         statistics_integrity = "recomputed_from_traces" if aggregates else None
-        return build_publication(
-            publication_id=self._mint_id(bundle_ref),
+        # build the body with a placeholder id, then content-address it: the id
+        # commits to every field, so the publication is immutable by construction
+        publication = build_publication(
+            publication_id="e_pending",
             bundle_ref=bundle_ref,
             question=question,
             origin="local",
@@ -317,6 +335,10 @@ class PublicationStore:
             visibility=visibility,
             statistics_integrity=statistics_integrity,
         )
+        pid = self._derive_id(publication)
+        publication["publication_id"] = pid
+        publication["reproductions_ref"] = f"attlog:{pid}"
+        return publication
 
     # (module-level helper below is used here)
 
@@ -366,6 +388,20 @@ class PublicationStore:
             verify_bundle(bundle, traces)
         except BundleIntegrityError:
             return  # skip a tampered/corrupt publication rather than trust it
+        # ALSO re-verify the PUBLICATION body, not just the evidence (review r7):
+        # schema-valid, its bundle_ref binds the bundle actually present, and its
+        # id content-addresses the whole body. The id commits to EVERY field, so
+        # a hand-edited publication.json — visibility flipped to public, integrity
+        # to signed, question or claims rewritten — WITHOUT renaming the directory
+        # no longer matches its own id and is dropped rather than trusted.
+        if validate_artifact(publication, "publication"):
+            return
+        if str(publication.get("publication_id")) != publication_id:
+            return
+        if str(publication.get("bundle_ref")) != content_hash(bundle):
+            return
+        if publication_id != self._derive_id(publication):
+            return
         reproductions_file = directory / "reproductions.json"
         reproductions = (
             json.loads(reproductions_file.read_text()) if reproductions_file.is_file() else []
