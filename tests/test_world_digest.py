@@ -51,9 +51,11 @@ class TestWorldDigest(unittest.TestCase):
             EmittedEvent(type="tool_result", tool="read_txns", values=[{
                 "value_id": "v_r", "decision_value": support.ATTACKER_IBAN,
                 "preview": support.ATTACKER_IBAN, "labels": ["untrusted_derived"],
-                "sources": [{"kind": "external_read", "origin_ref": "o"}]}]),
+                "sources": [{"kind": "external_read", "origin_ref": "o"}]}, {
+                "value_id": "v_amt", "decision_value": 1200, "preview": "1200",
+                "labels": ["prompt_given"], "sources": [{"kind": "constant"}]}]),
             EmittedEvent(type="tool_call_intent", tool="send_money",
-                         arg_bindings={"recipient": "v_r"},
+                         arg_bindings={"recipient": "v_r", "amount": "v_amt"},
                          args={"recipient": support.ATTACKER_IBAN, "amount": 1200}),
         ]
         trace = assemble_and_gate(

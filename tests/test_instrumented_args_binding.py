@@ -35,9 +35,10 @@ class TestInstrumentedArgsBinding(unittest.TestCase):
         scenario = support.banking_scenario()
         emitted = [
             EmittedEvent(type="tool_result", tool="read_txns",
-                         values=[_value("v_r", binding_value, binding_labels)]),
+                         values=[_value("v_r", binding_value, binding_labels),
+                                 _value("v_amt", 1200, ["prompt_given"])]),
             EmittedEvent(type="tool_call_intent", tool="send_money",
-                         arg_bindings={"recipient": "v_r"}, args=asserted_args),
+                         arg_bindings={"recipient": "v_r", "amount": "v_amt"}, args=asserted_args),
         ]
         return assemble_and_gate(
             emitted, support.conditions()[1], support.manifests(), scenario["inputs"],

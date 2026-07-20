@@ -66,15 +66,22 @@ class TestGatewayArgsBinding(unittest.TestCase):
         return self._post(f"/runs/{run_id}/events",
                           {"type": "tool_result", "tool": "read_txns", "values": [value]}, secret)
 
+    def _bind_amount(self, run_id, secret, value=1200):
+        # send_money requires recipient AND amount; bind a prompt-given amount so
+        # authoritative_args is a COMPLETE executable call (review r10)
+        self._emit_value(run_id, secret, "v_amt", value, ["prompt_given"])
+        return {"amount": "v_amt"}
+
     def test_clean_binding_with_malicious_concrete_arg_never_allows(self) -> None:
         run_id, secret = self._open()
         # a CLEAN prompt-given value holding a safe, allowlisted IBAN
         self._emit_value(run_id, secret, "v_clean", SAFE_IBAN, ["prompt_given"])
+        amount = self._bind_amount(run_id, secret)
         # the classic laundering attempt: bind the clean value, but assert the
         # attacker IBAN as the concrete arg the tool will actually run
         status, body = self._post(f"/runs/{run_id}/events", {
             "type": "tool_call_intent", "tool": "send_money",
-            "arg_bindings": {"recipient": "v_clean"},
+            "arg_bindings": {"recipient": "v_clean", **amount},
             "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
         }, secret)
         # refused as a protocol violation — NOT an ALLOW for the attacker value
@@ -85,25 +92,27 @@ class TestGatewayArgsBinding(unittest.TestCase):
         run_id, secret = self._open()
         # bind a clean allowlisted IBAN and assert it honestly → ALLOW
         self._emit_value(run_id, secret, "v_clean", SAFE_IBAN, ["prompt_given"])
+        amount = self._bind_amount(run_id, secret)
         status, body = self._post(f"/runs/{run_id}/events", {
             "type": "tool_call_intent", "tool": "send_money",
-            "arg_bindings": {"recipient": "v_clean"},
+            "arg_bindings": {"recipient": "v_clean", **amount},
             "args": {"recipient": SAFE_IBAN, "amount": 1200},
         }, secret)
         self.assertEqual(status, 200, body)
         self.assertEqual(body["decision"]["verdict"], "ALLOW")
-        # the gateway returns the AUTHORITATIVE args a cooperating proxy must run
-        # (the bound value), so an honest client executes the value that was gated
-        self.assertEqual(body["authoritative_args"], {"recipient": SAFE_IBAN})
+        # the gateway returns the AUTHORITATIVE args a cooperating proxy must run —
+        # the COMPLETE call (both required args), each a bound ledger value
+        self.assertEqual(body["authoritative_args"], {"recipient": SAFE_IBAN, "amount": 1200})
 
     def test_tainted_binding_is_denied_even_with_an_allowlisted_assertion(self) -> None:
         run_id, secret = self._open()
         # bind an UNTRUSTED attacker value, but try to assert an allowlisted one
         # to sneak past the taint floor — must fail the assertion, never ALLOW
         self._emit_value(run_id, secret, "v_bad", support.ATTACKER_IBAN, ["untrusted_derived"])
+        amount = self._bind_amount(run_id, secret)
         status, body = self._post(f"/runs/{run_id}/events", {
             "type": "tool_call_intent", "tool": "send_money",
-            "arg_bindings": {"recipient": "v_bad"},
+            "arg_bindings": {"recipient": "v_bad", **amount},
             "args": {"recipient": SAFE_IBAN, "amount": 1200},
         }, secret)
         self.assertEqual(status, 409, body)
@@ -113,12 +122,35 @@ class TestGatewayArgsBinding(unittest.TestCase):
         # omit `args` entirely: the gate reconstructs the attacker value from the
         # binding and denies it — the concrete value is recoverable from ledger
         self._emit_value(run_id, secret, "v_bad", support.ATTACKER_IBAN, ["untrusted_derived"])
+        amount = self._bind_amount(run_id, secret)
         status, body = self._post(f"/runs/{run_id}/events", {
             "type": "tool_call_intent", "tool": "send_money",
-            "arg_bindings": {"recipient": "v_bad"},
+            "arg_bindings": {"recipient": "v_bad", **amount},
         }, secret)
         self.assertEqual(status, 200, body)
         self.assertEqual(body["decision"]["verdict"], "DENY")
+
+    def test_required_arg_must_be_bound_for_a_complete_call(self) -> None:
+        # send_money requires recipient AND amount; binding only the driving arg
+        # leaves authoritative_args an INCOMPLETE call → refused (review r10)
+        run_id, secret = self._open()
+        self._emit_value(run_id, secret, "v_clean", SAFE_IBAN, ["prompt_given"])
+        status, body = self._post(f"/runs/{run_id}/events", {
+            "type": "tool_call_intent", "tool": "send_money",
+            "arg_bindings": {"recipient": "v_clean"},
+            "args": {"recipient": SAFE_IBAN, "amount": 1200},
+        }, secret)
+        self.assertEqual(status, 409, body)
+        self.assertIn("amount", body["error"])  # the unbound required arg is named
+        # binding BOTH → the full call is gated and returned
+        amount = self._bind_amount(run_id, secret)
+        status, body = self._post(f"/runs/{run_id}/events", {
+            "type": "tool_call_intent", "tool": "send_money",
+            "arg_bindings": {"recipient": "v_clean", **amount},
+            "args": {"recipient": SAFE_IBAN, "amount": 1200},
+        }, secret)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["authoritative_args"], {"recipient": SAFE_IBAN, "amount": 1200})
 
     def test_decision_relevant_arg_must_be_bound(self) -> None:
         run_id, secret = self._open()
@@ -134,9 +166,10 @@ class TestGatewayArgsBinding(unittest.TestCase):
     def test_gated_value_is_recoverable_from_ledger_and_replays_identically(self) -> None:
         run_id, secret = self._open()
         self._emit_value(run_id, secret, "v_bad", support.ATTACKER_IBAN, ["untrusted_derived"])
+        amount = self._bind_amount(run_id, secret)
         self._post(f"/runs/{run_id}/events", {
             "type": "tool_call_intent", "tool": "send_money",
-            "arg_bindings": {"recipient": "v_bad"},
+            "arg_bindings": {"recipient": "v_bad", **amount},
             "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
         }, secret)
         self._post(f"/runs/{run_id}/finalize", {}, secret)
