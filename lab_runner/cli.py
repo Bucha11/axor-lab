@@ -123,7 +123,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # trial (review r3). The fingerprint is the agent's CONTENT (cassette bytes /
     # model id), so identical agents reproduce the same id and different ones don't.
     fingerprint = _agent_fingerprint(args, resolved)
-    run_id = args.run_id or f"r_{content_hash({'experiment': resolved.experiment, 'agent': fingerprint})[7:15]}"
+    # 128-bit id (32 hex chars) from the experiment+agent fingerprint — the old
+    # 8-char (32-bit) slice was birthday-collision-searchable, so two unrelated
+    # runs could share a run_id and look like retries of one trial (review r7)
+    run_id = args.run_id or (
+        "r_" + content_hash({"experiment": resolved.experiment, "agent": fingerprint})
+        .removeprefix("sha256:")[:32]
+    )
     agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     result = run_experiment_suite(
         list(resolved.scenarios),
@@ -506,7 +512,7 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
         "trace_ref": content_hash(trace),
     }]
     bundle = build_bundle(
-        bundle_id=f"b_incident_{content_hash(trace)[7:13]}",
+        bundle_id="b_incident_" + content_hash(trace).removeprefix("sha256:")[:32],
         created=args.created or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         scenarios=[scenario], conditions=[condition], tool_manifests=manifests,
         environment={"kernel_version": str(trace["producer"]["kernel_version"]),  # type: ignore[index]

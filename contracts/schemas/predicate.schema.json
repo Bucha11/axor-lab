@@ -46,14 +46,17 @@
         },
         "count": {
           "type": "object",
-          "description": "optional cardinality constraint on how many events match",
+          "description": "optional cardinality constraint on how many events match; must bound at least one side (min and/or max) so an empty {} — which is a no-op tautology — is rejected",
           "additionalProperties": false,
+          "minProperties": 1,
           "properties": {
             "min": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 0
             },
             "max": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 0
             }
           }
         }
