@@ -346,6 +346,50 @@ class TestSandboxRealExecutor(unittest.TestCase):
         self.assertNotEqual(outcome, OUTCOME_COMPLETED)  # contained
         self.assertIn(outcome, (OUTCOME_KILLED_CPU, OUTCOME_KILLED_WALL))
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "process-group sweep is Unix-specific")
+    def test_forked_descendant_does_not_outlive_the_run(self) -> None:
+        # the main process exits 0 but forks a long sleep into its process group;
+        # run_python must sweep the WHOLE group on return, so the descendant is
+        # not left running unbounded by wall_seconds (review r11 P1)
+        import os
+        import time
+        from lab_sandbox import OUTCOME_COMPLETED, run_python
+        code = (
+            "import subprocess, sys\n"
+            "p = subprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "sys.stdout.write(str(p.pid)); sys.stdout.flush()\n"
+        )
+        result = run_python(code, self._limits())
+        self.assertEqual(result.outcome, OUTCOME_COMPLETED)  # the parent exited cleanly
+        child_pid = int(result.stdout.strip())
+        for _ in range(60):  # allow the SIGKILL + reap to settle
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child_pid, 0)  # the forked sleep is gone, not orphaned
+
+    def test_output_one_byte_over_cap_is_marked_capped(self) -> None:
+        # exactly output_cap+1 bytes in a boundary-crossing chunk: the old code
+        # dropped the overflow silently and left truncated=False → misclassified
+        # as completed. Now it is OUTPUT_CAPPED (review r11 P1).
+        from lab_sandbox import OUTCOME_OUTPUT_CAPPED, run_python
+        cap = self._limits().output_kb * 1024
+        result = run_python(f"import sys; sys.stdout.write('A' * {cap + 1})", self._limits())
+        self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
+        self.assertTrue(result.truncated)
+        self.assertEqual(len(result.stdout), cap)
+
+    def test_output_exactly_at_cap_still_completes(self) -> None:
+        # exactly output_cap bytes is NOT over the cap → completed, not capped
+        from lab_sandbox import OUTCOME_COMPLETED, run_python
+        cap = self._limits().output_kb * 1024
+        result = run_python(f"import sys; sys.stdout.write('A' * {cap})", self._limits())
+        self.assertEqual(result.outcome, OUTCOME_COMPLETED)
+        self.assertFalse(result.truncated)
+
 
 # ── B5 — the live gateway over real HTTP (governance-capable endpoint) ───────
 class TestInstrumentedGateway(unittest.TestCase):

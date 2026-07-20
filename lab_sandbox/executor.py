@@ -70,12 +70,15 @@ def _apply_limits(limits: ResourceLimits) -> None:  # pragma: no cover - runs in
         pass
 
 
-def _killpg(proc: subprocess.Popen) -> None:  # pragma: no cover - timing dependent
-    """SIGKILL the child's whole process group (it is a session leader via
-    start_new_session), so descendants a wall timeout would otherwise orphan
-    die too."""
+def _killpg(pgid: int) -> None:  # pragma: no cover - timing dependent
+    """SIGKILL a whole process group by its SAVED pgid. Taking the pgid as an
+    argument (captured at spawn) — not re-deriving it via os.getpgid(pid) — means
+    the sweep still works after the group LEADER has exited, when the pid may be
+    gone while its descendants keep running (review r11)."""
+    if pgid <= 0:
+        return
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        os.killpg(pgid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         pass
 
@@ -98,6 +101,7 @@ def run_python(
     output_cap = limits.output_kb * 1024
     workdir = tempfile.mkdtemp(prefix="axor-sbx-")
     proc: subprocess.Popen | None = None
+    pgid = -1
     try:
         proc = subprocess.Popen(  # noqa: PLW1509 - preexec_fn is intentional (child rlimits)
             [sys.executable, "-I", "-c", code],
@@ -107,6 +111,10 @@ def run_python(
             cwd=workdir,
             start_new_session=True,  # own process group → we can kill descendants
         )
+        # capture the group id NOW (the child is its own group+session leader, so
+        # pgid == pid) — we must be able to sweep the group even after the leader
+        # itself has exited 0 while a forked descendant lingers (review r11)
+        pgid = proc.pid
         buf = bytearray()
         state = {"capped": False}
 
@@ -116,14 +124,18 @@ def run_python(
                 chunk = proc.stdout.read(4096)
                 if not chunk:
                     break
-                if len(buf) < output_cap:
-                    buf.extend(chunk[: output_cap - len(buf)])
-                else:
-                    # cap reached: stop buffering and kill the group so the
-                    # child cannot keep producing output (bounded parent memory)
+                remaining = output_cap - len(buf)
+                if len(chunk) > remaining:
+                    # this chunk CROSSES the cap: keep what fits, mark capped, and
+                    # kill the group. The old code silently dropped the overflow
+                    # of a boundary-crossing chunk and left capped=False, so
+                    # printing exactly output_cap+1 was misclassified as completed
+                    # with truncated=False (review r11).
+                    buf.extend(chunk[:remaining])
                     state["capped"] = True
-                    _killpg(proc)
+                    _killpg(pgid)
                     break
+                buf.extend(chunk)
 
         reader = threading.Thread(target=_drain, daemon=True)
         reader.start()
@@ -133,7 +145,7 @@ def run_python(
         except subprocess.TimeoutExpired:
             wall = True
             audit.append({"control": "wall_seconds", "allowed": False})
-            _killpg(proc)
+            _killpg(pgid)
             proc.wait()
         reader.join(timeout=1.0)
 
@@ -146,8 +158,10 @@ def run_python(
         audit.append({"control": "exit", "returncode": proc.returncode, "outcome": outcome})
         return ExecutionResult(outcome, proc.returncode, stdout, truncated, audit)
     finally:
-        if proc is not None and proc.poll() is None:
-            _killpg(proc)
+        # ALWAYS sweep the whole group, even if the leader already exited 0 — a
+        # `subprocess.Popen(["sleep","3600"])` descendant would otherwise outlive
+        # run_python() unbounded by wall_seconds (review r11 P1)
+        _killpg(pgid)
         if proc is not None and proc.stdout is not None:
             proc.stdout.close()
         shutil.rmtree(workdir, ignore_errors=True)  # ephemeral working dir, cleaned up
