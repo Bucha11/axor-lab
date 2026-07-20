@@ -1,9 +1,17 @@
 """Canonical JSON serialization and content hashing.
 
-Canonicalization (`axor-jcs`): lexicographically sorted object keys, minimal
-separators (no whitespace), UTF-8, `ensure_ascii=False`, and NaN/Infinity
-rejected. This is **RFC 8785 / JCS**, including RFC 8785 §3.2.2.3 number
-serialization (the ECMAScript ``Number.prototype.toString`` algorithm).
+Canonicalization (`axor-jcs`): object keys sorted by UTF-16 code units (the
+ECMAScript string order, NOT Python's code-point order), minimal separators (no
+whitespace), UTF-8, `ensure_ascii=False`, and NaN/Infinity rejected. This is
+**RFC 8785 / JCS**, including RFC 8785 §3.2.2.3 number serialization (the
+ECMAScript ``Number.prototype.toString`` algorithm).
+
+Interoperability guards (review r14): object property names must be strings (a
+coerced ``1``/``"1"`` would collide into one property name); an integer outside
+±(2^53−1) is rejected (it is not exactly representable as a JS Number, so a JS
+verifier would read a different value); and a lone surrogate is rejected (it has
+no valid UTF-8/UTF-16 encoding). These keep a Python-produced hash byte-identical
+to a JS/Rust RFC 8785 implementation on the values Lab actually serializes.
 
 Two number regimes, and the distinction is load-bearing (review r13):
 
@@ -67,6 +75,21 @@ def _rfc8785_number(value: float) -> str:
     return f"{mantissa}e{'+' if e >= 0 else '-'}{abs(e)}"
 
 
+# RFC 8785 numbers are IEEE-754 doubles; an integer beyond 2^53-1 is not exactly
+# representable as a JS Number, so canonicalizing it in one language and reading
+# it in another would disagree. Reject it rather than silently emit a value a JS
+# verifier can't reproduce (review r14).
+_MAX_SAFE_INT = 2 ** 53 - 1
+
+
+def _reject_lone_surrogate(s: str) -> None:
+    """A lone surrogate (U+D800–U+DFFF not in a pair) has no valid UTF-8/UTF-16
+    encoding, so it is not interoperable JSON — reject it (review r14)."""
+    for ch in s:
+        if 0xD800 <= ord(ch) <= 0xDFFF:
+            raise ValueError(f"string contains a lone surrogate U+{ord(ch):04X}; not valid JSON")
+
+
 def _canonicalize(obj: object, out: list[str]) -> None:
     if obj is None:
         out.append("null")
@@ -75,19 +98,30 @@ def _canonicalize(obj: object, out: list[str]) -> None:
     elif obj is False:
         out.append("false")
     elif isinstance(obj, str):
+        _reject_lone_surrogate(obj)
         out.append(json.dumps(obj, ensure_ascii=False))  # RFC 8785 string escaping
     elif isinstance(obj, int):  # bool already handled above
+        if abs(obj) > _MAX_SAFE_INT:
+            raise ValueError(
+                f"integer {obj} exceeds the interoperable JSON range (±2^53-1); "
+                "represent it as a string to keep the hash cross-language"
+            )
         out.append(str(obj))
     elif isinstance(obj, float):
         out.append(_rfc8785_number(obj))
     elif isinstance(obj, dict):
         out.append("{")
         first = True
-        for key in sorted(obj.keys(), key=_key_str):
+        # object property names MUST be strings, and RFC 8785 sorts them by UTF-16
+        # code units (the ECMAScript string order) — NOT Python's code-point order,
+        # which disagrees for supplementary-plane keys. `.encode("utf-16-be")`
+        # yields exactly the UTF-16 code-unit byte sequence to compare (review r14).
+        for key in sorted(obj.keys(), key=_utf16_sort_key):
             if not first:
                 out.append(",")
             first = False
-            out.append(json.dumps(_key_str(key), ensure_ascii=False))
+            _reject_lone_surrogate(key)
+            out.append(json.dumps(key, ensure_ascii=False))
             out.append(":")
             _canonicalize(obj[key], out)
         out.append("}")
@@ -102,20 +136,17 @@ def _canonicalize(obj: object, out: list[str]) -> None:
         raise TypeError(f"object of type {type(obj).__name__} is not canonical-JSON serializable")
 
 
-def _key_str(key: object) -> str:
-    if isinstance(key, str):
-        return key
-    if key is True:
-        return "true"
-    if key is False:
-        return "false"
-    if key is None:
-        return "null"
-    if isinstance(key, float):
-        return _rfc8785_number(key)
-    if isinstance(key, int):
-        return str(key)
-    raise TypeError(f"object property name of type {type(key).__name__} is not allowed")
+def _utf16_sort_key(key: object) -> bytes:
+    # non-string property names are NOT allowed: coercing 1 and "1" to the same
+    # "1" would produce two identical property names in one object — a
+    # non-injective, ambiguous serialization (review r14)
+    if not isinstance(key, str):
+        raise TypeError(
+            f"object property name of type {type(key).__name__} is not allowed; "
+            "canonical JSON object keys must be strings"
+        )
+    _reject_lone_surrogate(key)
+    return key.encode("utf-16-be")
 
 
 def canonical_json(obj: object) -> str:
