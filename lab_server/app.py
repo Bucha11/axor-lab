@@ -76,7 +76,7 @@ def make_server(
                     return
                 evidence = _EVIDENCE_RE.match(path)
                 if evidence:
-                    stored = store.get(evidence.group(1))
+                    stored = self._readable(store.get(evidence.group(1)))
                     if evidence.group(2) not in stored.traces:
                         raise NotFound("trace not found")
                     policy = parse_qs(split.query).get("policy", [None])[0]
@@ -84,14 +84,12 @@ def make_server(
                     return
                 api_pub = _API_PUB_RE.match(path)
                 if api_pub:
-                    stored = store.get(api_pub.group(1))
+                    stored = self._readable(store.get(api_pub.group(1)))
                     self._json(200, {**stored.publication, "provenance": stored.axes()})
                     return
                 page = _PUB_RE.match(path)
                 if page:
-                    stored = store.get(page.group(1))
-                    if stored.publication.get("visibility") == "private":
-                        raise NotFound("no such publication")  # never serve private
+                    stored = self._readable(store.get(page.group(1)))
                     self._html(render_publication(stored))
                     return
                 raise NotFound("no such route")
@@ -132,6 +130,10 @@ def make_server(
                     return
                 repro = _API_REPRO_RE.match(self.path)
                 if repro:
+                    # appending a reproduction is a WRITE (it changes a published
+                    # record's provenance axis) — it needs the write token, not
+                    # an open endpoint anyone can inflate (review r7)
+                    self._require(write_token)
                     stored = store.add_attestation(repro.group(1), payload["attestation"])
                     self._json(201, {"reproductions": stored.axes()["reproductions"]})
                     return
@@ -142,6 +144,14 @@ def make_server(
                 self._error(exc)
 
         # -- helpers ------------------------------------------------------
+
+        def _readable(self, stored: object) -> object:
+            """A private publication is never served on ANY read route — not the
+            HTML page, the JSON API, or an EvidenceCase URL (review r7: private
+            must mean private everywhere, not just on the main page)."""
+            if stored.publication.get("visibility") == "private":  # type: ignore[attr-defined]
+                raise NotFound("no such publication")
+            return stored
 
         def _require(self, expected: str | None) -> None:
             """Enforce a bearer token when one is configured (constant-time)."""

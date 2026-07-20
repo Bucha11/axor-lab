@@ -154,8 +154,11 @@ def run_trial(
     # 3. gate — the ONE decide implementation (also used by replay). The real
     # axor-core governor and the reference kernel share this dispatch.
     if isinstance(kernel, AxorKernel):
+        # read the RAW runtime value (in-memory), not decision_value off the
+        # serialized dict — a sensitive value is redacted there and has no
+        # decision_value, which used to KeyError and fail the whole trial (r7)
         registrations = [
-            (read_tool, ledger.get(vid)["decision_value"]) for vid in produced
+            (read_tool, ledger.runtime_value(vid)) for vid in produced
         ]
         decision = gate_with_governor(
             kernel.config, str(condition["enforcement"]), registrations,
@@ -248,7 +251,12 @@ class ExperimentResult:
         """Paired outcomes per seed — stored, because McNemar needs the pairing."""
         by_key: dict[tuple[str, str, int], dict[str, bool]] = {}
         for trial in self.trials:
-            outcome = self.outcomes[str(trial["trial_id"])]
+            # a failed trial has no outcome — skip it, don't KeyError (review r7).
+            # It is excluded from the pair, which is exactly what missingness
+            # accounts for; one bad trial must not sink the whole analysis.
+            outcome = self.outcomes.get(str(trial["trial_id"]))
+            if outcome is None:
+                continue
             value = outcome.violation if metric == "ASR" else outcome.task_success
             key = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]))
             by_key.setdefault(key, {})[str(trial["condition_id"])] = value

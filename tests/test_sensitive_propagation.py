@@ -57,6 +57,19 @@ class TestSensitivePropagation(unittest.TestCase):
         self.assertNotIn("sensitive", derived["labels"])
         self.assertNotIn("untrusted_derived", derived["labels"])
 
+    def test_real_kernel_registration_reads_runtime_value_not_serialized(self) -> None:
+        # the exact pattern the real-kernel path uses: it must get the RAW value
+        # even for a redacted sensitive value, where reading decision_value off
+        # the serialized dict used to KeyError and fail the whole trial (r7)
+        led = ValueLedger()
+        vid = led.mint_external_read(SECRET, "tool_result:read:key", sensitive=True)
+        with self.assertRaises(KeyError):
+            _ = led.get(vid)["decision_value"]  # the OLD (crashing) access
+        registrations = [("read_key", led.runtime_value(v)) for v in [vid]]  # the NEW access
+        self.assertEqual(registrations[0][1], SECRET)  # kernel sees the raw value
+        # ...but the serialized trace values still never carry the secret
+        self.assertNotIn(SECRET, json.dumps(led.values))
+
 
 if __name__ == "__main__":
     unittest.main()

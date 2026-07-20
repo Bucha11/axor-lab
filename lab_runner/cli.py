@@ -123,7 +123,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # trial (review r3). The fingerprint is the agent's CONTENT (cassette bytes /
     # model id), so identical agents reproduce the same id and different ones don't.
     fingerprint = _agent_fingerprint(args, resolved)
-    run_id = args.run_id or f"r_{content_hash({'experiment': resolved.experiment, 'agent': fingerprint})[7:15]}"
+    # 128-bit id (32 hex chars) from the experiment+agent fingerprint — the old
+    # 8-char (32-bit) slice was birthday-collision-searchable, so two unrelated
+    # runs could share a run_id and look like retries of one trial (review r7)
+    run_id = args.run_id or (
+        "r_" + content_hash({"experiment": resolved.experiment, "agent": fingerprint})
+        .removeprefix("sha256:")[:32]
+    )
     agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     result = run_experiment_suite(
         list(resolved.scenarios),
@@ -137,9 +143,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     print(f"  {len(result.trials)} trials completed")
 
     print("[analyzing]")
-    aggregates = _aggregates(resolved, result, agent)
+    # missingness FIRST (denominator honesty) — it must be reported even if a
+    # whole condition has no completed trials, so it never depends on aggregates
     summary = missingness(result.trials)
     print(f"  {summary.display()}")
+    aggregates = _aggregates(resolved, result, agent)
     for aggregate in aggregates:
         _print_aggregate(aggregate)
 
@@ -504,7 +512,7 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
         "trace_ref": content_hash(trace),
     }]
     bundle = build_bundle(
-        bundle_id=f"b_incident_{content_hash(trace)[7:13]}",
+        bundle_id="b_incident_" + content_hash(trace).removeprefix("sha256:")[:32],
         created=args.created or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         scenarios=[scenario], conditions=[condition], tool_manifests=manifests,
         environment={"kernel_version": str(trace["producer"]["kernel_version"]),  # type: ignore[index]
@@ -683,14 +691,19 @@ def _aggregates(
     for condition in resolved.conditions:
         condition_id = str(condition["id"])
         n, asr_succ, util_succ = counts[condition_id]
+        if n == 0:
+            # a condition where every trial failed produces NO aggregate rather
+            # than crashing wilson_interval; missingness reports the gap (r7)
+            continue
         for metric, successes in ((_METRIC_ASR, asr_succ), (_METRIC_UTILITY, util_succ)):
             test = None
             is_treated = baseline is not None and condition_id != baseline and metric == _METRIC_ASR
-            if is_treated and design == "matched_pairs":
+            base_n = counts[baseline][0] if baseline is not None else 0  # type: ignore[index]
+            if is_treated and base_n > 0 and design == "matched_pairs":
                 pairs = result.pairs(baseline, condition_id, metric="ASR")  # type: ignore[attr-defined]
                 test = mcnemar_test(pairs, vs=baseline)
-            elif is_treated and design == "independent_samples":
-                base_n, base_asr, _ = counts[baseline]  # type: ignore[index]
+            elif is_treated and base_n > 0 and design == "independent_samples":
+                base_asr = counts[baseline][1]  # type: ignore[index]
                 test = two_proportion_test(base_asr, base_n, successes, n, vs=baseline)
             aggregates.append(
                 binary_aggregate(metric, condition_id, successes, n, test=test,
@@ -700,7 +713,12 @@ def _aggregates(
 
 
 def _condition_counts(result: "object", condition_id: str) -> tuple[int, int, int]:
-    trials = [t for t in result.trials if t["condition_id"] == condition_id]  # type: ignore[attr-defined]
+    # only COMPLETED trials that actually produced an outcome (a failed trial has
+    # none) — accessing result.outcomes[...] for a failed trial used to KeyError
+    trials = [
+        t for t in result.trials  # type: ignore[attr-defined]
+        if t["condition_id"] == condition_id and str(t["trial_id"]) in result.outcomes  # type: ignore[attr-defined]
+    ]
     outcomes = [result.outcomes[str(t["trial_id"])] for t in trials]  # type: ignore[attr-defined]
     return (
         len(outcomes),

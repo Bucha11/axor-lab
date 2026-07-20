@@ -97,9 +97,6 @@ def load_axl(path: Path) -> dict[str, object]:
 def resolve(document: dict[str, object]) -> ResolvedExperiment:
     """Validate the whole document; raise ExperimentFileError with ALL errors."""
     errors: list[str] = []
-    experiment: dict[str, object] = document.get("experiment", {})  # type: ignore[assignment]
-    scenarios: list[dict[str, object]] = list(document.get("scenarios", []))  # type: ignore[arg-type]
-    manifests_list: list[dict[str, object]] = list(document.get("tool_manifests", []))  # type: ignore[arg-type]
 
     for key in ("experiment", "scenarios", "tool_manifests"):
         if key not in document:
@@ -107,10 +104,35 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
     if errors:
         raise ExperimentFileError(tuple(errors))
 
+    # type the .axl envelope BEFORE iterating: `experiment` must be an object and
+    # `scenarios`/`tool_manifests` arrays. Otherwise list(document["scenarios"])
+    # would silently iterate a dict's keys or a string's characters, and a
+    # non-object manifest would AttributeError on .get() — a raw crash instead of
+    # a clean [validating] error (review r7).
+    experiment_raw = document["experiment"]
+    scenarios_raw = document["scenarios"]
+    manifests_raw = document["tool_manifests"]
+    if not isinstance(experiment_raw, dict):
+        errors.append("[validating] 'experiment' must be an object")
+    if not isinstance(scenarios_raw, list):
+        errors.append("[validating] 'scenarios' must be an array")
+    if not isinstance(manifests_raw, list):
+        errors.append("[validating] 'tool_manifests' must be an array")
+    if errors:
+        raise ExperimentFileError(tuple(errors))
+
+    experiment: dict[str, object] = experiment_raw  # type: ignore[assignment]
+    scenarios: list[object] = list(scenarios_raw)  # type: ignore[arg-type]
+    manifests_list: list[object] = list(manifests_raw)  # type: ignore[arg-type]
+
     errors += [f"[validating] experiment: {e}" for e in validate_artifact(experiment, "experiment")]
     # duplicate ids must be an error, not a silent last-wins overwrite
     manifests: dict[str, dict[str, object]] = {}
     for manifest in manifests_list:
+        # each element must be an object before we read .get('id') / schema-check
+        if not isinstance(manifest, dict):
+            errors.append(f"[validating] tool_manifest entry must be an object, got {type(manifest).__name__}")
+            continue
         errors += [
             f"[validating] tool_manifest {manifest.get('id')}: {e}"
             for e in validate_artifact(manifest, "tool-manifest")
@@ -125,6 +147,9 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
 
     by_name: dict[str, dict[str, object]] = {}
     for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            errors.append(f"[validating] scenario entry must be an object, got {type(scenario).__name__}")
+            continue
         name = str(scenario.get("name"))
         if name in by_name:
             errors.append(f"[validating] duplicate scenario name '{name}'")

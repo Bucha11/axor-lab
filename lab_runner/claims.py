@@ -18,14 +18,28 @@ def deny_claim_text(trace: dict[str, object]) -> str:
     values = {str(v["value_id"]): v for v in trace["values"]}  # type: ignore[union-attr]
     events: list[dict[str, object]] = list(trace["events"])  # type: ignore[arg-type]
     decision: dict[str, object] | None = None
+    deny_call_id: object = None
     for event in events:
         if event.get("type") == "gate_decision" and event["decision"]["verdict"] == "DENY":  # type: ignore[index]
             decision = event["decision"]  # type: ignore[assignment]
+            deny_call_id = event.get("call_id")
             break
     if decision is None:
         return f"On trace {trace_id}, {kernel_version} returns DENY."
     gate = str(decision.get("gate", "unknown"))
-    tool = next((e.get("tool") for e in events if e.get("type") == "tool_call_intent"), None)
+    # name the tool the DENY actually gated, correlated by call_id — NOT the
+    # first intent in the trace (a trace with several calls would otherwise
+    # attribute the denial to the wrong tool, review r7)
+    tool = None
+    if deny_call_id is not None:
+        tool = next(
+            (e.get("tool") for e in events
+             if e.get("type") == "tool_call_intent" and e.get("call_id") == deny_call_id),
+            None,
+        )
+    if tool is None:  # legacy traces without call_ids: fall back to the sole intent
+        intents = [e.get("tool") for e in events if e.get("type") == "tool_call_intent"]
+        tool = intents[0] if len(intents) == 1 else None
     driving_id = str(decision.get("driving_value_id", ""))
     labels = tuple(values.get(driving_id, {}).get("labels", []))  # type: ignore[union-attr]
     parts = [f"On trace {trace_id}, {kernel_version} returns DENY by gate '{gate}'"]

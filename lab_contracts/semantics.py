@@ -92,8 +92,21 @@ def _check_predicate(
             hi = count.get("max") if isinstance(count, dict) else None
             if not isinstance(count, dict):
                 errors.append(f"[validating] {name}: 'count' must be an object with min/max")
-            elif lo is not None and hi is not None and int(lo) > int(hi):  # type: ignore[arg-type]
-                errors.append(f"[validating] {name}: count.min {lo} > count.max {hi}")
+            elif lo is None and hi is None:
+                # an empty {} is a tautology (the evaluator's no-count default is
+                # "at least one match"), so it reads as a bound but constrains
+                # nothing — reject it rather than silently no-op (review r7)
+                errors.append(
+                    f"[validating] {name}: 'count' must set min and/or max; "
+                    "an empty {} constrains nothing"
+                )
+            else:
+                if lo is not None and int(lo) < 0:  # type: ignore[arg-type]
+                    errors.append(f"[validating] {name}: count.min {lo} must be >= 0")
+                if hi is not None and int(hi) < 0:  # type: ignore[arg-type]
+                    errors.append(f"[validating] {name}: count.max {hi} must be >= 0")
+                if lo is not None and hi is not None and int(lo) > int(hi):  # type: ignore[arg-type]
+                    errors.append(f"[validating] {name}: count.min {lo} > count.max {hi}")
         tool = sub.get("tool")
         if tool is not None and tool not in tool_ids:
             errors.append(f"[validating] {name}: predicate names unknown tool '{tool}'")
