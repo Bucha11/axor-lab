@@ -182,3 +182,29 @@ reproduction-bundle endpoint; an agent-factory protocol for per-trial isolation;
 condition/model/order-aware missingness; cross-language float canonicalization
 vectors; and a signed, verified-vs-submitted attestation count — the seams are
 now guarded, but the larger "reproduce-from-scratch" loop remains future work.
+
+## Eighth review round — verify one value, allow another
+
+The most dangerous finding this round was a live-enforcement bypass: the
+instrumented gateway could check one value's provenance and let the tool run a
+different concrete value. Around it sat a cluster of "trust the persisted/
+self-reported thing" gaps — self-certified provenance fidelity, an unsigned
+reproduction counter, a restart that skipped the publish handshake, a retry
+model that orphaned traces, and load-bearing trace metadata that wasn't actually
+bound to its bundle. Seven patches. Suite green (392 tests).
+
+| Round-8 finding | Fix | Proof |
+|---|---|---|
+| **P0** the gateway took `arg_bindings` and a concrete `args` map independently — labels from the bound values, but the args the gate decided on straight from the client, and only bindings recorded. A clean binding + a malicious concrete arg → ALLOW on clean labels, tool runs the attacker value, replay reproduces the laundered ALLOW | `resolve_args(bindings, values)` is the single source of gated args (bound value's `decision_value`), shared by replay AND the gateway; a client `args` is an assertion checked by canonical hash; every decision-relevant arg must be bound; values must carry `decision_value` | `test_gateway_args_binding.py` |
+| **P1** the gateway defaulted `labels_carried=True` and stamped `explicit_flow_tracked` — a governance claim built from labels an untrusted agent merely asserted (self-reported, not tracked) | `explicit_flow_tracked` requires the operator to construct the gateway as an attested `trusted_runtime` (default off); an untrusted client is always `heuristic_attribution` and can only downgrade | `test_gateway_provenance_honesty.py` |
+| **P1** unsigned self-reports counted the same as verified reproductions, one "reproduced ×N" badge; on restart reproductions.json loaded raw (no re-check), so a hand-edit could forge `verified`/dupes/bad kinds | `verified` is EARNED only from a valid signature (never an input flag), the signature is retained; `rebuild_reproduction_log` re-verifies + re-dedups on every load; axes split verified/unverified; the badge counts only verified | `test_reproduction_verification.py` |
+| **P1** `_load` at restart ran only hash + schema + content-address checks, never replay or aggregate recomputation — a from-scratch, hash-coherent publication (fabricated aggregates/claims/non-replaying decisions) placed in the store dir loaded as if it had passed the handshake | one shared `_semantic_errors` (replay must be bit-identical + aggregates must recompute) runs on publish AND load; load also re-MINTs the publication and refuses anything whose body isn't what the server would generate | `test_publication_immutable.py::test_forged_claims_publication_is_rejected_on_restart` |
+| **P1** a stochastic retry left the prior trace in `traces` while the trial referenced the new one → verify_bundle rejected the orphan; a failed retry left a stale outcome + orphan too | both paths route through `_supersede`, which retires the prior attempt AND its trace into the audit log (outside the publishable bundle) and clears the stale outcome, so both attempts survive without orphaning evidence | `test_runner_correctness.py` (build+verify a real bundle after a retry) |
+| **P1/P2** the graph verifier bound only trial coordinates; `producer.kernel_version` / `inputs_digest` / a global `environment.kernel_version` could disagree with the bundle and replay would still pass | verify_bundle now binds producer kernel to the condition's kernel, `inputs_digest` to the scenario inputs+fixtures, and requires `environment.kernel_version` to be one of the conditions' kernels | `test_trace_metadata_binding.py` |
+| **P2** the publication server's `_read_json` crashed on a non-numeric Content-Length (500) and let a negative one bypass the cap (`read(-1)` hang) | ported the gateway's guards: non-numeric / negative Content-Length is a clean 400 | `test_content_length_hardening.py` |
+
+Still deferred (documented): a cryptographic per-event envelope so an untrusted
+multi-tenant gateway caller can earn `explicit_flow_tracked`; a server-signed
+acceptance receipt so a store directory without one never loads (stronger than
+re-mint-and-compare for a forged integrity badge); a first-class `attempts`
+graph in the bundle contract; and hash-chained append-only attestation logs.

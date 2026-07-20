@@ -83,43 +83,76 @@ def add_reproduction(
 ) -> tuple[dict[str, object], ...]:
     """Append to the attestation log — the publication itself never changes.
 
-    Review §6.4: reproductions are provenance, not a free counter. This
+    Review §6.4 / r8: reproductions are provenance, not a free counter. This
     (1) rejects an unknown kind, (2) de-duplicates by (attester, kind,
-    publication) so the count can't be inflated by re-posting, and (3) when the
-    attestation carries a `signature` + `by` key that is KNOWN, verifies it and
-    marks it `verified` — an unknown-key or bad signature is rejected rather
-    than silently counted as verified."""
+    publication) so the count can't be inflated by re-posting, and (3) computes
+    `verified` SOLELY from a valid signature by a KNOWN key — never trusting a
+    caller- or disk-supplied `verified` flag. The signature is RETAINED in the
+    stored entry (not popped) so `verified` is recomputable on every reload:
+    re-folding the persisted log through this function re-verifies each entry
+    and drops a forged `verified`. An unknown-key or bad signature is rejected."""
     if attestation.get("kind") not in REPRODUCTION_KINDS:
         raise ClaimTypingError(f"unknown reproduction kind {attestation.get('kind')!r}")
     key = (attestation.get("by"), attestation.get("kind"), attestation.get("publication_id"))
     if any((a.get("by"), a.get("kind"), a.get("publication_id")) == key for a in log):
         return log  # idempotent: a duplicate attestation does not inflate the count
     entry = dict(attestation)
-    signature = entry.pop("signature", None)
+    entry.pop("verified", None)  # verified is EARNED here, never accepted as input
+    signature = entry.get("signature")
     if signature is not None:
         pubkey = (known_keys or {}).get(str(entry.get("by")))
         if pubkey is None:
             raise ClaimTypingError(f"attestation signed by unknown key {entry.get('by')!r}")
         from .signing import SignatureInvalid, verify_bundle_signature
 
+        # verify over the attestation body (minus signature/verified), the exact
+        # bytes the attester signed; keep `signature` in the entry so a later
+        # reload can repeat this check rather than trust a stored flag
+        body = {k: v for k, v in entry.items() if k not in ("signature", "verified")}
         try:
-            # sign over the attestation body (minus signature), same crypto path
-            verify_bundle_signature({"content_hashes": entry}, signature, pubkey)
+            verify_bundle_signature({"content_hashes": body}, signature, pubkey)
         except SignatureInvalid as exc:
             raise ClaimTypingError(f"attestation signature invalid: {exc}") from exc
         entry["verified"] = True
     return log + (entry,)
 
 
+def rebuild_reproduction_log(
+    raw: tuple[dict[str, object], ...], known_keys: dict[str, str] | None = None
+) -> tuple[dict[str, object], ...]:
+    """Re-derive a trusted attestation log from persisted (untrusted) entries.
+
+    On restart the on-disk reproductions.json is just bytes — a hand-edit could
+    add duplicates, an invalid kind, or a forged `verified`. Folding every raw
+    entry back through add_reproduction re-checks kind, re-deduplicates, and
+    RE-VERIFIES each signature, so `verified` reflects cryptography, not the
+    file. An entry that no longer validates is dropped rather than trusted."""
+    log: tuple[dict[str, object], ...] = ()
+    for entry in raw:
+        try:
+            log = add_reproduction(log, entry, known_keys)
+        except ClaimTypingError:
+            continue  # a corrupt/forged persisted entry is dropped, not trusted
+    return log
+
+
 def provenance_axes(
     publication: dict[str, object], log: tuple[dict[str, object], ...]
 ) -> dict[str, object]:
-    """The three INDEPENDENT axes a catalog card composes — never one badge."""
+    """The three INDEPENDENT axes a catalog card composes — never one badge.
+
+    Reproductions split into cryptographically `verified` (signed by a known
+    key) and `unverified` self-reports (review r8): a public badge must count
+    only the verified ones, so an unsigned upload cannot masquerade as an
+    independent reproduction."""
+    verified = sum(1 for a in log if a.get("verified") is True)
     return {
         "origin": publication["origin"],
         "integrity": publication["integrity"],
         "reproductions": {
             "count": len(log),
+            "verified": verified,
+            "unverified": len(log) - verified,
             "kinds": sorted({str(a["kind"]) for a in log}),
         },
     }

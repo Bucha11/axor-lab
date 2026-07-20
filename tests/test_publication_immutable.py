@@ -117,6 +117,36 @@ class TestPublicationImmutable(unittest.TestCase):
         self.assertEqual(str(reloaded.get(pid).publication["publication_id"]), pid)
         self.assertEqual(len(reloaded.reproductions_of(pid)), 1)  # attestations persist
 
+    def test_forged_claims_publication_is_rejected_on_restart(self) -> None:
+        # a from-scratch publication that NEVER passed the handshake: fabricate a
+        # claim, recompute a matching content-addressed id, name the dir that id,
+        # and confirm the load path (replay + recompute + re-mint) refuses it —
+        # the content-address alone would accept a self-consistent forgery.
+        store = self._store()
+        pub = store.publish(self.bundle, self.traces, question="q", visibility="public")
+        pid = str(pub.publication["publication_id"])
+        body = json.loads((self.root / pid / "publication.json").read_text())
+        body["claims"] = [{"kind": "statistically_reproducible",
+                           "assertion": "ASR under governed: 0.00 [0.00, 0.00] over 999 trials",
+                           "evidence_ref": "agg:ASR:governed", "trace_refs": [], "aggregate_refs": []}]
+        # recompute the id so the naive content-address check would pass
+        from lab_server.store import PublicationStore as _PS
+        new_id = _PS._derive_id(body)
+        body["publication_id"] = new_id
+        body["reproductions_ref"] = f"attlog:{new_id}"
+        forged_dir = self.root / new_id
+        forged_dir.mkdir()
+        (forged_dir / "traces").mkdir()
+        (forged_dir / "publication.json").write_text(json.dumps(body))
+        (forged_dir / "bundle.json").write_text(json.dumps(self.bundle))
+        for t in self.traces.values():
+            from lab_contracts import content_hash
+            name = content_hash(t).removeprefix("sha256:")
+            (forged_dir / "traces" / f"{name}.json").write_text(json.dumps(t))
+        reloaded = self._store()
+        with self.assertRaises(Exception):
+            reloaded.get(new_id)  # re-mint mismatch (fabricated claim) → not trusted
+
 
 if __name__ == "__main__":
     unittest.main()

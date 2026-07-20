@@ -95,7 +95,8 @@ class TestGatewayConcurrency(unittest.TestCase):
         def emit(i: int) -> None:
             self.gw.post(f"/runs/{run_id}/events", {
                 "type": "tool_result", "tool": "read_txns",
-                "values": [{"value_id": f"v{i}", "preview": "x", "labels": ["clean"],
+                "values": [{"value_id": f"v{i}", "preview": "x", "decision_value": "x",
+                            "labels": ["clean"],
                             "sources": [{"kind": "external_read", "origin_ref": f"o{i}"}]}],
             }, secret=secret)
 

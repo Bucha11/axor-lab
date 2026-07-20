@@ -134,7 +134,7 @@ def replay_trace_status(
                 malformed = True
                 continue
             bindings: dict[str, str] = pending_call.get("arg_bindings", {})  # type: ignore[assignment]
-            args = {name: _arg_value(values[vid]) for name, vid in bindings.items()}
+            args = resolve_args(bindings, values)
             if isinstance(kernel, AxorKernel):
                 driving = pending_call.get("arg_bindings", {}).get("recipient", "v_none")  # type: ignore[union-attr]
                 decision = gate_with_governor(
@@ -247,6 +247,21 @@ def _arg_value(value: dict[str, object]) -> object:
     if "decision_value" in value:
         return value["decision_value"]
     return {"__redacted__": value.get("canonical_value_hash")}
+
+
+def resolve_args(
+    arg_bindings: dict[str, str], values_by_id: dict[str, dict[str, object]]
+) -> dict[str, object]:
+    """Assemble the concrete gated args SOLELY from the bound ledger values.
+
+    The args a gate decides on are a pure function of `arg_bindings` → each
+    bound value's authoritative `decision_value`. This is the single source of
+    that mapping, shared by exact replay AND the live gateway, so a caller can
+    never make the gate decide on one concrete value while the bound ledger
+    value (and therefore its security labels) describes another — the r8 P0
+    'verify one value, execute another' bypass. A binding to an unknown value
+    id raises KeyError (the caller must fail closed)."""
+    return {name: _arg_value(values_by_id[vid]) for name, vid in arg_bindings.items()}
 
 
 def _verdict_core(decision: dict[str, object]) -> dict[str, object]:

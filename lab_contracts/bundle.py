@@ -93,6 +93,7 @@ def verify_bundle(bundle: dict[str, object], traces: dict[str, dict[str, object]
 
     _verify_uniqueness(bundle, traces, errors)
     _verify_trial_trace_graph(bundle, traces, errors)
+    _verify_trace_metadata(bundle, traces, errors)
     if errors:
         raise BundleIntegrityError("; ".join(errors))
 
@@ -159,6 +160,62 @@ def _verify_trial_trace_graph(
     for ref, trace in by_ref.items():
         if ref not in cited:
             errors.append(f"orphan trace {trace.get('trace_id')} is not cited by any completed trial")
+
+
+def _verify_trace_metadata(
+    bundle: dict[str, object], traces: dict[str, dict[str, object]], errors: list[str]
+) -> None:
+    """Bind the LOAD-BEARING trace metadata to the bundle it lives in (review r8).
+
+    The trace schema says producer.kernel_version and inputs_digest describe the
+    exact world a trace was produced in, but the graph verifier only checked the
+    trial coordinates — so a trace could claim one producer kernel or inputs
+    digest yet sit in a bundle whose condition/scenario say otherwise, and replay
+    (which reads the bundle's kernel + inputs, not the trace's) would happily
+    reproduce it. This makes the provenance description non-authoritative. Here:
+      - producer.kernel_version must equal the kernel of the condition the trial
+        ran under;
+      - inputs_digest must bind the scenario's inputs + fixtures, the exact bytes
+        the runner hashed;
+      - a global environment.kernel_version, if present, must be one of the
+        conditions' kernels — never a third, unrelated value.
+    """
+    scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
+    conditions = {str(c["id"]): c for c in bundle["conditions"]}  # type: ignore[union-attr]
+    by_ref = {content_hash(t): t for t in traces.values()}
+    for trial in bundle["trials"]:  # type: ignore[union-attr]
+        if trial.get("status") != "completed":
+            continue
+        trace = by_ref.get(str(trial.get("trace_ref")))
+        if trace is None:
+            continue  # missing-trace already reported by the graph check
+        producer: dict[str, object] = trace.get("producer", {})  # type: ignore[assignment]
+        cond = conditions.get(str(trial.get("condition_id")))
+        if cond is not None and str(producer.get("kernel_version")) != str(cond.get("kernel")):
+            errors.append(
+                f"trace {trace.get('trace_id')}: producer.kernel_version "
+                f"{producer.get('kernel_version')!r} does not match condition "
+                f"{cond.get('id')!r} kernel {cond.get('kernel')!r}"
+            )
+        scen = scenarios.get(str(trial.get("scenario_id")))
+        if scen is not None and "inputs_digest" in trace:
+            expected = content_hash(
+                {"inputs": scen.get("inputs", {}), "fixtures": scen.get("fixtures", {})}
+            )
+            if str(trace.get("inputs_digest")) != expected:
+                errors.append(
+                    f"trace {trace.get('trace_id')}: inputs_digest does not bind "
+                    f"scenario {scen.get('name')!r} inputs+fixtures"
+                )
+    environment: dict[str, object] = bundle.get("environment", {})  # type: ignore[assignment]
+    env_kernel = environment.get("kernel_version")
+    if env_kernel is not None:
+        kernels = {str(c.get("kernel")) for c in bundle["conditions"]}  # type: ignore[union-attr]
+        if str(env_kernel) not in kernels:
+            errors.append(
+                f"environment.kernel_version {env_kernel!r} matches no condition kernel "
+                f"{sorted(kernels)}"
+            )
 
 
 def _check(hashes: dict[str, str], key: str, artifact: object, errors: list[str]) -> None:

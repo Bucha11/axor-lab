@@ -163,7 +163,16 @@ def make_server(
                 raise Unauthorized("missing or invalid bearer token")
 
         def _read_json(self) -> dict[str, object]:
-            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.headers.get("Content-Length")
+            try:
+                length = int(raw) if raw is not None else 0
+            except ValueError as exc:
+                # a non-numeric Content-Length is a malformed request, not a 500
+                raise PublishRejected(f"invalid Content-Length {raw!r}", status=400) from exc
+            if length < 0:
+                # a negative length would slip past the size cap and make
+                # rfile.read(-1) block reading to EOF — reject it (review r8)
+                raise PublishRejected("negative Content-Length", status=400)
             if length > MAX_BODY_BYTES:
                 raise PublishRejected("request body too large", status=413)
             return json.loads(self.rfile.read(length) or b"{}")

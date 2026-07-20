@@ -55,7 +55,8 @@ def render_catalog(publications: list[StoredPublication]) -> str:
         rows.append(
             f"<tr><td><a href='/e/{pid}'>{esc(pub['question'])}</a></td>"
             f"<td>{_provenance_badges(axes)}"
-            f"<span class='note'>{esc(reproductions['count'])} reproduction(s)</span></td></tr>"
+            f"<span class='note'>{esc(reproductions.get('verified', 0))} verified"
+            f" / {esc(reproductions['count'])} total</span></td></tr>"
         )
     table = (
         "<table><tr><th>Question</th><th>Provenance</th></tr>"
@@ -217,11 +218,19 @@ def render_evidence(stored: StoredPublication, trace_id: str, policy_id: str | N
 
 def _provenance_badges(axes: dict[str, object]) -> str:
     reproductions: dict[str, object] = axes["reproductions"]  # type: ignore[assignment]
-    return (
+    # the public badge counts ONLY cryptographically verified reproductions
+    # (signed by a known key); unsigned self-reports are shown separately and
+    # never inflate the headline number (review r8)
+    verified = int(reproductions.get("verified", 0))  # type: ignore[arg-type]
+    unverified = int(reproductions.get("unverified", 0))  # type: ignore[arg-type]
+    badges = (
         f"<span class='badge'>origin: {esc(axes['origin'])}</span>"
         f"<span class='badge'>integrity: {esc(axes['integrity'])}</span>"
-        f"<span class='badge'>reproduced &times;{esc(reproductions['count'])}</span>"
+        f"<span class='badge'>verified reproductions &times;{esc(verified)}</span>"
     )
+    if unverified:
+        badges += f"<span class='note'>+{esc(unverified)} unverified self-report(s)</span>"
+    return badges
 
 
 def _final_verdict(trace: dict[str, object]) -> str:
