@@ -54,6 +54,27 @@ class TestCanonicalizationVectors(unittest.TestCase):
         # and a float 0.0 hashes identically to the int 0 (JSON has one number type)
         self.assertEqual(content_hash({"n": 0.0}), content_hash({"n": 0}))
 
+    def test_keys_sort_by_utf16_code_units_not_code_points(self) -> None:
+        # a supplementary-plane key (U+10000, surrogate D800..) sorts BEFORE a
+        # BMP private-use key (U+E000) in UTF-16, the ES/JCS order — the opposite
+        # of Python's code-point order (review r14)
+        out = canonical_json({chr(0x10000): 1, chr(0xE000): 2})
+        self.assertLess(out.index(chr(0x10000)), out.index(chr(0xE000)))
+
+    def test_rejects_non_string_object_keys(self) -> None:
+        # coercing 1 and "1" to one "1" would make two identical property names
+        with self.assertRaises(TypeError):
+            canonical_json({1: "a"})
+
+    def test_rejects_integer_outside_the_interoperable_range(self) -> None:
+        with self.assertRaises(ValueError):
+            canonical_json({"x": 2 ** 53})  # not exactly a JS Number
+        canonical_json({"x": 2 ** 53 - 1})  # the max safe integer is fine
+
+    def test_rejects_a_lone_surrogate(self) -> None:
+        with self.assertRaises(ValueError):
+            canonical_json({"k": "\ud800"})  # lone high surrogate — not valid JSON
+
 
 if __name__ == "__main__":
     unittest.main()

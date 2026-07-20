@@ -101,6 +101,30 @@ class TestTestVerification(unittest.TestCase):
         self.assertTrue(any("matched_pairs but the environment is a live model" in p
                             for p in problems))
 
+    def test_empty_or_imported_provider_does_not_imply_deterministic(self) -> None:
+        # an empty/unknown provider must NOT silently enable a paired test —
+        # only an explicitly deterministic provider string does (review r14)
+        _, result = _run()
+        for provider in ("", "imported", "mystery-runner"):
+            env = copy.deepcopy(support.environment())
+            env["model"] = {"provider": provider, "id": "x"}
+            bundle, traces = _bundle(_honest_aggregates(result), environment=env)
+            problems = check_aggregates(bundle, traces)
+            self.assertTrue(
+                any("matched_pairs but the environment is a live model" in p for p in problems),
+                f"provider {provider!r} should not auto-enable matched_pairs",
+            )
+
+    def test_matched_pairs_claim_is_marked_uploader_declared(self) -> None:
+        # even for a declared-deterministic provider the server can't PROVE the
+        # pairing — the claim text must say the design is uploader-declared (r14)
+        _, result = _run()
+        stored = self._publish(_honest_aggregates(result))
+        stat = next(c for c in stored.publication["claims"]
+                    if c["kind"] == "statistically_reproducible")
+        self.assertIn("UPLOADER-DECLARED", stat["text"])
+        self.assertIn("not attested", stat["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

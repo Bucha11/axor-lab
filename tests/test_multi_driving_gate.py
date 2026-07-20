@@ -59,6 +59,30 @@ class TestMultiDrivingGate(unittest.TestCase):
         )
         self.assertEqual(decision["verdict"], "DENY")
         self.assertIn("no driving_args", decision["reason"])
+        # no provenance value exists → null driving_value_id + a typed reason,
+        # NOT a fake "v_none" ledger id that would fail trace validation (r14)
+        self.assertIsNone(decision["driving_value_id"])
+        self.assertEqual(decision["driving_unresolved"], {"kind": "no_driving_args"})
+
+    def test_unresolved_driving_arg_is_null_with_typed_reason(self) -> None:
+        # a driving arg with no resolvable provenance and no binding → null + arg
+        decision = self._decide(
+            _manifest(["recipient"]), {"recipient": "x@y.com"}, {"recipient": ()}, {},
+        )
+        self.assertEqual(decision["verdict"], "DENY")
+        self.assertIsNone(decision["driving_value_id"])
+        self.assertEqual(decision["driving_unresolved"],
+                         {"kind": "unresolved_argument", "arg": "recipient"})
+
+    def test_non_egress_allow_with_no_driving_value_carries_a_typed_reason(self) -> None:
+        # a non-egress tool with no driving args ALLOWs, but has no provenance
+        # value — its null driving_value_id must still carry a typed reason so the
+        # decision validates as a trace event (review r14)
+        manifest = {"id": "read_doc", "effect": {"default_class": "READ", "driving_args": []}}
+        decision = self._decide(manifest, {}, {}, {})
+        self.assertEqual(decision["verdict"], "ALLOW")
+        self.assertIsNone(decision["driving_value_id"])
+        self.assertEqual(decision["driving_unresolved"], {"kind": "no_driving_args"})
 
     def test_single_allowlisted_arg_still_allows(self) -> None:
         # regression: the banking slice's single-arg supersession still works

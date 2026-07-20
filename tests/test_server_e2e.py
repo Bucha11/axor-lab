@@ -19,7 +19,7 @@ from pathlib import Path
 
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
-from lab_contracts import build_bundle, content_hash
+from lab_contracts import build_bundle
 from lab_runner import run_experiment_suite
 from lab_server import make_server
 
@@ -27,12 +27,14 @@ REPEATS = 8
 CREATED = "2026-07-19T12:00:00+00:00"
 
 
-def _bundle_with_xss_question() -> tuple[dict[str, object], dict[str, dict[str, object]], str]:
+def _bundle_with_xss_question(
+    run_id: str = "r_srv",
+) -> tuple[dict[str, object], dict[str, dict[str, object]], str]:
     scenario = support.banking_scenario()
     conditions = support.conditions()
     result = run_experiment_suite(
         [scenario], support.manifests(), conditions, support.kernel_registry(),
-        repeats=REPEATS, run_id="r_srv",
+        repeats=REPEATS, run_id=run_id,
     )
     pairs = result.pairs("ungoverned", "governed", metric="ASR")
     aggregates = [
@@ -196,7 +198,16 @@ class TestServerEndToEnd(unittest.TestCase):
         self.assertEqual(pub["provenance"]["reproductions"]["count"], 1)
 
     def test_takedown_over_http_removes_page_but_preserves_attestations(self) -> None:
-        pid = self._publish(question="takedown isolation")
+        # use a DISTINCT bundle (different run_id → different bundle_ref): takedown
+        # is now evidence-level, so taking down the SHARED bundle would tombstone
+        # its evidence lineage and block every other test that re-publishes it
+        distinct_bundle, distinct_traces, _ = _bundle_with_xss_question(run_id="r_takedown")
+        status, body = self._post(
+            "/api/publications",
+            {"bundle": distinct_bundle, "traces": distinct_traces, "question": "takedown isolation"},
+        )
+        self.assertEqual(status, 201, body)
+        pid = str(body["publication_id"])
         self._post(f"/api/publications/{pid}/reproductions", {"attestation": {
             "schema_version": "attestation/v1", "publication_id": pid, "by": "@ext",
             "kind": "fresh_live", "created": "2026-07-20T00:00:00Z", "result": {"estimate": 0.0},

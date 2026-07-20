@@ -107,6 +107,15 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _terminal_label(stopped_reason: str | None, n_completed: int) -> str:
+    """The honest terminal status line for a run (review r14). A run stopped by
+    the cost ceiling is never `[completed]`: it is `[completed_partial]` if it
+    produced any completed trials, else `[stopped_cost_ceiling]` (nothing ran)."""
+    if not stopped_reason:
+        return "[completed]"
+    return "[completed_partial]" if n_completed > 0 else "[stopped_cost_ceiling]"
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     print("[validating]")
     document = load_axl(Path(args.file))
@@ -176,7 +185,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
         agent=agent,
         budget_check=_budget_check,
     )
-    print(f"  {len(result.trials)} trials completed")
+    # report the plan outcome by status separately — "N trials completed" over
+    # result.trials was misleading, since result.trials also holds failed and
+    # cost-excluded records (review r14). planned = everything the plan intended.
+    by_status: dict[str, int] = {}
+    for trial in result.trials:
+        by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
+    n_completed = by_status.get("completed", 0)
+    n_failed = by_status.get("failed", 0)
+    n_excluded = by_status.get("excluded", 0)
+    print(
+        f"  planned {len(result.trials)}: {n_completed} completed, "
+        f"{n_failed} failed, {n_excluded} excluded"
+    )
     if result.stopped_reason:
         print(f"  [cost_ceiling] run stopped early: {result.stopped_reason}", file=sys.stderr)
 
@@ -223,7 +244,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     attempt_log = write_superseded_attempts(out, result.superseded)
     if attempt_log is not None:
         print(f"  superseded attempts: {attempt_log} ({len(result.superseded)})")
-    print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
+    # an honest terminal label: a cost-stopped run is NOT "[completed]" — it
+    # either produced a usable partial (some completed trials) or nothing
+    # (review r14). The bundle is still written for the partial evidence.
+    label = _terminal_label(result.stopped_reason, n_completed)
+    print(f"{label}  bundle: {out}/bundle.json ({len(result.traces)} traces)")
     print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")
     return EXIT_OK
@@ -245,6 +270,64 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     print("bit-identical: verdict-core (verdict+gate+driving value) matches the "
           "recorded traces; the replay report is byte-identical across machines")
     print("(exact claim — no CI; behavioral outcomes reproduce statistically via `run`)")
+    return EXIT_OK
+
+
+def _package_receipt(path: Path) -> dict[str, object] | None:
+    """The portable verification receipt from a downloaded `.json` package, or
+    None for a bundle DIRECTORY (which ships no receipt)."""
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    receipt = data.get("receipt") if isinstance(data, dict) else None
+    return receipt if isinstance(receipt, dict) else None
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """Standalone, offline verification of a downloaded reproduction package —
+    NO server trusted (review r14). Confirms: content hashes verify, verdicts
+    replay bit-identically, and (for a downloaded package) the portable receipt's
+    signed_ref matches the bundle and any author signature verifies."""
+    path = Path(args.package)
+    # read_bundle_source runs schema validation + verify_bundle (content hashes);
+    # a corrupt package is a clean RunnerError → exit 1, not a traceback
+    bundle, traces = read_bundle_source(path)
+    print(f"content hashes: OK ({len(traces)} trace(s), {len(bundle['conditions'])} conditions)")  # type: ignore[arg-type]
+    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
+    kernels = {k.version: k for k in default_registry(versions).kernels}
+    report = replay_bundle(bundle, traces, kernels)
+    if not report.bit_identical:
+        print("replay MISMATCH: recomputed verdicts differ from recorded", file=sys.stderr)
+        return EXIT_FAILURE
+    print(f"replay: bit-identical over {len(report.decisions)} trace(s)")
+
+    receipt = _package_receipt(path)
+    if receipt is None:
+        print("receipt: none (a bundle directory carries no portable receipt)")
+        return EXIT_OK
+    from lab_contracts.signing import SignatureInvalid, SignatureUnavailable, verify_receipt
+
+    pubkey = getattr(args, "pubkey", None)
+    try:
+        verify_receipt(bundle, receipt, pubkey)
+    except SignatureInvalid as exc:
+        print(f"receipt: INVALID — {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    except SignatureUnavailable as exc:
+        # signed_ref matched (checked first), but the signature could not be
+        # verified (no key supplied / PyNaCl absent) — say so, don't claim a pass
+        print(f"receipt: signed_ref OK; signature UNVERIFIED — {exc}", file=sys.stderr)
+        return EXIT_OK
+    if receipt.get("signature"):
+        print(
+            f"receipt: signature VERIFIED (author {receipt.get('author')!r}, "
+            f"key {receipt.get('key_id')!r})"
+        )
+    else:
+        print(f"receipt: signed_ref OK ({receipt.get('integrity')}; no signature to verify)")
     return EXIT_OK
 
 
@@ -1011,6 +1094,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_replay = sub.add_parser("replay", help="recompute verdicts over frozen traces (exact)")
     p_replay.add_argument("bundle")
     p_replay.set_defaults(func=_cmd_replay)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="offline-verify a downloaded reproduction package (hashes + replay + receipt)",
+    )
+    p_verify.add_argument("package", help="a downloaded .json package or a bundle directory")
+    p_verify.add_argument(
+        "--pubkey", help="author Ed25519 public key (hex) to verify a signed receipt"
+    )
+    p_verify.set_defaults(func=_cmd_verify)
 
     p_pin = sub.add_parser("pin", help="pin (trace, expected verdict) as a regression case")
     p_pin.add_argument("bundle")

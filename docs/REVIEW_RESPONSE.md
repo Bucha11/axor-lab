@@ -342,3 +342,42 @@ be VERIFIED rather than self_reported, and a token-accurate cost model. The
 load-bearing round-13 goals — admin takedown is final, `--real-kernel` measures a
 clean single-kernel compare, no structurally broken trace passes as a regression,
 and a published result is actually downloadable and replayable — are closed.
+
+## Fourteenth review round — attestation honesty, gateway boundary, and portable proof
+
+The most urgent item was the red acceptance CI on the already-merged PR #11.
+The concrete cause: the only real failure was a flaky sandbox
+forked-descendant test (`RLIMIT_NPROC` is per-real-UID, so a busy runner
+could deny the fork); the second "failure" was `fail-fast` cancelling the
+other Python leg, not an independent break. Both are fixed — the fork test
+raises its own process ceiling, and the acceptance matrix reports each leg
+independently — so "all green" is trustworthy again.
+
+Around that, eight priority patches plus three P2s: the sampling design was
+inferred rather than declared, the JCS implementation wasn't fully RFC 8785,
+a fail-closed DENY couldn't be represented as valid evidence, the endpoint
+gateway trusted request shape, a cost-stopped run lied about being complete,
+and a downloaded publication couldn't be verified without trusting the
+server. Each finding has a proving test. Suite green: **538 tests**.
+
+| Round-14 finding | Fix | Proof |
+|---|---|---|
+| **CI** the acceptance matrix used `fail-fast`, so one leg's failure cancelled the other and masked the real cause; the sandbox fork test flaked on busy runners | `fail-fast: false` on the acceptance strategy; the fork test raises `max_processes` so the fork reliably succeeds | `.github/workflows/ci.yml`; `test_later_tier.py::test_forked_descendant_does_not_outlive_the_run` |
+| **P0 sec** takedown removed only the exact publication id — the SAME bundle re-published under a different question/visibility minted a new id and re-entered the catalog | takedown records the evidence lineage (`bundle_ref`); publish() refuses any metadata over a taken-down bundle; survives reload | `test_hardening.py::test_takedown_follows_the_evidence_not_just_the_exact_id`, `::test_evidence_takedown_survives_a_reload` |
+| **P0** the server inferred a deterministic (matched-pairs) design from an empty/unknown provider, and presented a paired p-value as if the pairing were attested | deterministic providers are an explicit allowlist (scripted/cassette); the matched-pairs claim says the pairing is UPLOADER-DECLARED, not attested | `test_hosted_stats_test_verification.py::test_empty_or_imported_provider_does_not_imply_deterministic`, `::test_matched_pairs_claim_is_marked_uploader_declared` |
+| **P0/P1** the JCS canonicalizer sorted keys by code point (not UTF-16), coerced non-string keys, and admitted unsafe integers / lone surrogates — a cross-language verifier would disagree on the hash | `canonical_json` sorts by UTF-16 code units, rejects non-string keys, rejects ints beyond 2^53−1 and lone surrogates; official edge vectors pinned | `test_canonicalization_vectors.py` |
+| **P0** a fail-closed DENY (no driving value) invented a fake `v_none`/`v_unresolved` ledger id → the trace failed validation, so the most interesting incidents were unpublishable | `driving_value_id` is null with a typed `driving_unresolved` reason; semantics accept null only with a reason; roundtrips through a signed bundle | `test_trace_ledger_integrity.py::TestFailClosedEvidenceRoundtrips`; `test_multi_driving_gate.py` |
+| **P1** the endpoint gateway trusted request shape — an unknown tool hit a KeyError→500, malformed events crashed, a redacted sensitive value needn't pin its bytes, and the assembled trace was never validated before serving | every event shape validated; unknown tool → 400; redacted sensitive value must carry a canonical_value_hash; finalize runs validate_artifact + trace_semantics; clean 400/opaque-500 boundary; finalized runs are LRU-evicted so they can't exhaust the quota | `test_gateway_conformity.py` |
+| **P1** a cost-stopped run was labelled `[completed]`, reported "N trials completed" over a list that also held failures/exclusions, and ran condition-major so a stop left zero matched pairs | block-balanced trial order (scenario→repeat→condition); CLI reports planned/completed/failed/excluded and labels `[completed_partial]`/`[stopped_cost_ceiling]`; missingness is condition-aware; a USD budget reserves output tokens and counts the tool schema | `test_budget_aware_design.py` |
+| **P1** a downloaded reproduction package could not be verified without trusting the serving server | the download carries a portable receipt (author/key_id/signature/signed_ref); the publish response carries an acceptance receipt; `axor-lab verify` checks hashes + replay + receipt offline | `test_portable_receipt.py` |
+| **P2** a malformed downloaded package crashed with a traceback; the page's download `curl` used a relative `./api/...` that broke from `/e/{id}`; the stats header claimed "live runs" for a deterministic agent | read_bundle_package raises a clean RunnerError; the curl uses a root-relative `/api/...` and shows `axor-lab verify`; the header is split by determinism and comparison design | `test_portable_receipt.py`; `lab_server/html.py` |
+
+Still deferred (documented): a cryptographic trusted-runtime attestation that
+would make a matched-pairs pairing (and `explicit_flow_tracked`) VERIFIED
+rather than uploader-declared, a token-accurate cost model, and a
+self-contained bundle that embeds the whole experiment document. The
+load-bearing round-14 goals — CI is authoritative, takedown is final over the
+evidence, the canonicalizer matches RFC 8785 byte-for-byte, a fail-closed
+incident is publishable, the gateway is a real conformity boundary, a partial
+run is labelled honestly, and a published result is verifiable offline — are
+closed.

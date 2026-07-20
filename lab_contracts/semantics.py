@@ -311,10 +311,21 @@ def trace_semantics(trace: dict[str, object]) -> list[str]:
             if vid not in ids:
                 errors.append(f"produces_value_ids -> unknown value_id {vid}")
         decision = event.get("decision")
-        if decision and decision.get("driving_value_id") not in ids:
-            errors.append(
-                f"decision.driving_value_id -> unknown {decision.get('driving_value_id')}"
-            )
+        if decision:
+            dvid = decision.get("driving_value_id")
+            # a fail-closed DENY has NO provenance value → driving_value_id is null
+            # and a typed driving_unresolved says why (review r14). Otherwise it
+            # must reference a real ledger value.
+            if dvid is None:
+                # null is honest only when a typed driving_unresolved says WHY no
+                # provenance value exists (a fail-closed DENY, or an observe-only
+                # ALLOW over a sink with no driving args — review r14)
+                if "driving_unresolved" not in decision:
+                    errors.append(
+                        "decision.driving_value_id is null without a driving_unresolved reason"
+                    )
+            elif dvid not in ids:
+                errors.append(f"decision.driving_value_id -> unknown {dvid}")
         node = str(event.get("node", "root"))
         if "seq" in event:
             prev = last_seq.get(node)

@@ -27,6 +27,9 @@ jobs:
     name: Acceptance suite (${{ matrix.python }})
     runs-on: ubuntu-latest
     strategy:
+      # report every Python leg independently — a flake on one version must not
+      # cancel the other and mask its real result (review r14: CI is authoritative)
+      fail-fast: false
       matrix:
         python: ["3.11", "3.12"]
     steps:

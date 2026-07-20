@@ -115,14 +115,34 @@ class Kernel:
     ) -> dict[str, object]:
         """Pure function of (recorded call state, condition) → decision dict."""
         driving_args: list[str] = list(manifest["effect"]["driving_args"])  # type: ignore[index]
-        driving_value_id = arg_bindings.get(driving_args[0], "v_none") if driving_args else "v_none"
-        if enforcement == "off":
-            return {
-                "verdict": "ALLOW",
-                "gate": GATE_TAINT_FLOOR,
-                "driving_value_id": driving_value_id,
-                "reason": "enforcement off (observe-only); observation stays on",
+        # the driving value is a REAL ledger id, or None when none exists — a
+        # fail-closed decision must not invent a fake `v_none`/`v_unresolved`
+        # ledger value (which then fails trace validation and makes the most
+        # interesting incidents unpublishable, review r14). `driving_unresolved`
+        # carries the typed reason instead.
+        if driving_args and driving_args[0] in arg_bindings:
+            driving_value_id: str | None = arg_bindings[driving_args[0]]
+            unresolved: dict[str, object] | None = None
+        elif not driving_args:
+            driving_value_id, unresolved = None, {"kind": "no_driving_args"}
+        else:
+            driving_value_id = None
+            unresolved = {"kind": "unresolved_argument", "arg": driving_args[0]}
+
+        def _decision(verdict: str, reason: str, *, dv: str | None = ...,  # type: ignore[assignment]
+                      unres: dict[str, object] | None = ..., **extra: object) -> dict[str, object]:
+            d: dict[str, object] = {
+                "verdict": verdict, "gate": GATE_TAINT_FLOOR,
+                "driving_value_id": driving_value_id if dv is ... else dv,
+                "reason": reason, **extra,
             }
+            u = unresolved if unres is ... else unres
+            if d["driving_value_id"] is None and u is not None:
+                d["driving_unresolved"] = u
+            return d
+
+        if enforcement == "off":
+            return _decision("ALLOW", "enforcement off (observe-only); observation stays on")
         effect_class = resolve_effect_class(manifest, args, inputs)
         allowlist = _resolve_allowlist(policy, inputs)
         if self.taint_floor_enabled and effect_class in EGRESS_CLASSES:
@@ -130,16 +150,12 @@ class Kernel:
             # provenance-checked — fail closed rather than ALLOW an unverifiable
             # call (review r6: allowlist/empty-driving-args fail-open)
             if not driving_args:
-                return {
-                    "verdict": "DENY",
-                    "gate": GATE_TAINT_FLOOR,
-                    "driving_value_id": "v_none",
-                    "projection": PROJECTION_UNTRUSTED,
-                    "reason": (
-                        f"egress sink {manifest['id']} declares no driving_args; cannot "
-                        "verify provenance (fail-closed)"
-                    ),
-                }
+                return _decision(
+                    "DENY",
+                    f"egress sink {manifest['id']} declares no driving_args; cannot "
+                    "verify provenance (fail-closed)",
+                    projection=PROJECTION_UNTRUSTED,
+                )
             # check EVERY driving arg: an allowlisted arg supersedes the taint
             # floor for ITSELF only — it must not short-circuit ALLOW and leave a
             # later tainted arg (e.g. an exfiltrated body) unexamined (review r6)
@@ -150,28 +166,27 @@ class Kernel:
                 # provenance (missing binding / unknown or unlabeled value) is
                 # DENIED, never allowed (review P0.6).
                 if not labels:
-                    return {
-                        "verdict": "DENY",
-                        "gate": GATE_TAINT_FLOOR,
-                        "driving_value_id": arg_bindings.get(arg_name, "v_unresolved"),
-                        "projection": PROJECTION_UNTRUSTED,
-                        "reason": (
-                            f"egress sink {manifest['id']}: driving arg '{arg_name}' has no "
-                            "resolvable provenance (fail-closed)"
-                        ),
-                    }
+                    # a real binding may exist (an unlabeled value) → use it; else
+                    # the arg is genuinely unresolved → null + typed reason
+                    bound = arg_bindings.get(arg_name)
+                    return _decision(
+                        "DENY",
+                        f"egress sink {manifest['id']}: driving arg '{arg_name}' has no "
+                        "resolvable provenance (fail-closed)",
+                        dv=bound,
+                        unres=None if bound is not None
+                        else {"kind": "unresolved_argument", "arg": arg_name},
+                        projection=PROJECTION_UNTRUSTED,
+                    )
                 if LABEL_UNTRUSTED in labels and args.get(arg_name) not in allowlist:
                     # untrusted AND not operator-allowlisted → DENY on this arg
-                    return {
-                        "verdict": "DENY",
-                        "gate": GATE_TAINT_FLOOR,
-                        "driving_value_id": arg_bindings[arg_name],
-                        "projection": PROJECTION_UNTRUSTED,
-                        "reason": (
-                            f"egress sink {manifest['id']}: driving arg '{arg_name}' is "
-                            f"{LABEL_UNTRUSTED} and not allowlisted"
-                        ),
-                    }
+                    return _decision(
+                        "DENY",
+                        f"egress sink {manifest['id']}: driving arg '{arg_name}' is "
+                        f"{LABEL_UNTRUSTED} and not allowlisted",
+                        dv=arg_bindings[arg_name],
+                        projection=PROJECTION_UNTRUSTED,
+                    )
                 # else: this arg is trusted, or untrusted-but-allowlisted
                 # (enum-supersession, paper §6.3) — continue checking the rest
                 if LABEL_UNTRUSTED in labels:
@@ -179,18 +194,12 @@ class Kernel:
             reason = f"effect {effect_class}: every driving arg is trusted or allowlisted"
             if superseded:
                 reason += f"; allowlisted (enum-supersession): {', '.join(superseded)}"
-            return {
-                "verdict": "ALLOW",
-                "gate": GATE_TAINT_FLOOR,
-                "driving_value_id": driving_value_id,
-                "reason": reason,
-            }
-        return {
-            "verdict": "ALLOW",
-            "gate": GATE_TAINT_FLOOR,
-            "driving_value_id": driving_value_id,
-            "reason": f"effect {effect_class}: no egress gate applies",
-        }
+            return _decision("ALLOW", reason)
+        # a non-egress ALLOW may still have no driving value (e.g. a read-only
+        # tool with no driving args) — go through _decision so a null
+        # driving_value_id carries its typed driving_unresolved reason, never a
+        # bare null that trace_semantics rejects (review r14)
+        return _decision("ALLOW", f"effect {effect_class}: no egress gate applies")
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,11 @@ _PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
     "cassette": (0.0, 0.0),  # a recorded transcript — no live inference
 }
 _DEFAULT_TURN_TOKENS = (900, 120)  # (input, output) per trial, rough
+# a USD budget with NO explicit output ceiling still has to reserve the output
+# the next call will bill — otherwise the pre-spend USD projection counts input
+# only and lets a call through that the (unbounded) output then blows past the
+# ceiling. Reserve a realistic single-response output per call (review r14).
+_DEFAULT_OUTPUT_RESERVE_PER_CALL = 512
 
 
 @dataclass(frozen=True)
@@ -130,7 +135,8 @@ class CostBudget:
         return max(0, self.max_output_tokens - int(usage.get("output_tokens", 0)))
 
     def pre_spend_exceeded(
-        self, usage: dict[str, int], projected_input_tokens: int, model: str
+        self, usage: dict[str, int], projected_input_tokens: int, model: str,
+        projected_output_tokens: int = _DEFAULT_OUTPUT_RESERVE_PER_CALL,
     ) -> str | None:
         """Reject a call BEFORE it is made when its projected cost would breach an
         input-token or USD ceiling (review r13).
@@ -141,7 +147,13 @@ class CostBudget:
         input budget still went out, and the overshoot was noticed only once
         billed. This reserves the projected input (a best-effort estimate — input
         size is not perfectly predictable) PLUS the output we would allow, and
-        refuses the call if that reservation exceeds the ceiling."""
+        refuses the call if that reservation exceeds the ceiling.
+
+        The USD reservation always includes an OUTPUT allowance: when an output
+        ceiling is set we reserve what remains under it; when it is NOT set, a
+        USD-only budget still reserves `projected_output_tokens` for the call —
+        otherwise the projection counts input only and a USD budget would never
+        account for the (unbounded) output it is about to pay for (review r14)."""
         in_after = int(usage.get("input_tokens", 0)) + max(0, projected_input_tokens)
         if self.max_input_tokens is not None and in_after > self.max_input_tokens:
             return (
@@ -149,8 +161,9 @@ class CostBudget:
                 f"total input to {in_after:,}, over the ceiling {self.max_input_tokens:,}"
             )
         if self.max_usd is not None:
-            out_reserve = self.remaining_output_tokens(usage)
-            out_after = int(usage.get("output_tokens", 0)) + (out_reserve or 0)
+            capped = self.remaining_output_tokens(usage)
+            out_reserve = capped if capped is not None else max(0, projected_output_tokens)
+            out_after = int(usage.get("output_tokens", 0)) + out_reserve
             projected = actual_usd(in_after, out_after, model)
             if projected > self.max_usd:
                 return (

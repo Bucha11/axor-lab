@@ -16,7 +16,7 @@ Content-hash verification itself (the integrity spine) is pure and always on.
 
 from __future__ import annotations
 
-from .canonical import canonical_json
+from .canonical import canonical_json, content_hash
 from .errors import ContractsError
 
 
@@ -59,3 +59,61 @@ def verify_bundle_signature(
         )
     except (BadSignatureError, ValueError) as exc:
         raise SignatureInvalid("bundle signature does not verify") from exc
+
+
+def signed_ref(bundle: dict[str, object]) -> str:
+    """The content hash of the EXACT bytes a bundle signature commits to — the
+    whole bundle minus its `signature` field. A receipt names this so a verifier
+    knows precisely what a signature covers, distinct from the publication's
+    `bundle_ref` (content_hash of the bundle INCLUDING any signature field)."""
+    return content_hash({k: v for k, v in bundle.items() if k != "signature"})
+
+
+def build_receipt(
+    bundle: dict[str, object],
+    *,
+    integrity: str,
+    author: str | None = None,
+    key_id: str | None = None,
+    signature: str | None = None,
+) -> dict[str, object]:
+    """A PORTABLE verification receipt for a downloaded bundle (review r14).
+
+    It carries everything a reader needs to verify offline WITHOUT trusting the
+    server: the content-addressed `signed_ref` (always), and — when the
+    publication earned integrity=signed — the author, key_id, and detached
+    signature. For a hash_verified publication the receipt still pins `signed_ref`
+    so the reader can confirm the bytes, with no signature to check."""
+    return {
+        "algorithm": "ed25519" if signature else "sha256-content-hash",
+        "integrity": integrity,
+        "signed_ref": signed_ref(bundle),
+        "author": author,
+        "key_id": key_id if key_id is not None else author,
+        "signature": signature,
+    }
+
+
+def verify_receipt(
+    bundle: dict[str, object],
+    receipt: dict[str, object],
+    author_pubkey_hex: str | None = None,
+) -> None:
+    """Verify a downloaded receipt against its bundle, offline.
+
+    Always confirms the receipt's `signed_ref` matches the bundle. If the receipt
+    carries a signature, an author public key is REQUIRED and the Ed25519
+    signature must verify — a signed receipt with no key to check it against is
+    SignatureUnavailable, not a silent pass. Raises on any mismatch."""
+    expected = signed_ref(bundle)
+    if str(receipt.get("signed_ref")) != expected:
+        raise SignatureInvalid(
+            f"receipt signed_ref {receipt.get('signed_ref')!r} does not match the bundle {expected!r}"
+        )
+    sig = receipt.get("signature")
+    if sig:
+        if not author_pubkey_hex:
+            raise SignatureUnavailable(
+                "receipt carries a signature but no author public key was supplied to verify it"
+            )
+        verify_bundle_signature(bundle, str(sig), author_pubkey_hex)

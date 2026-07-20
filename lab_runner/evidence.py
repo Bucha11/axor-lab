@@ -185,9 +185,11 @@ def _chain(trace: dict[str, object], scenario: dict[str, object]) -> dict[str, o
     if call_event is None:  # legacy traces without call_ids: only safe if there's one
         call_event = intents[0] if len(intents) == 1 else {}
     decision: dict[str, object] = decision_event["decision"]  # type: ignore[assignment]
-    driving_id = str(decision["driving_value_id"])
+    # a fail-closed DENY has driving_value_id=null (no provenance value exists),
+    # so its lineage is empty — start from nothing rather than a fake id (r14)
+    driving_id = decision.get("driving_value_id")
     lineage: list[dict[str, object]] = []
-    frontier = [driving_id]
+    frontier = [str(driving_id)] if driving_id is not None else []
     seen: set[str] = set()
     while frontier:
         vid = frontier.pop(0)

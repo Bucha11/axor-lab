@@ -31,8 +31,15 @@ _METRIC_OUTCOME = {
     "task_success_rate": "task_success",
     "utility": "task_success",
 }
-# providers whose behavior is fixed by scenario+seed → matched pairs are real
-_DETERMINISTIC_PROVIDERS = frozenset({"scripted", "cassette", "imported", ""})
+# providers whose behavior is DECLARED deterministic (fixed by scenario+seed), so
+# a matched-pairs design is at least self-consistent. This is an UPLOADER-DECLARED
+# signal read from environment.model.provider — not proof, since the whole bundle
+# is uploader-controlled (review r14). The empty string and "imported" are NOT
+# evidence of determinism (an empty/unknown provider must not silently enable a
+# paired test), so they are excluded; a live run that self-labels one of the
+# names below still cannot PROVE its pairing — the publication marks the design
+# uploader-declared, not attested (see the claim text in store._mint).
+_DETERMINISTIC_PROVIDERS = frozenset({"scripted", "cassette"})
 
 
 def _metric_field(metric: str) -> str | None:
