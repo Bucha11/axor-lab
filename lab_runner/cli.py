@@ -41,7 +41,7 @@ from .errors import ExperimentFileError, RunnerError
 from .evidence import build_evidence_case
 from .experiment_file import ResolvedExperiment, load_axl, resolve
 from .kernel import Kernel, default_registry
-from .regression import STATUS_DIFFERS, RegressionPin, check_pins, pin
+from .regression import STATUS_DIFFERS, STATUS_MATCHES, RegressionPin, check_pins, pin
 from .replay import replay_bundle
 from .runner import run_experiment_suite
 
@@ -298,18 +298,31 @@ def _cmd_regress(args: argparse.Namespace) -> int:
         pins, traces, condition, kernel, manifests,
         inputs_for=lambda trace: _scenario_for(bundle, trace).get("inputs", {}),  # type: ignore[union-attr,arg-type]
     )
-    differs = [r for r in results if r["status"] == STATUS_DIFFERS]
     for result in results:
         print(
             f"{result['trace_id']}: expected {result['expected']}, got {result['actual']} "
             f"under {result['kernel']} -> {result['status']}"
         )
-    if differs:
-        print(
-            f"{len(differs)} pin(s) differ from expected — label each as regression "
-            "or approved baseline update (not auto-resolved)",
-            file=sys.stderr,
-        )
+    # ANY status other than a clean match is unresolved — a differing verdict, a
+    # missing/tampered/malformed trace, or an unsupported kernel. A malformed
+    # trace whose recomputed sequence coincidentally equals the pin used to fall
+    # through to EXIT_OK; it must NOT (review r13).
+    differs = [r for r in results if r["status"] == STATUS_DIFFERS]
+    unresolved = [r for r in results if r["status"] != STATUS_MATCHES]
+    if unresolved:
+        if differs:
+            print(
+                f"{len(differs)} pin(s) differ from expected — label each as regression "
+                "or approved baseline update (not auto-resolved)",
+                file=sys.stderr,
+            )
+        other = [r for r in unresolved if r["status"] != STATUS_DIFFERS]
+        if other:
+            print(
+                f"{len(other)} pin(s) could not be cleanly replayed "
+                "(missing / tampered / malformed / unsupported kernel) — not a pass",
+                file=sys.stderr,
+            )
         return EXIT_REGRESSION_DIFFERS
     print(f"all {len(results)} pin(s) match expected verdicts")
     return EXIT_OK

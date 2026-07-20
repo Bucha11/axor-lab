@@ -14,12 +14,19 @@ from dataclasses import dataclass
 
 from lab_contracts.canonical import content_hash
 
-from .replay import replay_trace
+from .replay import (
+    REPLAY_MALFORMED_TRACE,
+    REPLAY_MATCH,
+    REPLAY_UNSUPPORTED_KERNEL,
+    replay_trace_status,
+)
 
 STATUS_MATCHES = "matches_pinned_expected"
 STATUS_DIFFERS = "differs_from_pinned_expected"
 STATUS_MISSING = "pinned_trace_missing"
 STATUS_TAMPERED = "pinned_trace_tampered"
+STATUS_MALFORMED = "pinned_trace_malformed"
+STATUS_UNSUPPORTED_KERNEL = "pinned_kernel_unsupported"
 
 
 @dataclass(frozen=True)
@@ -82,10 +89,25 @@ def check_pins(
             results.append(_result(pinned, "TRACE_TAMPERED", version, STATUS_TAMPERED))
             continue
         trace_inputs = inputs_for(trace) if inputs_for is not None else (inputs or {})
-        recomputed, _ = replay_trace(trace, condition, kernel, manifests, trace_inputs)
+        recomputed, replay_status = replay_trace_status(
+            trace, condition, kernel, manifests, trace_inputs
+        )
+        # a MATCH requires the replay to be STRUCTURALLY sound, not just that the
+        # recomputed verdict SEQUENCE happens to equal the pin. A malformed trace
+        # (e.g. an intent with no decision) still yields a verdict list that can
+        # coincide with the pin — reporting that as `matches_pinned_expected`
+        # would silently bless a structurally broken trace (review r13). The
+        # malformed/unsupported-kernel detection lives in replay; honor it here.
+        if replay_status == REPLAY_MALFORMED_TRACE:
+            results.append(_result(pinned, "MALFORMED", version, STATUS_MALFORMED))
+            continue
+        if replay_status == REPLAY_UNSUPPORTED_KERNEL:
+            results.append(_result(pinned, "UNSUPPORTED_KERNEL", version, STATUS_UNSUPPORTED_KERNEL))
+            continue
         actual_sequence = tuple(str(d["verdict"]) for d in recomputed)
         expected = pinned.expected_sequence or (pinned.expected_verdict,)
-        matches = actual_sequence == expected
+        # only a clean REPLAY_MATCH whose sequence equals the pin is a match
+        matches = replay_status == REPLAY_MATCH and actual_sequence == expected
         actual = actual_sequence[-1] if actual_sequence else "NO_DECISION"
         result = _result(
             pinned, actual, version, STATUS_MATCHES if matches else STATUS_DIFFERS
