@@ -452,11 +452,18 @@ def run_experiment_suite(
     # DID run and reports e.g. n=1/1 for a 100-trial plan stopped after one
     # (review r13). Every not-yet-run trial is recorded status=excluded with
     # failure_reason=cost_ceiling, so the denominator stays honest.
+    # BLOCK-BALANCED order (review r14): iterate scenario → repeat → condition, so
+    # each (scenario, repeat) block runs ALL its conditions back to back before the
+    # next block. A condition-major order (all baseline repeats, then all governed
+    # repeats) means a cost stop partway leaves every completed trial on ONE
+    # condition and ZERO matched pairs — the paired comparison has no data. With
+    # blocks interleaved, a stop leaves at most one block incomplete, so the
+    # partial run keeps the maximum number of complete matched pairs.
     plan = [
         (scenario, condition, repeat_index)
         for scenario in scenarios
-        for condition in conditions
         for repeat_index in range(repeats)
+        for condition in conditions
     ]
 
     def _exclude_remaining(from_index: int, reason: str) -> None:

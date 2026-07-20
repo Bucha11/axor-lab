@@ -82,8 +82,15 @@ class WrappedModelAgent:
                 # PRE-SPEND check: estimate this prompt's input tokens and refuse
                 # BEFORE the request if its projected input/USD cost would breach a
                 # ceiling — input tokens and USD used to be caught only post-call
-                # (review r13). ~4 chars/token, the same rough proxy the estimate uses.
-                projected_input = sum(len(str(m)) for m in messages) // 4
+                # (review r13). ~4 chars/token, the same rough proxy the estimate
+                # uses. The tool SCHEMAS are sent with every call and bill as input
+                # too, so they are counted in the projection, not just the messages
+                # (review r14) — omitting them undercounts a tool-heavy call.
+                tool_schemas = _tool_schemas(sink_manifest)
+                projected_chars = sum(len(str(m)) for m in messages) + sum(
+                    len(json.dumps(t)) for t in tool_schemas
+                )
+                projected_input = projected_chars // 4
                 pre = self.budget.pre_spend_exceeded(usage, projected_input, self.model)
                 if pre is not None:
                     raise CostCeilingReached(pre, overshot=False)

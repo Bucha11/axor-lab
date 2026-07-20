@@ -190,35 +190,67 @@ class MissingnessSummary:
     n_missing: int
     reasons: tuple[tuple[str, int], ...]
     potentially_biased: bool
+    # per-condition (condition_id, completed, total) — a partial run whose
+    # completions are lopsided across conditions has few matched pairs, so the
+    # paired comparison is weak even when the overall n looks healthy (review r14)
+    by_condition: tuple[tuple[str, int, int], ...] = ()
+    # True when missingness is concentrated on ONE condition — which specifically
+    # threatens the matched-pairs comparison (one arm loses its data)
+    condition_imbalanced: bool = False
 
     def display(self) -> str:
         parts = [f"n={self.n_completed}/{self.n_total}"]
         if self.n_missing:
             reasons = ", ".join(f"{count} {reason}" for reason, count in self.reasons)
             parts.append(f"{self.n_missing} excluded: {reasons}")
+        if len(self.by_condition) > 1 and self.n_missing:
+            per = ", ".join(f"{cid} {done}/{tot}" for cid, done, tot in self.by_condition)
+            parts.append(f"by condition: {per}")
         if self.potentially_biased:
             parts.append("flagged potentially biased (missingness is non-random)")
+        if self.condition_imbalanced:
+            parts.append("flagged condition-imbalanced (missingness concentrated on one arm)")
         return "; ".join(parts)
 
 
 def missingness(trials: Sequence[dict[str, object]]) -> MissingnessSummary:
     """Summarize failed/excluded trials; flag plausibly NON-random missingness
-    (failures concentrated on one scenario) instead of silently computing
-    over survivors."""
+    (failures concentrated on one scenario, or on one CONDITION — which breaks
+    the matched pairs) instead of silently computing over survivors."""
     total = len(trials)
     missing = [t for t in trials if t["status"] != "completed"]
     reasons: dict[str, int] = {}
     by_scenario: dict[str, int] = {}
+    missing_by_condition: dict[str, int] = {}
+    total_by_condition: dict[str, int] = {}
+    completed_by_condition: dict[str, int] = {}
+    for trial in trials:
+        cid = str(trial["condition_id"])
+        total_by_condition[cid] = total_by_condition.get(cid, 0) + 1
+        if trial["status"] == "completed":
+            completed_by_condition[cid] = completed_by_condition.get(cid, 0) + 1
     for trial in missing:
         reason = str(trial.get("failure_reason", "unspecified"))
         reasons[reason] = reasons.get(reason, 0) + 1
         scenario = str(trial["scenario_id"])
         by_scenario[scenario] = by_scenario.get(scenario, 0) + 1
+        cid = str(trial["condition_id"])
+        missing_by_condition[cid] = missing_by_condition.get(cid, 0) + 1
     scenario_count = len({str(t["scenario_id"]) for t in trials})
     concentrated = bool(
         missing
         and scenario_count > 1
         and max(by_scenario.values()) / len(missing) >= _BIAS_CONCENTRATION_SHARE
+    )
+    condition_count = len(total_by_condition)
+    condition_imbalanced = bool(
+        missing
+        and condition_count > 1
+        and max(missing_by_condition.values()) / len(missing) >= _BIAS_CONCENTRATION_SHARE
+    )
+    by_condition = tuple(
+        (cid, completed_by_condition.get(cid, 0), total_by_condition[cid])
+        for cid in sorted(total_by_condition)
     )
     return MissingnessSummary(
         n_total=total,
@@ -226,4 +258,6 @@ def missingness(trials: Sequence[dict[str, object]]) -> MissingnessSummary:
         n_missing=len(missing),
         reasons=tuple(sorted(reasons.items())),
         potentially_biased=concentrated,
+        by_condition=by_condition,
+        condition_imbalanced=condition_imbalanced,
     )

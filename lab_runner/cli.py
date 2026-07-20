@@ -107,6 +107,15 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _terminal_label(stopped_reason: str | None, n_completed: int) -> str:
+    """The honest terminal status line for a run (review r14). A run stopped by
+    the cost ceiling is never `[completed]`: it is `[completed_partial]` if it
+    produced any completed trials, else `[stopped_cost_ceiling]` (nothing ran)."""
+    if not stopped_reason:
+        return "[completed]"
+    return "[completed_partial]" if n_completed > 0 else "[stopped_cost_ceiling]"
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     print("[validating]")
     document = load_axl(Path(args.file))
@@ -176,7 +185,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
         agent=agent,
         budget_check=_budget_check,
     )
-    print(f"  {len(result.trials)} trials completed")
+    # report the plan outcome by status separately — "N trials completed" over
+    # result.trials was misleading, since result.trials also holds failed and
+    # cost-excluded records (review r14). planned = everything the plan intended.
+    by_status: dict[str, int] = {}
+    for trial in result.trials:
+        by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
+    n_completed = by_status.get("completed", 0)
+    n_failed = by_status.get("failed", 0)
+    n_excluded = by_status.get("excluded", 0)
+    print(
+        f"  planned {len(result.trials)}: {n_completed} completed, "
+        f"{n_failed} failed, {n_excluded} excluded"
+    )
     if result.stopped_reason:
         print(f"  [cost_ceiling] run stopped early: {result.stopped_reason}", file=sys.stderr)
 
@@ -223,7 +244,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     attempt_log = write_superseded_attempts(out, result.superseded)
     if attempt_log is not None:
         print(f"  superseded attempts: {attempt_log} ({len(result.superseded)})")
-    print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
+    # an honest terminal label: a cost-stopped run is NOT "[completed]" — it
+    # either produced a usable partial (some completed trials) or nothing
+    # (review r14). The bundle is still written for the partial evidence.
+    label = _terminal_label(result.stopped_reason, n_completed)
+    print(f"{label}  bundle: {out}/bundle.json ({len(result.traces)} traces)")
     print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")
     return EXIT_OK
