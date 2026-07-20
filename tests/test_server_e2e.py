@@ -112,6 +112,29 @@ class TestServerEndToEnd(unittest.TestCase):
         self.assertIn("exactly_replayable", kinds)
         self.assertIn("statistically_reproducible", kinds)
 
+    def test_bundle_download_route_is_replayable(self) -> None:
+        # the reproduce command on the page must actually work: the download
+        # returns the bundle + every trace, and axor-lab replay consumes it (r13)
+        from lab_runner.bundle_io import read_bundle_package
+        from lab_runner.replay import replay_bundle
+        from lab_runner import default_registry
+
+        pid = self._publish()
+        status, pkg = self._get_json(f"/api/publications/{pid}/bundle")
+        self.assertEqual(status, 200)
+        self.assertIn("bundle", pkg)
+        self.assertEqual(len(pkg["traces"]), len(self.traces))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / f"{pid}.json"
+            path.write_text(json.dumps(pkg))
+            # read_bundle_package schema-checks AND hash-verifies before returning
+            bundle, traces = read_bundle_package(path)
+            versions = tuple(str(c["kernel"]) for c in bundle["conditions"])
+            kernels = {k.version: k for k in default_registry(versions).kernels}
+            report = replay_bundle(bundle, traces, kernels)
+            self.assertTrue(report.bit_identical)  # the real bytes replay exactly
+
     def test_tampered_bundle_is_rejected_server_side(self) -> None:
         tampered_traces = json.loads(json.dumps(self.traces))
         victim = tampered_traces[self.denied]

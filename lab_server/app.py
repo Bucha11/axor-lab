@@ -38,6 +38,7 @@ MAX_BODY_BYTES = 32 * 1024 * 1024  # uploaded bundles are bounded (threat-model 
 _EVIDENCE_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)/evidence/([A-Za-z0-9_-]+)$")
 _PUB_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)$")
 _API_PUB_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)$")
+_API_BUNDLE_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/bundle$")
 _API_REPRO_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/reproductions$")
 _API_TAKEDOWN_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/takedown$")
 
@@ -90,6 +91,18 @@ def make_server(
                         raise NotFound("trace not found")
                     policy = parse_qs(split.query).get("policy", [None])[0]
                     self._html(render_evidence(stored, evidence.group(2), policy))
+                    return
+                api_bundle = _API_BUNDLE_RE.match(path)
+                if api_bundle:
+                    # the reproduction PACKAGE — the bundle + every trace body, so
+                    # a reader can actually reconstruct the bundle dir and run
+                    # `axor-lab replay`. Without this the page's reproduce command
+                    # named a directory the reader never received (review r13).
+                    stored = self._readable(store.get(api_bundle.group(1)))
+                    self._json(200, {
+                        "bundle": stored.bundle,
+                        "traces": list(stored.traces.values()),
+                    })
                     return
                 api_pub = _API_PUB_RE.match(path)
                 if api_pub:

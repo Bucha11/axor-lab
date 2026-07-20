@@ -174,3 +174,40 @@ def read_bundle_dir(directory: Path) -> tuple[dict[str, object], dict[str, dict[
 
     verify_bundle(bundle, traces)
     return bundle, traces
+
+
+def read_bundle_package(path: Path) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """Load a downloaded reproduction PACKAGE — a single JSON `{bundle, traces}`,
+    the shape the server's `/api/publications/{id}/bundle` route returns (review
+    r13). Same schema + integrity checks as a bundle directory, so a downloaded
+    package is verified before it is trusted."""
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, dict) or "bundle" not in data or "traces" not in data:
+        raise RunnerError(
+            f"{path} is not a reproduction package (expected a JSON object with "
+            "'bundle' and 'traces')"
+        )
+    bundle: dict[str, object] = data["bundle"]
+    traces: dict[str, dict[str, object]] = {}
+    for trace in data["traces"]:
+        trace_id = str(trace["trace_id"])
+        if trace_id in traces:
+            raise RunnerError(f"duplicate trace_id {trace_id!r} in package — corrupt")
+        traces[trace_id] = trace
+    errors = validate_artifact(bundle, "bundle")
+    for trace in traces.values():
+        errors += [f"trace {trace['trace_id']}: {e}" for e in validate_artifact(trace, "trace")]
+    if errors:
+        raise RunnerError(f"{path} failed schema validation: " + "; ".join(errors[:10]))
+    verify_bundle(bundle, traces)
+    return bundle, traces
+
+
+def read_bundle_source(path: Path) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """Load a bundle from EITHER a bundle directory or a downloaded `.json`
+    reproduction package, so `axor-lab replay` works on a package a reader just
+    downloaded from a publication page (review r13)."""
+    path = Path(path)
+    if path.is_file():
+        return read_bundle_package(path)
+    return read_bundle_dir(path)

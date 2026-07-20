@@ -130,12 +130,21 @@ def render_publication(stored: StoredPublication) -> str:
         )
     body.append("</table>")
 
+    pid_txt = esc(pub["publication_id"])
     body.append("<h2>Reproduce</h2>")
     body.append(
-        "<pre># replay the governance verdicts (exact)\n"
-        f"axor-lab replay ./{esc(pub['publication_id'])}\n\n"
-        "# fresh live run (new sample, reproduces within CI)\n"
-        "axor-lab run experiment.axl --out ./bundle</pre>"
+        "<pre># download the reproduction package (bundle + every frozen trace)\n"
+        f"curl -s ./api/publications/{pid_txt}/bundle -o {pid_txt}.json\n\n"
+        "# replay the governance verdicts over the frozen evidence (EXACT)\n"
+        f"axor-lab replay {pid_txt}.json</pre>"
+    )
+    body.append(
+        f"<p class='note'>The package at "
+        f"<code>/api/publications/{pid_txt}/bundle</code> is the exact evidence "
+        "this page is built from — the bundle plus every frozen trace — so the "
+        "replay above runs against the real bytes, not a name you were never given. "
+        "A fresh live <code>run</code> (a new statistical sample) needs the original "
+        "experiment document, which the bundle does not yet embed.</p>"
     )
 
     body.append("<h2>Limitations</h2><ul>")

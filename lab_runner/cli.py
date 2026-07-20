@@ -35,7 +35,13 @@ from lab_contracts import (
 )
 
 from .axor_backend import resolve_kernel
-from .bundle_io import PACKAGING, read_bundle_dir, write_bundle_dir, write_superseded_attempts
+from .bundle_io import (
+    PACKAGING,
+    read_bundle_dir,
+    read_bundle_source,
+    write_bundle_dir,
+    write_superseded_attempts,
+)
 from .claims import deny_claim_text
 from .errors import ExperimentFileError, RunnerError
 from .evidence import build_evidence_case, evidence_condition, validate_twin
@@ -224,7 +230,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
-    bundle, traces = read_bundle_dir(Path(args.bundle))
+    # accept a bundle DIRECTORY or a downloaded .json reproduction package, so a
+    # reader can replay exactly what a publication page served (review r13)
+    bundle, traces = read_bundle_source(Path(args.bundle))
     versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
     kernels = {k.version: k for k in default_registry(versions).kernels}
     report = replay_bundle(bundle, traces, kernels)
@@ -515,11 +523,27 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     out.mkdir(parents=True, exist_ok=True)
     (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
     (out / "production-todo.md").write_text(export.production_todo)
+    # export the FROZEN pinned trace BODIES alongside the config so the
+    # regressions are actually portable — cp-deploy.json carries each pin's
+    # content hash, but a hash is not the bytes to replay on another machine
+    # (review r13). Each is written content-addressed under regression-traces/.
+    carried: list[dict[str, object]] = export.config["regressions"]  # type: ignore[assignment]
+    if carried:
+        by_ref = {content_hash(t): t for t in traces.values()}
+        rt_dir = out / "regression-traces"
+        rt_dir.mkdir(exist_ok=True)
+        for pin in carried:
+            ref = str(pin["trace_ref"])
+            trace = by_ref[ref]  # export_cp already verified the ref resolves
+            (rt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
+                json.dumps(trace, indent=2, ensure_ascii=False)
+            )
     source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
     print(f"  config_hash (carry-over key): {export.config['config_hash']}")
-    print(f"  regressions carried: {len(export.config['regressions'])}")  # type: ignore[arg-type]
+    print(f"  regressions carried: {len(carried)}"
+          + (f" (frozen trace bodies in {out}/regression-traces/)" if carried else ""))
     print(f"  production-todo (NOT reused): {out}/production-todo.md")
     if export.earned_bridge:
         print(f"  earned bridge: {source['condition_id']} changed the outcome vs "
