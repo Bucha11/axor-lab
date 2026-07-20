@@ -20,6 +20,20 @@ class GatingError(Exception):
     provenance value. Fails closed (never an ALLOW)."""
 
 
+def normalize_value_hash(value: dict[str, object]) -> dict[str, object]:
+    """Return a copy of a ledger value with an AUTHORITATIVE canonical_value_hash.
+
+    Every value in a trace must carry canonical_value_hash so the ledger is
+    self-verifying (contracts trace_semantics, review r13). An endpoint value
+    that carries its decision_value gets the hash computed from it here — the
+    server derives it, never trusts a client-supplied hash. A redacted sensitive
+    value (no decision_value) keeps whatever hash the producer supplied."""
+    out = dict(value)
+    if "decision_value" in out:
+        out["canonical_value_hash"] = content_hash(out["decision_value"])
+    return out
+
+
 def decision_relevant_args(manifest: dict[str, object]) -> set[str]:
     """Arg names that can change the verdict: driving args plus any arg named
     in an effect-resolve rule's `when`. All must be bound so the gate decides
