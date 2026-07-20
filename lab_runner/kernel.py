@@ -29,6 +29,40 @@ from .ledger import LABEL_UNTRUSTED
 GATE_TAINT_FLOOR = "taint_floor"
 PROJECTION_UNTRUSTED = "untrusted-derived"
 
+# what the reference kernel actually EXECUTES. A policy value outside these sets
+# would enter the config hash but never change a verdict, so a condition
+# declaring it is rejected rather than silently ignored (review r4: a
+# schema-valid condition must be fully executable by the kernel that runs it).
+REFERENCE_SUPPORTED_PROFILES = frozenset({"strict", "default"})
+REFERENCE_SUPPORTED_TRUST_MODELS = frozenset({"content-ledger"})
+
+
+def unsupported_reference_policy_fields(policy: dict[str, object] | None) -> list[str]:
+    """Policy values the reference kernel does not execute (would be hashed but
+    ignored). Empty ⇒ the policy is fully executable by the reference kernel."""
+    if not policy:
+        return []
+    errors: list[str] = []
+    profile = policy.get("profile")
+    if profile is not None and str(profile) not in REFERENCE_SUPPORTED_PROFILES:
+        errors.append(
+            f"policy.profile {profile!r} is not executed by the reference kernel "
+            f"(supported: {sorted(REFERENCE_SUPPORTED_PROFILES)}) — it would enter the "
+            "config_hash but never change a verdict"
+        )
+    trust_model = policy.get("trust_model")
+    if trust_model is not None and str(trust_model) not in REFERENCE_SUPPORTED_TRUST_MODELS:
+        errors.append(
+            f"policy.trust_model {trust_model!r} is not executed by the reference kernel "
+            f"(supported: {sorted(REFERENCE_SUPPORTED_TRUST_MODELS)})"
+        )
+    if policy.get("criticality_overrides"):
+        errors.append(
+            "policy.criticality_overrides is not implemented by the reference kernel; "
+            "remove it or run a kernel that executes it"
+        )
+    return errors
+
 
 def _resolve_allowlist(
     policy: dict[str, object] | None, inputs: dict[str, object]
