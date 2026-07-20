@@ -177,6 +177,20 @@ class PublicationStore:
         )
         pid = str(publication["publication_id"])
         with self._lock:
+            # a tombstoned id must NOT be resurrected by re-publishing the same
+            # body: takedown is an admin action, and because the id
+            # content-addresses the body, ANY writer who has the bytes could
+            # re-derive the same id and put the taken-down record back in the
+            # catalog until the next restart (when the tombstone wins again).
+            # Refuse it; restoring a taken-down publication is a separate
+            # admin-only operation, not a side effect of a write-token publish
+            # (review r13).
+            if pid in self._tombstones:
+                raise PublishRejected(
+                    f"publication {pid} was taken down and cannot be re-published; "
+                    "restoring a taken-down record is an admin-only operation",
+                    status=409,
+                )
             existing = self._cache.get(pid)
             if existing is not None:
                 # a publication is immutable: re-publishing the SAME bundle with
@@ -280,8 +294,13 @@ class PublicationStore:
 
     def catalog(self) -> list[StoredPublication]:
         # ONLY public: unlisted is capability-URL-reachable but never listed,
-        # private is never served (review §7 / P0.5)
-        return [s for s in self._cache.values() if s.publication.get("visibility") == "public"]
+        # private is never served (review §7 / P0.5); a tombstoned id is never
+        # listed even if one ever re-entered the cache (defense in depth, r13)
+        return [
+            s for s in self._cache.values()
+            if s.publication.get("visibility") == "public"
+            and str(s.publication.get("publication_id")) not in self._tombstones
+        ]
 
     @staticmethod
     def _derive_id(publication: dict[str, object]) -> str:

@@ -86,6 +86,27 @@ class TestTakedown(unittest.TestCase):
             self.assertEqual(reloaded.catalog(), [])
             self.assertEqual(len(reloaded.reproductions_of(pid)), 1)
 
+    def test_write_token_cannot_resurrect_a_taken_down_publication(self) -> None:
+        # takedown is an ADMIN action; because the id content-addresses the body,
+        # a lesser write-token holder who has the bytes could re-derive the same
+        # id and re-publish — putting the taken-down record back in the catalog
+        # until the next restart. publish() must refuse a tombstoned id (r13).
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PublicationStore(root=Path(tmp))
+            bundle, traces = _bundle_and_traces()
+            pid = str(store.publish(bundle, traces, question="Q?").publication["publication_id"])
+            store.takedown(pid)
+
+            with self.assertRaises(PublishRejected) as ctx:
+                store.publish(bundle, traces, question="Q?")  # same body → same id
+            self.assertEqual(ctx.exception.status, 409)
+            self.assertIn("taken down", str(ctx.exception))
+            # still gone from the catalog and still tombstoned
+            self.assertEqual(store.catalog(), [])
+            self.assertTrue(store.is_taken_down(pid))
+            with self.assertRaises(NotFound):
+                store.get(pid)
+
 
 class TestSignedIntegrity(unittest.TestCase):
     def test_unknown_author_key_is_refused(self) -> None:
