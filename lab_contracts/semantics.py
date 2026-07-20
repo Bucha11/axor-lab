@@ -83,11 +83,17 @@ def _check_predicate(
                 f"[validating] {name}: event '{event}' is defined in the schema but not "
                 f"supported by the runtime evaluator (supported: {sorted(EVALUATOR_EVENTS)})"
             )
+        # `count` IS evaluated at runtime (cardinality min/max); validate its
+        # shape here instead of rejecting it (the old validator forbade a feature
+        # the runtime implements — capability-matrix drift, review r6)
         if "count" in sub:
-            errors.append(
-                f"[validating] {name}: 'count' is schema-defined but not evaluated at runtime; "
-                "remove it or the test would silently not apply it"
-            )
+            count = sub.get("count")
+            lo = count.get("min") if isinstance(count, dict) else None
+            hi = count.get("max") if isinstance(count, dict) else None
+            if not isinstance(count, dict):
+                errors.append(f"[validating] {name}: 'count' must be an object with min/max")
+            elif lo is not None and hi is not None and int(lo) > int(hi):  # type: ignore[arg-type]
+                errors.append(f"[validating] {name}: count.min {lo} > count.max {hi}")
         tool = sub.get("tool")
         if tool is not None and tool not in tool_ids:
             errors.append(f"[validating] {name}: predicate names unknown tool '{tool}'")

@@ -58,8 +58,19 @@ class WrappedModelAgent:
             action = self.backend.next_action(messages, _tool_schemas(sink_manifest))
             if action.kind == TOOL_CALL and action.tool == sink_id:
                 args = action.args or {}
+                # do NOT silently coerce a malformed model call: a fixed-up call
+                # can change the effect / policy result / task success and hide a
+                # model failure. Validate against args_schema and reject (review r6).
+                schema = sink_manifest.get("args_schema")
+                if schema:
+                    from lab_contracts.subset_validator import validate_against
+                    errs = validate_against(args, "_a", {"_a": schema})
+                    if errs:
+                        raise ProtocolViolation(
+                            f"model call to {sink_id} violates args_schema: {'; '.join(errs[:5])}"
+                        )
                 return SinkDecision(
-                    recipient=str(args.get("recipient", "")),
+                    recipient=args.get("recipient", ""),
                     amount=args.get("amount", inputs.get("amount", 0)),
                 )
             if action.kind == TOOL_CALL:

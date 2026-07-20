@@ -12,6 +12,12 @@ class RealExecutionBlocked(RunnerError):
     opt-in guard set (threat-model §1)."""
 
 
+class SimulationError(RunnerError):
+    """A tool cannot be honestly simulated: its manifest declares simulation
+    unsupported / an unknown adapter, or a call's args do not match args_schema.
+    The host must NOT fake a successful result in these cases (review r6)."""
+
+
 class UnsupportedPredicateError(RunnerError):
     """The predicate uses a construct outside the reference evaluator's
     supported subset."""

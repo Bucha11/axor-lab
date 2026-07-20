@@ -34,37 +34,9 @@ from .recompute import check_aggregates
 _ATTESTATION_ID_MAX = 128
 
 
-def _deny_claim_text(trace: dict[str, object]) -> str:
-    """Build the exact DENY claim from the RECORDED decision, never a template.
-
-    The old text always said 'the driving argument is untrusted_derived' — but a
-    kernel can DENY for criticality, a rate limit, budget, missing approval, etc.
-    Here we report the decision's own gate + driving value + labels + recorded
-    reason, and if none is recorded we say so rather than inventing causality."""
-    kernel_version = str(trace["producer"]["kernel_version"])  # type: ignore[index]
-    trace_id = str(trace["trace_id"])
-    values = {str(v["value_id"]): v for v in trace["values"]}  # type: ignore[union-attr]
-    events: list[dict[str, object]] = list(trace["events"])  # type: ignore[arg-type]
-    decision: dict[str, object] | None = None
-    for event in events:
-        if event.get("type") == "gate_decision" and event["decision"]["verdict"] == "DENY":  # type: ignore[index]
-            decision = event["decision"]  # type: ignore[assignment]
-            break
-    if decision is None:
-        return f"On trace {trace_id}, {kernel_version} returns DENY."
-    gate = str(decision.get("gate", "unknown"))
-    tool = next((e.get("tool") for e in events if e.get("type") == "tool_call_intent"), None)
-    driving_id = str(decision.get("driving_value_id", ""))
-    labels = tuple(values.get(driving_id, {}).get("labels", []))  # type: ignore[union-attr]
-    parts = [f"On trace {trace_id}, {kernel_version} returns DENY by gate '{gate}'"]
-    if tool:
-        parts.append(f"on {tool}")
-    if driving_id and driving_id != "v_none":
-        parts.append(f"; driving value {driving_id}")
-        parts.append(f"labelled [{', '.join(labels)}]" if labels else "has no recorded labels")
-    reason = decision.get("reason") or decision.get("projection")
-    tail = f" ({reason})" if reason else ". No further causal explanation was recorded."
-    return " ".join(parts) + tail
+# the DENY claim text is rendered by ONE shared function so the CLI local
+# publish and this server path produce identical assertions (review r6)
+from lab_runner.claims import deny_claim_text as _deny_claim_text
 
 
 def _write_atomic(path: Path, text: str) -> None:
