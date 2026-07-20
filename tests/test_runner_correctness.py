@@ -76,26 +76,70 @@ class TestFailureCaptureAndHistory(unittest.TestCase):
         self.assertEqual(summary.n_missing, 1)
         self.assertIn("provider 429", summary.display())
 
-    def test_retry_preserves_the_superseded_attempt(self) -> None:
+    def test_stochastic_retry_keeps_bundle_verifiable(self) -> None:
+        # a real stochastic retry: the second attempt at the SAME trial key
+        # produces a DIFFERENT trace (different recipient → different hash). The
+        # prior trace must leave the publishable set, or verify_bundle would
+        # reject it as an orphan (review r8).
+        from lab_contracts import build_bundle, content_hash, verify_bundle
+
+        cond = support.conditions()[1]
+        attacked = run_experiment(
+            support.banking_scenario(), support.manifests(), [cond],
+            support.kernel_registry(), repeats=1, run_id="r_retry", agent=ATTACK_ALWAYS,
+        )
+        faithful = run_experiment(
+            support.banking_scenario(), support.manifests(), [cond],
+            support.kernel_registry(), repeats=1, run_id="r_retry", agent=ScriptedAgent(attack_rate=0.0),
+        )
+        key = list(faithful.outcomes)[0]
+        first_ref = attacked.trials[0]["trace_ref"]
+        retry_trace = faithful.outcomes[key].trace
+        self.assertNotEqual(content_hash(retry_trace), first_ref)  # genuinely different
+
+        # merge the retry into the first result → supersession
+        attacked.add(key, {**attacked.trials[0], "trace_ref": content_hash(retry_trace)},
+                     faithful.outcomes[key])
+        self.assertEqual(len(attacked.trials), 1)          # only the current attempt
+        self.assertEqual(len(attacked.traces), 1)          # NO orphan trace left behind
+        self.assertEqual(len(attacked.superseded), 1)      # prior attempt kept in the log
+        self.assertEqual(attacked.superseded[0]["trace_ref"], first_ref)
+        self.assertIn("trace", attacked.superseded[0])     # its evidence is preserved
+
+        # the publishable bundle verifies — trials and traces match one-to-one
+        bundle = build_bundle(
+            bundle_id="b_retry", created="2026-07-19T12:00:00+00:00",
+            scenarios=[support.banking_scenario()], conditions=[cond],
+            tool_manifests=list(support.manifests().values()), environment=support.environment(),
+            trials=attacked.trials, aggregates=[], traces=attacked.traces,
+        )
+        traces = {str(t["trace_id"]): t for t in attacked.traces.values()}
+        verify_bundle(bundle, traces)  # must not raise: no orphan evidence
+
+    def test_failed_retry_supersedes_a_prior_completed_attempt(self) -> None:
+        from lab_contracts import build_bundle, verify_bundle
+
+        cond = support.conditions()[1]
         result = run_experiment(
-            support.banking_scenario(), support.manifests(), [support.conditions()[1]],
+            support.banking_scenario(), support.manifests(), [cond],
             support.kernel_registry(), repeats=1, run_id="r_retry", agent=ATTACK_ALWAYS,
         )
-        # re-run the same (scenario, condition, seed, repeat) → replaces current,
-        # keeps the prior as superseded
-        run_experiment  # noqa: B018
-        first_trace_ref = result.trials[0]["trace_ref"]
-        result2 = run_experiment(
-            support.banking_scenario(), support.manifests(), [support.conditions()[1]],
-            support.kernel_registry(), repeats=1, run_id="r_retry", agent=ATTACK_ALWAYS,
+        key = str(result.trials[0]["trial_id"])
+        # a later attempt at the same key FAILS: the prior completed trace must
+        # leave the publishable set and its stale outcome must be cleared
+        result.add_failure(key, {"trial_id": key, "scenario_id": "banking-exfil-01",
+                                 "condition_id": str(cond["id"]), "seed": "s000",
+                                 "repeat_index": 0, "status": "failed", "failure_reason": "boom"})
+        self.assertEqual(len(result.traces), 0)          # no orphan trace
+        self.assertNotIn(key, result.outcomes)           # stale outcome cleared
+        self.assertEqual(len(result.superseded), 1)
+        bundle = build_bundle(
+            bundle_id="b_retry2", created="2026-07-19T12:00:00+00:00",
+            scenarios=[support.banking_scenario()], conditions=[cond],
+            tool_manifests=list(support.manifests().values()), environment=support.environment(),
+            trials=result.trials, aggregates=[], traces=result.traces,
         )
-        # merge a retry into the same result to exercise supersession
-        outcome_key = list(result2.outcomes)[0]
-        result.add(outcome_key, {**result.trials[0], "trace_ref": "sha256:new"},
-                   result2.outcomes[outcome_key])
-        self.assertEqual(len(result.trials), 1)               # current only
-        self.assertEqual(len(result.superseded), 1)           # history kept
-        self.assertEqual(result.superseded[0]["trace_ref"], first_trace_ref)
+        verify_bundle(bundle, {})  # failed trial references no trace → still verifies
 
 
 class TestInlineManifests(unittest.TestCase):

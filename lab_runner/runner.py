@@ -232,20 +232,46 @@ class ExperimentResult:
 
     def add(self, trial_key: str, trial_record: dict[str, object], outcome: TrialOutcome) -> None:
         # idempotency: a retried trial with the same key replaces, never
-        # duplicates — but the replaced attempt is retained, not discarded
-        for existing in self.trials:
-            if existing["trial_id"] == trial_key:
-                self.superseded.append({**existing, "superseded_by": trial_record.get("trace_ref")})
-        self.trials = [t for t in self.trials if t["trial_id"] != trial_key]
+        # duplicates — the replaced attempt is retained in the audit log
+        new_ref = content_hash(outcome.trace)
+        self._supersede(trial_key, superseded_by=new_ref)
         self.trials.append(trial_record)
         self.outcomes[trial_key] = outcome
-        self.traces[content_hash(outcome.trace)] = outcome.trace
+        self.traces[new_ref] = outcome.trace
 
     def add_failure(self, trial_key: str, trial_record: dict[str, object]) -> None:
         """Record a trial that raised — status=failed with a reason — instead of
         aborting the whole experiment (review §4.4). Integrates with missingness."""
-        self.trials = [t for t in self.trials if t["trial_id"] != trial_key]
+        # a failed RETRY of a prior completed attempt also supersedes it: the old
+        # trace leaves the publishable set and its stale outcome is cleared
+        self._supersede(trial_key, superseded_by=None)
         self.trials.append(trial_record)
+
+    def _supersede(self, trial_key: str, superseded_by: str | None) -> None:
+        """Retire any current attempt for this trial key into the superseded
+        audit log and REMOVE its trace from the publishable set.
+
+        A stochastic retry produces a new trace with a DIFFERENT content hash;
+        if the prior trace stayed in `traces`, the new trial would reference the
+        new trace while the old one dangled as an orphan — verify_bundle rejects
+        a bundle whose traces don't match its trials (review r8). Superseded
+        attempts (and their traces) live only in `superseded`, which is an audit
+        record outside the publishable bundle, so both attempts are preserved
+        without corrupting the integrity graph. The stale outcome is cleared so
+        analysis never scores a superseded attempt."""
+        kept: list[dict[str, object]] = []
+        for existing in self.trials:
+            if existing["trial_id"] == trial_key:
+                old_ref = str(existing.get("trace_ref", ""))
+                old_trace = self.traces.pop(old_ref, None)
+                entry = {**existing, "superseded_by": superseded_by}
+                if old_trace is not None:
+                    entry["trace"] = old_trace  # keep the attempt's evidence in the log
+                self.superseded.append(entry)
+            else:
+                kept.append(existing)
+        self.trials = kept
+        self.outcomes.pop(trial_key, None)
 
     def pairs(self, baseline_id: str, treated_id: str, metric: str) -> list[tuple[bool, bool]]:
         """Paired outcomes per seed — stored, because McNemar needs the pairing."""
