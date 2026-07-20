@@ -386,6 +386,8 @@ class TestInstrumentedGateway(unittest.TestCase):
             # the tool proxy verdict came back BEFORE the tool would run
             self.assertEqual(resp["decision"]["verdict"], "DENY")
 
+            # the trace is only published after an explicit finalize
+            post(f"/runs/{run_id}/finalize", {}, secret=secret)
             req = urllib.request.Request(base + f"/runs/{run_id}/trace",
                                          headers={"Authorization": f"Bearer {secret}"})
             with urllib.request.urlopen(req) as r:
