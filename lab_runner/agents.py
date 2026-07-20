@@ -62,7 +62,14 @@ class DrivingAgent(Protocol):
         read_result: object,
         inputs: dict[str, object],
         sink_manifest: dict[str, object],
+        *,
+        scenario_id: str = "",
     ) -> SinkDecision:
+        """`scenario_id` identifies WHICH scenario this call is for, so a
+        per-scenario cassette keys on the stable scenario name — not the task
+        text, which is a long free-form string that never matches the intended
+        key and would silently collapse different scenarios onto one transcript
+        (review r11)."""
         ...
 
 

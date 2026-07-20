@@ -129,7 +129,7 @@ class TestSandboxRedTeam(unittest.TestCase):
 
         return SandboxPolicy(
             egress_allowlist=frozenset({"api.anthropic.com"}),
-            limits=ResourceLimits(disk_mb=256, max_processes=64, output_kb=1024),
+            limits=ResourceLimits(max_file_mb=256, max_processes=64, output_kb=1024),
         )
 
     def test_egress_deny_by_default(self) -> None:
@@ -149,7 +149,7 @@ class TestSandboxRedTeam(unittest.TestCase):
         with self.assertRaises(SandboxDenied):
             policy.check_resource("processes", 100_000)   # fork bomb
         with self.assertRaises(SandboxDenied):
-            policy.check_resource("disk_mb", 10_000)       # disk fill
+            policy.check_resource("max_file_mb", 10_000)       # disk fill
         with self.assertRaises(SandboxDenied):
             policy.check_resource("output_kb", 5_000_000)  # output flood
 
@@ -174,7 +174,7 @@ class TestSandboxRedTeam(unittest.TestCase):
 
         policy = self._policy()
         for attempt in (lambda: policy.check_egress("evil.example"),
-                        lambda: policy.check_resource("disk_mb", 99999),
+                        lambda: policy.check_resource("max_file_mb", 99999),
                         lambda: policy.check_mount("/")):
             with self.assertRaises(SandboxDenied):
                 attempt()
@@ -239,7 +239,7 @@ class TestSandboxRealExecutor(unittest.TestCase):
 
     def _limits(self):
         from lab_sandbox import ResourceLimits
-        return ResourceLimits(cpu_seconds=1, mem_mb=300, disk_mb=1,
+        return ResourceLimits(cpu_seconds=1, mem_mb=300, max_file_mb=1,
                               wall_seconds=4, output_kb=4, max_processes=48)
 
     def _cpu_limits(self):
@@ -250,7 +250,7 @@ class TestSandboxRealExecutor(unittest.TestCase):
         # wall would win the race and mislabel the kill. 20s removes that race
         # without slowing the normal path (the process still exits at ~1s).
         from lab_sandbox import ResourceLimits
-        return ResourceLimits(cpu_seconds=1, mem_mb=300, disk_mb=1,
+        return ResourceLimits(cpu_seconds=1, mem_mb=300, max_file_mb=1,
                               wall_seconds=20, output_kb=4, max_processes=48)
 
     def test_benign_code_completes(self) -> None:
@@ -299,14 +299,17 @@ class TestSandboxRealExecutor(unittest.TestCase):
         self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
         self.assertLessEqual(len(result.stdout), 4 * 1024)
 
-    def test_disk_fill_is_contained(self) -> None:
-        # RLIMIT_FSIZE (1 MB) prevents a 50 MB write; the run does NOT complete
+    def test_single_file_size_is_capped(self) -> None:
+        # RLIMIT_FSIZE (max_file_mb=1) caps the size of ONE file — a 50 MB write
+        # is killed. This is a per-file cap, NOT a total-disk quota: writing many
+        # smaller files (or by absolute path) is NOT contained here — that needs a
+        # filesystem quota / container volume (review r11, honest naming).
         from lab_sandbox import OUTCOME_COMPLETED, run_python
         result = run_python(
-            "open('/tmp/axor_sbx_probe','wb').write(b'A' * (50 * 1024 * 1024))",
+            "open('big','wb').write(b'A' * (50 * 1024 * 1024))",  # in the ephemeral workdir
             self._limits(),
         )
-        self.assertNotEqual(result.outcome, OUTCOME_COMPLETED)  # contained
+        self.assertNotEqual(result.outcome, OUTCOME_COMPLETED)  # single-file cap held
 
     def test_fsize_limit_is_actually_set_in_the_child(self) -> None:
         from lab_sandbox import run_python
@@ -345,6 +348,50 @@ class TestSandboxRealExecutor(unittest.TestCase):
         outcome = run_python(code, self._cpu_limits()).outcome
         self.assertNotEqual(outcome, OUTCOME_COMPLETED)  # contained
         self.assertIn(outcome, (OUTCOME_KILLED_CPU, OUTCOME_KILLED_WALL))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "process-group sweep is Unix-specific")
+    def test_forked_descendant_does_not_outlive_the_run(self) -> None:
+        # the main process exits 0 but forks a long sleep into its process group;
+        # run_python must sweep the WHOLE group on return, so the descendant is
+        # not left running unbounded by wall_seconds (review r11 P1)
+        import os
+        import time
+        from lab_sandbox import OUTCOME_COMPLETED, run_python
+        code = (
+            "import subprocess, sys\n"
+            "p = subprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "sys.stdout.write(str(p.pid)); sys.stdout.flush()\n"
+        )
+        result = run_python(code, self._limits())
+        self.assertEqual(result.outcome, OUTCOME_COMPLETED)  # the parent exited cleanly
+        child_pid = int(result.stdout.strip())
+        for _ in range(60):  # allow the SIGKILL + reap to settle
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child_pid, 0)  # the forked sleep is gone, not orphaned
+
+    def test_output_one_byte_over_cap_is_marked_capped(self) -> None:
+        # exactly output_cap+1 bytes in a boundary-crossing chunk: the old code
+        # dropped the overflow silently and left truncated=False → misclassified
+        # as completed. Now it is OUTPUT_CAPPED (review r11 P1).
+        from lab_sandbox import OUTCOME_OUTPUT_CAPPED, run_python
+        cap = self._limits().output_kb * 1024
+        result = run_python(f"import sys; sys.stdout.write('A' * {cap + 1})", self._limits())
+        self.assertEqual(result.outcome, OUTCOME_OUTPUT_CAPPED)
+        self.assertTrue(result.truncated)
+        self.assertEqual(len(result.stdout), cap)
+
+    def test_output_exactly_at_cap_still_completes(self) -> None:
+        # exactly output_cap bytes is NOT over the cap → completed, not capped
+        from lab_sandbox import OUTCOME_COMPLETED, run_python
+        cap = self._limits().output_kb * 1024
+        result = run_python(f"import sys; sys.stdout.write('A' * {cap})", self._limits())
+        self.assertEqual(result.outcome, OUTCOME_COMPLETED)
+        self.assertFalse(result.truncated)
 
 
 # ── B5 — the live gateway over real HTTP (governance-capable endpoint) ───────

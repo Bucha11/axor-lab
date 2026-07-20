@@ -16,7 +16,7 @@ from .black_box import BLACK_BOX_LABEL, BlackBoxResult, score_black_box
 from .errors import EndpointError, GovernanceUnavailable, UnsafeEndpoint
 from .gateway import make_gateway
 from .instrumented import EmittedEvent, assemble_and_gate
-from .safety import ssrf_check
+from .safety import safe_open, ssrf_check
 
 __all__ = [
     "BLACK_BOX_LABEL",
@@ -29,4 +29,5 @@ __all__ = [
     "make_gateway",
     "score_black_box",
     "ssrf_check",
+    "safe_open",
 ]

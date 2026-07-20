@@ -19,7 +19,12 @@ class ResourceLimits:
 
     cpu_seconds: float = 30.0
     mem_mb: int = 512
-    disk_mb: int = 256
+    # RLIMIT_FSIZE caps the size of ANY SINGLE file the child writes — it is NOT
+    # a total-disk quota. A child can still create many files, or write outside
+    # its workdir by absolute path. Named max_file_mb so the field doesn't
+    # promise a disk cap the OS rlimit can't give (review r11); a real disk quota
+    # needs filesystem/project quotas or a container volume.
+    max_file_mb: int = 256
     wall_seconds: float = 120.0
     output_kb: int = 1024
     max_processes: int = 64  # fork-bomb backstop
@@ -48,7 +53,7 @@ class SandboxPolicy:
         cap = {
             "cpu_seconds": self.limits.cpu_seconds,
             "mem_mb": self.limits.mem_mb,
-            "disk_mb": self.limits.disk_mb,
+            "max_file_mb": self.limits.max_file_mb,
             "wall_seconds": self.limits.wall_seconds,
             "output_kb": self.limits.output_kb,
             "processes": self.limits.max_processes,

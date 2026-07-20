@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .errors import LicenseError
+
 WORKSPACE_TIERS = ("community", "team", "security", "enterprise")
 
 
@@ -61,8 +63,8 @@ def canonical_payload(license_fields: dict[str, object]) -> bytes:
     from lab_contracts import canonical_json
 
     body = {
-        "organization": license_fields["organization"],
-        "workspace_tier": license_fields["workspace_tier"],
+        "organization": license_fields.get("organization", ""),
+        "workspace_tier": license_fields.get("workspace_tier", ""),
         "modules": license_fields.get("modules", {}),
         "governed_node_ceiling": license_fields.get("governed_node_ceiling", 0),
         "self_hosted_runner": license_fields.get("self_hosted_runner", False),
@@ -73,12 +75,71 @@ def canonical_payload(license_fields: dict[str, object]) -> bytes:
 
 
 def parse_license_fields(fields: dict[str, object]) -> License:
+    """Parse AND strictly validate a license body, raising LicenseError on any
+    ill-formed field. A signature proves the vendor authored the bytes; it does
+    NOT prove they are well-formed, so a typo'd vendor license (a string
+    "false", an unknown tier, a negative ceiling, a bogus date) must be rejected
+    rather than silently coerced into enabled capabilities (review r11). Every
+    boolean means a JSON boolean — never bool("false") == True."""
+    if not isinstance(fields, dict):
+        raise LicenseError("license body must be a JSON object")
+
+    org = fields.get("organization")
+    if not isinstance(org, str) or not org:
+        raise LicenseError("organization must be a non-empty string")
+
+    tier = fields.get("workspace_tier")
+    if tier not in WORKSPACE_TIERS:
+        raise LicenseError(f"workspace_tier {tier!r} is not one of {WORKSPACE_TIERS}")
+
+    modules_raw = fields.get("modules", {})
+    if not isinstance(modules_raw, dict):
+        raise LicenseError("modules must be an object")
+    modules: dict[str, bool] = {}
+    for name, value in modules_raw.items():
+        if not isinstance(value, bool):
+            raise LicenseError(
+                f"module {name!r} must be a JSON boolean, got {type(value).__name__}"
+            )
+        modules[str(name)] = value
+
+    ceiling = fields.get("governed_node_ceiling", 0)
+    # bool is a subclass of int — exclude it explicitly so `true` isn't a ceiling
+    if isinstance(ceiling, bool) or not isinstance(ceiling, int) or ceiling < 0:
+        raise LicenseError(f"governed_node_ceiling must be an integer >= 0, got {ceiling!r}")
+
+    self_hosted = fields.get("self_hosted_runner", False)
+    if not isinstance(self_hosted, bool):
+        raise LicenseError("self_hosted_runner must be a JSON boolean")
+
+    expires = fields.get("expires_at", "")
+    if expires:
+        if not isinstance(expires, str) or not _is_iso_date(expires):
+            raise LicenseError(f"expires_at must be a YYYY-MM-DD date, got {expires!r}")
+
+    features_raw = fields.get("features", [])
+    if not isinstance(features_raw, list) or not all(isinstance(f, str) for f in features_raw):
+        raise LicenseError("features must be a list of strings")
+
     return License(
-        organization=str(fields["organization"]),
-        workspace_tier=str(fields["workspace_tier"]),
-        modules={str(k): bool(v) for k, v in dict(fields.get("modules", {})).items()},  # type: ignore[arg-type]
-        governed_node_ceiling=int(fields.get("governed_node_ceiling", 0)),  # type: ignore[arg-type]
-        self_hosted_runner=bool(fields.get("self_hosted_runner", False)),
-        expires_at=str(fields.get("expires_at", "")),
-        features=tuple(str(f) for f in fields.get("features", [])),  # type: ignore[union-attr]
+        organization=org,
+        workspace_tier=tier,
+        modules=modules,
+        governed_node_ceiling=ceiling,
+        self_hosted_runner=self_hosted,
+        expires_at=str(expires),
+        features=tuple(features_raw),
     )
+
+
+def _is_iso_date(value: str) -> bool:
+    """Strict YYYY-MM-DD. This is what makes the lexicographic expiry compare
+    sound — for a fixed-width ISO date, lexicographic order IS chronological, so
+    a bogus 'never' can't behave like an indefinite license."""
+    import datetime
+
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return len(value) == 10  # reject shortened forms fromisoformat now tolerates

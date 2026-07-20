@@ -9,6 +9,7 @@ on the same seed produce the discordant pairs McNemar needs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from lab_contracts.canonical import content_hash, world_digest
@@ -118,7 +119,8 @@ def run_trial(
         # untrusted value, it is model_extraction (conservative join). The
         # agent cannot launder taint by claiming the value is clean.
         decision_call = agent.decide_sink_call(
-            str(scenario["task"]), result, inputs, manifests[sink_tool]
+            str(scenario["task"]), result, inputs, manifests[sink_tool],
+            scenario_id=str(scenario["name"]),
         )
         recipient = decision_call.recipient
         amount = decision_call.amount
@@ -229,6 +231,9 @@ class ExperimentResult:
     # superseded attempts (review §4.3): a retried trial replaces the CURRENT
     # record but the prior attempt is preserved here for the audit trail.
     superseded: list[dict[str, object]] = field(default_factory=list)
+    # set when a run-wide cost ceiling stopped the run early (review r11); the
+    # partial result flows through missingness/analysis honestly
+    stopped_reason: str | None = None
 
     def add(self, trial_key: str, trial_record: dict[str, object], outcome: TrialOutcome) -> None:
         # idempotency: a retried trial with the same key replaces, never
@@ -423,11 +428,16 @@ def run_experiment_suite(
     repeats: int,
     run_id: str,
     agent: AgentAdapter | None = None,
+    budget_check: "Callable[[], str | None] | None" = None,
 ) -> ExperimentResult:
     """Benchmark-suite run: every scenario × condition × repeat, one result.
 
     Pooled per statistics.md: unit = one task attempt; n = repeats × scenarios.
     Pairing stays per (scenario, seed, repeat) across conditions.
+
+    `budget_check` (optional) is called AFTER each trial; if it returns a reason
+    string, the run stops immediately — before the next provider call — so a
+    run-wide cost ceiling is a hard stop, not an advisory print (review r11).
     """
     agent = agent or ScriptedAgent()
     result = ExperimentResult(run_id=run_id)
@@ -437,4 +447,9 @@ def run_experiment_suite(
             for repeat_index in range(repeats):
                 _run_one(result, scenario, manifests, condition, kernel, run_id,
                          f"s{repeat_index:03d}", repeat_index, agent)
+                if budget_check is not None:
+                    reason = budget_check()
+                    if reason is not None:
+                        result.stopped_reason = reason
+                        return result
     return result
