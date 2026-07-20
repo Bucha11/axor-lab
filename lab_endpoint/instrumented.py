@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from lab_contracts import world_digest
 from lab_runner.kernel import Kernel
 
-from .gating import gated_args, provenance_fidelity
+from .gating import gated_args, normalize_value_hash, provenance_fidelity
 
 PRODUCER_MODE = "instrumented_endpoint"
 
@@ -67,7 +67,9 @@ def assemble_and_gate(
             for value in item.values:
                 if value["value_id"] not in seen:
                     seen.add(str(value["value_id"]))
-                    values.append(value)
+                    # every trace value must carry an authoritative
+                    # canonical_value_hash (contracts trace_semantics, r13)
+                    values.append(normalize_value_hash(value))
             events.append({
                 "seq": seq, "node": "root", "type": "tool_result", "tool": item.tool,
                 "produces_value_ids": [str(v["value_id"]) for v in item.values],

@@ -18,6 +18,9 @@ from .subset_validator import validate_against
 # contract vocabulary (tool-manifest.schema effect classes, predicate matchers)
 EGRESS_CLASSES = frozenset({"EXPORT", "EXEC"})
 SINK_CLASSES = EGRESS_CLASSES | {"WRITE"}
+# the confidentiality label whose value is redacted in the trace — the ONLY case
+# in which a value may omit its decision_value (mirrors lab_runner.ledger)
+LABEL_SENSITIVE = "sensitive"
 KNOWN_MATCHERS = frozenset(
     {"equal", "not_equal", "in", "not_in", "matches", "provenance_is", "gt", "lt"}
 )
@@ -258,9 +261,48 @@ def _normalize_path(path: str) -> str:
 
 
 def trace_semantics(trace: dict[str, object]) -> list[str]:
-    """Referential integrity of a trace's value ledger (contracts/validate.py)."""
+    """Referential integrity + ledger unambiguity of a trace (contracts/validate.py).
+
+    Beyond referential integrity (every id a binding/derivation names exists),
+    this enforces the invariants the schema cannot (review r13):
+      - value_id is UNIQUE — a duplicate makes the ledger ambiguous, and replay /
+        EvidenceCase build `{value_id: value}` last-wins, so which 'v1' is real
+        depends on array order and the consumer;
+      - canonical_value_hash is present and, when a decision_value is present,
+        equals content_hash(decision_value) — so a value cannot claim a hash of
+        one payload while carrying another; only a `sensitive` value may omit the
+        decision_value (its serialized form is redacted);
+      - per node, seq is strictly increasing in array order and a call_id appears
+        on at most one intent and one decision — so "ordered by seq" and "ordered
+        by array position" agree and a call_id is not reused for two intents.
+    """
+    from .canonical import content_hash
+
     errors: list[str] = []
-    ids = {str(v["value_id"]) for v in trace.get("values", [])}  # type: ignore[union-attr]
+    values = trace.get("values", [])  # type: ignore[assignment]
+    ids: set[str] = set()
+    for value in values:  # type: ignore[union-attr]
+        vid = str(value["value_id"])
+        if vid in ids:
+            errors.append(f"duplicate value_id {vid!r} — the ledger is ambiguous")
+        ids.add(vid)
+        if "canonical_value_hash" not in value:
+            errors.append(f"value {vid}: missing canonical_value_hash")
+        elif "decision_value" in value:
+            expected = content_hash(value["decision_value"])
+            if str(value["canonical_value_hash"]) != expected:
+                errors.append(
+                    f"value {vid}: canonical_value_hash does not match "
+                    "content_hash(decision_value)"
+                )
+        elif LABEL_SENSITIVE not in (value.get("labels") or []):
+            errors.append(
+                f"value {vid}: decision_value omitted but the value is not labelled "
+                "'sensitive' (only a redacted sensitive value may omit it)"
+            )
+    last_seq: dict[str, object] = {}
+    intent_call_ids: set[str] = set()
+    decision_call_ids: set[str] = set()
     for event in trace.get("events", []):  # type: ignore[union-attr]
         for arg, vid in (event.get("arg_bindings") or {}).items():
             if vid not in ids:
@@ -273,7 +315,26 @@ def trace_semantics(trace: dict[str, object]) -> list[str]:
             errors.append(
                 f"decision.driving_value_id -> unknown {decision.get('driving_value_id')}"
             )
-    for value in trace.get("values", []):  # type: ignore[union-attr]
+        node = str(event.get("node", "root"))
+        if "seq" in event:
+            prev = last_seq.get(node)
+            if prev is not None and event["seq"] <= prev:  # type: ignore[operator]
+                errors.append(
+                    f"event seq {event['seq']} in node {node!r} is not strictly increasing "
+                    f"in array order (previous {prev})"
+                )
+            last_seq[node] = event["seq"]
+        cid = event.get("call_id")
+        if cid is not None:
+            if event.get("type") == "tool_call_intent":
+                if str(cid) in intent_call_ids:
+                    errors.append(f"duplicate tool_call_intent call_id {cid!r}")
+                intent_call_ids.add(str(cid))
+            elif event.get("type") == "gate_decision":
+                if str(cid) in decision_call_ids:
+                    errors.append(f"duplicate gate_decision call_id {cid!r}")
+                decision_call_ids.add(str(cid))
+    for value in values:  # type: ignore[union-attr]
         for derived in value.get("derived_from") or []:
             if derived not in ids:
                 errors.append(f"value {value['value_id']}.derived_from -> unknown {derived}")

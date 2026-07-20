@@ -35,13 +35,19 @@ from lab_contracts import (
 )
 
 from .axor_backend import resolve_kernel
-from .bundle_io import PACKAGING, read_bundle_dir, write_bundle_dir, write_superseded_attempts
+from .bundle_io import (
+    PACKAGING,
+    read_bundle_dir,
+    read_bundle_source,
+    write_bundle_dir,
+    write_superseded_attempts,
+)
 from .claims import deny_claim_text
 from .errors import ExperimentFileError, RunnerError
-from .evidence import build_evidence_case
+from .evidence import build_evidence_case, evidence_condition, validate_twin
 from .experiment_file import ResolvedExperiment, load_axl, resolve
 from .kernel import Kernel, default_registry
-from .regression import STATUS_DIFFERS, RegressionPin, check_pins, pin
+from .regression import STATUS_DIFFERS, STATUS_MATCHES, RegressionPin, check_pins, pin
 from .replay import replay_bundle
 from .runner import run_experiment_suite
 
@@ -123,15 +129,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # same trial/trace ids), so different executions looked like retries of one
     # trial (review r3). The fingerprint is the agent's CONTENT (cassette bytes /
     # model id), so identical agents reproduce the same id and different ones don't.
+    agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     fingerprint = _agent_fingerprint(args, resolved)
     # 128-bit id (32 hex chars) from the experiment+agent fingerprint — the old
     # 8-char (32-bit) slice was birthday-collision-searchable, so two unrelated
-    # runs could share a run_id and look like retries of one trial (review r7)
-    run_id = args.run_id or (
-        "r_" + content_hash({"experiment": resolved.experiment, "agent": fingerprint})
-        .removeprefix("sha256:")[:32]
+    # runs could share a run_id and look like retries of one trial (review r7).
+    # For a NONDETERMINISTIC agent a fresh random execution nonce is folded in, so
+    # two live runs of the same experiment are distinct executions (review r13).
+    run_id = _derive_run_id(
+        args.run_id, resolved.experiment, fingerprint,
+        deterministic=bool(getattr(agent, "is_deterministic", True)),
     )
-    agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     model = _estimate_model(args, resolved)
     # a HARD run-wide cost ceiling: checked against ACTUAL usage between trials,
     # so the run stops before the next provider call (review r11). Unset → no bind.
@@ -222,7 +230,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
-    bundle, traces = read_bundle_dir(Path(args.bundle))
+    # accept a bundle DIRECTORY or a downloaded .json reproduction package, so a
+    # reader can replay exactly what a publication page served (review r13)
+    bundle, traces = read_bundle_source(Path(args.bundle))
     versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
     kernels = {k.version: k for k in default_registry(versions).kernels}
     report = replay_bundle(bundle, traces, kernels)
@@ -250,7 +260,12 @@ def _cmd_pin(args: argparse.Namespace) -> int:
     # sequence — not just the final verdict. Persisting only expected_verdict made
     # regress compare a multi-call trace's real sequence (ALLOW, ALLOW, DENY) to a
     # singleton (DENY) and cry regression on an unchanged trace/kernel (review r12).
-    p = pin(trace, args.expected)
+    # pin() also rejects an expected_verdict that contradicts the trace's final
+    # recorded verdict (review r13) — surface that as a clean CLI error.
+    try:
+        p = pin(trace, args.expected)
+    except ValueError as exc:
+        raise RunnerError(str(exc)) from exc
     pins.append(
         {
             "trace_id": p.trace_id,
@@ -298,18 +313,31 @@ def _cmd_regress(args: argparse.Namespace) -> int:
         pins, traces, condition, kernel, manifests,
         inputs_for=lambda trace: _scenario_for(bundle, trace).get("inputs", {}),  # type: ignore[union-attr,arg-type]
     )
-    differs = [r for r in results if r["status"] == STATUS_DIFFERS]
     for result in results:
         print(
             f"{result['trace_id']}: expected {result['expected']}, got {result['actual']} "
             f"under {result['kernel']} -> {result['status']}"
         )
-    if differs:
-        print(
-            f"{len(differs)} pin(s) differ from expected — label each as regression "
-            "or approved baseline update (not auto-resolved)",
-            file=sys.stderr,
-        )
+    # ANY status other than a clean match is unresolved — a differing verdict, a
+    # missing/tampered/malformed trace, or an unsupported kernel. A malformed
+    # trace whose recomputed sequence coincidentally equals the pin used to fall
+    # through to EXIT_OK; it must NOT (review r13).
+    differs = [r for r in results if r["status"] == STATUS_DIFFERS]
+    unresolved = [r for r in results if r["status"] != STATUS_MATCHES]
+    if unresolved:
+        if differs:
+            print(
+                f"{len(differs)} pin(s) differ from expected — label each as regression "
+                "or approved baseline update (not auto-resolved)",
+                file=sys.stderr,
+            )
+        other = [r for r in unresolved if r["status"] != STATUS_DIFFERS]
+        if other:
+            print(
+                f"{len(other)} pin(s) could not be cleanly replayed "
+                "(missing / tampered / malformed / unsupported kernel) — not a pass",
+                file=sys.stderr,
+            )
         return EXIT_REGRESSION_DIFFERS
     print(f"all {len(results)} pin(s) match expected verdicts")
     return EXIT_OK
@@ -323,8 +351,22 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
     twin = traces.get(args.twin) if args.twin else None
     if args.twin and twin is None:
         raise RunnerError(f"twin trace {args.twin} not found in bundle")
+    if twin is not None:
+        # a governed twin must be the SAME case under an enforcing policy — not
+        # any unrelated trace the caller happened to name (review r13)
+        try:
+            validate_twin(trace, twin, bundle)
+        except ValueError as exc:
+            raise RunnerError(str(exc)) from exc
     scenario = _scenario_for(bundle, trace)
-    condition = _enforcing_condition(bundle, None)
+    # the SAME condition resolver the HTML EvidenceCase uses: an explicit
+    # --policy wins, else the trace's own enforcing condition, else the first
+    # enforcing one — never just "the first enforcement-on condition", which
+    # rendered a strict counterfactual for an allowlist trace (review r13)
+    try:
+        condition = evidence_condition(bundle, trace, getattr(args, "policy", None))
+    except ValueError as exc:
+        raise RunnerError(str(exc)) from exc
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     # resolve the SAME kernel replay/regress use — the REAL axor-core governor
     # when the condition pins the installed build — not always the reference
@@ -481,11 +523,27 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     out.mkdir(parents=True, exist_ok=True)
     (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
     (out / "production-todo.md").write_text(export.production_todo)
+    # export the FROZEN pinned trace BODIES alongside the config so the
+    # regressions are actually portable — cp-deploy.json carries each pin's
+    # content hash, but a hash is not the bytes to replay on another machine
+    # (review r13). Each is written content-addressed under regression-traces/.
+    carried: list[dict[str, object]] = export.config["regressions"]  # type: ignore[assignment]
+    if carried:
+        by_ref = {content_hash(t): t for t in traces.values()}
+        rt_dir = out / "regression-traces"
+        rt_dir.mkdir(exist_ok=True)
+        for pin in carried:
+            ref = str(pin["trace_ref"])
+            trace = by_ref[ref]  # export_cp already verified the ref resolves
+            (rt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
+                json.dumps(trace, indent=2, ensure_ascii=False)
+            )
     source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
     print(f"  config_hash (carry-over key): {export.config['config_hash']}")
-    print(f"  regressions carried: {len(export.config['regressions'])}")  # type: ignore[arg-type]
+    print(f"  regressions carried: {len(carried)}"
+          + (f" (frozen trace bodies in {out}/regression-traces/)" if carried else ""))
     print(f"  production-todo (NOT reused): {out}/production-todo.md")
     if export.earned_bridge:
         print(f"  earned bridge: {source['condition_id']} changed the outcome vs "
@@ -647,8 +705,21 @@ def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
 
 
 def _repin_to_real_kernel(document: dict[str, object]) -> None:
-    """Repin every enforcement-on condition to the installed axor-core version,
-    so the run governs with the REAL kernel (not the reference)."""
+    """Repin EVERY condition — baseline included — to the installed axor-core
+    version, so the run governs with the real kernel.
+
+    Repinning only the enforcement-on conditions left the baseline on the
+    reference kernel, so the compare no longer isolated enforcement: it mixed an
+    enforcement change WITH a kernel change (the condition contract wants one
+    kernel across the compared conditions). It also produced a bundle with two
+    distinct condition kernels, so `_environment` wrote a comma-joined
+    `kernel_version` that `verify_bundle` rejects — meaning the command ran every
+    trial (paid model calls included) and only THEN failed at save (review r13).
+
+    The real backend handles `enforcement == "off"` as observe-only (an ALLOW
+    with observation still on, no gates applied), so a baseline on the real
+    kernel behaves identically to one on the reference kernel — but now both
+    arms share one kernel, and the bundle has a single kernel_version."""
     from lab_contracts import condition_config_hash
     from lab_runner import axor_available, real_kernel_version
 
@@ -657,10 +728,9 @@ def _repin_to_real_kernel(document: dict[str, object]) -> None:
     version = real_kernel_version()
     experiment: dict[str, object] = document["experiment"]  # type: ignore[assignment]
     for condition in experiment.get("conditions", []):  # type: ignore[union-attr]
-        if condition.get("enforcement") == "on":
-            condition["kernel"] = version
-            condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
-    print(f"  repinned governed condition(s) to the real kernel: {version}")
+        condition["kernel"] = version
+        condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
+    print(f"  repinned ALL conditions (baseline + governed) to the real kernel: {version}")
 
 
 def _resolve_agent_override(spec: str) -> object:
@@ -673,6 +743,29 @@ def _resolve_agent_override(spec: str) -> object:
     if kind == "anthropic":
         return WrappedModelAgent(backend=AnthropicBackend(model=param or "claude-opus-4-8"))
     raise RunnerError(f"unknown --agent {spec!r}; use cassette:<file> or anthropic:<model>")
+
+
+def _derive_run_id(
+    explicit: str | None,
+    experiment: dict[str, object],
+    fingerprint: str,
+    *,
+    deterministic: bool,
+) -> str:
+    """The run id. An explicit --run-id always wins. A DETERMINISTIC agent
+    (scripted / replayed cassette) yields a content-derived id, so re-running the
+    same experiment reproduces the same identity. A NONDETERMINISTIC agent (a live
+    model) draws a fresh sample each execution, so two runs are DIFFERENT
+    executions, not retries of one — a random execution nonce is folded in so
+    their run/trial/trace ids differ (review r13)."""
+    if explicit:
+        return explicit
+    body: dict[str, object] = {"experiment": experiment, "agent": fingerprint}
+    if not deterministic:
+        import secrets
+
+        body["execution_nonce"] = secrets.token_hex(16)  # 128-bit per-execution
+    return "r_" + content_hash(body).removeprefix("sha256:")[:32]
 
 
 def _agent_fingerprint(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
@@ -834,9 +927,15 @@ def _environment(
     if usage is not None:
         inference_params["usage"] = usage  # actual tokens + spend, recorded in the bundle
     env: dict[str, object] = {
-        "kernel_version": kernels[0] if len(kernels) == 1 else ",".join(kernels),
         "model": {"provider": provider, "id": model, "inference_params": inference_params},
     }
+    # the global kernel_version is a convenience that only makes sense when every
+    # condition shares one kernel — verify_bundle requires it to equal a condition
+    # kernel. Emitting a comma-joined pseudo-value for a mixed-kernel bundle would
+    # fail that check AFTER every (paid) trial ran; omit it instead (each trace's
+    # producer.kernel_version, bound to its own condition, stays authoritative).
+    if len(kernels) == 1:
+        env["kernel_version"] = kernels[0]
     return env
 
 
@@ -935,6 +1034,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_evidence.add_argument("bundle")
     p_evidence.add_argument("trace_id")
     p_evidence.add_argument("--twin", default=None, help="observed governed twin trace id")
+    p_evidence.add_argument(
+        "--policy", default=None,
+        help="condition id to replay the counterfactual under (must be enforcement-on)",
+    )
     p_evidence.set_defaults(func=_cmd_evidence)
 
     p_publish = sub.add_parser("publish", help="mint a publication/v1 from a verified bundle")

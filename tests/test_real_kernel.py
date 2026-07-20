@@ -101,5 +101,66 @@ class TestRealKernelIntegration(unittest.TestCase):
         self.assertTrue(all(not treated for _, treated in pairs))  # real kernel: none breach
 
 
+@unittest.skipUnless(axor_available(), "axor-core not installed")
+class TestRealKernelRepin(unittest.TestCase):
+    """`--real-kernel` must repin EVERY condition and produce a bundle that
+    verifies — not just the enforcement-on ones (review r13)."""
+
+    def test_repin_covers_baseline_and_bundle_verifies(self) -> None:
+        from lab_contracts import build_bundle, verify_bundle
+        from lab_runner import run_experiment_suite
+        from lab_runner.cli import _environment, _repin_to_real_kernel
+        from lab_runner.experiment_file import ResolvedExperiment
+
+        version = real_kernel_version()
+        conditions = support.conditions()  # ungoverned(off) + governed(on), reference kernel
+        self.assertNotEqual(conditions[0]["kernel"], version)  # baseline starts on reference
+
+        _repin_to_real_kernel({"experiment": {"id": "e_real", "conditions": conditions}})
+        # ALL conditions — the enforcement-off baseline included — now on the real
+        # kernel, so the compare isolates enforcement and the bundle has ONE kernel
+        self.assertTrue(all(c["kernel"] == version for c in conditions))
+        self.assertTrue(all(
+            c["config_hash"] == condition_config_hash(version, c.get("policy")) for c in conditions
+        ))
+
+        result = run_experiment_suite(
+            [support.banking_scenario()], support.manifests(), conditions,
+            support.kernel_registry(), repeats=2, run_id="r_repin", agent=ATTACK_ALWAYS,
+        )
+        resolved = ResolvedExperiment(
+            experiment={"id": "e_real", "agent_ref": "scripted", "repeats": 2},
+            scenarios=(support.banking_scenario(),), manifests=support.manifests(),
+            conditions=tuple(conditions), agent=None, kernel_registry=support.kernel_registry(),
+        )
+        env = _environment(resolved, "scripted")
+        # a SINGLE kernel_version, never a comma-joined pseudo-value verify rejects
+        self.assertEqual(env["kernel_version"], version)
+
+        bundle = build_bundle(
+            bundle_id="b_repin", created="2026-07-20T12:00:00+00:00",
+            scenarios=[support.banking_scenario()], conditions=conditions,
+            tool_manifests=list(support.manifests().values()), environment=env,
+            trials=result.trials, aggregates=[], traces=result.traces,
+        )
+        verify_bundle(bundle, result.traces)  # must NOT raise (was: mixed-kernel env)
+
+    def test_environment_omits_kernel_version_for_a_mixed_kernel_bundle(self) -> None:
+        # a legitimately mixed-kernel bundle omits the global kernel_version rather
+        # than writing a comma-joined value that fails verify AFTER the run
+        from lab_runner.cli import _environment
+        from lab_runner.experiment_file import ResolvedExperiment
+
+        mixed = support.conditions()
+        mixed[1] = {**mixed[1], "kernel": real_kernel_version()}  # two distinct kernels
+        resolved = ResolvedExperiment(
+            experiment={"id": "e_mixed", "agent_ref": "scripted", "repeats": 1},
+            scenarios=(support.banking_scenario(),), manifests=support.manifests(),
+            conditions=tuple(mixed), agent=None, kernel_registry=support.kernel_registry(),
+        )
+        env = _environment(resolved, "scripted")
+        self.assertNotIn("kernel_version", env)
+
+
 if __name__ == "__main__":
     unittest.main()

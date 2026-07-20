@@ -304,3 +304,41 @@ whole record, a first-class content-hashed `attempts` graph in the bundle
 contract, and a token-accurate cost model. The load-bearing round-12 goal — no
 official path can emit a regression, statistical claim, or evidence view the
 frozen evidence does not support — is closed.
+
+## Thirteenth review round — real-kernel purity, takedown auth, and reproducibility
+
+The most serious new finding was an auth bypass: a write-token holder could
+resurrect a publication after an admin took it down. Around it: `--real-kernel`
+broke the compare (and the bundle save), regression could bless a malformed
+trace, the value-ledger admitted ambiguous/self-contradictory traces, floats
+weren't RFC 8785, a cost stop wrecked the missingness denominator, and the
+"reproduce" commands weren't reproducible. 17 findings (16 P1, 1 P2), each with a
+proving test. Suite green: **496 tests**.
+
+| Round-13 finding | Fix | Proof |
+|---|---|---|
+| **P1 sec** a taken-down publication could be re-published (id content-addresses the body) and re-enter the catalog until restart | publish() refuses a tombstoned id (409); catalog() filters tombstones | `test_hardening.py::test_write_token_cannot_resurrect_a_taken_down_publication` |
+| **P1** `--real-kernel` repinned only enforcement-on conditions → the compare mixed a kernel change with the enforcement change, and the two-kernel bundle failed verify AFTER every paid trial ran | repin EVERY condition (baseline included; the real backend runs enforcement=off as observe-only); a mixed-kernel bundle omits the global kernel_version | `test_real_kernel.py::TestRealKernelRepin` |
+| **P1** regression compared only the recomputed verdict SEQUENCE, so a MALFORMED trace whose sequence coincided with the pin reported a match | check_pins uses replay_trace_status; malformed/unsupported are distinct non-match statuses; the CLI exits 4 on any non-match | `test_regression_pin_fidelity.py::TestRegressionHonorsReplayStatus` |
+| **P1** the CLI EvidenceCase picked the FIRST enforcing condition (wrong counterfactual for an allowlist trace) and `--twin` accepted any unrelated trace | one shared evidence_condition resolver (CLI+HTML) + `evidence --policy`; validate_twin requires same scenario/seed/repeat and an enforcing twin | `test_evidence_rendering.py` |
+| **P1** a pin could assert a verdict the trace never produced (expected_verdict ≠ sequence[-1]) | pin() and CP `_validate_pins` require expected_verdict == the final recorded verdict | `test_regression_pin_fidelity.py::TestPinVerdictConsistency` |
+| **P1** CP export carried pin hashes but not the frozen trace bytes — not portable | export-cp writes each pinned trace body under regression-traces/ | `test_cp_export.py::test_export_writes_frozen_pinned_trace_bodies` |
+| **P1** trace_semantics deduped value_ids and never checked the hash / event order — an ambiguous or self-contradictory trace passed | value_id unique, canonical_value_hash present & consistent (only a sensitive value may omit decision_value), per-node seq strictly increasing, call_id unique per event type | `test_trace_ledger_integrity.py` |
+| **P1** canonical_value_hash didn't have to match the decision_value | folded into the ledger checks above; endpoints derive an authoritative hash via normalize_value_hash | `test_trace_ledger_integrity.py` |
+| **P1** seq was declared load-bearing but never enforced (replay trusted array order) | per-node strictly-increasing seq check makes seq-order == array-order | `test_trace_ledger_integrity.py` |
+| **P1** floats were hashed with Python repr, not RFC 8785 — a cross-language verifier would compute a different bundle hash | canonical_json implements RFC 8785 §3.2.2.3 number serialization (ES Number::toString); float-free artifacts stay byte-identical to axor-core, which rejects floats | `test_canonicalization_vectors.py::test_floats_use_rfc8785_ecmascript_form_not_python_repr` |
+| **P1** a cost stop dropped the never-run trials, so missingness reported e.g. n=1/1 for a 100-trial plan | the full plan is materialized; every not-run trial is recorded status=excluded (failure_reason=cost_ceiling) | `test_cost_ceiling.py::test_missingness_denominator_reflects_the_full_plan` |
+| **P1** USD/input-token ceilings were post-call only — a 200k-token prompt against a 100-token budget still went out | CostBudget.pre_spend_exceeded reserves projected input + allowed output and refuses the call before the request | `test_cost_ceiling.py` |
+| **P1** bundle overwrite did rmtree-then-replace — a crash between them destroyed the prior bundle | move the old dir to a backup (rename), swap in staging, fsync parent, then drop the backup; roll back on a failed swap | `test_multiscenario_bundle.py::test_a_failed_overwrite_preserves_the_old_bundle` |
+| **P1** the page's reproduce commands weren't reproducible — no bundle download, no experiment.axl | GET /api/publications/{id}/bundle returns the package; `axor-lab replay` accepts a downloaded .json package; the page text is honest about the fresh-run gap | `test_server_e2e.py::test_bundle_download_route_is_replayable` |
+| **P1** two independent live runs got identical ids (looked like retries) | _derive_run_id folds a random execution nonce for a nondeterministic agent; deterministic agents keep the content id | `test_run_identity.py::TestRunIdExecutionNonce` |
+| **P1** a `[]`/mis-shaped POST body dropped the request thread with a 500 | _read_json requires a JSON object; both handlers map (KeyError/TypeError/ValueError/AttributeError) → 400 and everything else → an opaque 500 | `test_server_security.py` |
+| **P1** a self-reported `explicit_flow_tracked` rendered as a sound chain with no warning | EvidenceCase emits fidelity={claimed, verified}; an unverifiable explicit claim downgrades to self_reported and still warns | `test_acceptance_04_evidence_case.py::test_self_reported_explicit_fidelity_is_not_presented_as_verified` |
+
+Still deferred (documented): a full self-contained bundle that embeds the whole
+experiment document (so a fresh live `run` is reproducible from the package), a
+cryptographic trusted-runtime attestation that would let `explicit_flow_tracked`
+be VERIFIED rather than self_reported, and a token-accurate cost model. The
+load-bearing round-13 goals — admin takedown is final, `--real-kernel` measures a
+clean single-kernel compare, no structurally broken trace passes as a regression,
+and a published result is actually downloadable and replayable — are closed.

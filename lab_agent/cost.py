@@ -128,3 +128,33 @@ class CostBudget:
         if self.max_output_tokens is None:
             return None
         return max(0, self.max_output_tokens - int(usage.get("output_tokens", 0)))
+
+    def pre_spend_exceeded(
+        self, usage: dict[str, int], projected_input_tokens: int, model: str
+    ) -> str | None:
+        """Reject a call BEFORE it is made when its projected cost would breach an
+        input-token or USD ceiling (review r13).
+
+        The output ceiling is already enforced hard by capping the call's
+        max_tokens, but input tokens and USD were only ever checked AFTER a call
+        returned — so a single 200k-token prompt against a 100-token remaining
+        input budget still went out, and the overshoot was noticed only once
+        billed. This reserves the projected input (a best-effort estimate — input
+        size is not perfectly predictable) PLUS the output we would allow, and
+        refuses the call if that reservation exceeds the ceiling."""
+        in_after = int(usage.get("input_tokens", 0)) + max(0, projected_input_tokens)
+        if self.max_input_tokens is not None and in_after > self.max_input_tokens:
+            return (
+                f"next call's projected input (~{projected_input_tokens:,} tokens) would take "
+                f"total input to {in_after:,}, over the ceiling {self.max_input_tokens:,}"
+            )
+        if self.max_usd is not None:
+            out_reserve = self.remaining_output_tokens(usage)
+            out_after = int(usage.get("output_tokens", 0)) + (out_reserve or 0)
+            projected = actual_usd(in_after, out_after, model)
+            if projected > self.max_usd:
+                return (
+                    f"next call's projected spend ${projected:.2f} would exceed the ceiling "
+                    f"${self.max_usd:.2f}"
+                )
+        return None

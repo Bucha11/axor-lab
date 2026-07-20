@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from lab_contracts import world_digest
 from lab_runner.kernel import Kernel, default_registry
 
-from .gating import GatingError, gated_args, provenance_fidelity
+from .gating import GatingError, gated_args, normalize_value_hash, provenance_fidelity
 from .instrumented import PRODUCER_MODE
 
 _RUNS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
@@ -252,7 +252,10 @@ def make_gateway(
                         self._json(400, {"error": f"value {vid!r} has no decision_value (and is not sensitive)"})
                         return
                     known.add(vid)
-                    run.values.append(value)
+                    # derive an authoritative canonical_value_hash from the
+                    # decision_value (never trust a client-supplied hash) so every
+                    # trace value is self-verifying (contracts trace_semantics, r13)
+                    run.values.append(normalize_value_hash(value))
                 run.events.append({"seq": run.seq, "node": "root", "type": "tool_result",
                                   "tool": event.get("tool"),
                                   "produces_value_ids": [v["value_id"] for v in event.get("values", [])]})

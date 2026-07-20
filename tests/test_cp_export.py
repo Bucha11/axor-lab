@@ -8,6 +8,7 @@ result where governance changed the outcome.
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from tests import support
@@ -116,6 +117,40 @@ class TestCPExport(unittest.TestCase):
         with self.assertRaises(CPExportError) as ctx:
             export_cp(bundle, regressions=pins, traces=traces)
         self.assertIn("content hash", str(ctx.exception))
+
+    def test_export_writes_frozen_pinned_trace_bodies(self) -> None:
+        # the CP config carries a pin's content hash, but a hash is not the bytes
+        # to replay elsewhere — the frozen trace body must be exported too (r13)
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path as _Path
+
+        from lab_contracts import content_hash
+
+        bundle, traces = _bundle_and_traces()
+        trace = _denied_trace(traces)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _Path(tmp)
+            # write a bundle dir + a pins file, then run `export-cp` as the CLI does
+            from lab_runner.bundle_io import write_bundle_dir
+            bdir = root / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            pins = root / "pins.json"
+            pins.write_text(json.dumps([{
+                "trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
+                "expected_verdict": "DENY", "expected_sequence": ["DENY"],
+            }]))
+            out = root / "cp"
+            result = subprocess.run(
+                [sys.executable, "-m", "lab_runner", "export-cp", str(bdir),
+                 "--pins", str(pins), "--out", str(out)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            frozen = out / "regression-traces" / (content_hash(trace).removeprefix("sha256:") + ".json")
+            self.assertTrue(frozen.is_file())  # the bytes are there, not just a hash
+            self.assertEqual(json.loads(frozen.read_text())["trace_id"], str(trace["trace_id"]))
 
     def test_pins_without_traces_are_refused(self) -> None:
         bundle = _bundle()

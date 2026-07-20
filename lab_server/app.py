@@ -38,12 +38,22 @@ MAX_BODY_BYTES = 32 * 1024 * 1024  # uploaded bundles are bounded (threat-model 
 _EVIDENCE_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)/evidence/([A-Za-z0-9_-]+)$")
 _PUB_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)$")
 _API_PUB_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)$")
+_API_BUNDLE_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/bundle$")
 _API_REPRO_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/reproductions$")
 _API_TAKEDOWN_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/takedown$")
 
 
 class Unauthorized(ServerError):
     """A mutation was attempted without the required bearer token."""
+
+
+def _opaque_500() -> ServerError:
+    """A generic 500 that leaks NO internal detail to the client (review r13).
+    Unexpected exceptions map to this so a stack of internal state never reaches
+    the socket; the real exception can still be logged server-side."""
+    exc = ServerError("internal server error")
+    exc.status = 500  # type: ignore[attr-defined]
+    return exc
 
 
 def make_server(
@@ -82,6 +92,18 @@ def make_server(
                     policy = parse_qs(split.query).get("policy", [None])[0]
                     self._html(render_evidence(stored, evidence.group(2), policy))
                     return
+                api_bundle = _API_BUNDLE_RE.match(path)
+                if api_bundle:
+                    # the reproduction PACKAGE — the bundle + every trace body, so
+                    # a reader can actually reconstruct the bundle dir and run
+                    # `axor-lab replay`. Without this the page's reproduce command
+                    # named a directory the reader never received (review r13).
+                    stored = self._readable(store.get(api_bundle.group(1)))
+                    self._json(200, {
+                        "bundle": stored.bundle,
+                        "traces": list(stored.traces.values()),
+                    })
+                    return
                 api_pub = _API_PUB_RE.match(path)
                 if api_pub:
                     stored = self._readable(store.get(api_pub.group(1)))
@@ -95,6 +117,12 @@ def make_server(
                 raise NotFound("no such route")
             except ServerError as exc:
                 self._error(exc)
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                # a malformed EvidenceCase / policy / kernel-resolution error is a
+                # client-shaped 400, not a 500 traceback leaked to the socket
+                self._error(PublishRejected(f"bad request: {exc}", status=400))
+            except Exception:  # noqa: BLE001 — last-resort boundary
+                self._error(_opaque_500())
 
         # -- POST ---------------------------------------------------------
 
@@ -138,10 +166,15 @@ def make_server(
                     self._json(201, {"reproductions": stored.axes()["reproductions"]})
                     return
                 raise NotFound("no such route")
-            except (KeyError, json.JSONDecodeError) as exc:
-                self._error(PublishRejected(f"malformed request: {exc}", status=400))
             except ServerError as exc:
                 self._error(exc)
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                # a shape the request body didn't satisfy (missing key, wrong
+                # type, non-object nested where an object was expected) is a
+                # client error → 400, never a dropped connection / 500
+                self._error(PublishRejected(f"malformed request: {exc}", status=400))
+            except Exception:  # noqa: BLE001 — last-resort boundary
+                self._error(_opaque_500())
 
         # -- helpers ------------------------------------------------------
 
@@ -175,7 +208,14 @@ def make_server(
                 raise PublishRejected("negative Content-Length", status=400)
             if length > MAX_BODY_BYTES:
                 raise PublishRejected("request body too large", status=413)
-            return json.loads(self.rfile.read(length) or b"{}")
+            data = json.loads(self.rfile.read(length) or b"{}")
+            # the top level MUST be a JSON object — a `[]` or a bare scalar would
+            # otherwise reach `payload["bundle"]` / `.get(...)` and raise a
+            # TypeError/AttributeError deep inside, dropping the request thread
+            # with a 500 + traceback instead of a clean 400 (review r13)
+            if not isinstance(data, dict):
+                raise PublishRejected("request body must be a JSON object", status=400)
+            return data
 
         def _html(self, markup: str) -> None:
             body = markup.encode("utf-8")

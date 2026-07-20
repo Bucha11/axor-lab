@@ -14,12 +14,19 @@ from dataclasses import dataclass
 
 from lab_contracts.canonical import content_hash
 
-from .replay import replay_trace
+from .replay import (
+    REPLAY_MALFORMED_TRACE,
+    REPLAY_MATCH,
+    REPLAY_UNSUPPORTED_KERNEL,
+    replay_trace_status,
+)
 
 STATUS_MATCHES = "matches_pinned_expected"
 STATUS_DIFFERS = "differs_from_pinned_expected"
 STATUS_MISSING = "pinned_trace_missing"
 STATUS_TAMPERED = "pinned_trace_tampered"
+STATUS_MALFORMED = "pinned_trace_malformed"
+STATUS_UNSUPPORTED_KERNEL = "pinned_kernel_unsupported"
 
 
 @dataclass(frozen=True)
@@ -33,15 +40,30 @@ class RegressionPin:
 
 
 def pin(trace: dict[str, object], expected_verdict: str) -> RegressionPin:
+    """Pin a frozen trace to its recorded verdict sequence.
+
+    `expected_verdict` is the headline verdict the user asserts. It MUST equal
+    the trace's final recorded verdict — a `pin deny-trace ALLOW` used to produce
+    a pin whose `expected_verdict` (ALLOW) contradicted its `expected_sequence`
+    ([DENY]); since regression treats the sequence as authoritative, that pin
+    reported a MATCH while printing "expected ALLOW", an internally inconsistent
+    result (review r13). Reject the contradiction at pin time."""
     recorded = tuple(
         str(e["decision"]["verdict"]) for e in trace["events"]  # type: ignore[index,union-attr]
         if e.get("type") == "gate_decision"
     )
+    sequence = recorded or (expected_verdict,)
+    if expected_verdict != sequence[-1]:
+        raise ValueError(
+            f"expected_verdict {expected_verdict!r} does not match the trace's final "
+            f"recorded verdict {sequence[-1]!r}; a pin cannot assert a headline verdict "
+            "the frozen trace never produced"
+        )
     return RegressionPin(
         trace_id=str(trace["trace_id"]),
         trace_ref=content_hash(trace),
         expected_verdict=expected_verdict,
-        expected_sequence=recorded or (expected_verdict,),
+        expected_sequence=sequence,
     )
 
 
@@ -82,10 +104,25 @@ def check_pins(
             results.append(_result(pinned, "TRACE_TAMPERED", version, STATUS_TAMPERED))
             continue
         trace_inputs = inputs_for(trace) if inputs_for is not None else (inputs or {})
-        recomputed, _ = replay_trace(trace, condition, kernel, manifests, trace_inputs)
+        recomputed, replay_status = replay_trace_status(
+            trace, condition, kernel, manifests, trace_inputs
+        )
+        # a MATCH requires the replay to be STRUCTURALLY sound, not just that the
+        # recomputed verdict SEQUENCE happens to equal the pin. A malformed trace
+        # (e.g. an intent with no decision) still yields a verdict list that can
+        # coincide with the pin — reporting that as `matches_pinned_expected`
+        # would silently bless a structurally broken trace (review r13). The
+        # malformed/unsupported-kernel detection lives in replay; honor it here.
+        if replay_status == REPLAY_MALFORMED_TRACE:
+            results.append(_result(pinned, "MALFORMED", version, STATUS_MALFORMED))
+            continue
+        if replay_status == REPLAY_UNSUPPORTED_KERNEL:
+            results.append(_result(pinned, "UNSUPPORTED_KERNEL", version, STATUS_UNSUPPORTED_KERNEL))
+            continue
         actual_sequence = tuple(str(d["verdict"]) for d in recomputed)
         expected = pinned.expected_sequence or (pinned.expected_verdict,)
-        matches = actual_sequence == expected
+        # only a clean REPLAY_MATCH whose sequence equals the pin is a match
+        matches = replay_status == REPLAY_MATCH and actual_sequence == expected
         actual = actual_sequence[-1] if actual_sequence else "NO_DECISION"
         result = _result(
             pinned, actual, version, STATUS_MATCHES if matches else STATUS_DIFFERS

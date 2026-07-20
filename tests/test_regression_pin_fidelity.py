@@ -79,5 +79,50 @@ class TestPerScenarioInputs(unittest.TestCase):
         self.assertEqual(wrong[0]["actual"], "ALLOW")
 
 
+class TestPinVerdictConsistency(unittest.TestCase):
+    """A pin cannot assert a headline verdict the frozen trace never produced
+    (review r13)."""
+
+    def test_pin_rejects_a_verdict_that_contradicts_the_final_recorded_one(self) -> None:
+        deny_trace = _synthetic_multi_decision_trace()  # sequence ends in DENY
+        with self.assertRaises(ValueError) as ctx:
+            pin(deny_trace, "ALLOW")
+        self.assertIn("final recorded verdict", str(ctx.exception))
+        # the consistent pin is fine
+        self.assertEqual(pin(deny_trace, "DENY").expected_sequence[-1], "DENY")
+
+
+class TestRegressionHonorsReplayStatus(unittest.TestCase):
+    """A structurally MALFORMED trace whose recomputed verdict sequence happens
+    to equal the pin must NOT be reported as a match (review r13)."""
+
+    def _governed(self):
+        return support.conditions()[1], support.kernel_registry().get(support.KERNEL_PINNED)
+
+    def test_malformed_trace_is_not_a_match_even_if_the_sequence_coincides(self) -> None:
+        cond, kernel = self._governed()
+        manifests = support.manifests()
+        scen = copy.deepcopy(support.banking_scenario())
+        scen["inputs"]["known_ibans"] = [support.LANDLORD_IBAN]  # type: ignore[index]
+        trace = run_trial(scen, manifests, cond, kernel, run_id="r", seed="s000",
+                          repeat_index=0, agent=ATTACK).trace
+        self.assertEqual(pin(trace, "DENY").expected_sequence, ("DENY",))
+
+        # corrupt it: append a leftover tool_call_intent with no matching
+        # decision → replay flags MALFORMED_TRACE, yet the recomputed verdict
+        # sequence is still [DENY], which would falsely satisfy a [DENY] pin
+        malformed = copy.deepcopy(trace)
+        malformed["events"].append({  # type: ignore[union-attr]
+            "seq": 99, "node": "root", "type": "tool_call_intent",
+            "tool": "send_money", "call_id": "call_orphan", "arg_bindings": {},
+        })
+        p = pin(malformed, "DENY")  # re-pin so the content hash matches (not TAMPERED)
+        traces = {str(malformed["trace_id"]): malformed}
+        res = check_pins((p,), traces, cond, kernel, manifests,
+                         inputs_for=lambda t: scen["inputs"])
+        self.assertEqual(res[0]["status"], "pinned_trace_malformed")
+        self.assertNotEqual(res[0]["status"], "matches_pinned_expected")
+
+
 if __name__ == "__main__":
     unittest.main()

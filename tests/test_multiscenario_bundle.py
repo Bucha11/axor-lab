@@ -113,6 +113,39 @@ class TestMultiScenarioBundleRoundtrip(unittest.TestCase):
             files = list((out / "traces").glob("*.json"))
             self.assertEqual(len(files), 1)  # no stale traces linger
 
+    def test_a_failed_overwrite_preserves_the_old_bundle(self) -> None:
+        # a crash/kill during the swap must NOT destroy the prior valid bundle —
+        # the old rmtree-then-replace could leave nothing (review r13)
+        import unittest.mock as mock
+
+        from lab_runner import bundle_io
+
+        bundle = self._bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "bundle"
+            write_bundle_dir(out, bundle, self.result.traces)
+            n_before = len(list((out / "traces").glob("*.json")))
+            original = bundle_io.os.replace
+
+            def flaky(src, dst):
+                # fail only the staging -> target swap-in; let the rollback
+                # (backup -> target) succeed, as it would after a real crash
+                if Path(dst) == out and Path(src).name.startswith(".bundle-staging-"):
+                    raise OSError("simulated crash during swap-in")
+                return original(src, dst)
+
+            with mock.patch.object(bundle_io.os, "replace", flaky):
+                with self.assertRaises(OSError):
+                    write_bundle_dir(out, self._bundle(), self.result.traces, overwrite=True)
+            # the old bundle is intact and still loads
+            self.assertTrue((out / "bundle.json").exists())
+            self.assertEqual(len(list((out / "traces").glob("*.json"))), n_before)
+            reloaded_bundle, reloaded_traces = read_bundle_dir(out)
+            self.assertEqual(len(reloaded_traces), len(self.result.traces))
+            # no backup/staging litter left behind
+            leftovers = [p.name for p in out.parent.iterdir() if p.name != "bundle"]
+            self.assertEqual(leftovers, [])
+
 
 if __name__ == "__main__":
     unittest.main()

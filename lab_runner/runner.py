@@ -447,6 +447,34 @@ def run_experiment_suite(
     """
     agent = agent or ScriptedAgent()
     result = ExperimentResult(run_id=run_id)
+    # materialize the FULL plan up front so a cost stop can record the trials
+    # that never ran — otherwise missingness computes over only the trials that
+    # DID run and reports e.g. n=1/1 for a 100-trial plan stopped after one
+    # (review r13). Every not-yet-run trial is recorded status=excluded with
+    # failure_reason=cost_ceiling, so the denominator stays honest.
+    plan = [
+        (scenario, condition, repeat_index)
+        for scenario in scenarios
+        for condition in conditions
+        for repeat_index in range(repeats)
+    ]
+
+    def _exclude_remaining(from_index: int, reason: str) -> None:
+        recorded = {str(t["trial_id"]) for t in result.trials}
+        for scenario, condition, repeat_index in plan[from_index:]:
+            seed = f"s{repeat_index:03d}"
+            trial_key = trial_id_for(
+                run_id, str(scenario["name"]), str(condition["id"]), seed, repeat_index
+            )
+            if trial_key in recorded:
+                continue  # a mid-trial stop may have partially recorded this one
+            result.add_failure(trial_key, {
+                "trial_id": trial_key, "scenario_id": str(scenario["name"]),
+                "condition_id": str(condition["id"]), "seed": seed,
+                "repeat_index": repeat_index, "status": "excluded",
+                "failure_reason": f"cost_ceiling: {reason}",
+            })
+
     # cost check BEFORE the first trial — if usage already sits at a ceiling we
     # must not run even one paid trial (review r12); with a fresh run this is a
     # no-op, but it makes "before the first call" true rather than aspirational
@@ -454,22 +482,29 @@ def run_experiment_suite(
         reason = budget_check()
         if reason is not None:
             result.stopped_reason = reason
+            _exclude_remaining(0, reason)  # NOTHING ran → n=0/total, not n=0/0
             return result
-    for scenario in scenarios:
-        for condition in conditions:
-            kernel = resolve_kernel(str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry)
-            for repeat_index in range(repeats):
-                try:
-                    _run_one(result, scenario, manifests, condition, kernel, run_id,
-                             f"s{repeat_index:03d}", repeat_index, agent)
-                except CostCeilingReached as stop:
-                    # the guard fired mid-trial, BEFORE a provider call — stop the
-                    # whole run with the reached/overshot reason (review r12)
-                    result.stopped_reason = str(stop)
-                    return result
-                if budget_check is not None:
-                    reason = budget_check()
-                    if reason is not None:
-                        result.stopped_reason = reason
-                        return result
+    kernels: dict[str, object] = {}
+    for index, (scenario, condition, repeat_index) in enumerate(plan):
+        cid = str(condition["id"])
+        if cid not in kernels:
+            kernels[cid] = resolve_kernel(
+                str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry
+            )
+        try:
+            _run_one(result, scenario, manifests, condition, kernels[cid], run_id,
+                     f"s{repeat_index:03d}", repeat_index, agent)
+        except CostCeilingReached as stop:
+            # the guard fired mid-trial, BEFORE a provider call — stop the whole
+            # run and exclude THIS trial plus every remaining one (review r12/r13)
+            result.stopped_reason = str(stop)
+            _exclude_remaining(index, stop.reason)
+            return result
+        if budget_check is not None:
+            reason = budget_check()
+            if reason is not None:
+                # this trial completed; exclude only the ones AFTER it
+                result.stopped_reason = reason
+                _exclude_remaining(index + 1, reason)
+                return result
     return result

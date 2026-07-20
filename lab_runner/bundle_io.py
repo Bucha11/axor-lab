@@ -13,6 +13,7 @@ collision-free even if two traces shared an id, and immune to a hostile
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -36,6 +37,21 @@ def _trace_filename(trace: dict[str, object]) -> str:
     return content_hash(trace).replace("sha256:", "") + ".json"
 
 
+def _fsync_dir(directory: Path) -> None:
+    """fsync a directory so a rename into it is durable before we drop the
+    backup. A no-op where directory fsync is unsupported (e.g. Windows)."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def write_bundle_dir(
     directory: Path,
     bundle: dict[str, object],
@@ -43,13 +59,17 @@ def write_bundle_dir(
     *,
     overwrite: bool = False,
 ) -> None:
-    """Write a bundle directory atomically.
+    """Write a bundle directory atomically, never destroying a prior valid one.
 
     Verifies integrity before writing anything, stages into a sibling temp
-    directory, then swaps it in with a single rename so a crash mid-write never
-    leaves a half-written bundle. Refuses to write into a non-empty directory
-    unless ``overwrite=True`` — and when it does overwrite it replaces the whole
-    directory, so stale traces from a prior run never linger and get republished.
+    directory, then swaps it in with renames so a crash mid-write never leaves a
+    half-written bundle. On overwrite it moves the OLD directory aside to a
+    backup (a rename, not rmtree), renames the staging into place, fsyncs the
+    parent, and only THEN removes the backup — so a crash or kill between the two
+    swaps leaves the intact old bundle in the backup rather than nothing, which
+    the previous rmtree-then-replace could do (review r13). Refuses to write into
+    a non-empty directory unless ``overwrite=True``; the whole directory is
+    replaced so stale traces from a prior run never linger and get republished.
     """
     directory = Path(directory)
     if directory.exists() and any(directory.iterdir()) and not overwrite:
@@ -72,9 +92,21 @@ def write_bundle_dir(
             (traces_dir / _trace_filename(trace)).write_text(
                 json.dumps(trace, indent=2, ensure_ascii=False)
             )
+        backup: Path | None = None
         if directory.exists():
-            shutil.rmtree(directory)
-        staging.replace(directory)  # atomic on the same filesystem
+            # move the OLD bundle aside with a RENAME (keeps it fully intact),
+            # never rmtree it before the new one is in place (review r13)
+            backup = directory.with_name(directory.name + ".bak-" + staging.name)
+            os.replace(directory, backup)
+        try:
+            os.replace(staging, directory)  # atomic swap-in on the same filesystem
+        except OSError:
+            if backup is not None:  # roll back to the preserved old bundle
+                os.replace(backup, directory)
+            raise
+        _fsync_dir(parent)  # durably record the rename before dropping the backup
+        if backup is not None:
+            shutil.rmtree(backup, ignore_errors=True)
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
@@ -142,3 +174,40 @@ def read_bundle_dir(directory: Path) -> tuple[dict[str, object], dict[str, dict[
 
     verify_bundle(bundle, traces)
     return bundle, traces
+
+
+def read_bundle_package(path: Path) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """Load a downloaded reproduction PACKAGE — a single JSON `{bundle, traces}`,
+    the shape the server's `/api/publications/{id}/bundle` route returns (review
+    r13). Same schema + integrity checks as a bundle directory, so a downloaded
+    package is verified before it is trusted."""
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, dict) or "bundle" not in data or "traces" not in data:
+        raise RunnerError(
+            f"{path} is not a reproduction package (expected a JSON object with "
+            "'bundle' and 'traces')"
+        )
+    bundle: dict[str, object] = data["bundle"]
+    traces: dict[str, dict[str, object]] = {}
+    for trace in data["traces"]:
+        trace_id = str(trace["trace_id"])
+        if trace_id in traces:
+            raise RunnerError(f"duplicate trace_id {trace_id!r} in package — corrupt")
+        traces[trace_id] = trace
+    errors = validate_artifact(bundle, "bundle")
+    for trace in traces.values():
+        errors += [f"trace {trace['trace_id']}: {e}" for e in validate_artifact(trace, "trace")]
+    if errors:
+        raise RunnerError(f"{path} failed schema validation: " + "; ".join(errors[:10]))
+    verify_bundle(bundle, traces)
+    return bundle, traces
+
+
+def read_bundle_source(path: Path) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """Load a bundle from EITHER a bundle directory or a downloaded `.json`
+    reproduction package, so `axor-lab replay` works on a package a reader just
+    downloaded from a publication page (review r13)."""
+    path = Path(path)
+    if path.is_file():
+        return read_bundle_package(path)
+    return read_bundle_dir(path)

@@ -24,7 +24,7 @@ from .errors import (
     UnknownKernelError,
     UnsupportedPredicateError,
 )
-from .evidence import build_evidence_case
+from .evidence import build_evidence_case, evidence_condition, validate_twin
 from .kernel import Kernel, KernelRegistry, default_registry
 from .ledger import ValueLedger
 from .predicates import evaluate
@@ -77,6 +77,8 @@ __all__ = [
     "UnsupportedPredicateError",
     "ValueLedger",
     "build_evidence_case",
+    "evidence_condition",
+    "validate_twin",
     "check_pins",
     "default_registry",
     "evaluate",
