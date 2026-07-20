@@ -79,6 +79,14 @@ class WrappedModelAgent:
                     raise CostCeilingReached(
                         reason, overshot=self.budget.is_overshot(usage, self.model)
                     )
+                # PRE-SPEND check: estimate this prompt's input tokens and refuse
+                # BEFORE the request if its projected input/USD cost would breach a
+                # ceiling — input tokens and USD used to be caught only post-call
+                # (review r13). ~4 chars/token, the same rough proxy the estimate uses.
+                projected_input = sum(len(str(m)) for m in messages) // 4
+                pre = self.budget.pre_spend_exceeded(usage, projected_input, self.model)
+                if pre is not None:
+                    raise CostCeilingReached(pre, overshot=False)
                 max_out = self.budget.remaining_output_tokens(usage)
             action = self.backend.next_action(messages, _tool_schemas(sink_manifest), max_out)
             if action.kind == TOOL_CALL and action.tool == sink_id:

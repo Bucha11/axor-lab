@@ -42,6 +42,22 @@ class TestCostBudget(unittest.TestCase):
         self.assertFalse(b.is_overshot({"output_tokens": 100}, "claude-opus-4-8"))  # AT = reached
         self.assertTrue(b.is_overshot({"output_tokens": 101}, "claude-opus-4-8"))   # past = overshot
 
+    def test_pre_spend_rejects_a_call_that_would_breach_the_input_ceiling(self) -> None:
+        b = CostBudget(max_input_tokens=1000)
+        usage = {"input_tokens": 900, "output_tokens": 0}
+        # a projected 200-token prompt would take input to 1100 > 1000 → refuse BEFORE the call
+        self.assertIsNotNone(b.pre_spend_exceeded(usage, 200, "claude-opus-4-8"))
+        # a 50-token prompt stays under → allowed
+        self.assertIsNone(b.pre_spend_exceeded(usage, 50, "claude-opus-4-8"))
+
+    def test_pre_spend_rejects_a_call_that_would_breach_the_usd_ceiling(self) -> None:
+        b = CostBudget(max_usd=0.01)
+        # a huge projected input on opus would blow a 1-cent ceiling before the call
+        reason = b.pre_spend_exceeded({"input_tokens": 0, "output_tokens": 0}, 1_000_000,
+                                      "claude-opus-4-8")
+        self.assertIsNotNone(reason)
+        self.assertIn("$", reason)
+
     def test_output_token_ceiling(self) -> None:
         b = CostBudget(max_output_tokens=100)
         self.assertIsNone(b.exceeded({"output_tokens": 99}, "claude-opus-4-8"))
