@@ -86,13 +86,22 @@ def write_superseded_attempts(
     """Persist superseded retry attempts as a sidecar audit log, OUTSIDE the
     publishable bundle (they would orphan the bundle graph, review r8/r9). Call
     after write_bundle_dir so it lands in the final directory. Returns the path
-    written, or None when there is nothing to record."""
+    written, or None when there is nothing to record.
+
+    The file is named `.unverified.json` and written atomically (temp + rename):
+    it is an honest audit trail, NOT verified evidence — it carries no content
+    hash and is not part of the signed/verified bundle spine, so its name says so
+    rather than implying the same integrity as bundle.json (review r10). A
+    content-hashed, schema-validated attempts graph inside the bundle contract is
+    the stronger follow-up."""
     if not superseded:
         return None
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "superseded_attempts.json"
-    path.write_text(json.dumps(superseded, indent=2, ensure_ascii=False))
+    path = directory / "superseded_attempts.unverified.json"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(superseded, indent=2, ensure_ascii=False))
+    tmp.replace(path)  # atomic on the same filesystem
     return path
 
 

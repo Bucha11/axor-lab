@@ -110,11 +110,19 @@ class PublicationStore:
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         for directory in sorted(self.root.glob("*/")):
-            if (directory / "tombstone.json").is_file():
-                self._tombstones.add(directory.name)
-                self._load_reproductions_only(directory.name)
-            elif (directory / "publication.json").is_file():
-                self._load(directory.name)
+            # ISOLATE each directory: one corrupt file (truncated JSON, a
+            # non-object array element, a missing key) must skip that ONE
+            # publication, never crash the whole catalog on startup (review r10).
+            try:
+                if (directory / "tombstone.json").is_file():
+                    self._tombstones.add(directory.name)
+                    self._load_reproductions_only(directory.name)
+                elif (directory / "publication.json").is_file():
+                    self._load(directory.name)
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                # ValueError covers json.JSONDecodeError; the record is quarantined
+                # (left on disk, not loaded) rather than trusted or fatal
+                continue
 
     # -- publish handshake ------------------------------------------------
 
@@ -303,8 +311,13 @@ class PublicationStore:
         if reproductions_file.is_file():
             # re-derive a TRUSTED log from the on-disk bytes: re-check kind,
             # re-dedup, re-verify signatures, and bind to THIS publication_id
-            # (review r8/r9) rather than trust the file
-            raw = tuple(json.loads(reproductions_file.read_text()))
+            # (review r8/r9) rather than trust the file. A corrupt/non-list file
+            # yields an empty log, never an exception (review r10).
+            try:
+                parsed = json.loads(reproductions_file.read_text())
+                raw = tuple(parsed) if isinstance(parsed, list) else ()
+            except (OSError, ValueError):
+                raw = ()
             return list(rebuild_reproduction_log(raw, self.known_keys, publication_id))
         raise NotFound(f"publication {publication_id} not found")
 
@@ -470,8 +483,14 @@ class PublicationStore:
         receipt_file = directory / "receipt.json"
         author = signature = None
         if receipt_file.is_file():
-            receipt = json.loads(receipt_file.read_text())
-            author, signature = receipt.get("author"), receipt.get("signature")
+            # a corrupt receipt → treat as no receipt (integrity degrades to
+            # hash_verified), never crash the load (review r10)
+            try:
+                receipt = json.loads(receipt_file.read_text())
+                if isinstance(receipt, dict):
+                    author, signature = receipt.get("author"), receipt.get("signature")
+            except ValueError:
+                author = signature = None
         integrity = self._integrity_on_load(bundle, author, signature)
         # and re-MINT the publication from the evidence: the claims, aggregate
         # refs, statistics_integrity AND integrity must be exactly what the server
@@ -488,8 +507,16 @@ class PublicationStore:
         reproductions_file = directory / "reproductions.json"
         # re-derive a trusted log from disk: re-check kind, re-dedup, re-verify
         # signatures, bind to THIS publication — never trust a persisted `verified`
-        # flag or an attestation transplanted from another publication (review r8/r9)
-        raw = tuple(json.loads(reproductions_file.read_text())) if reproductions_file.is_file() else ()
+        # flag or an attestation transplanted from another publication (review
+        # r8/r9). A corrupt/non-list reproductions file degrades to an empty log
+        # so it doesn't drop the whole (otherwise valid) publication (review r10).
+        raw: tuple[object, ...] = ()
+        if reproductions_file.is_file():
+            try:
+                parsed = json.loads(reproductions_file.read_text())
+                raw = tuple(parsed) if isinstance(parsed, list) else ()
+            except ValueError:
+                raw = ()
         reproductions = list(rebuild_reproduction_log(raw, self.known_keys, publication_id))
         self._cache[publication_id] = StoredPublication(
             publication=publication, bundle=bundle, traces=traces, reproductions=reproductions,

@@ -31,24 +31,39 @@ def decision_relevant_args(manifest: dict[str, object]) -> set[str]:
     return names
 
 
+def required_args(manifest: dict[str, object]) -> set[str]:
+    """The tool's schema-required args. A side-effecting call is not valid
+    without them, so they must ALL be bound for authoritative_args to be a
+    complete, executable tool call (review r10)."""
+    schema: dict[str, object] = manifest.get("args_schema", {})  # type: ignore[assignment]
+    return set(schema.get("required", []))  # type: ignore[arg-type]
+
+
 def gated_args(
     manifest: dict[str, object],
     arg_bindings: dict[str, str],
     values_by_id: dict[str, dict[str, object]],
     asserted: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Return the authoritative args the gate must decide on — assembled SOLELY
-    from the bound ledger values (`arg_bindings → decision_value`), the same way
-    exact replay reconstructs them.
+    """Return the authoritative args the gate decides on — the COMPLETE tool
+    call, assembled SOLELY from the bound ledger values (`arg_bindings →
+    decision_value`), the same way exact replay reconstructs them.
 
-    Every decision-relevant arg must be bound. If the caller also supplies a
-    concrete `asserted` args map, each bound arg it names must match by JCS
-    content hash. Any violation raises GatingError (fail closed) — so a clean
-    binding paired with a malicious concrete value is refused, never laundered.
+    Every arg that must have provenance is bound, or this fails closed
+    (GatingError): the decision-relevant args (driving + effect-resolution), the
+    schema-required args, AND every arg the caller says it will actually pass
+    (`asserted`). So `authoritative_args` is a full executable call — a
+    cooperating proxy runs exactly it, never a bound subset topped up with
+    unbound, unrecorded values (review r10). If the caller supplies a concrete
+    `asserted` map, each bound arg it names must also match by JCS content hash,
+    so a clean binding paired with a malicious concrete value is refused.
     """
-    unbound = sorted(decision_relevant_args(manifest) - set(arg_bindings))
+    must_bind = decision_relevant_args(manifest) | required_args(manifest)
+    if asserted is not None:
+        must_bind |= set(asserted)  # every arg the caller will execute needs a value id
+    unbound = sorted(must_bind - set(arg_bindings))
     if unbound:
-        raise GatingError(f"decision-relevant args must be bound to values: {unbound}")
+        raise GatingError(f"these args must be bound to ledger values: {unbound}")
     authoritative = resolve_args(arg_bindings, values_by_id)
     if asserted is not None:
         for name, value in authoritative.items():

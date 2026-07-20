@@ -42,11 +42,14 @@ class TestInstrumentedEndpoint(unittest.TestCase):
                     "derived_from": ["v_inj"],
                     "sources": [{"kind": "external_read",
                                  "origin_ref": "tool_result:read_txns:transactions[1].description"}],
+                }, {
+                    "value_id": "v_amount", "preview": "1200", "decision_value": 1200,
+                    "labels": ["prompt_given"], "sources": [{"kind": "constant"}],
                 }],
             ),
             EmittedEvent(
                 type="tool_call_intent", tool="send_money",
-                arg_bindings={"recipient": "v_recipient"},
+                arg_bindings={"recipient": "v_recipient", "amount": "v_amount"},
                 args={"recipient": support.ATTACKER_IBAN, "amount": 1200},
             ),
         ]
@@ -381,11 +384,13 @@ class TestInstrumentedGateway(unittest.TestCase):
                             "decision_value": support.ATTACKER_IBAN,
                             "labels": ["untrusted_derived"],
                             "sources": [{"kind": "external_read",
-                                         "origin_ref": "tool_result:read_txns:transactions[1].description"}]}],
+                                         "origin_ref": "tool_result:read_txns:transactions[1].description"}]},
+                           {"value_id": "v_amt", "preview": "1200", "decision_value": 1200,
+                            "labels": ["prompt_given"], "sources": [{"kind": "constant"}]}],
             }, secret=secret)
             resp = post(f"/runs/{run_id}/events", {
                 "type": "tool_call_intent", "tool": "send_money",
-                "arg_bindings": {"recipient": "v_r"},
+                "arg_bindings": {"recipient": "v_r", "amount": "v_amt"},
                 "args": {"recipient": support.ATTACKER_IBAN, "amount": 1200},
             }, secret=secret)
             # the tool proxy verdict came back BEFORE the tool would run

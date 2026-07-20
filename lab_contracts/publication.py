@@ -138,6 +138,8 @@ def rebuild_reproduction_log(
 
     log: tuple[dict[str, object], ...] = ()
     for entry in raw:
+        if not isinstance(entry, dict):
+            continue  # a non-object element (e.g. [42]) is junk, not an attestation
         if (
             expected_publication_id is not None
             and str(entry.get("publication_id")) != str(expected_publication_id)
