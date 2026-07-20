@@ -354,6 +354,7 @@ class TestSandboxRealExecutor(unittest.TestCase):
         # the main process exits 0 but forks a long sleep into its process group;
         # run_python must sweep the WHOLE group on return, so the descendant is
         # not left running unbounded by wall_seconds (review r11 P1)
+        import dataclasses
         import os
         import time
         from lab_sandbox import OUTCOME_COMPLETED, run_python
@@ -362,7 +363,15 @@ class TestSandboxRealExecutor(unittest.TestCase):
             "p = subprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
             "sys.stdout.write(str(p.pid)); sys.stdout.flush()\n"
         )
-        result = run_python(code, self._limits())
+        # RLIMIT_NPROC is per-REAL-UID and system-wide, not per-sandbox — on a busy
+        # CI runner the uid can already be near the tight max_processes=48 cap, so
+        # the ONE fork this test needs (the descendant it then checks gets swept)
+        # intermittently fails with EAGAIN and the parent script exits nonzero.
+        # This test is about the process-group sweep, not the nproc cap, so give it
+        # generous headroom; the fork then reliably succeeds and the sweep is what
+        # is actually under test (review r13 — CI flake).
+        limits = dataclasses.replace(self._limits(), max_processes=4096)
+        result = run_python(code, limits)
         self.assertEqual(result.outcome, OUTCOME_COMPLETED)  # the parent exited cleanly
         child_pid = int(result.stdout.strip())
         for _ in range(60):  # allow the SIGKILL + reap to settle
