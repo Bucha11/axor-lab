@@ -61,6 +61,40 @@ def build_bundle(
     return bundle
 
 
+def evidence_lineage_ref(bundle: dict[str, object]) -> str:
+    """A STABLE identifier for the EVIDENCE a bundle carries, invariant to how it
+    is packaged (review r15).
+
+    `content_hash(bundle)` (the publication's bundle_ref) commits to EVERY field
+    — bundle_id, created, packaging, the content-hash map — so re-serialising the
+    same experiment with a fresh bundle_id/created yields a different bundle_ref.
+    That made an evidence-level takedown escapable: repackage the taken-down
+    evidence and it hashes differently. The lineage ref hashes ONLY the
+    load-bearing evidence — the scenarios, conditions, tool manifests, the
+    coordinates+trace refs of the COMPLETED trials, and the aggregate definitions
+    — so cosmetic repackaging maps to the SAME lineage and a takedown is final."""
+    completed = sorted(
+        [
+            str(t.get("scenario_id")), str(t.get("condition_id")), str(t.get("seed")),
+            str(t.get("repeat_index")), str(t.get("trace_ref", "")),
+        ]
+        for t in bundle.get("trials", [])  # type: ignore[union-attr]
+        if t.get("status") == "completed"
+    )
+    aggregates = sorted(
+        [str(a.get("metric")), str(a.get("condition_id")), str(a.get("comparison_design", "matched_pairs"))]
+        for a in bundle.get("aggregates", [])  # type: ignore[union-attr]
+    )
+    lineage = {
+        "scenarios": bundle.get("scenarios", []),
+        "conditions": bundle.get("conditions", []),
+        "tool_manifests": bundle.get("tool_manifests", []),
+        "completed_trials": completed,
+        "aggregates": aggregates,
+    }
+    return content_hash(lineage)
+
+
 # the trial coordinate a trace's own `trial` block must agree with — this is
 # the binding that stops one trace from "proving" a hundred fabricated trials
 _TRIAL_COORDS = ("scenario_id", "condition_id", "seed", "repeat_index")
