@@ -16,6 +16,7 @@ from .stats import (
     mcnemar_test,
     missingness,
     paired_bootstrap_ci,
+    two_proportion_test,
     wilson_interval,
 )
 
@@ -33,5 +34,6 @@ __all__ = [
     "mcnemar_test",
     "missingness",
     "paired_bootstrap_ci",
+    "two_proportion_test",
     "wilson_interval",
 ]

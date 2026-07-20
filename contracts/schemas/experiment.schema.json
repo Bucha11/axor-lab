@@ -62,6 +62,17 @@
         "compare"
       ],
       "default": "compare"
+    },
+    "comparison_design": {
+      "type": "object",
+      "description": "how the two conditions are compared. matched_pairs (McNemar) is valid ONLY when the agent's behavior is fixed by scenario+seed (a deterministic/replayed agent). A live model is sampled independently per condition → independent_samples (a two-proportion comparison, reported as exploratory). If omitted, the design is inferred from the agent.",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["matched_pairs", "independent_samples"] },
+        "pairing_key": { "type": "array", "items": { "type": "string" } },
+        "order": { "enum": ["fixed", "randomized"] }
+      },
+      "required": ["kind"]
     }
   }
 }

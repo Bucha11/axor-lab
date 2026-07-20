@@ -295,6 +295,13 @@ class PublicationStore:
         agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
         for aggregate in aggregates:
             interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
+            # an independent-samples comparison is exploratory — never present it
+            # as a paired significance result (review r4)
+            design = str(aggregate.get("comparison_design", "matched_pairs"))
+            design_note = (
+                " independent-samples comparison (exploratory; not a paired significance test)"
+                if design == "independent_samples" else ""
+            )
             claims.append(
                 make_claim(
                     "statistically_reproducible",
@@ -302,7 +309,7 @@ class PublicationStore:
                     f"{float(aggregate['estimate']):.2f} "
                     f"[{float(interval['low']):.2f}, {float(interval['high']):.2f}] "
                     f"over {aggregate['n']} trials{agent_note}, "
-                    "server-recomputed from the traces.",
+                    f"server-recomputed from the traces.{design_note}",
                     f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
                     trace_refs=trace_refs,
                     aggregate_refs=aggregate_refs,
