@@ -148,6 +148,10 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
                 validate_scenario(scenario, manifests)
             except ScenarioValidationError as exc:
                 errors += [f"scenario {name}: {e}" for e in exc.errors]
+            # fixtures must satisfy each tool's result_schema (review r6)
+            from .simulator import validate_fixture_results
+            errors += [f"[validating] scenario {name}: {e}"
+                       for e in validate_fixture_results(scenario, manifests)]
 
     wanted = [str(s) for s in experiment.get("scenario_ids", [])]  # type: ignore[union-attr]
     for scenario_id in wanted:
