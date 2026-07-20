@@ -9,6 +9,7 @@ exception.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from lab_contracts.canonical import content_hash
@@ -50,14 +51,22 @@ def check_pins(
     condition: dict[str, object],
     kernel: object,
     manifests: dict[str, dict[str, object]],
-    inputs: dict[str, object],
+    inputs: dict[str, object] | None = None,
+    *,
+    inputs_for: "Callable[[dict[str, object]], dict[str, object]] | None" = None,
 ) -> list[dict[str, object]]:
     """Re-run every pinned trace under `kernel`; report, never raise.
 
     Before replay, the pinned trace is (1) located — a missing trace is a
     reported status, not a KeyError — and (2) verified against its pinned
     content hash — a trace edited under the same id is surfaced as tampered
-    rather than silently re-run (review §5.3)."""
+    rather than silently re-run (review §5.3).
+
+    `inputs_for(trace)` supplies EACH trace's own scenario inputs; a single
+    shared `inputs` dict is wrong for a multi-scenario bundle, where pin B would
+    replay against scenario A's allowlist / effect-resolution inputs and produce
+    a false regression or a false pass (review r12). `inputs` remains as a legacy
+    fallback applied to every pin when no resolver is given."""
     # report the BEHAVIOR fingerprint (version + behavior-changing flags), not
     # just the version string — a taint_floor-off variant must be visibly a
     # different kernel, never the same identity with different verdicts (r4)
@@ -72,7 +81,8 @@ def check_pins(
         if content_hash(trace) != pinned.trace_ref:
             results.append(_result(pinned, "TRACE_TAMPERED", version, STATUS_TAMPERED))
             continue
-        recomputed, _ = replay_trace(trace, condition, kernel, manifests, inputs)
+        trace_inputs = inputs_for(trace) if inputs_for is not None else (inputs or {})
+        recomputed, _ = replay_trace(trace, condition, kernel, manifests, trace_inputs)
         actual_sequence = tuple(str(d["verdict"]) for d in recomputed)
         expected = pinned.expected_sequence or (pinned.expected_verdict,)
         matches = actual_sequence == expected

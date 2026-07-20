@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from html import escape
 
-from lab_runner import build_evidence_case, default_registry
+from lab_runner import build_evidence_case, default_registry, resolve_kernel
 
 from .store import StoredPublication
 
@@ -153,8 +153,12 @@ def render_evidence(stored: StoredPublication, trace_id: str, policy_id: str | N
     # (so a governed_allowlist trace is not silently replayed under strict); else
     # the first enforcing candidate for an ungoverned trace.
     condition = _evidence_condition(bundle, trace, policy_id)
-    kernel = default_registry((str(condition["kernel"]),)).get(str(condition["kernel"]))
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    # use the REAL axor-core governor when the condition pins the installed
+    # version, exactly as replay/regress do — an EvidenceCase for a real-kernel
+    # trace must not silently reason with the reference kernel (review r12).
+    version = str(condition["kernel"])
+    kernel = resolve_kernel(version, manifests, condition.get("policy"), default_registry((version,)))
     case = build_evidence_case(trace, scenario, condition, kernel, manifests)
     chain: dict[str, object] = case["chain"]  # type: ignore[assignment]
     modes: dict[str, object] = case["modes"]  # type: ignore[assignment]

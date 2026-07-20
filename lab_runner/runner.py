@@ -16,6 +16,7 @@ from lab_contracts.canonical import content_hash, world_digest
 
 from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
 from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
+from .errors import CostCeilingReached
 from .kernel import Kernel, KernelRegistry
 from .ledger import ValueLedger
 from .predicates import evaluate
@@ -319,6 +320,11 @@ def _run_one(
     }
     try:
         outcome = run_trial(scenario, manifests, condition, kernel, run_id, seed, repeat_index, agent)  # type: ignore[arg-type]
+    except CostCeilingReached:
+        # a budget stop halts the WHOLE run — it is NOT a per-trial failure to
+        # capture-and-continue (that would keep spending past the ceiling). Let
+        # it propagate to run_experiment_suite, which records stopped_reason.
+        raise
     except Exception as exc:  # noqa: BLE001 — a bad trial must not sink the run
         result.add_failure(trial_key, {**base, "status": "failed", "failure_reason": f"{type(exc).__name__}: {exc}"})
         return
@@ -441,12 +447,26 @@ def run_experiment_suite(
     """
     agent = agent or ScriptedAgent()
     result = ExperimentResult(run_id=run_id)
+    # cost check BEFORE the first trial — if usage already sits at a ceiling we
+    # must not run even one paid trial (review r12); with a fresh run this is a
+    # no-op, but it makes "before the first call" true rather than aspirational
+    if budget_check is not None:
+        reason = budget_check()
+        if reason is not None:
+            result.stopped_reason = reason
+            return result
     for scenario in scenarios:
         for condition in conditions:
             kernel = resolve_kernel(str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry)
             for repeat_index in range(repeats):
-                _run_one(result, scenario, manifests, condition, kernel, run_id,
-                         f"s{repeat_index:03d}", repeat_index, agent)
+                try:
+                    _run_one(result, scenario, manifests, condition, kernel, run_id,
+                             f"s{repeat_index:03d}", repeat_index, agent)
+                except CostCeilingReached as stop:
+                    # the guard fired mid-trial, BEFORE a provider call — stop the
+                    # whole run with the reached/overshot reason (review r12)
+                    result.stopped_reason = str(stop)
+                    return result
                 if budget_check is not None:
                     reason = budget_check()
                     if reason is not None:

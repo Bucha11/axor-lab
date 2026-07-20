@@ -76,11 +76,29 @@ def build_evidence_case(
 
 
 def _chain(trace: dict[str, object], scenario: dict[str, object]) -> dict[str, object]:
-    """injection → provenance lineage → gated call → verdict."""
+    """injection → provenance lineage → gated call → verdict.
+
+    The chain is built for ONE gate decision correlated to ITS intent by call_id
+    — the first DENY when there is one (the decision publication claims are built
+    from), else the first decision. Picking `first intent` + `first decision`
+    independently showed call A's chain for a DENY on call B in a multi-call
+    trace (review r12)."""
     values = {str(v["value_id"]): v for v in trace["values"]}  # type: ignore[union-attr]
     events: list[dict[str, object]] = list(trace["events"])  # type: ignore[arg-type]
-    decision_event = next(e for e in events if e.get("type") == "gate_decision")
-    call_event = next(e for e in events if e.get("type") == "tool_call_intent")
+    decisions = [e for e in events if e.get("type") == "gate_decision"]
+    if not decisions:
+        raise ValueError("trace has no gate_decision to build an EvidenceCase for")
+    decision_event = next(
+        (e for e in decisions if e["decision"]["verdict"] == "DENY"),  # type: ignore[index]
+        decisions[0],
+    )
+    target_call_id = decision_event.get("call_id")
+    intents = [e for e in events if e.get("type") == "tool_call_intent"]
+    call_event = None
+    if target_call_id is not None:
+        call_event = next((e for e in intents if e.get("call_id") == target_call_id), None)
+    if call_event is None:  # legacy traces without call_ids: only safe if there's one
+        call_event = intents[0] if len(intents) == 1 else {}
     decision: dict[str, object] = decision_event["decision"]  # type: ignore[assignment]
     driving_id = str(decision["driving_value_id"])
     lineage: list[dict[str, object]] = []

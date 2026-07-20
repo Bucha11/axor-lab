@@ -68,12 +68,24 @@ def actual_usd(input_tokens: int, output_tokens: int, model: str) -> float:
 class CostBudget:
     """A HARD run-wide ceiling — the enforcement half the cost layer promised but
     never had (it only ever printed an estimate). Any set limit is checked
-    against ACTUAL usage between trials, so the run stops BEFORE the next provider
-    call once a ceiling is reached (review r11). Unset limits (None) don't bind."""
+    against ACTUAL usage BEFORE the first trial and BEFORE every provider call
+    inside a trial's agent loop, so the run stops the moment a ceiling is reached
+    rather than after a whole trial's worth of calls has already overshot it
+    (review r11, r12). Unset limits (None) don't bind."""
 
     max_usd: float | None = None
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        # a zero or negative ceiling is not a budget — it is either a no-op the
+        # caller mistook for "spend nothing" or an outright error. Reject it so a
+        # `--max-usd 0` fails loudly instead of stopping the run before any trial
+        # ran while looking like a successful empty run (review r12).
+        for name in ("max_usd", "max_input_tokens", "max_output_tokens"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be > 0 when set, got {value!r}")
 
     def is_set(self) -> bool:
         return any(x is not None for x in (self.max_usd, self.max_input_tokens, self.max_output_tokens))
@@ -92,3 +104,27 @@ class CostBudget:
             if spent >= self.max_usd:
                 return f"spend ${spent:.2f} reached ceiling ${self.max_usd:.2f}"
         return None
+
+    def is_overshot(self, usage: dict[str, int], model: str) -> bool:
+        """True when actual usage is STRICTLY past a ceiling — i.e. the last
+        completed call pushed us over, not merely up to, the limit. With per-call
+        pre-checks this should be rare (we stop before the overshooting call),
+        but input tokens and a final partial output are not fully controllable,
+        so we report the honest label rather than pretend we stopped exactly."""
+        in_tok = int(usage.get("input_tokens", 0))
+        out_tok = int(usage.get("output_tokens", 0))
+        if self.max_input_tokens is not None and in_tok > self.max_input_tokens:
+            return True
+        if self.max_output_tokens is not None and out_tok > self.max_output_tokens:
+            return True
+        if self.max_usd is not None and actual_usd(in_tok, out_tok, model) > self.max_usd:
+            return True
+        return False
+
+    def remaining_output_tokens(self, usage: dict[str, int]) -> int | None:
+        """Output tokens left under the ceiling, to cap the NEXT provider call's
+        max_tokens so a single call cannot blow far past the limit. None when no
+        output ceiling is set."""
+        if self.max_output_tokens is None:
+            return None
+        return max(0, self.max_output_tokens - int(usage.get("output_tokens", 0)))

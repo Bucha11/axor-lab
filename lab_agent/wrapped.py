@@ -18,8 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lab_runner.agents import SinkDecision
+from lab_runner.errors import CostCeilingReached
 
 from .backends import FINAL, TOOL_CALL, CassetteBackend, ModelAction, ModelBackend
+from .cost import CostBudget
 from .errors import ProtocolViolation
 
 _MAX_TURNS = 8
@@ -30,6 +32,11 @@ class WrappedModelAgent:
     """A model-backed DrivingAgent (satisfies lab_runner's DrivingAgent protocol)."""
 
     backend: ModelBackend
+    # a HARD cost ceiling consulted BEFORE every provider call, so a single
+    # trial's multi-turn loop cannot overshoot the run-wide budget by up to
+    # _MAX_TURNS calls before the between-trials check ever runs (review r12).
+    budget: CostBudget | None = None
+    model: str = ""
 
     @property
     def is_deterministic(self) -> bool:
@@ -61,7 +68,19 @@ class WrappedModelAgent:
             {"role": "user", "content": _task_prompt(task, read_result)}
         ]
         for _ in range(_MAX_TURNS):
-            action = self.backend.next_action(messages, _tool_schemas(sink_manifest))
+            # cost guard BEFORE the call: if a ceiling is already reached, stop
+            # the whole run here rather than make another paid call and check
+            # only after the trial completed (the overshoot window, review r12)
+            max_out = None
+            if self.budget is not None and self.budget.is_set() and self.model:
+                usage = self.backend.usage()
+                reason = self.budget.exceeded(usage, self.model)
+                if reason is not None:
+                    raise CostCeilingReached(
+                        reason, overshot=self.budget.is_overshot(usage, self.model)
+                    )
+                max_out = self.budget.remaining_output_tokens(usage)
+            action = self.backend.next_action(messages, _tool_schemas(sink_manifest), max_out)
             if action.kind == TOOL_CALL and action.tool == sink_id:
                 args = action.args or {}
                 # do NOT silently coerce a malformed model call: a fixed-up call
@@ -130,6 +149,8 @@ class FileCassetteAgent:
 
     path: Path
     is_deterministic: bool = True  # fresh cassette per trial → identical behavior
+    budget: CostBudget | None = None
+    model: str = ""
 
     def decide_sink_call(
         self,
@@ -141,7 +162,11 @@ class FileCassetteAgent:
         scenario_id: str = "",
     ) -> SinkDecision:
         records = self._records_for(scenario_id)
-        agent = WrappedModelAgent(backend=CassetteBackend.from_records(records))
+        # forward the budget so EACH trial's multi-turn loop is guarded before
+        # every call (the within-trial overshoot the between-trials check misses)
+        agent = WrappedModelAgent(
+            backend=CassetteBackend.from_records(records), budget=self.budget, model=self.model
+        )
         return agent.decide_sink_call(task, read_result, inputs, sink_manifest, scenario_id=scenario_id)
 
     def _records_for(self, scenario_id: str) -> list[dict[str, object]]:

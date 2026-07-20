@@ -29,6 +29,7 @@ from lab_contracts import (
     build_bundle,
     build_publication,
     content_hash,
+    finalize_publication_id,
     make_claim,
     validate_artifact,
 )
@@ -40,7 +41,7 @@ from .errors import ExperimentFileError, RunnerError
 from .evidence import build_evidence_case
 from .experiment_file import ResolvedExperiment, load_axl, resolve
 from .kernel import Kernel, default_registry
-from .regression import STATUS_DIFFERS, RegressionPin, check_pins
+from .regression import STATUS_DIFFERS, RegressionPin, check_pins, pin
 from .replay import replay_bundle
 from .runner import run_experiment_suite
 
@@ -136,11 +137,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # so the run stops before the next provider call (review r11). Unset → no bind.
     from lab_agent.cost import CostBudget
 
-    budget = CostBudget(
-        max_usd=getattr(args, "max_usd", None),
-        max_input_tokens=getattr(args, "max_input_tokens", None),
-        max_output_tokens=getattr(args, "max_output_tokens", None),
-    )
+    try:
+        budget = CostBudget(
+            max_usd=getattr(args, "max_usd", None),
+            max_input_tokens=getattr(args, "max_input_tokens", None),
+            max_output_tokens=getattr(args, "max_output_tokens", None),
+        )
+    except ValueError as exc:
+        raise RunnerError(str(exc)) from exc
+
+    # thread the ceiling INTO the agent so its multi-turn loop is guarded before
+    # every provider call — the between-trials check below only bounds overshoot
+    # to whole trials, not to a single trial's fan-out of calls (review r12)
+    if budget.is_set() and hasattr(agent, "budget"):
+        agent.budget = budget  # type: ignore[attr-defined]
+        agent.model = model  # type: ignore[attr-defined]
 
     def _budget_check() -> str | None:
         if not budget.is_set() or not hasattr(agent, "usage"):
@@ -235,15 +246,21 @@ def _cmd_pin(args: argparse.Namespace) -> int:
     out = Path(args.out)
     pins: list[dict[str, object]] = json.loads(out.read_text()) if out.is_file() else []
     pins = [p for p in pins if p["trace_id"] != args.trace_id]
+    # use the regression model's pin(), which records the WHOLE ordered verdict
+    # sequence — not just the final verdict. Persisting only expected_verdict made
+    # regress compare a multi-call trace's real sequence (ALLOW, ALLOW, DENY) to a
+    # singleton (DENY) and cry regression on an unchanged trace/kernel (review r12).
+    p = pin(trace, args.expected)
     pins.append(
         {
-            "trace_id": args.trace_id,
-            "trace_ref": content_hash(trace),
-            "expected_verdict": args.expected,
+            "trace_id": p.trace_id,
+            "trace_ref": p.trace_ref,
+            "expected_verdict": p.expected_verdict,
+            "expected_sequence": list(p.expected_sequence),
         }
     )
     out.write_text(json.dumps(pins, indent=2))
-    print(f"pinned {args.trace_id} -> expected {args.expected} ({out})")
+    print(f"pinned {args.trace_id} -> expected {list(p.expected_sequence)} ({out})")
     return EXIT_OK
 
 
@@ -255,12 +272,14 @@ def _cmd_regress(args: argparse.Namespace) -> int:
             trace_id=str(p["trace_id"]),
             trace_ref=str(p["trace_ref"]),
             expected_verdict=str(p["expected_verdict"]),
+            # restore the pinned ORDERED sequence (default to the singleton for
+            # older pin files) so a multi-call trace is compared correctly (r12)
+            expected_sequence=tuple(str(v) for v in p.get("expected_sequence", ())),
         )
         for p in pins_raw
     )
     condition = _enforcing_condition(bundle, args.condition)
     version = args.kernel or str(condition["kernel"])
-    inputs = _scenario_inputs(bundle, traces, pins)
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     if args.disable_taint_floor:
         # explicit variant demonstration: force the reference kernel with the
@@ -272,7 +291,13 @@ def _cmd_regress(args: argparse.Namespace) -> int:
         # taint-floor kernel (review r6: one kernel path everywhere)
         kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
                                 default_registry((version,)))
-    results = check_pins(pins, traces, condition, kernel, manifests, inputs)
+    # each pinned trace replays against ITS OWN scenario's inputs — a single
+    # shared inputs dict would replay every pin under the first scenario's
+    # allowlist / effect-resolution inputs (review r12)
+    results = check_pins(
+        pins, traces, condition, kernel, manifests,
+        inputs_for=lambda trace: _scenario_for(bundle, trace).get("inputs", {}),  # type: ignore[union-attr,arg-type]
+    )
     differs = [r for r in results if r["status"] == STATUS_DIFFERS]
     for result in results:
         print(
@@ -300,8 +325,14 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         raise RunnerError(f"twin trace {args.twin} not found in bundle")
     scenario = _scenario_for(bundle, trace)
     condition = _enforcing_condition(bundle, None)
-    kernel = default_registry((str(condition["kernel"]),)).get(str(condition["kernel"]))
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    # resolve the SAME kernel replay/regress use — the REAL axor-core governor
+    # when the condition pins the installed build — not always the reference
+    # kernel via default_registry, which would render reference-kernel verdicts
+    # under a production kernel version (review r12)
+    version = str(condition["kernel"])
+    kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
+                            default_registry((version,)))
     case = build_evidence_case(trace, scenario, condition, kernel, manifests, governed_twin=twin)
     print(json.dumps(case, indent=2, ensure_ascii=False))
     return EXIT_OK
@@ -340,23 +371,20 @@ def _cmd_publish(args: argparse.Namespace) -> int:
                 aggregate_refs=aggregate_refs,
             )
         )
-    provider = str(bundle.get("environment", {}).get("model", {}).get("provider", ""))  # type: ignore[union-attr]
-    agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
-    for aggregate in aggregates:
-        interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
-        claims.append(
-            make_claim(
-                "statistically_reproducible",
-                f"{aggregate['metric']} under {aggregate['condition_id']}: "
-                f"{aggregate['estimate']:.2f} "
-                f"[{interval['low']:.2f}, {interval['high']:.2f}] over {aggregate['n']} trials{agent_note}.",
-                f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
-                trace_refs=trace_refs,
-                aggregate_refs=aggregate_refs,
-            )
+    # local publish proves REPLAY (it re-ran the verdicts above), NOT statistics:
+    # it does not independently recompute the aggregates, so it must NOT mint a
+    # `statistically_reproducible` claim over self-reported numbers — the schema
+    # forbids self_reported backing that claim, and a hand-edited bundle could
+    # carry a fabricated aggregate. Statistical claims are minted only by the
+    # server, which recomputes from the traces (→ recomputed_from_traces, r12).
+    stat_note = ""
+    if aggregates:
+        stat_note = (
+            f"  ({len(aggregates)} aggregate(s) in the bundle are NOT published as claims — "
+            "host with --server for server-recomputed statistical claims)"
         )
     publication = build_publication(
-        publication_id=f"e_{bundle_ref.removeprefix('sha256:')[:32]}",  # 128-bit id (§6.3)
+        publication_id="e_pending",  # placeholder; content-addressed below
         bundle_ref=bundle_ref,
         question=args.question,
         origin="local",
@@ -364,16 +392,20 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         claims=claims,
         license_id=args.license,
         visibility=getattr(args, "visibility", "unlisted"),
-        # local publish reports its own numbers; only the server independently
-        # recomputes them (→ recomputed_from_traces). Be honest about which.
-        statistics_integrity="self_reported" if aggregates else None,
+        statistics_integrity=None,  # no statistical claims are asserted locally
     )
+    # content-address the WHOLE body (the shared definition), so the same bundle
+    # published with a different question/visibility/license is a genuinely
+    # different publication with its own id, not an id-colliding overwrite (r12)
+    finalize_publication_id(publication)
     errors = validate_artifact(publication, "publication")
     if errors:
         raise RunnerError(f"publication failed schema validation: {errors}")
     Path(args.out).write_text(json.dumps(publication, indent=2, ensure_ascii=False))
     print(f"publication {publication['publication_id']} -> {args.out}")
     print("origin=local integrity=hash_verified")
+    if stat_note:
+        print(stat_note)
     print(f"host it: axor-lab publish {args.bundle} --question ... --server <url>")
     return EXIT_OK
 
@@ -434,15 +466,15 @@ def _publish_to_server(
 def _cmd_export_cp(args: argparse.Namespace) -> int:
     from .cp_export import CPExportError, export_cp
 
-    bundle, _ = read_bundle_dir(Path(args.bundle))
+    bundle, traces = read_bundle_dir(Path(args.bundle))
     regressions: list[dict[str, object]] = []
     if args.pins:
-        regressions = [
-            {"trace_id": p["trace_id"], "expected_verdict": p["expected_verdict"]}
-            for p in json.loads(Path(args.pins).read_text())
-        ]
+        # pass the FULL pin objects (trace_ref + expected_sequence too) so
+        # export_cp can validate each against the bundle's traces before it
+        # carries the pin into a production Control Plane config (review r12)
+        regressions = list(json.loads(Path(args.pins).read_text()))
     try:
-        export = export_cp(bundle, regressions, condition_id=args.condition)
+        export = export_cp(bundle, regressions, condition_id=args.condition, traces=traces)
     except CPExportError as exc:
         raise RunnerError(str(exc)) from exc
     out = Path(args.out)
@@ -829,19 +861,6 @@ def _scenario_for(bundle: dict[str, object], trace: dict[str, object]) -> dict[s
         if scenario["name"] == scenario_id:
             return scenario
     raise RunnerError(f"scenario {scenario_id} not in bundle")
-
-
-def _scenario_inputs(
-    bundle: dict[str, object],
-    traces: dict[str, dict[str, object]],
-    pins: tuple[RegressionPin, ...],
-) -> dict[str, object]:
-    if not pins:
-        raise RunnerError("no pins to check")
-    trace = traces.get(pins[0].trace_id)
-    if trace is None:
-        raise RunnerError(f"pinned trace {pins[0].trace_id} not found in bundle")
-    return _scenario_for(bundle, trace).get("inputs", {})  # type: ignore[return-value]
 
 
 def _first_denied_trace(traces: dict[str, dict[str, object]]) -> dict[str, object] | None:

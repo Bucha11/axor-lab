@@ -285,18 +285,12 @@ class PublicationStore:
 
     @staticmethod
     def _derive_id(publication: dict[str, object]) -> str:
-        """A 128-bit id (32 hex chars) that content-addresses the WHOLE
-        publication body — every field except the two that are themselves
-        derived from the id (review §6.3 — the old 32-bit id was collision-
-        searchable; and r7 — the id must COMMIT to the body, so no hand-edit
-        of visibility/question/claims/integrity/license survives a reload).
-        Byte-identical publications get the same id (idempotent re-publish);
-        any changed field yields a different id, i.e. a different publication."""
-        body = {
-            k: v for k, v in publication.items()
-            if k not in ("publication_id", "reproductions_ref")
-        }
-        return f"e_{content_hash(body).removeprefix('sha256:')[:32]}"
+        """Content-address the WHOLE publication body — the ONE definition shared
+        with the local CLI publish (lab_contracts.derive_publication_id) so both
+        mint identical ids (review §6.3, r7, r12)."""
+        from lab_contracts import derive_publication_id
+
+        return derive_publication_id(publication)
 
     def is_taken_down(self, publication_id: str) -> bool:
         return publication_id in self._tombstones

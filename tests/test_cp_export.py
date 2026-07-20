@@ -12,14 +12,14 @@ import unittest
 
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
-from lab_contracts import build_bundle, condition_config_hash
+from lab_contracts import build_bundle, condition_config_hash, content_hash
 from lab_runner import run_experiment_suite
 from lab_runner.cp_export import PRODUCTION_TODO, CPExportError, earned_bridge, export_cp
 
 CREATED = "2026-07-19T12:00:00+00:00"
 
 
-def _bundle(governance_helps: bool = True) -> dict[str, object]:
+def _bundle_and_traces(governance_helps: bool = True):
     scenario = support.banking_scenario()
     conditions = support.conditions()
     result = run_experiment_suite(
@@ -33,10 +33,25 @@ def _bundle(governance_helps: bool = True) -> dict[str, object]:
         binary_aggregate("ASR", "governed", 0, len(pairs),
                          test=mcnemar_test(pairs, vs="ungoverned")),
     ]
-    return build_bundle(
+    bundle = build_bundle(
         bundle_id="b_cp", created=CREATED, scenarios=[scenario], conditions=conditions,
         tool_manifests=list(support.manifests().values()), environment=support.environment(),
         trials=result.trials, aggregates=aggregates, traces=result.traces,
+    )
+    return bundle, result.traces
+
+
+def _bundle(governance_helps: bool = True) -> dict[str, object]:
+    return _bundle_and_traces(governance_helps)[0]
+
+
+def _denied_trace(traces: dict) -> dict:
+    return next(
+        t for t in traces.values()
+        if any(
+            e.get("type") == "gate_decision" and e["decision"]["verdict"] == "DENY"
+            for e in t["events"]
+        )
     )
 
 
@@ -59,11 +74,64 @@ class TestCPExport(unittest.TestCase):
         exported_ids = {m["id"] for m in export.config["tool_manifests"]}  # type: ignore[union-attr]
         self.assertEqual(exported_ids, {"read_txns", "send_money"})
 
-    def test_regressions_carry_over(self) -> None:
+    def test_validated_pin_carries_over_with_full_shape(self) -> None:
+        bundle, traces = _bundle_and_traces()
+        trace = _denied_trace(traces)
+        pin = {"trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
+               "expected_verdict": "DENY", "expected_sequence": ["DENY"]}
+        export = export_cp(bundle, regressions=[pin], traces=traces)
+        carried = export.config["regressions"]
+        self.assertEqual(len(carried), 1)  # type: ignore[arg-type]
+        got = carried[0]  # type: ignore[index]
+        self.assertEqual(got["trace_id"], str(trace["trace_id"]))
+        self.assertEqual(got["trace_ref"], content_hash(trace))
+        self.assertEqual(got["expected_verdict"], "DENY")
+        self.assertEqual(got["expected_sequence"], ["DENY"])
+        # the pin now records WHICH scenario/condition it re-runs, from the trial
+        self.assertEqual(got["condition_id"], "governed")
+        self.assertIn("scenario_id", got)
+
+    def test_pin_for_a_trace_not_in_the_bundle_is_rejected(self) -> None:
+        bundle, traces = _bundle_and_traces()
+        pins = [{"trace_id": "t_never_ran", "expected_verdict": "DENY"}]
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(bundle, regressions=pins, traces=traces)
+        self.assertIn("no such trace", str(ctx.exception))
+
+    def test_pin_with_a_fabricated_sequence_is_rejected(self) -> None:
+        bundle, traces = _bundle_and_traces()
+        trace = _denied_trace(traces)
+        # claim a sequence the frozen trace never produced
+        pins = [{"trace_id": str(trace["trace_id"]), "expected_verdict": "DENY",
+                 "expected_sequence": ["ALLOW", "ALLOW", "DENY"]}]
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(bundle, regressions=pins, traces=traces)
+        self.assertIn("does not match the frozen", str(ctx.exception))
+
+    def test_pin_with_a_stale_trace_ref_is_rejected(self) -> None:
+        bundle, traces = _bundle_and_traces()
+        trace = _denied_trace(traces)
+        pins = [{"trace_id": str(trace["trace_id"]), "trace_ref": "sha256:stale",
+                 "expected_verdict": "DENY"}]
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(bundle, regressions=pins, traces=traces)
+        self.assertIn("content hash", str(ctx.exception))
+
+    def test_pins_without_traces_are_refused(self) -> None:
         bundle = _bundle()
         pins = [{"trace_id": "t_x", "expected_verdict": "DENY"}]
-        export = export_cp(bundle, regressions=pins)
-        self.assertEqual(export.config["regressions"], pins)
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(bundle, regressions=pins)  # no traces=
+        self.assertIn("no bundle traces", str(ctx.exception))
+
+    def test_export_requires_a_recorded_config_hash(self) -> None:
+        bundle = _bundle()
+        for condition in bundle["conditions"]:  # type: ignore[union-attr]
+            if condition["enforcement"] == "on":
+                del condition["config_hash"]
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(bundle)
+        self.assertIn("no recorded config_hash", str(ctx.exception))
 
     def test_production_todo_lists_the_four_not_reused_categories(self) -> None:
         export = export_cp(_bundle())

@@ -17,7 +17,14 @@ from .errors import (
     SchemaValidationError,
     UnresolvedInputError,
 )
-from .publication import add_reproduction, build_publication, make_claim, provenance_axes
+from .publication import (
+    add_reproduction,
+    build_publication,
+    derive_publication_id,
+    finalize_publication_id,
+    make_claim,
+    provenance_axes,
+)
 from .schemas import contracts_dir, load_schemas
 from .semantics import (
     EGRESS_CLASSES,
@@ -39,6 +46,8 @@ __all__ = [
     "SchemaValidationError",
     "UnresolvedInputError",
     "add_reproduction",
+    "derive_publication_id",
+    "finalize_publication_id",
     "build_bundle",
     "build_publication",
     "canonical_json",

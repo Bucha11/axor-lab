@@ -10,8 +10,10 @@ the numbers do not follow from the evidence, and the publish is rejected.
 
 The recomputation mirrors the runner's own aggregation (``ExperimentResult``):
 ASR maps to the `violation` predicate, any other metric to `task_success`, and
-n is the number of trials that form a complete set across the conditions the
-metric is compared over (the paired unit of analysis, statistics.md §1).
+the marginal n is the completed trials OF THAT CONDITION (the runner's
+per-condition marginal), for both designs. The pairing lives only in the test
+object — McNemar over the baseline∩treated intersection (statistics.md §1) —
+never in the marginal denominator, so the two agree exactly at missingness.
 """
 
 from __future__ import annotations
@@ -69,9 +71,6 @@ def recompute_aggregates(
     Returns {(metric, condition_id): recomputed aggregate dict}."""
     uploaded: list[dict[str, object]] = bundle["aggregates"]  # type: ignore[assignment]
     rows = _rows(bundle, traces)
-    metric_conditions: dict[str, set[str]] = {}
-    for agg in uploaded:
-        metric_conditions.setdefault(str(agg["metric"]), set()).add(str(agg["condition_id"]))
     out: dict[tuple[str, str], dict[str, object]] = {}
     for agg in uploaded:
         metric = str(agg["metric"])
@@ -79,20 +78,17 @@ def recompute_aggregates(
         field = _metric_field(metric)
         if field is None:
             continue  # unknown metric — reported by check_aggregates, not recomputed
-        design = str(agg.get("comparison_design", "matched_pairs"))
-        if design == "independent_samples":
-            # independent samples: n is the MARGINAL count for this condition,
-            # not the paired intersection
-            marg = [r[cid] for r in rows.values() if cid in r]
-            n = len(marg)
-            successes = sum(1 for o in marg if o[field])
-        else:
-            # matched pairs: a trial counts once it exists under every condition
-            # this metric is compared across (the paired unit of analysis)
-            cond_ids = metric_conditions[metric]
-            complete = [r for r in rows.values() if cond_ids <= r.keys()]
-            n = len(complete)
-            successes = sum(1 for r in complete if r[cid][field])
+        # The marginal aggregate n is ALWAYS the completed trials OF THIS
+        # CONDITION — identical to the runner's _condition_counts, for BOTH
+        # designs. The pairing is a property of the TEST (McNemar over the
+        # baseline∩treated intersection), never of the marginal denominator.
+        # Computing the matched-pairs marginal over the all-conditions
+        # intersection made the server reject honest runner bundles at
+        # missingness: a single failed baseline trial shrank every condition's
+        # recomputed n below the runner's per-condition marginal (review r12).
+        marg = [r[cid] for r in rows.values() if cid in r]
+        n = len(marg)
+        successes = sum(1 for o in marg if o[field])
         out[(metric, cid)] = binary_aggregate(metric, cid, successes, n)
     return out
 

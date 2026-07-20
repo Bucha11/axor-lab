@@ -108,5 +108,57 @@ class TestTrialTraceBinding(unittest.TestCase):
         self.assertIn("duplicate trace_id", str(ctx.exception))
 
 
+class TestCrossReferenceIntegrity(unittest.TestCase):
+    """Trial coordinates and trace tools must RESOLVE in-bundle (review r12)."""
+
+    def setUp(self) -> None:
+        self.trials, self.traces, self.ctx = _run()
+
+    def test_failed_trial_citing_phantom_scenario_is_rejected(self) -> None:
+        # a FAILED trial (no trace) that names a scenario not in the bundle —
+        # it still counts toward the denominator, so it cannot be a phantom
+        phantom = {
+            "trial_id": "t_phantom", "scenario_id": "never-ran",
+            "condition_id": "governed", "seed": "s000", "repeat_index": 0,
+            "status": "failed", "failure_reason": "SimulatedError: x",
+        }
+        bundle = _bundle([*self.trials, phantom], self.traces, self.ctx)
+        with self.assertRaises(BundleIntegrityError) as ctx:
+            verify_bundle(bundle, self.traces)
+        self.assertIn("never-ran", str(ctx.exception))
+        self.assertIn("not a bundle scenario", str(ctx.exception))
+
+    def test_trial_citing_phantom_condition_is_rejected(self) -> None:
+        phantom = {
+            "trial_id": "t_phantom2", "scenario_id": str(self.ctx["scenario"]["name"]),
+            "condition_id": "governed_but_fake", "seed": "s000", "repeat_index": 0,
+            "status": "failed", "failure_reason": "SimulatedError: x",
+        }
+        bundle = _bundle([*self.trials, phantom], self.traces, self.ctx)
+        with self.assertRaises(BundleIntegrityError) as ctx:
+            verify_bundle(bundle, self.traces)
+        self.assertIn("governed_but_fake", str(ctx.exception))
+        self.assertIn("not a bundle condition", str(ctx.exception))
+
+    def test_trace_invoking_tool_without_a_manifest_is_rejected(self) -> None:
+        # a trace event invokes a sink the bundle has no manifest for — an
+        # egress the governor config never saw
+        trial = next(copy.deepcopy(t) for t in self.trials if t.get("status") == "completed")
+        trace = copy.deepcopy(
+            next(tr for tr in self.traces.values() if content_hash(tr) == trial["trace_ref"])
+        )
+        for event in trace["events"]:
+            if event.get("type") == "tool_call_intent":
+                event["tool"] = "wire_transfer_v2_unmanifested"
+                break
+        trial["trace_ref"] = content_hash(trace)
+        traces = {str(trace["trace_id"]): trace}
+        bundle = _bundle([trial], traces, self.ctx)
+        with self.assertRaises(BundleIntegrityError) as ctx:
+            verify_bundle(bundle, traces)
+        self.assertIn("wire_transfer_v2_unmanifested", str(ctx.exception))
+        self.assertIn("no tool_manifest", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

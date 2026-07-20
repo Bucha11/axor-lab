@@ -44,3 +44,18 @@ class ExperimentFileError(RunnerError):
 
 class ConfirmationRequired(RunnerError):
     """The pre-run estimate was not confirmed (no --yes and no interactive TTY)."""
+
+
+class CostCeilingReached(RunnerError):
+    """A hard cost ceiling was reached DURING a trial's agent loop (before a
+    provider call), so the whole run must stop — not just fail this one trial.
+
+    `overshot` distinguishes a clean stop AT the ceiling (we refused the next
+    call while already at/over the limit) from the honest case where the last
+    completed call pushed actual usage strictly PAST a ceiling (review r12)."""
+
+    def __init__(self, reason: str, *, overshot: bool = False) -> None:
+        state = "overshot" if overshot else "reached"
+        super().__init__(f"cost ceiling {state}: {reason}")
+        self.reason = reason
+        self.overshot = overshot

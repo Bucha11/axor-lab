@@ -518,25 +518,39 @@ class TestFederationAndPopulation(unittest.TestCase):
         self.assertEqual(agg["n"], 20)               # runs, NOT 20*10 members
         self.assertEqual(agg["unit_of_analysis"], "run")
 
-    def test_carried_taint_contains_a_compromised_member(self) -> None:
+    def test_governance_contains_a_compromised_member(self) -> None:
         from lab_games import run_federation
 
         governed = run_federation(self._members(20, compromised=1), rounds=10,
-                                  topology="ring", carried_taint=True)
+                                  topology="ring", governed=True)
         ungoverned = run_federation(self._members(20, compromised=1), rounds=10,
-                                    topology="ring", carried_taint=False)
-        # governance contains the blast radius; without it the defection spreads
-        self.assertIsNotNone(governed.contained_at)
-        self.assertLess(governed.compromised_spread(), ungoverned.compromised_spread())
+                                    topology="ring", governed=False)
+        # governance keeps the compromise at its origin (blast_radius 0); without
+        # it the defection spreads to non-origin members
+        self.assertTrue(governed.contained())
+        self.assertEqual(governed.blast_radius(), 0)
+        self.assertGreater(ungoverned.blast_radius(), governed.blast_radius())
+
+    def test_blast_radius_excludes_the_origin_compromise(self) -> None:
+        from lab_games import run_federation
+
+        # even governed, the origin member DOES defect — but that is the seed,
+        # not spread, so the blast radius (spread beyond origin) is 0
+        governed = run_federation(self._members(10, compromised=1), rounds=8,
+                                  topology="ring", governed=True)
+        self.assertEqual(governed.compromised_members, frozenset({"m0"}))
+        # m0 itself defected (it is the origin), but that is not "spread"
+        self.assertFalse(all(governed.member_moves["m0"]))
+        self.assertEqual(governed.blast_radius(), 0)
 
     def test_population_scales_to_many_members(self) -> None:
         from lab_games import run_federation
 
         run = run_federation(self._members(200, compromised=1), rounds=5,
-                             topology="star", carried_taint=True)
+                             topology="star", governed=True)
         self.assertEqual(len(run.member_moves), 200)  # town of N
         # a single compromise stays contained even at population scale
-        self.assertLessEqual(run.compromised_spread(), 2)
+        self.assertTrue(run.contained())
 
     def test_topologies_are_supported(self) -> None:
         from lab_games import TOPOLOGY_COMPLETE, TOPOLOGY_RING, TOPOLOGY_STAR, run_federation

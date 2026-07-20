@@ -92,10 +92,51 @@ def verify_bundle(bundle: dict[str, object], traces: dict[str, dict[str, object]
         _check(hashes, f"trace:{trace['trace_id']}", trace, errors)
 
     _verify_uniqueness(bundle, traces, errors)
+    _verify_cross_references(bundle, traces, errors)
     _verify_trial_trace_graph(bundle, traces, errors)
     _verify_trace_metadata(bundle, traces, errors)
     if errors:
         raise BundleIntegrityError("; ".join(errors))
+
+
+def _verify_cross_references(
+    bundle: dict[str, object], traces: dict[str, dict[str, object]], errors: list[str]
+) -> None:
+    """Every trial's coordinates and every trace's tools must RESOLVE in-bundle.
+
+    The hash graph proves a completed trial is bound to the right trace, but it
+    never checked that the scenario/condition a trial NAMES actually exist, nor
+    that a tool a trace invokes has a manifest. So a failed/excluded trial could
+    cite a phantom scenario or condition (padding a denominator or inventing a
+    baseline that never ran), and a trace could invoke a sink tool with no
+    manifest — an egress the governor config never saw — and the bundle would
+    still verify. Both are integrity failures now (review r12)."""
+    scenario_names = {str(s["name"]) for s in bundle["scenarios"]}  # type: ignore[union-attr]
+    condition_ids = {str(c["id"]) for c in bundle["conditions"]}  # type: ignore[union-attr]
+    manifest_ids = {str(m["id"]) for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    for trial in bundle["trials"]:  # type: ignore[union-attr]
+        # applies to EVERY trial, completed or failed — a failed trial still
+        # contributes to the denominator / missingness accounting, so it must
+        # not reference a scenario or condition that isn't in the bundle
+        sid = str(trial.get("scenario_id"))
+        if sid not in scenario_names:
+            errors.append(
+                f"trial {trial.get('trial_id')}: scenario_id {sid!r} is not a bundle scenario"
+            )
+        cid = str(trial.get("condition_id"))
+        if cid not in condition_ids:
+            errors.append(
+                f"trial {trial.get('trial_id')}: condition_id {cid!r} is not a bundle condition"
+            )
+    for trace in traces.values():
+        events: list[dict[str, object]] = trace.get("events", [])  # type: ignore[assignment]
+        for event in events:
+            tool = event.get("tool")
+            if tool is not None and str(tool) not in manifest_ids:
+                errors.append(
+                    f"trace {trace.get('trace_id')}: event invokes tool {tool!r} "
+                    "with no tool_manifest in the bundle"
+                )
 
 
 def _verify_uniqueness(
