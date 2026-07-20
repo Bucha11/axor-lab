@@ -123,15 +123,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # same trial/trace ids), so different executions looked like retries of one
     # trial (review r3). The fingerprint is the agent's CONTENT (cassette bytes /
     # model id), so identical agents reproduce the same id and different ones don't.
+    agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     fingerprint = _agent_fingerprint(args, resolved)
     # 128-bit id (32 hex chars) from the experiment+agent fingerprint — the old
     # 8-char (32-bit) slice was birthday-collision-searchable, so two unrelated
-    # runs could share a run_id and look like retries of one trial (review r7)
-    run_id = args.run_id or (
-        "r_" + content_hash({"experiment": resolved.experiment, "agent": fingerprint})
-        .removeprefix("sha256:")[:32]
+    # runs could share a run_id and look like retries of one trial (review r7).
+    # For a NONDETERMINISTIC agent a fresh random execution nonce is folded in, so
+    # two live runs of the same experiment are distinct executions (review r13).
+    run_id = _derive_run_id(
+        args.run_id, resolved.experiment, fingerprint,
+        deterministic=bool(getattr(agent, "is_deterministic", True)),
     )
-    agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
     model = _estimate_model(args, resolved)
     # a HARD run-wide cost ceiling: checked against ACTUAL usage between trials,
     # so the run stops before the next provider call (review r11). Unset → no bind.
@@ -717,6 +719,29 @@ def _resolve_agent_override(spec: str) -> object:
     if kind == "anthropic":
         return WrappedModelAgent(backend=AnthropicBackend(model=param or "claude-opus-4-8"))
     raise RunnerError(f"unknown --agent {spec!r}; use cassette:<file> or anthropic:<model>")
+
+
+def _derive_run_id(
+    explicit: str | None,
+    experiment: dict[str, object],
+    fingerprint: str,
+    *,
+    deterministic: bool,
+) -> str:
+    """The run id. An explicit --run-id always wins. A DETERMINISTIC agent
+    (scripted / replayed cassette) yields a content-derived id, so re-running the
+    same experiment reproduces the same identity. A NONDETERMINISTIC agent (a live
+    model) draws a fresh sample each execution, so two runs are DIFFERENT
+    executions, not retries of one — a random execution nonce is folded in so
+    their run/trial/trace ids differ (review r13)."""
+    if explicit:
+        return explicit
+    body: dict[str, object] = {"experiment": experiment, "agent": fingerprint}
+    if not deterministic:
+        import secrets
+
+        body["execution_nonce"] = secrets.token_hex(16)  # 128-bit per-execution
+    return "r_" + content_hash(body).removeprefix("sha256:")[:32]
 
 
 def _agent_fingerprint(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
