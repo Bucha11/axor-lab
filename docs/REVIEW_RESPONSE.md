@@ -107,3 +107,27 @@ Acknowledged, deferred by design: publication identity is currently the
 suggestion to split artifact identity (full bundle hash) from publication
 identity (UUID) so one bundle can carry several distinct publications is a
 data-model change, not a correctness fix, and is left for the hosted surface.
+
+## Fourth review round — methodological validity
+
+The fourth pass asked whether a published artifact actually PROVES its claimed
+conclusion — especially for live BYOK runs. Four ordered patches; suite green.
+
+| Round-4 finding | Fix | Proof |
+|---|---|---|
+| **P0** McNemar (a paired test) was applied to live-model runs whose "pairs" are nominal (each condition sampled independently, no shared seed) — a spurious paired p-value | comparison_design is first-class: matched_pairs (McNemar) is used ONLY for a deterministic agent; a live model uses a two-proportion independent-samples test, marked exploratory; a declared matched_pairs with a non-deterministic agent is rejected | `test_comparison_design.py` |
+| **P1** stats engine trusted its inputs | wilson (0≤successes≤n), mcnemar (non-negative), bootstrap (positive resamples, finite), binary_aggregate rejects a test whose paired_n exceeds n | `test_comparison_design.py::TestStatsInputValidation` |
+| **P0** a kernel behavior flag (taint_floor) changed verdicts without changing the version/config identity | Kernel.behavior_version encodes behavior-changing flags; regression reports the fingerprint — same version + different gate is a different identity | `test_replay_regression_robustness.py::TestKernelBehaviorIsPartOfIdentity` |
+| **P0** policy fields entered the config hash but were never executed (profile/trust_model/criticality_overrides); run_mode and type were ignored | resolve() rejects a policy field the reference kernel doesn't execute; run_mode selects which conditions run; type=game is rejected by the benchmark runner | `test_runtime_parity.py` |
+| **P1** visibility default mismatch (local unlisted vs hosted public); one publish could silently world-list | server + app default to unlisted; CLI `--visibility` (public must be explicit) with a NOTE | `test_visibility_and_crypto.py` |
+| **P1** a signed publish without PyNaCl 500'd (SignatureUnavailable uncaught) | caught → clean PublishRejected | `test_visibility_and_crypto.py` |
+
+Still deferred (documented, not claimed done): aggregate content-hash identity
+with scope, fully typed claim assertions (text rendered from data), a scenario
+execution plan binding the injection source tool to the executed path,
+persisted signature/author on the publication with re-verification on load,
+strict verified-vs-submitted attestation counting, a downloadable reproduction
+bundle endpoint, an agent-factory protocol for per-trial isolation, a
+schema-set digest in the bundle environment, and the full entitlement packaging
+(SSO/RBAC tiers). The load-bearing methodological blocker — never publishing a
+paired significance claim for an independently-sampled live run — is closed.

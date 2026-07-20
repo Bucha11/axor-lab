@@ -19,7 +19,7 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 | multi-scenario benchmark bundle | **beta** | trace ids carry the full trial coordinate; a 3-scenario suite survives a build→write→read→verify→replay roundtrip (`tests/test_multiscenario_bundle.py`) — the round-2 P0 that used to corrupt it is fixed |
 | AgentDojo adapter | **beta** | curated **banking** subset (3 tasks), not arbitrary-dataset import |
 | server / catalog | **beta (local)** | token-gated writes, content-hash filenames, atomic writes, **recomputes every statistical aggregate from the traces** (rejects fabricated estimates/n), and builds each DENY claim from the **recorded decision** (never a templated reason); not yet a public SaaS (no OAuth/DB/object-store) |
-| BYOK agent | **beta** | wrapped runtime is banking-slice-shaped; run identity carries the agent fingerprint; generic multi-tool loop is roadmap |
+| BYOK agent | **beta** | wrapped runtime is banking-slice-shaped; run identity carries the agent fingerprint; **live runs are analyzed as independent samples (two-proportion, exploratory) — never a paired McNemar p-value**; generic multi-tool loop is roadmap |
 | endpoint gateway | **experimental** | fail-closed governance + SSRF guard + bearer token + per-run secret + quotas + **per-run locking, atomic seq, finalize-before-read, 400/413 body limits**; a full isolation runtime is roadmap |
 | sandbox | **experimental** | real RLIMIT process limits + streaming output cap + process-group kill + isolated cwd; NOT namespace/seccomp isolation — do not run hostile code from untrusted users |
 | games / federation | **experimental** | a deterministic toy model; containment is demonstrated, not proven |
