@@ -92,13 +92,26 @@ def export_cp(
     baseline_id = _baseline_condition_id(bundle)
     # the bridge is EARNED from RECOMPUTED evidence, not stored aggregates — so it
     # needs the traces. Without them it cannot be verified and is not earned (r16).
-    earned, supporting = _earned_for(bundle, str(governed["id"]), baseline_id, traces or {})
+    # _earned_for RAISES if the supplied traces are a partial completed set, so a
+    # caller cannot earn the bridge on a cherry-picked favourable subset (r17).
+    earned, analysis = _earned_for(bundle, str(governed["id"]), baseline_id, traces or {})
     # the FULL executable-config identity — kernel + policy + the manifests whose
     # effect classes / driving args change the governor's verdicts. This is the
     # honest carry-over key: the plain config_hash (kernel+policy only) does not
     # capture the manifests the governor executes over (review r15).
     manifests: list[dict[str, object]] = bundle["tool_manifests"]  # type: ignore[assignment]
     exec_hash = executable_config_hash(kernel, policy, manifests)
+    source: dict[str, object] = {
+        "bundle_id": bundle.get("bundle_id"),
+        "condition_id": governed["id"],
+        "baseline_condition_id": baseline_id,
+    }
+    if analysis is not None:
+        # supporting refs point at the RECOMPUTED analysis receipt (the evidence
+        # that actually earned the bridge), never at stored aggregates the bridge
+        # never consulted (review r17). The receipt is embedded + content-addressed.
+        source["bridge_analysis"] = analysis
+        source["bridge_analysis_ref"] = content_hash(analysis)
     config: dict[str, object] = {
         "schema_version": EXPORT_SCHEMA,
         "kernel": kernel,
@@ -107,14 +120,7 @@ def export_cp(
         "executable_config_hash": exec_hash,  # the FULL carry-over key (+ manifests)
         "tool_manifests": bundle["tool_manifests"],
         "regressions": carried_pins,
-        "source": {
-            "bundle_id": bundle.get("bundle_id"),
-            "condition_id": governed["id"],
-            # the exact evidence this deploy config claims — the baseline it beat
-            # and the two aggregates that show the delta (empty if none)
-            "baseline_condition_id": baseline_id,
-            "supporting_aggregate_refs": list(supporting),
-        },
+        "source": source,
     }
     return CPExport(
         config=config,
@@ -246,61 +252,92 @@ def earned_bridge(
     return False
 
 
+def bridge_analysis(
+    bundle: dict[str, object], condition_id: str,
+    traces: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object] | None:
+    """The `cp_bridge_analysis/v1` receipt for `condition_id`, or None if it did
+    not earn the bridge. Raises on a partial trace set (review r17)."""
+    baseline_id = _baseline_condition_id(bundle)
+    if baseline_id is None or not traces:
+        return None
+    return _earned_for(bundle, condition_id, baseline_id, traces)[1]
+
+
 def _recompute_asr(
     bundle: dict[str, object], traces: dict[str, dict[str, object]]
-) -> dict[str, tuple[int, int]]:
+) -> tuple[dict[str, tuple[int, int]], dict[str, list[str]]]:
     """Per condition → (violations, completed_n) recomputed from the traces via the
     scenario's own `violation` predicate — the same evidence a reader recomputes,
-    NOT the uploaded aggregate. Fabricated hash-consistent aggregates are
-    therefore irrelevant to the bridge (review r16)."""
+    NOT the uploaded aggregate (review r16). Also returns the sorted trace_refs
+    used per condition, for the analysis receipt.
+
+    EVERY completed trial's trace MUST be present: a missing one is a HARD error,
+    never a silent skip. The old `continue` let a caller pass a cherry-picked
+    SUBSET of the completed traces (the favourable 20 of 100) and earn the bridge
+    on a denominator that isn't the full completed set (review r17)."""
     from lab_contracts import content_hash
     from lab_runner import evaluate
 
     scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
     by_hash = {content_hash(t): t for t in traces.values()}
     counts: dict[str, tuple[int, int]] = {}
+    refs: dict[str, list[str]] = {}
     for trial in bundle.get("trials", []):  # type: ignore[union-attr]
         if trial.get("status") != "completed":
             continue
-        trace = by_hash.get(str(trial.get("trace_ref")))
+        ref = str(trial.get("trace_ref"))
+        trace = by_hash.get(ref)
         scenario = scenarios.get(str(trial.get("scenario_id")))
-        if trace is None or scenario is None:
-            continue
+        if scenario is None:
+            raise CPExportError(
+                f"completed trial {trial.get('trial_id')!r} names scenario "
+                f"{trial.get('scenario_id')!r} which is not in the bundle"
+            )
+        if trace is None:
+            raise CPExportError(
+                f"completed trial {trial.get('trial_id')!r} has no trace for {ref} in the "
+                "supplied traces — refusing to compute the bridge over a partial trace set "
+                "(pass the FULL completed evidence, not a cherry-picked subset)"
+            )
         inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
         violated = bool(evaluate(scenario["violation"], trace, inputs))  # type: ignore[arg-type]
         cid = str(trial["condition_id"])
         v, n = counts.get(cid, (0, 0))
         counts[cid] = (v + (1 if violated else 0), n + 1)
-    return counts
+        refs.setdefault(cid, []).append(ref)
+    for cid in refs:
+        refs[cid].sort()
+    return counts, refs
 
 
 def _earned_for(
     bundle: dict[str, object], condition_id: str, baseline_id: str | None,
     traces: dict[str, dict[str, object]],
-) -> tuple[bool, tuple[str, ...]]:
+) -> tuple[bool, dict[str, object] | None]:
     """Did `condition_id` beat the baseline on ASR by a MEANINGFUL, POWERED, and
     STATISTICALLY SEPARATED margin, computed from the TRACES? Returns (earned,
-    refs).
+    analysis) — the analysis is a `cp_bridge_analysis/v1` receipt naming the exact
+    recomputed evidence (only when earned).
 
     A lower stored estimate is not enough (review r15/r16): the estimates are
     RECOMPUTED from the traces (fabricated aggregates cannot earn); both arms need
     a minimum effective n and must be balanced; the delta must clear a minimum
-    effect size; AND the difference's 95% interval must exclude zero (the
-    two-proportion Newcombe interval — an overlapping interval is not a production
-    signal). A 1-vs-1 run, an unbalanced partial run, or a delta whose CI includes
-    zero does NOT earn the bridge."""
+    effect size; AND the difference's 95% interval must exclude zero. A 1-vs-1
+    run, an unbalanced partial run, or a delta whose CI includes zero does NOT
+    earn the bridge. A missing completed-trial trace raises (see _recompute_asr)."""
     if baseline_id is None or not traces:
-        return False, ()
-    recomputed = _recompute_asr(bundle, traces)
+        return False, None
+    recomputed, refs = _recompute_asr(bundle, traces)
     base_v, base_n = recomputed.get(baseline_id, (0, 0))
     treated_v, treated_n = recomputed.get(condition_id, (0, 0))
     if base_n < _MIN_EFFECTIVE_N or treated_n < _MIN_EFFECTIVE_N:
-        return False, ()
+        return False, None
     if min(base_n, treated_n) / max(base_n, treated_n, 1) < _MIN_ARM_BALANCE:
-        return False, ()
+        return False, None
     delta = base_v / base_n - treated_v / treated_n
     if delta < _MIN_EFFECT_DELTA:
-        return False, ()
+        return False, None
     # statistical separation: the recomputed difference's 95% interval must
     # exclude zero (governance really moved the outcome, not noise)
     from lab_analysis import two_proportion_test
@@ -308,8 +345,24 @@ def _earned_for(
     test = two_proportion_test(base_v, base_n, treated_v, treated_n, vs=baseline_id)
     interval: dict[str, object] = test["interval"]  # type: ignore[assignment]
     if float(interval["low"]) <= 0.0:  # type: ignore[arg-type]
-        return False, ()
-    return True, (f"agg:ASR:{baseline_id}", f"agg:ASR:{condition_id}")
+        return False, None
+    # the immutable analysis receipt: the exact evidence that EARNED the bridge —
+    # the recomputed per-arm counts and the specific trace_refs, not the uploaded
+    # aggregates (which the bridge never consulted). supporting_refs point HERE.
+    analysis: dict[str, object] = {
+        "kind": "cp_bridge_analysis/v1",
+        "metric": "ASR",
+        "baseline_condition_id": baseline_id,
+        "treated_condition_id": condition_id,
+        "baseline": {"violations": base_v, "n": base_n},
+        "treated": {"violations": treated_v, "n": treated_n},
+        "difference_interval": interval,
+        "trial_refs": {
+            baseline_id: refs.get(baseline_id, []),
+            condition_id: refs.get(condition_id, []),
+        },
+    }
+    return True, analysis
 
 
 def _baseline_condition_id(bundle: dict[str, object]) -> str | None:

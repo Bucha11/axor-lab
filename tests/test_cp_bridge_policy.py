@@ -13,7 +13,7 @@ from tests import support
 from lab_analysis import binary_aggregate
 from lab_contracts import build_bundle, content_hash
 from lab_runner import ScriptedAgent, run_experiment_suite
-from lab_runner.cp_export import earned_bridge
+from lab_runner.cp_export import CPExportError, earned_bridge
 
 CREATED = "2026-07-20T12:00:00+00:00"
 
@@ -112,6 +112,51 @@ class TestEvidenceDerivedBridge(unittest.TestCase):
         # signal → not earned
         bundle, traces = _bundle(20, 20, 17, 20)
         self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_cp_bridge_rejects_partial_trace_dictionary(self) -> None:
+        # a POWERED, separated run — but the caller hands the bridge only the
+        # favourable subset of traces. Every completed trial must have its trace;
+        # a partial dict is a HARD error, never a silent skip (review r17).
+        bundle, traces = _bundle(24, 24, 0, 24)
+        # drop half the traces — a cherry-picked subset
+        keys = list(traces)
+        partial = {k: traces[k] for k in keys[: len(keys) // 2]}
+        with self.assertRaises(CPExportError):
+            earned_bridge(bundle, traces=partial)
+
+    def test_cp_bridge_requires_every_completed_trial_trace(self) -> None:
+        # remove ONE completed trial's trace → the bridge refuses to compute
+        bundle, traces = _bundle(24, 24, 0, 24)
+        victim = next(iter(traces))
+        del traces[victim]
+        with self.assertRaises(CPExportError):
+            earned_bridge(bundle, traces=traces)
+
+    def test_cp_export_verifies_bundle_before_bridge_analysis(self) -> None:
+        # export_cp over a partial trace set raises rather than exporting a config
+        # whose bridge was earned on incomplete evidence
+        from lab_runner.cp_export import export_cp
+
+        bundle, traces = _bundle(24, 24, 0, 24)
+        keys = list(traces)
+        partial = {k: traces[k] for k in keys[: len(keys) // 2]}
+        with self.assertRaises(CPExportError):
+            export_cp(bundle, condition_id="governed", traces=partial)
+
+    def test_cp_bridge_supporting_ref_names_recomputed_analysis(self) -> None:
+        from lab_contracts import content_hash
+        from lab_runner.cp_export import bridge_analysis
+
+        bundle, traces = _bundle(24, 24, 0, 24)
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertIsNotNone(analysis)
+        self.assertEqual(analysis["kind"], "cp_bridge_analysis/v1")
+        self.assertEqual(analysis["treated"]["n"], 24)
+        self.assertEqual(analysis["baseline"]["n"], 24)
+        # the trial_refs are the actual completed-trial trace hashes, and the
+        # receipt is content-addressable
+        self.assertTrue(analysis["trial_refs"]["governed"])
+        self.assertTrue(content_hash(analysis).startswith("sha256:"))
 
 
 if __name__ == "__main__":

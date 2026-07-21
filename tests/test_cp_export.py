@@ -266,9 +266,14 @@ class TestMultiConditionExport(unittest.TestCase):
         self.assertEqual(source["condition_id"], "allowlist")
         self.assertEqual(source["baseline_condition_id"], "baseline")
         self.assertTrue(export.earned_bridge)
-        self.assertEqual(
-            source["supporting_aggregate_refs"], ["agg:ASR:baseline", "agg:ASR:allowlist"]
-        )
+        # supporting evidence is the RECOMPUTED analysis receipt (r17), not stored
+        # aggregate refs the bridge never consulted
+        from lab_contracts import content_hash
+        analysis: dict = source["bridge_analysis"]  # type: ignore[assignment]
+        self.assertEqual(analysis["kind"], "cp_bridge_analysis/v1")
+        self.assertEqual(analysis["baseline_condition_id"], "baseline")
+        self.assertEqual(analysis["treated_condition_id"], "allowlist")
+        self.assertEqual(source["bridge_analysis_ref"], content_hash(analysis))
 
     def test_exported_condition_without_delta_does_not_claim_the_bridge(self) -> None:
         # strict is enforcing but did NOT change the outcome — the bridge must
