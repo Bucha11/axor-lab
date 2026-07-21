@@ -90,7 +90,9 @@ def export_cp(
 
     carried_pins = _validate_pins(bundle, regressions or [], traces or {})
     baseline_id = _baseline_condition_id(bundle)
-    earned, supporting = _earned_for(bundle, str(governed["id"]), baseline_id)
+    # the bridge is EARNED from RECOMPUTED evidence, not stored aggregates — so it
+    # needs the traces. Without them it cannot be verified and is not earned (r16).
+    earned, supporting = _earned_for(bundle, str(governed["id"]), baseline_id, traces or {})
     # the FULL executable-config identity — kernel + policy + the manifests whose
     # effect classes / driving args change the governor's verdicts. This is the
     # honest carry-over key: the plain config_hash (kernel+policy only) does not
@@ -219,72 +221,95 @@ def _validate_pins(
     return carried
 
 
-def earned_bridge(bundle: dict[str, object], condition_id: str | None = None) -> bool:
-    """The bridge is EARNED, not nagged: true only when an aggregate shows
-    governance changed the outcome on the researcher's own agent — an ASR that
-    dropped from the (enforcement-off) baseline to a governed condition.
+def earned_bridge(
+    bundle: dict[str, object],
+    condition_id: str | None = None,
+    traces: dict[str, dict[str, object]] | None = None,
+) -> bool:
+    """The bridge is EARNED from RECOMPUTED evidence: true only when governance
+    changed the outcome by a meaningful, powered, statistically-separated margin,
+    computed from the TRACES — not from uploaded aggregates a hand-built bundle
+    could fabricate (review r16). Without traces it cannot be verified → False.
 
-    The baseline is the condition whose enforcement is OFF, resolved by role —
-    NOT the literal id 'ungoverned', which a bundle need not use. With
-    `condition_id`, only that condition is checked (used by export_cp so the
-    bridge is about the condition actually being deployed)."""
+    The baseline is the enforcement-off condition (by role, not the literal id
+    'ungoverned'). With `condition_id`, only that condition is checked."""
     baseline_id = _baseline_condition_id(bundle)
-    if baseline_id is None:
+    if baseline_id is None or not traces:
         return False
     if condition_id is not None:
-        return _earned_for(bundle, condition_id, baseline_id)[0]
+        return _earned_for(bundle, condition_id, baseline_id, traces)[0]
     for condition in bundle["conditions"]:  # type: ignore[union-attr]
-        if condition["enforcement"] == "on" and _earned_for(bundle, str(condition["id"]), baseline_id)[0]:
+        if condition["enforcement"] == "on" and _earned_for(
+            bundle, str(condition["id"]), baseline_id, traces
+        )[0]:
             return True
     return False
 
 
-def _earned_for(
-    bundle: dict[str, object], condition_id: str, baseline_id: str | None
-) -> tuple[bool, tuple[str, ...]]:
-    """Did `condition_id` beat the baseline on ASR by a MEANINGFUL, POWERED
-    margin? Returns (earned, refs).
+def _recompute_asr(
+    bundle: dict[str, object], traces: dict[str, dict[str, object]]
+) -> dict[str, tuple[int, int]]:
+    """Per condition → (violations, completed_n) recomputed from the traces via the
+    scenario's own `violation` predicate — the same evidence a reader recomputes,
+    NOT the uploaded aggregate. Fabricated hash-consistent aggregates are
+    therefore irrelevant to the bridge (review r16)."""
+    from lab_contracts import content_hash
+    from lab_runner import evaluate
 
-    A lower stored estimate is not enough (review r15): the delta must clear a
-    minimum effect size, both arms must have a minimum effective n, the two arms
-    must not be wildly imbalanced, and each arm's aggregate n must not exceed the
-    completed trials the bundle actually recorded for that condition (a cheap
-    recomputation of the denominator from the evidence). A 1-vs-1 run, an
-    unbalanced partial run, or an aggregate claiming more trials than exist does
-    NOT earn the bridge."""
-    if baseline_id is None:
+    scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
+    by_hash = {content_hash(t): t for t in traces.values()}
+    counts: dict[str, tuple[int, int]] = {}
+    for trial in bundle.get("trials", []):  # type: ignore[union-attr]
+        if trial.get("status") != "completed":
+            continue
+        trace = by_hash.get(str(trial.get("trace_ref")))
+        scenario = scenarios.get(str(trial.get("scenario_id")))
+        if trace is None or scenario is None:
+            continue
+        inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
+        violated = bool(evaluate(scenario["violation"], trace, inputs))  # type: ignore[arg-type]
+        cid = str(trial["condition_id"])
+        v, n = counts.get(cid, (0, 0))
+        counts[cid] = (v + (1 if violated else 0), n + 1)
+    return counts
+
+
+def _earned_for(
+    bundle: dict[str, object], condition_id: str, baseline_id: str | None,
+    traces: dict[str, dict[str, object]],
+) -> tuple[bool, tuple[str, ...]]:
+    """Did `condition_id` beat the baseline on ASR by a MEANINGFUL, POWERED, and
+    STATISTICALLY SEPARATED margin, computed from the TRACES? Returns (earned,
+    refs).
+
+    A lower stored estimate is not enough (review r15/r16): the estimates are
+    RECOMPUTED from the traces (fabricated aggregates cannot earn); both arms need
+    a minimum effective n and must be balanced; the delta must clear a minimum
+    effect size; AND the difference's 95% interval must exclude zero (the
+    two-proportion Newcombe interval — an overlapping interval is not a production
+    signal). A 1-vs-1 run, an unbalanced partial run, or a delta whose CI includes
+    zero does NOT earn the bridge."""
+    if baseline_id is None or not traces:
         return False, ()
-    aggs = {
-        (str(a["metric"]), str(a["condition_id"])): a
-        for a in bundle.get("aggregates", [])  # type: ignore[union-attr]
-    }
-    treated = aggs.get(("ASR", condition_id))
-    base = aggs.get(("ASR", baseline_id))
-    if treated is None or base is None:
-        return False, ()
-    base_n, treated_n = int(base.get("n", 0)), int(treated.get("n", 0))  # type: ignore[arg-type]
-    # the aggregate n cannot exceed the completed trials the bundle recorded for
-    # that condition — a claim of 100 trials over 1 completed trial is rejected
-    completed = _completed_by_condition(bundle)
-    if base_n > completed.get(baseline_id, 0) or treated_n > completed.get(condition_id, 0):
-        return False, ()
+    recomputed = _recompute_asr(bundle, traces)
+    base_v, base_n = recomputed.get(baseline_id, (0, 0))
+    treated_v, treated_n = recomputed.get(condition_id, (0, 0))
     if base_n < _MIN_EFFECTIVE_N or treated_n < _MIN_EFFECTIVE_N:
         return False, ()
     if min(base_n, treated_n) / max(base_n, treated_n, 1) < _MIN_ARM_BALANCE:
         return False, ()
-    delta = float(base["estimate"]) - float(treated["estimate"])  # type: ignore[arg-type]
+    delta = base_v / base_n - treated_v / treated_n
     if delta < _MIN_EFFECT_DELTA:
         return False, ()
+    # statistical separation: the recomputed difference's 95% interval must
+    # exclude zero (governance really moved the outcome, not noise)
+    from lab_analysis import two_proportion_test
+
+    test = two_proportion_test(base_v, base_n, treated_v, treated_n, vs=baseline_id)
+    interval: dict[str, object] = test["interval"]  # type: ignore[assignment]
+    if float(interval["low"]) <= 0.0:  # type: ignore[arg-type]
+        return False, ()
     return True, (f"agg:ASR:{baseline_id}", f"agg:ASR:{condition_id}")
-
-
-def _completed_by_condition(bundle: dict[str, object]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for trial in bundle.get("trials", []):  # type: ignore[union-attr]
-        if trial.get("status") == "completed":
-            cid = str(trial.get("condition_id"))
-            counts[cid] = counts.get(cid, 0) + 1
-    return counts
 
 
 def _baseline_condition_id(bundle: dict[str, object]) -> str | None:

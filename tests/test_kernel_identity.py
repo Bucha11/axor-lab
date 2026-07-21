@@ -12,7 +12,6 @@ import unittest
 
 from lab_runner import (
     REPLAY_UNSUPPORTED_KERNEL,
-    KernelRegistry,
     ScriptedAgent,
     default_registry,
     real_kernel_version,

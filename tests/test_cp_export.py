@@ -23,15 +23,22 @@ CREATED = "2026-07-19T12:00:00+00:00"
 def _bundle_and_traces(governance_helps: bool = True):
     scenario = support.banking_scenario()
     conditions = support.conditions()
+    if not governance_helps:
+        # a REAL no-effect run: the governed condition allowlists the attacker, so
+        # it ALSO allows the exfil — the traces themselves show no delta, which the
+        # evidence-derived bridge recomputes (a fabricated aggregate can't earn) (r16)
+        gov = conditions[1]
+        gov["policy"] = {"profile": "strict", "trust_model": "content-ledger",
+                         "allowlist": [support.ATTACKER_IBAN]}
+        gov["config_hash"] = condition_config_hash(support.KERNEL_PINNED, gov["policy"])
     result = run_experiment_suite(
         [scenario], support.manifests(), conditions, support.kernel_registry(),
-        repeats=20, run_id="r_cp",  # >= the earned-bridge minimum effective n (r15)
+        repeats=24, run_id="r_cp",  # >= the earned-bridge minimum effective n
     )
     pairs = result.pairs("ungoverned", "governed", metric="ASR")
-    ungoverned_breaches = sum(1 for b, _ in pairs if b) if governance_helps else 0
     aggregates = [
-        binary_aggregate("ASR", "ungoverned", ungoverned_breaches, len(pairs)),
-        binary_aggregate("ASR", "governed", 0, len(pairs),
+        binary_aggregate("ASR", "ungoverned", sum(1 for b, _ in pairs if b), len(pairs)),
+        binary_aggregate("ASR", "governed", sum(1 for _, t in pairs if t), len(pairs),
                          test=mcnemar_test(pairs, vs="ungoverned")),
     ]
     bundle = build_bundle(
@@ -177,10 +184,14 @@ class TestCPExport(unittest.TestCase):
         self.assertIn("what Lab does NOT carry over", export.production_todo)
 
     def test_earned_bridge_true_when_governance_changed_the_outcome(self) -> None:
-        self.assertTrue(earned_bridge(_bundle(governance_helps=True)))
+        bundle, traces = _bundle_and_traces(governance_helps=True)
+        self.assertTrue(earned_bridge(bundle, traces=traces))
 
     def test_earned_bridge_false_when_no_delta(self) -> None:
-        self.assertFalse(earned_bridge(_bundle(governance_helps=False)))
+        # a REAL no-effect run: the governed arm allowlists the attacker, so the
+        # recomputed ASR shows no delta — a fabricated aggregate could not rescue it
+        bundle, traces = _bundle_and_traces(governance_helps=False)
+        self.assertFalse(earned_bridge(bundle, traces=traces))
 
     def test_export_refuses_a_tampered_config_hash(self) -> None:
         bundle = _bundle()
@@ -194,46 +205,63 @@ class TestCPExport(unittest.TestCase):
 KERNEL = support.KERNEL_PINNED
 
 
-def _multi_enforcing_bundle() -> dict[str, object]:
+def _multi_enforcing_bundle() -> tuple[dict[str, object], dict[str, dict[str, object]]]:
     """baseline (off) + two enforcing conditions; only `allowlist` improves ASR.
-    The baseline id is 'baseline', NOT the literal 'ungoverned'."""
+    The baseline id is 'baseline', NOT the literal 'ungoverned'.
+
+    This is a REAL run, not a synthetic bundle: the earned bridge recomputes ASR
+    from the traces (review r16), so the deltas below come from actual enforcement.
+    `strict` here allowlists the attacker (so it still permits the exfil → no
+    delta); `allowlist` here runs the real content-ledger deny (→ real delta).
+    The ids are deliberately mismatched to the policies to prove the bridge keys
+    off measured evidence and the enforcement-off ROLE, never off condition names."""
+    strict_policy = {"profile": "strict", "trust_model": "content-ledger",
+                     "allowlist": [support.ATTACKER_IBAN]}  # permits the exfil → no delta
+    allowlist_policy = {"profile": "strict", "trust_model": "content-ledger"}  # denies → delta
     conditions: list[dict[str, object]] = [
-        {"schema_version": "condition/v1", "id": "baseline", "enforcement": "off",
-         "kernel": KERNEL, "policy": {}},
-        {"schema_version": "condition/v1", "id": "strict", "enforcement": "on",
-         "kernel": KERNEL, "policy": {"profile": "strict"}},
-        {"schema_version": "condition/v1", "id": "allowlist", "enforcement": "on",
-         "kernel": KERNEL, "policy": {"profile": "strict", "allowlist": ["a@x"]}},
+        {"schema_version": "condition/v1", "id": "baseline", "label": "baseline",
+         "enforcement": "off", "kernel": KERNEL,
+         "config_hash": condition_config_hash(KERNEL, None)},
+        {"schema_version": "condition/v1", "id": "strict", "label": "strict",
+         "enforcement": "on", "kernel": KERNEL, "policy": strict_policy,
+         "config_hash": condition_config_hash(KERNEL, strict_policy)},
+        {"schema_version": "condition/v1", "id": "allowlist", "label": "allowlist",
+         "enforcement": "on", "kernel": KERNEL, "policy": allowlist_policy,
+         "config_hash": condition_config_hash(KERNEL, allowlist_policy)},
     ]
-    for condition in conditions:
-        condition["config_hash"] = condition_config_hash(KERNEL, condition["policy"])
-    # 20 completed trials per condition so the earned bridge clears the minimum
-    # effective n and the aggregate n matches recorded evidence (review r15)
-    trials = [
-        {"trial_id": f"t_{cid}_{i}", "scenario_id": "s", "condition_id": cid,
-         "seed": f"s{i:03d}", "repeat_index": i, "status": "completed", "trace_ref": f"ref_{cid}_{i}"}
-        for cid in ("baseline", "strict", "allowlist") for i in range(20)
-    ]
-    aggregates = [
-        binary_aggregate("ASR", "baseline", 16, 20),
-        binary_aggregate("ASR", "strict", 16, 20),      # no delta vs baseline
-        binary_aggregate("ASR", "allowlist", 2, 20),    # real delta vs baseline
-    ]
-    return {
-        "schema_version": "bundle/v1", "bundle_id": "b_multi",
-        "conditions": conditions, "aggregates": aggregates, "tool_manifests": [],
-        "trials": trials,
-    }
+    scenario = support.banking_scenario()
+    result = run_experiment_suite(
+        [scenario], support.manifests(), conditions, support.kernel_registry(),
+        repeats=24, run_id="r_multi",  # >= the earned-bridge minimum effective n
+    )
+
+    def _agg(cid: str) -> object:
+        pairs = result.pairs("baseline", cid, metric="ASR")
+        if cid == "baseline":
+            return binary_aggregate("ASR", "baseline", sum(1 for b, _ in pairs if b), len(pairs))
+        return binary_aggregate("ASR", cid, sum(1 for _, t in pairs if t), len(pairs),
+                                test=mcnemar_test(pairs, vs="baseline"))
+
+    bundle = build_bundle(
+        bundle_id="b_multi", created=CREATED, scenarios=[scenario], conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=result.trials,
+        aggregates=[_agg("baseline"), _agg("strict"), _agg("allowlist")],
+        traces=result.traces,
+    )
+    return bundle, result.traces
 
 
 class TestMultiConditionExport(unittest.TestCase):
     def test_export_requires_condition_when_multiple_enforcing(self) -> None:
+        bundle, _ = _multi_enforcing_bundle()
         with self.assertRaises(CPExportError) as ctx:
-            export_cp(_multi_enforcing_bundle())
+            export_cp(bundle)
         self.assertIn("multiple enforcing", str(ctx.exception))
 
     def test_explicit_condition_is_exported_with_its_supporting_refs(self) -> None:
-        export = export_cp(_multi_enforcing_bundle(), condition_id="allowlist")
+        bundle, traces = _multi_enforcing_bundle()
+        export = export_cp(bundle, condition_id="allowlist", traces=traces)
         source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
         self.assertEqual(source["condition_id"], "allowlist")
         self.assertEqual(source["baseline_condition_id"], "baseline")
@@ -245,18 +273,21 @@ class TestMultiConditionExport(unittest.TestCase):
     def test_exported_condition_without_delta_does_not_claim_the_bridge(self) -> None:
         # strict is enforcing but did NOT change the outcome — the bridge must
         # not fire just because SOME other condition did
-        export = export_cp(_multi_enforcing_bundle(), condition_id="strict")
+        bundle, traces = _multi_enforcing_bundle()
+        export = export_cp(bundle, condition_id="strict", traces=traces)
         self.assertEqual(export.config["source"]["condition_id"], "strict")  # type: ignore[index]
         self.assertFalse(export.earned_bridge)
 
     def test_unknown_condition_is_rejected(self) -> None:
+        bundle, traces = _multi_enforcing_bundle()
         with self.assertRaises(CPExportError):
-            export_cp(_multi_enforcing_bundle(), condition_id="nope")
+            export_cp(bundle, condition_id="nope", traces=traces)
 
     def test_earned_bridge_uses_enforcement_off_baseline_not_literal_id(self) -> None:
         # baseline id is 'baseline' (enforcement off); the old code hardcoded
         # 'ungoverned' and would have returned False
-        self.assertTrue(earned_bridge(_multi_enforcing_bundle(), condition_id="allowlist"))
+        bundle, traces = _multi_enforcing_bundle()
+        self.assertTrue(earned_bridge(bundle, condition_id="allowlist", traces=traces))
 
 
 if __name__ == "__main__":
