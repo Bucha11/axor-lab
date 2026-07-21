@@ -912,20 +912,40 @@ class PublicationStore:
         A DAMAGED/FORGED record under a known key is NOT silently dropped-then-
         reminted as a clean acceptance/v1 (review r18): that would erase the fact
         the on-disk attestation failed and impersonate the publish-time record.
-        Instead the invalid bytes are QUARANTINED (acceptance.invalid.json) and a
-        distinct, timestamped `reacceptance/v1` event — linking to the quarantined
-        original — is minted, persisted, and served. A previously-minted
+        Instead the invalid bytes are ARCHIVED to the append-only acceptance history
+        and a distinct, timestamped `reacceptance/v1` event — linking to the
+        archived original — is minted, persisted, and served. A previously-minted
         reacceptance/v1 on disk is itself verified and restored verbatim so the
-        re-attestation is stable across reloads."""
+        re-attestation is stable across reloads.
+
+        This method NEVER returns None for a publication being LOADED from disk: a
+        MISSING, malformed, or non-object acceptance file is itself a forensic event
+        for an already-persisted publication, so it is recorded and re-attested with
+        a `reacceptance/v1` — never left as None, which acceptance() would misread as
+        a fresh publication and mint a clean acceptance/v1 indistinguishable from the
+        publish-time record (review r19)."""
         path = directory / "acceptance.json"
         if not path.is_file():
-            return None
+            return self._reaccept_forensic(
+                directory, publication, bundle,
+                {"status": "missing", "reason": "acceptance record absent on load",
+                 "path": "acceptance.json"},
+            )
+        raw = path.read_text()
         try:
-            acc = json.loads(path.read_text())
+            acc = json.loads(raw)
         except ValueError:
-            return None
+            return self._reaccept_forensic(
+                directory, publication, bundle,
+                {"status": "malformed", "reason": "acceptance.json is not valid JSON",
+                 "raw_ref": content_hash(raw)},
+            )
         if not isinstance(acc, dict):
-            return None
+            return self._reaccept_forensic(
+                directory, publication, bundle,
+                {"status": "not_an_object", "reason": "acceptance.json is not a JSON object",
+                 "raw_ref": content_hash(acc)},
+            )
         from lab_contracts.signing import (
             SignatureInvalid,
             SignatureUnavailable,
@@ -951,6 +971,37 @@ class PublicationStore:
             return self._quarantine_and_reaccept(directory, publication, bundle, acc)
         return acc
 
+    def _history_dir(self, directory: Path) -> Path:
+        return directory / "acceptance-history"
+
+    def _archive_superseded(self, directory: Path, record: dict[str, object]) -> str:
+        """Append a superseded/forensic record to the APPEND-ONLY acceptance history,
+        keyed by its own content hash, and return that ref. Idempotent: an identical
+        record already archived is not rewritten, but no record is ever overwritten
+        or lost — every previous_ref in the reacceptance chain resolves to a stored
+        object (review r19)."""
+        ref = content_hash(record)
+        name = ref.removeprefix("sha256:")
+        target = self._history_dir(directory) / f"{name}.json"
+        if not target.exists():
+            _write_atomic(target, json.dumps(record, indent=2))
+        return ref
+
+    def acceptance_history(self, publication_id: str) -> list[dict[str, object]]:
+        """Every superseded acceptance/forensic record for a publication, sorted by
+        ref — the full chain a reader needs to resolve each reacceptance's
+        previous_ref back to actual stored bytes (review r19)."""
+        history: list[dict[str, object]] = []
+        hdir = self._history_dir(self._dir(publication_id))
+        if hdir.is_dir():
+            for pathname in sorted(hdir.glob("*.json")):
+                try:
+                    record = json.loads(pathname.read_text())
+                except ValueError:
+                    continue
+                history.append({"ref": f"sha256:{pathname.stem}", "record": record})
+        return history
+
     def _quarantine_and_reaccept(
         self,
         directory: Path,
@@ -958,12 +1009,28 @@ class PublicationStore:
         bundle: dict[str, object],
         invalid: dict[str, object],
     ) -> dict[str, object]:
-        """Move the damaged acceptance aside (preserving the FIRST damaged copy)
-        and mint+persist a linked reacceptance/v1 event (review r18)."""
-        quarantine = directory / "acceptance.invalid.json"
-        if not quarantine.exists():
-            _write_atomic(quarantine, json.dumps(invalid, indent=2))
+        """Archive the damaged acceptance to the append-only history and mint+persist
+        a linked reacceptance/v1 event (review r18/r19). Repeated corruption keeps
+        EVERY superseded record — the previous_ref chain stays resolvable."""
+        self._archive_superseded(directory, invalid)
         reacceptance = self._reaccept(publication, bundle, invalid)
+        _write_atomic(directory / "acceptance.json", json.dumps(reacceptance, indent=2))
+        return reacceptance
+
+    def _reaccept_forensic(
+        self,
+        directory: Path,
+        publication: dict[str, object],
+        bundle: dict[str, object],
+        forensic: dict[str, object],
+    ) -> dict[str, object]:
+        """A MISSING/malformed/non-object acceptance for a loaded publication: record
+        a forensic marker in the append-only history and re-attest with a
+        reacceptance/v1 linking to it — never leave it None (which would mint a clean
+        acceptance/v1 masquerading as the publish-time record, review r19)."""
+        marker = {"schema_version": "axor-lab-acceptance-forensic/v1", **forensic}
+        self._archive_superseded(directory, marker)
+        reacceptance = self._reaccept(publication, bundle, marker)
         _write_atomic(directory / "acceptance.json", json.dumps(reacceptance, indent=2))
         return reacceptance
 

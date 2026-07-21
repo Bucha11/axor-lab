@@ -125,10 +125,13 @@ class TestAcceptanceReceipt(unittest.TestCase):
         self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
         self.assertNotIn("FABRICATED_CHECK", served["semantic_report"]["verified"])
         self.assertEqual(served["semantic_report_ref"], content_hash(served["semantic_report"]))
-        # the damaged original was preserved, not erased
-        quarantine = root / pid / "acceptance.invalid.json"
-        self.assertTrue(quarantine.is_file())
-        self.assertEqual(json.loads(quarantine.read_text()), tampered)
+        # the damaged original was preserved in the append-only history, not erased,
+        # and the reacceptance links to it by content hash (review r19)
+        history = store2.acceptance_history(pid)
+        archived = [h["record"] for h in history]
+        self.assertIn(tampered, archived)
+        self.assertEqual(served["supersedes"]["previous_ref"], content_hash(tampered))
+        self.assertIn(served["supersedes"]["previous_ref"], [h["ref"] for h in history])
 
     def test_reacceptance_is_a_distinct_timestamped_event(self) -> None:
         # the re-attestation is a NEW, timestamped event — not the publish-time
@@ -200,6 +203,80 @@ class TestAcceptanceReceipt(unittest.TestCase):
         ).get(pid).acceptance
         self.assertEqual(first, second)
         self.assertEqual(second["reaccepted_at"], "2026-07-21T12:00:00Z")
+
+    def test_missing_acceptance_file_does_not_mint_clean_acceptance_v1(self) -> None:
+        # DELETING acceptance.json for a loaded publication must NOT lazily mint a
+        # clean acceptance/v1 indistinguishable from the publish-time record — it is
+        # a forensic event, re-attested as a reacceptance/v1 (review r19)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(root=root, server_id="axor-lab-server-A")
+        pid = str(store.publish(bundle, traces, question="q").publication["publication_id"])
+        (root / pid / "acceptance.json").unlink()
+
+        store2 = PublicationStore(root=root, server_id="axor-lab-server-A",
+                                  clock=lambda: "2026-07-21T12:00:00Z")
+        served = store2.get(pid).acceptance
+        self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
+        # the forensic marker for the missing file is archived and linked
+        history = store2.acceptance_history(pid)
+        statuses = [h["record"].get("status") for h in history]
+        self.assertIn("missing", statuses)
+        self.assertIn(served["supersedes"]["previous_ref"], [h["ref"] for h in history])
+
+    def test_malformed_acceptance_creates_explicit_reacceptance(self) -> None:
+        # acceptance.json replaced with invalid JSON (or a non-object) is re-attested
+        # explicitly, never minted clean (review r19)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(root=root, server_id="axor-lab-server-A")
+        pid = str(store.publish(bundle, traces, question="q").publication["publication_id"])
+        (root / pid / "acceptance.json").write_text("{not json")
+
+        store2 = PublicationStore(root=root, server_id="axor-lab-server-A")
+        served = store2.get(pid).acceptance
+        self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
+        statuses = [h["record"].get("status") for h in store2.acceptance_history(pid)]
+        self.assertIn("malformed", statuses)
+
+    def test_repeated_reacceptance_preserves_every_superseded_record(self) -> None:
+        # corrupt the original → reaccept A; corrupt A → reaccept B. BOTH the
+        # original and the corrupted A survive in the append-only history, and B's
+        # previous_ref resolves to the corrupted A (review r19)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(root=root, server_id="axor-lab-server-A")
+        pid = str(store.publish(bundle, traces, question="q").publication["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+
+        original = json.loads(acc_file.read_text())
+        original["semantic_report"]["verified"].append("FABRICATED_ONE")
+        acc_file.write_text(json.dumps(original))
+        # first reload: reaccept A, archiving the corrupted original
+        PublicationStore(root=root, server_id="axor-lab-server-A",
+                         clock=lambda: "2026-01-01T00:00:00Z").get(pid)
+        reaccept_a = json.loads(acc_file.read_text())
+        # corrupt reaccept A too
+        reaccept_a["semantic_report"]["verified"].append("FABRICATED_TWO")
+        acc_file.write_text(json.dumps(reaccept_a))
+        # second reload: reaccept B, archiving the corrupted A
+        store_b = PublicationStore(root=root, server_id="axor-lab-server-A",
+                                   clock=lambda: "2026-02-02T00:00:00Z")
+        reaccept_b = store_b.get(pid).acceptance
+        history = store_b.acceptance_history(pid)
+        archived = [h["record"] for h in history]
+        # every superseded record survived — original AND corrupted A
+        self.assertIn(original, archived)
+        self.assertIn(reaccept_a, archived)
+        # B links to the corrupted A, which resolves in history
+        self.assertEqual(reaccept_b["supersedes"]["previous_ref"], content_hash(reaccept_a))
+        self.assertIn(content_hash(reaccept_a), [h["ref"] for h in history])
 
     def test_missing_historical_key_does_not_reissue_acceptance_silently(self) -> None:
         # a SIGNED acceptance whose signing key is not in the keyring (rotated out
@@ -345,9 +422,14 @@ class TestSignedAcceptance(unittest.TestCase):
         self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
         self.assertEqual(served["algorithm"], "ed25519")
         self.assertNotIn("FABRICATED_CHECK", served["semantic_report"]["verified"])
-        # it links to the forged original, and the damaged bytes are preserved
+        # it links to the forged original, and the damaged bytes are preserved in
+        # the append-only history (review r19)
         self.assertEqual(served["supersedes"]["previous_ref"], content_hash(forged))
-        self.assertEqual(json.loads((root / pid / "acceptance.invalid.json").read_text()), forged)
+        store2 = PublicationStore(
+            root=root, server_id="lab.example.com",
+            server_key_id="key-A", server_signing_key=priv, known_server_keys={"key-A": pub},
+        )
+        self.assertIn(forged, [h["record"] for h in store2.acceptance_history(pid)])
         # and the signed reacceptance verifies against the current key
         from lab_contracts.signing import verify_reacceptance
 

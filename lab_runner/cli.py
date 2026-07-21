@@ -429,9 +429,31 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         if is_reacceptance:
             supersedes = acceptance.get("supersedes")
             prev_ref = supersedes.get("previous_ref") if isinstance(supersedes, dict) else "?"
+            # the previous_ref must resolve to an actual archived record in the
+            # package's acceptance_history (review r19): otherwise the reacceptance
+            # only proves the server signed SOME string, not that it supersedes a
+            # real damaged receipt. A package that omits the history it names fails.
+            from lab_contracts import content_hash
+
+            history = data.get("acceptance_history")
+            history = history if isinstance(history, list) else []
+            resolved = any(
+                isinstance(entry, dict)
+                and content_hash(entry.get("record")) == prev_ref
+                and str(entry.get("ref")) == prev_ref
+                for entry in history
+            )
+            if not resolved:
+                print(
+                    f"acceptance: INVALID — reacceptance previous_ref {prev_ref} does not "
+                    "resolve to any record in acceptance_history (superseded receipt missing)",
+                    file=sys.stderr,
+                )
+                return EXIT_FAILURE
             print(
-                f"acceptance: RE-ATTESTATION (reacceptance/v1) — the original acceptance "
-                f"was superseded (previous_ref={prev_ref}) at {acceptance.get('reaccepted_at')}",
+                f"acceptance: RE-ATTESTATION (reacceptance/v1) — supersedes a superseded "
+                f"receipt resolved in history (previous_ref={prev_ref}) at "
+                f"{acceptance.get('reaccepted_at')}",
             )
         if str(acceptance.get("algorithm")) == "ed25519":
             print("acceptance: signature VERIFIED")
