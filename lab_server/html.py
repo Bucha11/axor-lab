@@ -107,8 +107,16 @@ def render_publication(stored: StoredPublication) -> str:
 
     body.append("<h2>Methodology</h2>")
     environment: dict[str, object] = stored.bundle["environment"]  # type: ignore[assignment]
+    # a mixed-kernel bundle omits the singular `kernel_version` and carries a
+    # `kernel_versions` LIST instead (contract allows both). Reading the singular
+    # key unconditionally KeyError'd → 400 on a valid publication (review r17).
+    if "kernel_version" in environment:
+        kernel_label = esc(str(environment["kernel_version"]))
+    else:
+        versions = environment.get("kernel_versions", [])  # type: ignore[union-attr]
+        kernel_label = esc(", ".join(str(v) for v in versions)) or "(mixed / unspecified)"
     body.append(
-        f"<p>Kernel <code>{esc(environment['kernel_version'])}</code>; "
+        f"<p>Kernel <code>{kernel_label}</code>; "
         f"model <code>{esc(environment['model']['id'])}</code>.</p>"  # type: ignore[index]
     )
     # show what ACTUALLY differs between conditions — the contract supports

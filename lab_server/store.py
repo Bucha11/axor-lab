@@ -67,14 +67,33 @@ def _semantic_errors(
     return errors
 
 
-def _write_atomic(path: Path, text: str) -> None:
+def _write_atomic(path: Path, text: str, *, durable: bool = False) -> None:
     """Write via a temp file + rename so a crash never leaves partial JSON
     (review §7.2). The temp file lives in the same directory for an atomic
-    same-filesystem rename."""
+    same-filesystem rename.
+
+    With ``durable=True`` the temp file's CONTENTS are flushed and fsync'd BEFORE
+    the rename, and the parent directory is fsync'd after (review r17). A plain
+    directory fsync only makes the rename durable — not the bytes — so a power
+    loss could leave a present-but-empty/partial file that survives the crash. A
+    tombstone whose bytes are lost is not a durable tombstone."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
+    data = text.encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        os.write(fd, data)
+        if durable:
+            os.fsync(fd)  # the CONTENTS reach disk before we rename over the target
+    finally:
+        os.close(fd)
     os.replace(tmp, path)
+    if durable:
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)  # the rename (the new name) reaches disk too
+        finally:
+            os.close(dir_fd)
 
 
 @dataclass
@@ -408,18 +427,16 @@ class PublicationStore:
 
     def _write_lineage_tombstone(self, lineage: str) -> None:
         """Persist a lineage tombstone to the standalone durable registry (a file
-        named by the lineage hash), then fsync the directory (review r16)."""
+        named by the lineage hash). ``durable=True`` fsyncs the file CONTENTS
+        before the rename and the directory after, so the tombstone's bytes — not
+        just its name — survive a power loss (review r16/r17)."""
         self._lineage_dir.mkdir(parents=True, exist_ok=True)
         name = lineage.removeprefix("sha256:") + ".json"
-        _write_atomic(self._lineage_dir / name, json.dumps({"evidence_lineage_ref": lineage}))
-        try:
-            fd = os.open(self._lineage_dir, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except OSError:
-            pass
+        _write_atomic(
+            self._lineage_dir / name,
+            json.dumps({"evidence_lineage_ref": lineage}),
+            durable=True,
+        )
 
     def add_attestation(self, publication_id: str, attestation: dict[str, object]) -> StoredPublication:
         errors = validate_artifact(attestation, "attestation")
@@ -479,13 +496,16 @@ class PublicationStore:
         if stored.acceptance is not None:
             return stored.acceptance
         pub = stored.publication
+        # the report lists only the LOAD-BEARING checks that actually ran (r17):
+        # a bundle with no aggregates was never statistics-recomputed, so claiming
+        # "statistics_recomputed" would attest a check that did not happen
+        has_aggregates = bool(stored.bundle.get("aggregates"))
+        verified = ["bundle_schema", "trace_schema", "content_hashes", "replay_bit_identical"]
+        verified.append("statistics_recomputed" if has_aggregates else "statistics_not_applicable")
         report = {
             "replay": "bit_identical",
             "statistics": str(pub.get("statistics_integrity") or "none"),
-            "verified": [
-                "bundle_schema", "trace_schema", "content_hashes",
-                "replay_bit_identical", "statistics_recomputed",
-            ],
+            "verified": verified,
         }
         acc: dict[str, object] = {
             "schema_version": "axor-lab-acceptance/v1",
