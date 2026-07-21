@@ -771,6 +771,12 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     out.mkdir(parents=True, exist_ok=True)
     (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
     (out / "production-todo.md").write_text(export.production_todo)
+    # make the export SELF-CONTAINED (review r19): write the full source bundle +
+    # ALL its traces (scenarios, predicates, inputs, trials, provenance all travel)
+    # so `axor-lab verify-cp-export` can recompute the graph, the bridge, and the
+    # runtime provenance from the directory ALONE — bridge-traces/ carries only the
+    # bridge's own traces, which is not enough to re-derive the whole handoff.
+    write_bundle_dir(out / "source-bundle", bundle, traces, overwrite=True)
     # export the FROZEN pinned trace BODIES alongside the config so the
     # regressions are actually portable — cp-deploy.json carries each pin's
     # content hash, but a hash is not the bytes to replay on another machine
@@ -793,6 +799,11 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     # violation predicate over (review r18)
     analysis: dict[str, object] | None = source.get("bridge_analysis")  # type: ignore[assignment]
     if analysis is not None:
+        # the analysis receipt as its own file, content-addressed by the ref the
+        # deploy config carries, so a reader can check it independently (review r19)
+        (out / "bridge-analysis.json").write_text(
+            json.dumps(analysis, indent=2, ensure_ascii=False)
+        )
         by_ref = {content_hash(t): t for t in traces.values()}
         bt_dir = out / "bridge-traces"
         bt_dir.mkdir(exist_ok=True)
@@ -825,6 +836,54 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     else:
         print("  note: no aggregate shows governance changed an outcome yet "
               "(the bridge surfaces once one does).")
+    return EXIT_OK
+
+
+def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
+    """Recompute a CP export FROM SCRATCH out of its own directory and confirm it
+    equals the shipped cp-deploy.json (review r19).
+
+    A reader must not have to trust the exporter: the self-contained directory
+    carries the full source bundle + every trace, so this re-runs the ENTIRE
+    handoff — graph verification, the design-aware bridge, the recorded runtime
+    provenance — and checks the recomputed config is byte-identical to the one on
+    disk. Any drift (a doctored deploy config, a swapped trace, a tampered
+    analysis) makes the recomputation differ and fails."""
+    from .cp_export import CPExportError, export_cp
+
+    directory = Path(args.dir)
+    deploy_path = directory / "cp-deploy.json"
+    if not deploy_path.is_file():
+        raise RunnerError(f"{directory} has no cp-deploy.json — not a CP export directory")
+    shipped: dict[str, object] = json.loads(deploy_path.read_text())
+    source_dir = directory / "source-bundle"
+    if not (source_dir / "bundle.json").is_file():
+        raise RunnerError(
+            f"{directory} has no source-bundle/ — this export was not written self-contained; "
+            "re-export with a current axor-lab so it carries its own evidence"
+        )
+    # read + schema-validate + hash-verify the embedded source bundle and traces
+    bundle, traces = read_bundle_dir(source_dir)
+    src: dict[str, object] = shipped.get("source", {})  # type: ignore[assignment]
+    condition_id = str(src.get("condition_id")) if src.get("condition_id") else None
+    regressions: list[dict[str, object]] = list(shipped.get("regressions", []))  # type: ignore[arg-type]
+    try:
+        recomputed = export_cp(bundle, regressions, condition_id=condition_id, traces=traces)
+    except CPExportError as exc:
+        print(f"cp-export: INVALID — recomputation failed: {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    if recomputed.config != shipped:
+        print(
+            "cp-export: INVALID — the deploy config recomputed from the embedded evidence "
+            "does not match cp-deploy.json (a doctored config, swapped trace, or tampered "
+            "analysis would cause this)",
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
+    verified = shipped.get("verified") is True
+    earned = bool(recomputed.earned_bridge)
+    print(f"cp-export: RECOMPUTED OK from {source_dir} ({len(traces)} traces)")
+    print(f"  config recomputes byte-identical; verified={verified}; earned_bridge={earned}")
     return EXIT_OK
 
 
@@ -1394,6 +1453,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="which enforcing condition to deploy (required when several enforce)",
     )
     p_export.set_defaults(func=_cmd_export_cp)
+
+    p_verify_cp = sub.add_parser(
+        "verify-cp-export",
+        help="recompute a CP export from its own directory and confirm it matches cp-deploy.json",
+    )
+    p_verify_cp.add_argument("dir", help="a CP export directory produced by export-cp")
+    p_verify_cp.set_defaults(func=_cmd_verify_cp_export)
 
     p_incident = sub.add_parser(
         "import-incident", help="build a trace-replay bundle from a production incident trace"

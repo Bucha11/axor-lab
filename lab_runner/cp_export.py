@@ -88,17 +88,29 @@ def export_cp(
     discipline (review r18): it re-runs the full bundle graph verification
     (schema + Trial<->Trace binding + trace-metadata) before anything, so a
     schema-valid, hash-resolving, but graph-invalid bundle (a trial citing a trace
-    whose own coordinates disagree) is refused rather than silently exported."""
-    if traces is not None:
-        for problem_source, obj in (("bundle", bundle), *((f"trace {t.get('trace_id')}", t)
-                                                          for t in traces.values())):
-            errs = validate_artifact(obj, "bundle" if problem_source == "bundle" else "trace")
-            if errs:
-                raise CPExportError(f"{problem_source} failed schema validation: {errs[:5]}")
-        try:
-            verify_bundle(bundle, traces)
-        except BundleIntegrityError as exc:
-            raise CPExportError(f"bundle graph is not verifiable: {exc}") from exc
+    whose own coordinates disagree) is refused rather than silently exported.
+
+    The COMPLETE traces are MANDATORY (review r19): they are the evidence the graph
+    verification, the earned bridge, and the recorded runtime provenance all rest
+    on. Calling this with no traces used to SKIP every one of those checks — a
+    silent optional argument that turned a verified evidence handoff into an
+    unverified config dump. For the "just make a production-config template"
+    use case, call export_cp_template, which is honestly named and never claims a
+    bridge or verified provenance."""
+    if traces is None:
+        raise CPExportError(
+            "export_cp is an evidence-backed handoff and REQUIRES the complete traces; "
+            "for an unverified production-config template use export_cp_template"
+        )
+    for problem_source, obj in (("bundle", bundle), *((f"trace {t.get('trace_id')}", t)
+                                                      for t in traces.values())):
+        errs = validate_artifact(obj, "bundle" if problem_source == "bundle" else "trace")
+        if errs:
+            raise CPExportError(f"{problem_source} failed schema validation: {errs[:5]}")
+    try:
+        verify_bundle(bundle, traces)
+    except BundleIntegrityError as exc:
+        raise CPExportError(f"bundle graph is not verifiable: {exc}") from exc
     governed = _select_condition(bundle, condition_id)
     policy: dict[str, object] = governed.get("policy", {})  # type: ignore[assignment]
     kernel = str(governed["kernel"])
@@ -154,9 +166,7 @@ def export_cp(
         sid: runtime_config_hash(kernel, policy, manifests, scen_by_id[sid].get("inputs", {}))
         for sid in executed if sid in scen_by_id
     }
-    _verify_recorded_runtime_hashes(
-        bundle, governed_id, runtime_hashes, require=traces is not None
-    )
+    _verify_recorded_runtime_hashes(bundle, governed_id, runtime_hashes, require=True)
     source: dict[str, object] = {
         "bundle_id": bundle.get("bundle_id"),
         "condition_id": governed["id"],
@@ -170,6 +180,9 @@ def export_cp(
         source["bridge_analysis_ref"] = content_hash(analysis)
     config: dict[str, object] = {
         "schema_version": EXPORT_SCHEMA,
+        # this config was derived from the COMPLETE evidence: graph-verified,
+        # bridge recomputed from traces, runtime provenance proven (review r19)
+        "verified": True,
         "kernel": kernel,
         "policy": policy,
         "config_hash": recorded,  # the recorded kernel+policy fingerprint
@@ -187,6 +200,55 @@ def export_cp(
         production_todo=_render_todo(),
         earned_bridge=earned,
     )
+
+
+def export_cp_template(
+    bundle: dict[str, object],
+    condition_id: str | None = None,
+) -> CPExport:
+    """An UNVERIFIED production-config TEMPLATE (review r19): the validated policy +
+    manifests + recorded config_hash carry over, WITHOUT the evidence. No traces
+    means no graph verification, no earned bridge, and no proven runtime
+    provenance — so `verified` is False, `earned_bridge` is always False, and no
+    regression pins are carried (pins need traces to validate). Honestly named and
+    separate from export_cp so a config dump is never mistaken for a verified
+    evidence handoff."""
+    governed = _select_condition(bundle, condition_id)
+    policy: dict[str, object] = governed.get("policy", {})  # type: ignore[assignment]
+    kernel = str(governed["kernel"])
+    recorded_raw = governed.get("config_hash")
+    if recorded_raw is None:
+        raise CPExportError(
+            f"condition {governed['id']!r} has no recorded config_hash; refusing to "
+            "synthesize the carry-over key and present it as the measured config"
+        )
+    recomputed = condition_config_hash(kernel, policy)
+    recorded = str(recorded_raw)
+    if recorded != recomputed:
+        raise CPExportError(
+            f"condition config_hash {recorded} does not match its policy+kernel "
+            f"({recomputed}); refusing to export a config the researcher did not measure"
+        )
+    manifests: list[dict[str, object]] = bundle["tool_manifests"]  # type: ignore[assignment]
+    config: dict[str, object] = {
+        "schema_version": EXPORT_SCHEMA,
+        # NOT derived from evidence — a template only. A reader must not treat this
+        # as a proven handoff (review r19).
+        "verified": False,
+        "kernel": kernel,
+        "policy": policy,
+        "config_hash": recorded,
+        "parametric_config_hash": parametric_policy_hash(kernel, policy, manifests),
+        "runtime_config_hashes": {},
+        "tool_manifests": bundle["tool_manifests"],
+        "regressions": [],
+        "source": {
+            "bundle_id": bundle.get("bundle_id"),
+            "condition_id": governed["id"],
+            "baseline_condition_id": _baseline_condition_id(bundle),
+        },
+    }
+    return CPExport(config=config, production_todo=_render_todo(), earned_bridge=False)
 
 
 def _verify_recorded_runtime_hashes(

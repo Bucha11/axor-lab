@@ -326,6 +326,34 @@ class TestBridgeExportPortability(unittest.TestCase):
                 self.assertTrue(body.is_file())
                 self.assertEqual(content_hash(json.loads(body.read_text())), ref)
 
+    def test_verify_cp_export_recomputes_from_scratch(self) -> None:
+        # the export directory is SELF-CONTAINED: verify-cp-export recomputes the
+        # whole handoff (graph + bridge + provenance) from source-bundle/ and
+        # confirms it equals cp-deploy.json (review r19)
+        import tempfile
+        from pathlib import Path
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out)]), 0)
+            # the directory carries its own source bundle + all traces
+            self.assertTrue((out / "source-bundle" / "bundle.json").is_file())
+            # recompute from scratch → matches
+            self.assertEqual(main(["verify-cp-export", str(out)]), 0)
+            # a DOCTORED deploy config no longer recomputes → fails
+            deploy = out / "cp-deploy.json"
+            cfg = json.loads(deploy.read_text())
+            cfg["config_hash"] = "sha256:" + "0" * 64
+            deploy.write_text(json.dumps(cfg))
+            self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+
 
 class TestExportVerifiesGraph(unittest.TestCase):
     def test_export_cp_calls_verify_bundle(self) -> None:

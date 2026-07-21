@@ -17,7 +17,13 @@ from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle, condition_config_hash, content_hash
 from lab_runner import run_experiment_suite
-from lab_runner.cp_export import PRODUCTION_TODO, CPExportError, earned_bridge, export_cp
+from lab_runner.cp_export import (
+    PRODUCTION_TODO,
+    CPExportError,
+    earned_bridge,
+    export_cp,
+    export_cp_template,
+)
 
 CREATED = "2026-07-19T12:00:00+00:00"
 
@@ -69,7 +75,7 @@ class TestCPExport(unittest.TestCase):
     def test_config_hash_is_the_recorded_fingerprint_byte_identical(self) -> None:
         bundle = _bundle()
         governed = next(c for c in bundle["conditions"] if c["enforcement"] == "on")  # type: ignore[union-attr]
-        export = export_cp(bundle)
+        export = export_cp_template(bundle)
         self.assertEqual(export.config["config_hash"], governed["config_hash"])
         # and it is provably recomputable from the exported policy+kernel
         self.assertEqual(
@@ -79,7 +85,7 @@ class TestCPExport(unittest.TestCase):
 
     def test_policy_and_manifests_carry_over(self) -> None:
         bundle = _bundle()
-        export = export_cp(bundle)
+        export = export_cp_template(bundle)
         self.assertEqual(export.config["policy"]["profile"], "strict")  # type: ignore[index]
         exported_ids = {m["id"] for m in export.config["tool_manifests"]}  # type: ignore[union-attr]
         self.assertEqual(exported_ids, {"read_txns", "send_money"})
@@ -89,7 +95,7 @@ class TestCPExport(unittest.TestCase):
         # concrete config_hash/runtime_config_hashes describe the Lab run, not what
         # production hashes, so calling config_hash the carry-over key was a
         # naming lie (review r18)
-        export = export_cp(_bundle())
+        export = export_cp_template(_bundle())
         todo = export.production_todo
         self.assertIn("parametric_config_hash", todo)
         self.assertIn("carry-over key", todo)
@@ -173,12 +179,15 @@ class TestCPExport(unittest.TestCase):
             self.assertTrue(frozen.is_file())  # the bytes are there, not just a hash
             self.assertEqual(json.loads(frozen.read_text())["trace_id"], str(trace["trace_id"]))
 
-    def test_pins_without_traces_are_refused(self) -> None:
+    def test_export_without_traces_is_refused(self) -> None:
+        # export_cp is the evidence-backed handoff — no traces means no graph
+        # verification, no bridge, no proven provenance, so it is refused; a caller
+        # who only wants a config template must call export_cp_template (review r19)
         bundle = _bundle()
         pins = [{"trace_id": "t_x", "expected_verdict": "DENY"}]
         with self.assertRaises(CPExportError) as ctx:
             export_cp(bundle, regressions=pins)  # no traces=
-        self.assertIn("no bundle traces", str(ctx.exception))
+        self.assertIn("REQUIRES the complete traces", str(ctx.exception))
 
     def test_export_requires_a_recorded_config_hash(self) -> None:
         bundle = _bundle()
@@ -186,11 +195,11 @@ class TestCPExport(unittest.TestCase):
             if condition["enforcement"] == "on":
                 del condition["config_hash"]
         with self.assertRaises(CPExportError) as ctx:
-            export_cp(bundle)
+            export_cp_template(bundle)
         self.assertIn("no recorded config_hash", str(ctx.exception))
 
     def test_production_todo_lists_the_four_not_reused_categories(self) -> None:
-        export = export_cp(_bundle())
+        export = export_cp_template(_bundle())
         keys = {key for key, _ in PRODUCTION_TODO}
         self.assertEqual(keys, {"tool_bindings", "credentials", "topology", "operations"})
         for key in keys:
@@ -213,7 +222,7 @@ class TestCPExport(unittest.TestCase):
             if condition["enforcement"] == "on":
                 condition["config_hash"] = "sha256:deadbeef"
         with self.assertRaises(CPExportError):
-            export_cp(bundle)
+            export_cp_template(bundle)
 
 
 KERNEL = support.KERNEL_PINNED
@@ -270,7 +279,7 @@ class TestMultiConditionExport(unittest.TestCase):
     def test_export_requires_condition_when_multiple_enforcing(self) -> None:
         bundle, _ = _multi_enforcing_bundle()
         with self.assertRaises(CPExportError) as ctx:
-            export_cp(bundle)
+            export_cp_template(bundle)
         self.assertIn("multiple enforcing", str(ctx.exception))
 
     def test_explicit_condition_is_exported_with_its_supporting_refs(self) -> None:
