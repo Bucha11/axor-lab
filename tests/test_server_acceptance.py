@@ -311,10 +311,12 @@ class TestSignedAcceptance(unittest.TestCase):
         self.assertEqual(acc["key_id"], "key-A")
         verify_bundle_signature(acc, str(acc["signature"]), pub_a)
 
-    def test_forged_signed_acceptance_with_recomputed_report_hash_is_rejected_on_load(self) -> None:
+    def test_forged_signed_acceptance_under_known_key_is_quarantined_and_reaccepted(self) -> None:
         # tamper the semantic report AND recompute its ref (binding-consistent) so
         # only the SIGNATURE is now wrong. With the signing key in the keyring the
-        # forgery is detected on load and dropped — it is never served
+        # forgery is detected on load — and rather than silently dropped-then-
+        # reminted as a clean acceptance/v1, it is QUARANTINED and re-attested with
+        # a distinct, signed reacceptance/v1 linking to the forged original (r18).
         from nacl.signing import SigningKey
 
         sk = SigningKey.generate()
@@ -334,18 +336,23 @@ class TestSignedAcceptance(unittest.TestCase):
         forged["semantic_report_ref"] = content_hash(forged["semantic_report"])  # binding-consistent
         acc_file.write_text(json.dumps(forged))  # signature no longer matches the body
 
-        reloaded = PublicationStore(
-            root=root, server_id="lab.example.com",
-            server_key_id="key-A", server_signing_key=priv,
-            known_server_keys={"key-A": pub},
-        ).get(pid)
-        self.assertIsNone(reloaded.acceptance)  # forgery detected under a known key → dropped
         served = PublicationStore(
             root=root, server_id="lab.example.com",
             server_key_id="key-A", server_signing_key=priv,
             known_server_keys={"key-A": pub},
-        ).acceptance(reloaded)
+        ).get(pid).acceptance
+        # a distinct, SIGNED re-attestation — not a clean acceptance/v1 masquerade
+        self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
+        self.assertEqual(served["algorithm"], "ed25519")
         self.assertNotIn("FABRICATED_CHECK", served["semantic_report"]["verified"])
+        # it links to the forged original, and the damaged bytes are preserved
+        self.assertEqual(served["supersedes"]["previous_ref"], content_hash(forged))
+        self.assertEqual(json.loads((root / pid / "acceptance.invalid.json").read_text()), forged)
+        # and the signed reacceptance verifies against the current key
+        from lab_contracts.signing import verify_reacceptance
+
+        publication = json.loads((root / pid / "publication.json").read_text())
+        verify_reacceptance(served, publication, server_pubkey_hex=pub)
 
 
 if __name__ == "__main__":
