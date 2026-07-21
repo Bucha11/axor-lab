@@ -13,11 +13,47 @@ import unittest
 
 from tests import support
 from lab_analysis import binary_aggregate
-from lab_contracts import build_bundle, content_hash
+from lab_contracts import (
+    CONFIG_COMPILER_VERSION,
+    build_bundle,
+    content_hash,
+    runtime_config_hash,
+    verify_bundle,
+)
 from lab_runner import ScriptedAgent, run_experiment_suite
 from lab_runner.cp_export import CPExportError, earned_bridge
 
 CREATED = "2026-07-20T12:00:00+00:00"
+
+_CONDS = {c["id"]: c for c in support.conditions()}
+_MANIFESTS = list(support.manifests().values())
+
+
+def _runtime_fields(cid: str, inputs: dict) -> dict[str, object]:
+    """The runtime provenance a real run records on a completed trial — computed the
+    same way the runner does, so a hand-built fixture is SCHEMA-valid (completed
+    trials must carry it, review r20) and config_provenance reads it as
+    recorded_at_execution rather than reconstructed_legacy."""
+    cond = _CONDS[cid]
+    return {
+        "runtime_config_hash": runtime_config_hash(
+            str(cond["kernel"]), cond.get("policy"), _MANIFESTS, inputs,
+        ),
+        "config_compiler_version": CONFIG_COMPILER_VERSION,
+        "resolved_kernel_fingerprint": str(cond["kernel"]),
+    }
+
+
+def _bind_trace(src: dict, cid: str, scn: str, seed: str, repeat_index: int) -> dict:
+    """A copy of a real trace whose identity AND embedded `trial` block are rebound
+    to the fabricated coordinates, so the bundle passes the Trial<->Trace graph
+    verifier (review r20 finding #10) — not just earned_bridge in isolation. The
+    producer.kernel_version and inputs_digest already match (both conditions share
+    the reference kernel; the renamed scenarios keep the same inputs)."""
+    trace_id = f"t_{cid}_{scn}_{seed}_{repeat_index}"
+    trial = {**src.get("trial", {}), "scenario_id": scn, "condition_id": cid,
+             "seed": seed, "repeat_index": repeat_index}
+    return {**src, "trace_id": trace_id, "trial": trial}
 
 
 def _trace_pools():
@@ -179,16 +215,19 @@ def _two_scenario_bundle(arm_scenarios, design=None):
     traces: dict[str, dict[str, object]] = {}
     trials: list[dict[str, object]] = []
     order = 0
+    inputs = dict(base.get("inputs", {}))
     for cid, scns in arm_scenarios.items():
         pool = _VIOLATING if cid == "ungoverned" else _CLEAN
         for i, scn in enumerate(scns):
-            trace = {**pool[i % 30], "trace_id": f"t_{cid}_{i}"}
+            seed = f"s{i:03d}"
+            trace = _bind_trace(pool[i % 30], cid, scn, seed, i)
             ref = content_hash(trace)
             traces[str(trace["trace_id"])] = trace
             trials.append({
                 "trial_id": f"tr_{cid}_{i}", "scenario_id": scn,
-                "condition_id": cid, "seed": f"s{i:03d}", "repeat_index": i,
+                "condition_id": cid, "seed": seed, "repeat_index": i,
                 "status": "completed", "trace_ref": ref, "execution_order": order,
+                **_runtime_fields(cid, inputs),
             })
             order += 1
     agg_design = {"comparison_design": design} if design else {}
@@ -219,23 +258,26 @@ def _controlled_bundle(pairs, scenarios_of=None, design=None):
     traces: dict[str, dict[str, object]] = {}
     trials: list[dict[str, object]] = []
     order = 0
+    inputs = dict(base.get("inputs", {}))
     for i, (base_out, treated_out) in enumerate(pairs):
         scn = (scenarios_of or {}).get(i, "scn")
         for cid, outcome in (("ungoverned", base_out), ("governed", treated_out)):
+            seed = f"s{i:03d}"
             trial = {"trial_id": f"tr_{cid}_{i}", "scenario_id": scn,
-                     "condition_id": cid, "seed": f"s{i:03d}", "repeat_index": i,
+                     "condition_id": cid, "seed": seed, "repeat_index": i,
                      "execution_order": order}
             order += 1
             if outcome is None:
                 trial["status"] = "failed"
                 trial["failure_reason"] = "seeded failure"
             else:
-                trace = {**(_VIOLATING if outcome else _CLEAN)[i % 30],
-                         "trace_id": f"t_{cid}_{i}"}
+                trace = _bind_trace((_VIOLATING if outcome else _CLEAN)[i % 30],
+                                    cid, scn, seed, i)
                 ref = content_hash(trace)
                 traces[str(trace["trace_id"])] = trace
                 trial["status"] = "completed"
                 trial["trace_ref"] = ref
+                trial.update(_runtime_fields(cid, inputs))
             trials.append(trial)
     agg_design = {"comparison_design": design} if design else {}
     aggregates = [
@@ -326,16 +368,20 @@ def _weighting_confound_bundle():
     trials: list[dict[str, object]] = []
     order = 0
 
+    inputs = dict(base.get("inputs", {}))
+
     def _add(cid, scn, violating, n):
         nonlocal order
         pool = _VIOLATING if violating else _CLEAN
         for k in range(n):
-            trace = {**pool[k % 30], "trace_id": f"t_{cid}_{scn}_{k}"}
+            seed = f"s{order:03d}"
+            trace = _bind_trace(pool[k % 30], cid, scn, seed, order)
             ref = content_hash(trace)
             traces[str(trace["trace_id"])] = trace
             trials.append({"trial_id": f"tr_{cid}_{scn}_{k}", "scenario_id": scn,
-                           "condition_id": cid, "seed": f"s{order:03d}", "repeat_index": order,
-                           "status": "completed", "trace_ref": ref, "execution_order": order})
+                           "condition_id": cid, "seed": seed, "repeat_index": order,
+                           "status": "completed", "trace_ref": ref, "execution_order": order,
+                           **_runtime_fields(cid, inputs)})
             order += 1
 
     _add("ungoverned", "hard", True, 40)
@@ -393,6 +439,42 @@ class TestDesignAwareBridge(unittest.TestCase):
         # reader can see the arms tested the same composition
         self.assertEqual(set(analysis["scenario_balance"]["ungoverned"]), set(shared))
         self.assertEqual(analysis["scenario_balance"]["governed"][shared[0]], 1)
+
+    def test_design_aware_fixtures_are_graph_and_schema_valid(self) -> None:
+        # the design-aware fixtures are not just fed to earned_bridge in isolation:
+        # they are GRAPH-valid and SCHEMA-valid bundles, so the assertions exercise
+        # the same evidence a production export_cp would accept, not a bundle the
+        # real handoff would reject at verify_bundle (review r20 finding #10)
+        from lab_contracts import validate_artifact
+
+        shared = [f"scn-{i}" for i in range(24)]
+        for bundle, traces in (
+            _controlled_bundle([(True, False)] * 24),
+            _controlled_bundle([(True, False)] * 24 + [(None, None)] * 6),
+            _two_scenario_bundle({"ungoverned": shared, "governed": shared}),
+            _weighting_confound_bundle(),
+        ):
+            verify_bundle(bundle, traces)  # must NOT raise
+            self.assertEqual(validate_artifact(bundle, "bundle"), [])
+
+    def test_earning_fixture_survives_the_real_export_cp_path(self) -> None:
+        # the honest matched-design fixture is exported through the FULL production
+        # handoff (schema + graph + bridge), and the confounded/disjoint fixtures are
+        # refused there too — proving the design gate holds on the real path, not
+        # only inside earned_bridge (review r20 finding #10)
+        from lab_runner.cp_export import export_cp
+
+        earn_bundle, earn_traces = _controlled_bundle([(True, False)] * 24)
+        export = export_cp(earn_bundle, condition_id="governed", traces=earn_traces)
+        self.assertTrue(export.earned_bridge)
+        self.assertTrue(export.config["source"]["bridge_analysis"])
+
+        confound_bundle, confound_traces = _weighting_confound_bundle()
+        export2 = export_cp(confound_bundle, condition_id="governed", traces=confound_traces)
+        # the bundle is valid and exportable, but the confounded design earns NO
+        # bridge — the production config carries no unearned causal claim
+        self.assertFalse(export2.earned_bridge)
+        self.assertIsNone(export2.config["source"].get("bridge_analysis"))
 
 
 def _real_slice_bundle():
