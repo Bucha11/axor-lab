@@ -88,6 +88,43 @@ def gated_args(
     return authoritative
 
 
+def redacted_untrusted_bindings(
+    values: list[dict[str, object]], arg_bindings: dict[str, str]
+) -> list[str]:
+    """The bound value_ids that are UNTRUSTED-DERIVED yet REDACTED (the client
+    withheld their bytes). The real governor taint-registers only values that
+    carry their decision_value, so a gate whose args bind such a value would
+    decide on incomplete taint — fail-open. Shared by BOTH endpoint surfaces so
+    the HTTP gateway and the in-process SDK fail closed identically (review r18)."""
+    by_id = {str(v["value_id"]): v for v in values}
+    blind: list[str] = []
+    for vid in arg_bindings.values():
+        value = by_id.get(str(vid))
+        if (
+            value is not None
+            and "untrusted_derived" in value.get("labels", [])
+            and "decision_value" not in value
+        ):
+            blind.append(str(vid))
+    return blind
+
+
+def provenance_unavailable_decision(
+    driving_value_id: str, blind: list[str]
+) -> dict[str, object]:
+    """The fail-closed DENY a real-kernel gate returns when its decision depends on
+    an untrusted-derived value the client redacted: the taint cannot be
+    reconstructed, so provenance we cannot see is provenance we deny on (r18)."""
+    return {
+        "verdict": "DENY", "gate": "provenance_unavailable",
+        "driving_value_id": str(driving_value_id), "projection": "untrusted-derived",
+        "reason": (
+            f"redacted untrusted-derived value(s) {blind} bound to a gated arg — "
+            "taint cannot be reconstructed; failing closed"
+        ),
+    }
+
+
 def provenance_fidelity(trusted_runtime: bool, labels_carried: bool) -> str:
     """explicit_flow_tracked asserts a TRUSTED runtime built the lineage with
     closed constructors — it is granted only when the operator vouches for the

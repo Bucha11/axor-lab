@@ -139,6 +139,49 @@ class TestServerPackageVerification(unittest.TestCase):
         pkg["acceptance"]["integrity"] = "signed"
         self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_FAILURE)
 
+    def test_receipt_integrity_must_match_publication_integrity(self) -> None:
+        pkg = json.loads(json.dumps(self.pkg))
+        # the author receipt claiming a DIFFERENT integrity than the publication is
+        # a proof-downgrade signal and must fail (review r18)
+        pkg["receipt"]["integrity"] = "signed"
+        self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_FAILURE)
+
+    def test_package_with_reacceptance_still_verifies(self) -> None:
+        # a package whose acceptance is a REACCEPTANCE/v1 (the server found its
+        # persisted acceptance damaged and re-attested) must verify with the same
+        # rigour as an acceptance/v1 — the verifier accepts the linked
+        # re-attestation, it does not choke on the schema (review r18)
+        root = Path(self.tmp.name) / "store"
+        pid = str(self.pkg["publication"]["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))
+        reloaded = PublicationStore(root=root).get(pid)
+        self.assertEqual(reloaded.acceptance["schema_version"], "axor-lab-reacceptance/v1")
+        pkg = json.loads(json.dumps(self.pkg))
+        pkg["acceptance"] = reloaded.acceptance
+        self.assertEqual(
+            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_OK
+        )
+
+    def test_forged_reacceptance_report_is_rejected(self) -> None:
+        # a reacceptance whose semantic_report_ref no longer binds its report must
+        # be refused, exactly like a forged acceptance (review r18)
+        root = Path(self.tmp.name) / "store"
+        pid = str(self.pkg["publication"]["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))
+        reloaded = PublicationStore(root=root).get(pid)
+        pkg = json.loads(json.dumps(self.pkg))
+        pkg["acceptance"] = reloaded.acceptance
+        pkg["acceptance"]["semantic_report"]["replay"] = "fabricated"
+        self.assertEqual(
+            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_FAILURE
+        )
+
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")
 class TestSignedPackageVerification(unittest.TestCase):
@@ -168,6 +211,59 @@ class TestSignedPackageVerification(unittest.TestCase):
         self.assertEqual(main([
             "verify", str(p), "--server-pubkey", pub, "--server", "evil.example.com",
         ]), EXIT_FAILURE)
+
+    def _signed_publication_package(self, tmp: str):
+        """A package whose publication earned integrity=signed via an author key."""
+        from nacl.signing import SigningKey
+
+        from lab_contracts.signing import sign_bundle
+
+        author_sk = SigningKey.generate()
+        author_priv, author_pub = bytes(author_sk).hex(), bytes(author_sk.verify_key).hex()
+        store = PublicationStore(root=Path(tmp) / "store", known_keys={"acme": author_pub})
+        bundle, traces = _publishable()
+        sig = sign_bundle(bundle, author_priv)
+        stored = store.publish(bundle, traces, question="q", signature=sig, author="acme")
+        self.assertEqual(stored.publication["integrity"], "signed")
+        pkg = {
+            "schema_version": "axor-reproduction-package/v1",
+            "publication": stored.publication,
+            "bundle": stored.bundle,
+            "traces": list(stored.traces.values()),
+            "receipt": stored.receipt(),
+            "acceptance": store.acceptance(stored),
+        }
+        path = Path(tmp) / "signed.json"
+        path.write_text(json.dumps(pkg))
+        return pkg, path, author_pub
+
+    def test_signed_publication_without_author_pubkey_is_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, path, _ = self._signed_publication_package(tmp)
+            # a signed publication whose author signature we hold no key for is
+            # UNVERIFIED (the server acceptance is a separate attestation)
+            self.assertEqual(main(["verify", str(path), "--allow-unsigned-server"]), EXIT_UNVERIFIED)
+            # with the author key it verifies
+            _, path2, author_pub = self._signed_publication_package(tmp)
+            self.assertEqual(
+                main(["verify", str(path2), "--pubkey", author_pub, "--allow-unsigned-server"]),
+                EXIT_OK,
+            )
+
+    def test_signed_publication_rejects_hash_only_author_receipt(self) -> None:
+        from lab_contracts.signing import build_receipt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg, _, author_pub = self._signed_publication_package(tmp)
+            # strip the author signature: swap in a valid HASH-ONLY receipt. The
+            # publication still says signed, so this proof downgrade must FAIL
+            pkg["receipt"] = build_receipt(pkg["bundle"], integrity="hash_verified")
+            path = Path(tmp) / "downgraded.json"
+            path.write_text(json.dumps(pkg))
+            self.assertEqual(
+                main(["verify", str(path), "--pubkey", author_pub, "--allow-unsigned-server"]),
+                EXIT_FAILURE,
+            )
 
 
 if __name__ == "__main__":

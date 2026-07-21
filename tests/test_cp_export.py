@@ -1,9 +1,11 @@
 """B2 — Control Plane export (control-plane-handoff.md).
 
-The validated policy + config_hash + manifests + regressions carry over
-byte-identically (config_hash is the carry-over key); the production-todo lists
-exactly the four NOT-reused categories; the earned bridge surfaces only after a
-result where governance changed the outcome.
+The validated policy + manifests + regressions carry over byte-identically; the
+parametric_config_hash is the carry-over key (kernel+policy with symbolic
+$inputs, stable when production re-parameterizes), while config_hash is the
+recorded fingerprint of the concrete config the Lab run measured. The
+production-todo lists exactly the four NOT-reused categories; the earned bridge
+surfaces only after a result where governance changed the outcome.
 """
 
 from __future__ import annotations
@@ -64,7 +66,7 @@ def _denied_trace(traces: dict) -> dict:
 
 
 class TestCPExport(unittest.TestCase):
-    def test_config_hash_is_the_carry_over_key_byte_identical(self) -> None:
+    def test_config_hash_is_the_recorded_fingerprint_byte_identical(self) -> None:
         bundle = _bundle()
         governed = next(c for c in bundle["conditions"] if c["enforcement"] == "on")  # type: ignore[union-attr]
         export = export_cp(bundle)
@@ -81,6 +83,18 @@ class TestCPExport(unittest.TestCase):
         self.assertEqual(export.config["policy"]["profile"], "strict")  # type: ignore[index]
         exported_ids = {m["id"] for m in export.config["tool_manifests"]}  # type: ignore[union-attr]
         self.assertEqual(exported_ids, {"read_txns", "send_money"})
+
+    def test_production_todo_names_parametric_hash_as_carry_over_key(self) -> None:
+        # the todo must name the PARAMETRIC hash as the carry-over key — the
+        # concrete config_hash/runtime_config_hashes describe the Lab run, not what
+        # production hashes, so calling config_hash the carry-over key was a
+        # naming lie (review r18)
+        export = export_cp(_bundle())
+        todo = export.production_todo
+        self.assertIn("parametric_config_hash", todo)
+        self.assertIn("carry-over key", todo)
+        # it must NOT still claim the concrete config_hash is the carry-over key
+        self.assertNotIn("`config_hash` is the carry-over key", todo)
 
     def test_validated_pin_carries_over_with_full_shape(self) -> None:
         bundle, traces = _bundle_and_traces()

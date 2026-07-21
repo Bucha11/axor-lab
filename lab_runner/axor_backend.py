@@ -110,30 +110,65 @@ def resolve_kernel(
     return registry.get(version)  # type: ignore[attr-defined]
 
 
-def resolve_kernel_for_trace(
+def _scenario_inputs_for(bundle: dict[str, object], trace: dict[str, object]) -> dict[str, object]:
+    trial: dict[str, object] = trace.get("trial", {})  # type: ignore[assignment]
+    scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
+    scenario = scenarios.get(str(trial.get("scenario_id")), {})
+    return scenario.get("inputs", {})  # type: ignore[union-attr,return-value]
+
+
+def resolve_recorded_kernel_for_trace(
     bundle: dict[str, object], trace: dict[str, object], registry: object | None = None,
 ) -> object:
-    """The ONE way to resolve the exact kernel a trace ran under (review r17).
+    """Resolve the EXACT kernel a trace RAN under — for exact replay (review r18).
 
-    Every non-runner surface — CLI regress, CLI/HTML EvidenceCase, incident import
-    — must resolve the kernel THROUGH THIS, so it always (a) uses the shared
-    real-vs-reference resolver and (b) expands `$inputs.*` allowlists against the
-    trace's OWN scenario inputs. A single kernel resolved without per-trace
-    scenario inputs bakes the wrong (or symbolic) allowlist into an AxorKernel and
-    silently mis-governs a multi-scenario bundle."""
+    Uses the trace's OWN recorded condition (its `trial.condition_id`) and its own
+    scenario inputs, so `$inputs.*` allowlists expand against the world the trace
+    was produced in. This is the RECORDED-kernel resolver: it answers "what
+    decided this?", never "what WOULD a candidate decide?"."""
     from .kernel import default_registry
 
     trial: dict[str, object] = trace.get("trial", {})  # type: ignore[assignment]
     conditions = {str(c["id"]): c for c in bundle["conditions"]}  # type: ignore[union-attr]
-    scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
     condition = conditions[str(trial["condition_id"])]
-    scenario = scenarios.get(str(trial.get("scenario_id")), {})
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     version = str(condition["kernel"])
     reg = registry if registry is not None else default_registry((version,))
     return resolve_kernel(
-        version, manifests, condition.get("policy"), reg,
-        scenario.get("inputs", {}),  # type: ignore[union-attr]
+        version, manifests, condition.get("policy"), reg, _scenario_inputs_for(bundle, trace),
+    )
+
+
+# retained name (r17). The exact-replay resolver is the one it always was.
+resolve_kernel_for_trace = resolve_recorded_kernel_for_trace
+
+
+def resolve_candidate_kernel_for_trace(
+    bundle: dict[str, object],
+    trace: dict[str, object],
+    candidate_condition: dict[str, object],
+    candidate_version: str | None = None,
+    registry: object | None = None,
+) -> object:
+    """Resolve the CANDIDATE kernel a counterfactual replay should run — for
+    regression against a future/other kernel and for policy-override EvidenceCase
+    (review r18).
+
+    This deliberately does NOT read the trace's recorded condition/kernel. It
+    takes the POLICY/enforcement from the chosen `candidate_condition`, the VERSION
+    from `candidate_version` (a `--kernel` override) or that condition's kernel, and
+    the INPUTS from the trace's OWN recorded scenario — so `axor-lab regress
+    --kernel axor-core@X` actually runs axor-core@X, not the reference kernel the
+    trace was recorded under. Conflating this with the recorded resolver silently
+    replayed under the wrong backend while labelling the result with the other."""
+    from .kernel import default_registry
+
+    manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    version = str(candidate_version) if candidate_version else str(candidate_condition["kernel"])
+    reg = registry if registry is not None else default_registry((version,))
+    return resolve_kernel(
+        version, manifests, candidate_condition.get("policy"), reg,
+        _scenario_inputs_for(bundle, trace),
     )
 
 

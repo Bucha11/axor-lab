@@ -26,7 +26,7 @@ from lab_contracts.signing import (
     verify_receipt,
 )
 from lab_runner import run_experiment_suite
-from lab_runner.cli import EXIT_FAILURE, EXIT_OK, EXIT_UNVERIFIED, main
+from lab_runner.cli import EXIT_FAILURE, EXIT_OK, main
 
 _HAS_NACL = importlib.util.find_spec("nacl") is not None
 CREATED = "2026-07-20T12:00:00+00:00"
@@ -124,15 +124,20 @@ class TestCliVerifyExitCodes(unittest.TestCase):
             # a forged signed receipt is INVALID regardless of the acceptance mode
             self.assertEqual(main(["verify", str(pkg), "--allow-unsigned-server"]), EXIT_FAILURE)
 
-    def test_signed_receipt_without_pubkey_exits_unverified(self) -> None:
+    def test_signed_receipt_over_hash_verified_publication_is_rejected(self) -> None:
+        # _write_pkg publishes WITHOUT an author signature → a hash_verified
+        # publication. Injecting a SIGNED author receipt over it is an integrity
+        # mismatch (the store would never emit that pairing) and is now rejected
+        # as a proof-inconsistency (review r18). The pure "signed receipt without
+        # pubkey → UNVERIFIED" behaviour is unit-tested against verify_receipt
+        # directly in TestReceiptStateMachine; here the package is inconsistent.
         bundle, traces = _bundle_and_traces()
         receipt = build_receipt(bundle, integrity="signed", author="acme",
                                 key_id="acme", signature="ab" * 32)
         with tempfile.TemporaryDirectory() as tmp:
             pkg = _write_pkg(tmp, bundle, receipt, traces)
-            # allow-unsigned isolates the UNVERIFIED to the receipt (no pubkey)
             self.assertEqual(
-                main(["verify", str(pkg), "--allow-unsigned-server"]), EXIT_UNVERIFIED
+                main(["verify", str(pkg), "--allow-unsigned-server"]), EXIT_FAILURE
             )
 
     def test_hash_verified_package_still_passes(self) -> None:

@@ -19,7 +19,13 @@ from lab_contracts import world_digest
 from lab_runner.axor_backend import AxorKernel, gate_with_governor, is_real_kernel_version
 from lab_runner.kernel import Kernel
 
-from .gating import gated_args, normalize_value_hash, provenance_fidelity
+from .gating import (
+    gated_args,
+    normalize_value_hash,
+    provenance_fidelity,
+    provenance_unavailable_decision,
+    redacted_untrusted_bindings,
+)
 
 PRODUCER_MODE = "instrumented_endpoint"
 
@@ -110,10 +116,20 @@ def assemble_and_gate(
                 driving_value_id = (
                     item.arg_bindings.get(str(driving_args[0])) if driving_args else "v_none"
                 )
-                decision = gate_with_governor(
-                    kernel.config, str(condition["enforcement"]), registrations,
-                    item.tool, authoritative, str(driving_value_id),
-                )
+                enforcement = str(condition["enforcement"])
+                blind = redacted_untrusted_bindings(values, dict(item.arg_bindings))
+                if enforcement != "off" and blind:
+                    # SAME fail-closed rule as the HTTP gateway (review r18): a
+                    # redacted untrusted-derived value bound to a gated arg leaves
+                    # the governor's taint incomplete, so we DENY rather than let it
+                    # decide fail-open. The two surfaces share the rule so they
+                    # cannot drift.
+                    decision = provenance_unavailable_decision(str(driving_value_id), blind)
+                else:
+                    decision = gate_with_governor(
+                        kernel.config, enforcement, registrations,
+                        item.tool, authoritative, str(driving_value_id),
+                    )
             else:
                 arg_labels = {
                     name: tuple(_labels_of(values, vid)) for name, vid in item.arg_bindings.items()
@@ -129,6 +145,13 @@ def assemble_and_gate(
                 )
             events.append({"seq": seq, "node": "root", "type": "gate_decision", "decision": decision})
             seq += 1
+        else:
+            # an unknown event type is NOT silently dropped (review r18): a
+            # tool_result the assembler skips would leave its taint unregistered,
+            # and an unrecognised intent would never be gated — both fail OPEN. The
+            # HTTP gateway already 400s on this; the in-process path must reject it
+            # too so the two surfaces cannot drift.
+            raise ValueError(f"unknown emitted event type {item.type!r}")
 
     return {
         "schema_version": "trace/v1",

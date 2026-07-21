@@ -34,7 +34,7 @@ from lab_contracts import (
     validate_artifact,
 )
 
-from .axor_backend import resolve_kernel, resolve_kernel_for_trace
+from .axor_backend import resolve_candidate_kernel_for_trace, resolve_kernel
 from .bundle_io import (
     PACKAGING,
     read_bundle_dir,
@@ -350,6 +350,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         SignatureInvalid,
         SignatureUnavailable,
         verify_acceptance,
+        verify_reacceptance,
         verify_receipt,
     )
 
@@ -380,10 +381,39 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
         return EXIT_FAILURE
     print("publication: bound (id + bundle_ref + claims)")
+    # 2b) the AUTHOR receipt's integrity must match the publication's — otherwise a
+    # `signed` publication can be downgraded by swapping in a valid hash-only
+    # receipt (the author signature stripped) while the server acceptance stays
+    # signed, and verify would still exit 0. The portable author receipt exists
+    # precisely to prove author authenticity WITHOUT trusting the server, so a
+    # signed publication must carry a signed, VERIFIED author receipt (review r18).
+    pub_integrity = str(publication.get("integrity", "hash_verified"))
+    receipt_integrity = str(receipt.get("integrity", "hash_verified"))
+    if receipt_integrity != pub_integrity:
+        print(
+            f"receipt: INTEGRITY MISMATCH — receipt is {receipt_integrity!r} but the "
+            f"publication is {pub_integrity!r} (author-signature downgrade?) — refusing to pass",
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
+    if pub_integrity == "signed" and not getattr(args, "pubkey", None):
+        # a signed publication whose author signature we hold no key to check is
+        # UNVERIFIED, never a pass (the server acceptance is a separate attestation)
+        print(
+            "receipt: UNVERIFIED — signed publication but no author public key (--pubkey) "
+            "was supplied to verify its receipt",
+            file=sys.stderr,
+        )
+        unverified = True
     # 3) server acceptance binds + (optionally) verifies. verify_acceptance now
-    # also requires acceptance.integrity == publication.integrity.
+    # also requires acceptance.integrity == publication.integrity. A server that
+    # found its persisted acceptance damaged re-attests with a distinct, linked
+    # `reacceptance/v1` event (review r18) — verify it with the same rigour, and
+    # tell the reader an original attestation was superseded.
+    is_reacceptance = str(acceptance.get("schema_version", "")) == "axor-lab-reacceptance/v1"
+    verify_acc = verify_reacceptance if is_reacceptance else verify_acceptance
     try:
-        verify_acceptance(
+        verify_acc(
             acceptance, publication,
             server_pubkey_hex=getattr(args, "server_pubkey", None),
             expected_server=getattr(args, "server", None),
@@ -396,6 +426,13 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
         unverified = True
     else:
+        if is_reacceptance:
+            supersedes = acceptance.get("supersedes")
+            prev_ref = supersedes.get("previous_ref") if isinstance(supersedes, dict) else "?"
+            print(
+                f"acceptance: RE-ATTESTATION (reacceptance/v1) — the original acceptance "
+                f"was superseded (previous_ref={prev_ref}) at {acceptance.get('reaccepted_at')}",
+            )
         if str(acceptance.get("algorithm")) == "ed25519":
             print("acceptance: signature VERIFIED")
         elif getattr(args, "allow_unsigned_server", False):
@@ -469,14 +506,18 @@ def _cmd_regress(args: argparse.Namespace) -> int:
         # gate off (the fingerprint marks it a different kernel, review r4)
         kernel: object = Kernel(version=version, taint_floor_enabled=False)
     else:
-        # regress under the SAME kernel run/replay would use — so a real
-        # axor-core pin regresses under the real governor, not the reference
-        # taint-floor kernel (review r6: one kernel path everywhere). Each pin
-        # resolves its OWN kernel so a real-kernel allowlist expands against that
-        # pin's scenario inputs, not a single baked expansion (review r17).
+        # regress under the CANDIDATE kernel — the one named by --kernel or the
+        # chosen regression condition — NOT the kernel the trace was recorded
+        # under (review r18). Each pin resolves the candidate against its OWN
+        # scenario inputs so a real-kernel allowlist expands per scenario. The
+        # candidate resolver takes policy/enforcement from the selected condition
+        # and the version from the override, so `regress --kernel axor-core@X`
+        # actually runs axor-core@X.
         registry = default_registry((version,))
         kernel = resolve_kernel(version, manifests, condition.get("policy"), registry)  # type: ignore[arg-type]
-        kernel_for = lambda trace: resolve_kernel_for_trace(bundle, trace, registry)  # noqa: E731
+        kernel_for = lambda trace: resolve_candidate_kernel_for_trace(  # noqa: E731
+            bundle, trace, condition, args.kernel, registry
+        )
     # each pinned trace replays against ITS OWN scenario's inputs — a single
     # shared inputs dict would replay every pin under the first scenario's
     # allowlist / effect-resolution inputs (review r12)
@@ -724,6 +765,23 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
                 json.dumps(trace, indent=2, ensure_ascii=False)
             )
     source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
+    # export the FROZEN bridge trace BODIES so the earned-bridge analysis is
+    # independently recomputable from the export directory alone — the analysis
+    # receipt carries only trace hashes, not the bytes to re-evaluate the
+    # violation predicate over (review r18)
+    analysis: dict[str, object] | None = source.get("bridge_analysis")  # type: ignore[assignment]
+    if analysis is not None:
+        by_ref = {content_hash(t): t for t in traces.values()}
+        bt_dir = out / "bridge-traces"
+        bt_dir.mkdir(exist_ok=True)
+        trial_refs: dict[str, list[str]] = analysis["trial_refs"]  # type: ignore[assignment]
+        for refs in trial_refs.values():
+            for ref in refs:
+                trace = by_ref.get(ref)
+                if trace is not None:
+                    (bt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
+                        json.dumps(trace, indent=2, ensure_ascii=False)
+                    )
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
     # the parametric_config_hash is the carry-over key: kernel + policy + manifests

@@ -244,6 +244,7 @@ def replay_bundle(
 ) -> ReplayReport:
     """Replay every trace referenced by the bundle's trials."""
     from .axor_backend import resolve_kernel
+    from .errors import UnknownKernelError
 
     class _Shim:
         def get(self, version: str) -> object:
@@ -268,7 +269,11 @@ def replay_bundle(
                 str(condition["kernel"]), manifests, condition.get("policy"), _Shim(),  # type: ignore[arg-type]
                 scenario.get("inputs", {}),  # $inputs allowlist expands the same as the live run
             )
-        except Exception:  # noqa: BLE001 — unavailable/unknown kernel is a status, not a crash
+        except UnknownKernelError:
+            # ONLY a genuinely unavailable/mismatched kernel is a status, not a
+            # crash. A KeyError/TypeError/config-build failure is an INTERNAL bug —
+            # let it propagate rather than mislabel it "unsupported_kernel" and
+            # silently mark the trace not-reproduced (review r18).
             out.append((trace_id, ()))
             statuses.append((trace_id, REPLAY_UNSUPPORTED_KERNEL))
             all_match = False
