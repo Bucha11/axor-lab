@@ -46,7 +46,14 @@ from lab_runner import resolve_kernel
 from lab_runner.axor_backend import AxorKernel, gate_with_governor
 from lab_runner.kernel import Kernel, default_registry
 
-from .gating import GatingError, gated_args, normalize_value_hash, provenance_fidelity
+from .gating import (
+    GatingError,
+    gated_args,
+    normalize_value_hash,
+    provenance_fidelity,
+    provenance_unavailable_decision,
+    redacted_untrusted_bindings,
+)
 from .instrumented import PRODUCER_MODE
 
 # malformed-event exceptions we translate to a clean 400; anything else is an
@@ -80,6 +87,10 @@ class _Run:
     fixtures: dict[str, object] = field(default_factory=dict)
     values: list[dict[str, object]] = field(default_factory=list)
     events: list[dict[str, object]] = field(default_factory=list)
+    # accumulated serialized byte size of accepted events (values + intents), so a
+    # run's memory footprint is bounded independent of the event COUNT — many small
+    # events each under _MAX_BODY could still accumulate unbounded bytes (review r18)
+    nbytes: int = 0
     seq: int = 0
     labels_carried: bool = True
     finalized: bool = False
@@ -154,7 +165,9 @@ def make_gateway(
     token: str | None = None,
     max_runs: int = 1000,
     max_events_per_run: int = 10000,
+    max_run_bytes: int = 16 * 1024 * 1024,
     max_retained: int | None = None,
+    max_retained_bytes: int | None = None,
     trusted_runtime: bool = False,
     fixtures: dict[str, object] | None = None,
 ) -> ThreadingHTTPServer:
@@ -178,6 +191,13 @@ def make_gateway(
     # runs have their OWN budget so a flood of finalized-but-unacked runs can never
     # exhaust the ACTIVE quota and block new work (review r17)
     retained_cap = max_retained if max_retained is not None else max(max_runs, 16)
+    # RETAINED memory is also bounded: without a byte budget, retained_cap traces
+    # of up to max_run_bytes each could still pin retained_cap × max_run_bytes of
+    # memory. Default to that product so the byte cap never rejects a run the count
+    # cap would have admitted, while still giving a knob to tighten it (review r18).
+    retained_byte_cap = (
+        max_retained_bytes if max_retained_bytes is not None else retained_cap * max_run_bytes
+    )
     # resolve the kernel through the ONE shared resolver (review r17): a real
     # `axor-core@X` pin is satisfied ONLY by the exact installed build — otherwise
     # UnknownKernelError is raised HERE, at construction, rather than the gateway
@@ -210,10 +230,19 @@ def make_gateway(
             effect: dict[str, object] = manifests[tool].get("effect", {})  # type: ignore[assignment]
             driving_args = list(effect.get("driving_args", []))  # type: ignore[arg-type]
             driving_value_id = arg_bindings.get(str(driving_args[0])) if driving_args else "v_none"
-            decision = gate_with_governor(
-                kernel.config, str(condition["enforcement"]),
-                run.untrusted_registrations(), tool, args, str(driving_value_id),
-            )
+            enforcement = str(condition["enforcement"])
+            blind = redacted_untrusted_bindings(run.values, arg_bindings)
+            if enforcement != "off" and blind:
+                # FAIL CLOSED: this real-kernel gate depends on untrusted-derived
+                # value(s) the client redacted; the governor cannot register that
+                # taint, so an ALLOW would be fail-open. Provenance we cannot
+                # reconstruct is provenance we deny on (review r18).
+                decision = provenance_unavailable_decision(str(driving_value_id), blind)
+            else:
+                decision = gate_with_governor(
+                    kernel.config, enforcement,
+                    run.untrusted_registrations(), tool, args, str(driving_value_id),
+                )
         else:
             decision = kernel.decide(
                 enforcement=str(condition["enforcement"]), manifest=manifests[tool], args=args,
@@ -271,22 +300,31 @@ def make_gateway(
                             "error": "active run quota exceeded — finalize open runs before opening more"
                         })
                         return
-                    # keep the RETAINED finalized set within its own budget by
-                    # evicting ONLY a DELIVERED (acknowledged) run — its client
-                    # confirmed it stored the bytes, so dropping it loses nothing.
-                    # An unfetched or fetched-but-unacked trace is NEVER evicted:
-                    # that would lose evidence the client has not received, exactly
-                    # the loss the delivery lifecycle promises against (review r18).
-                    # If retention is full and nothing is acked, FAIL CLOSED (429)
-                    # rather than drop unread evidence.
-                    finalized = [rid for rid, r in runs.items() if r.finalized]
-                    if len(finalized) >= retained_cap:
-                        victim = next((rid for rid in finalized if runs[rid].delivered), None)
+                    # keep the RETAINED finalized set within its budget — BOTH a
+                    # count cap and a byte cap — by evicting ONLY DELIVERED
+                    # (acknowledged) runs: the client confirmed it stored those
+                    # bytes, so dropping them loses nothing. An unfetched or
+                    # fetched-but-unacked trace is NEVER evicted: that would lose
+                    # evidence the client has not received, exactly the loss the
+                    # delivery lifecycle promises against (review r18). If retention
+                    # is full (by count OR bytes) and nothing acked is left to drop,
+                    # FAIL CLOSED (429) rather than shed unread evidence.
+                    def _retained_bytes() -> int:
+                        return sum(r.nbytes for r in runs.values() if r.finalized)
+
+                    def _over_budget() -> bool:
+                        finalized = sum(1 for r in runs.values() if r.finalized)
+                        return finalized >= retained_cap or _retained_bytes() >= retained_byte_cap
+
+                    while _over_budget():
+                        victim = next(
+                            (rid for rid, r in runs.items() if r.finalized and r.delivered), None
+                        )
                         if victim is None:
                             self._json(429, {
-                                "error": "retained-trace quota exceeded and no acknowledged trace "
-                                "to evict — acknowledge (POST /trace/ack) a delivered trace first; "
-                                "unread evidence is never dropped"
+                                "error": "retained-trace quota exceeded (count or bytes) and no "
+                                "acknowledged trace to evict — acknowledge (POST /trace/ack) a "
+                                "delivered trace first; unread evidence is never dropped"
                             })
                             return
                         del runs[victim]
@@ -397,6 +435,15 @@ def make_gateway(
             if run.seq >= max_events_per_run:
                 self._json(429, {"error": "event quota exceeded"})
                 return
+            # bound the run's accumulated MEMORY, not just its event count: a run of
+            # many small events (each well under _MAX_BODY) could still pile up
+            # unbounded value bytes. Reject the event that would breach the cap
+            # BEFORE storing it; accepted-event bytes are tallied at each append so
+            # a rejected event never counts against the budget (review r18).
+            event_bytes = len(json.dumps(event, default=str))
+            if run.nbytes + event_bytes > max_run_bytes:
+                self._json(429, {"error": "run byte quota exceeded"})
+                return
             expected = event.get("expected_seq")
             if expected is not None and int(expected) != run.seq:  # type: ignore[arg-type]
                 self._json(409, {"error": f"expected_seq {expected} != current {run.seq}"})
@@ -449,6 +496,7 @@ def make_gateway(
                                   "tool": tool,
                                   "produces_value_ids": [v["value_id"] for v in raw_values]})
                 run.seq += 1
+                run.nbytes += event_bytes  # tally only ACCEPTED-event bytes
                 if event.get("labels_carried") is False:
                     run.labels_carried = False
                 self._json(200, {"ok": True, "seq": run.seq})
@@ -490,6 +538,7 @@ def make_gateway(
                     self._json(409, {"error": str(exc)})
                     return
                 decision = gate_intent(run, tool_field, bindings, authoritative)
+                run.nbytes += event_bytes  # tally only ACCEPTED-event bytes
                 # return the AUTHORITATIVE args a cooperating proxy must execute,
                 # so an honest client runs the bound value, not its own (review r9)
                 self._json(200, {"decision": decision, "authoritative_args": authoritative})

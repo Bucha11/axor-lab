@@ -90,7 +90,11 @@ def _write_atomic(path: Path, text: str, *, durable: bool = False) -> None:
     data = text.encode("utf-8")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
-        os.write(fd, data)
+        # os.write may write FEWER bytes than requested (a "short write"); loop
+        # until every byte lands or the target is silently truncated (review r18)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
         if durable:
             os.fsync(fd)  # the CONTENTS reach disk before we rename over the target
     finally:
