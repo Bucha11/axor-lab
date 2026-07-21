@@ -135,9 +135,13 @@ def replay_trace_status(
                 if "untrusted_derived" in value.get("labels", []):
                     if "decision_value" in value:
                         registrations.append((str(event.get("tool")), value["decision_value"]))
-                    elif isinstance(kernel, AxorKernel):
+                    elif isinstance(kernel, AxorKernel) and str(condition["enforcement"]) == "on":
                         # an untrusted source the real governor would taint-register
-                        # is redacted → its taint state can't be reconstructed
+                        # is redacted → its taint state can't be reconstructed. This
+                        # only matters under ENFORCEMENT: with enforcement off the
+                        # governor returns ALLOW without consulting taint at all, so
+                        # a redacted untrusted read cannot change the verdict and must
+                        # not block the (trivially reproducible) replay (review r16 P2)
                         redacted_required = True
         elif etype == "tool_call_intent":
             pending.setdefault(node, []).append(event)
@@ -152,17 +156,24 @@ def replay_trace_status(
                 malformed = True
                 continue
             bindings: dict[str, str] = pending_call.get("arg_bindings", {})  # type: ignore[assignment]
+            enforcement = str(condition["enforcement"])
             # if any BOUND value is redacted (sensitive, no decision_value), the
             # gate's concrete inputs cannot be reconstructed — exact replay is
             # unavailable, so do NOT recompute this decision over a hash sentinel
-            # (which the kernel can't even evaluate); flag it and move on (r15)
-            if any(
+            # (which the kernel can't even evaluate); flag it and move on (r15).
+            # EXCEPT under enforcement off: the verdict is an unconditional ALLOW
+            # that never inspects the args, so it replays exactly WITHOUT the
+            # redacted value — flagging it there is over-conservative (review r16 P2).
+            bound_redacted = any(
                 (values.get(str(vid)) or {}).get("decision_value", _MISSING) is _MISSING
                 for vid in bindings.values()
-            ):
+            )
+            if bound_redacted and enforcement != "off":
                 redacted_required = True
                 continue
-            args = resolve_args(bindings, values)
+            # a redacted bound value under enforcement off cannot be resolved, but
+            # the off-path ignores args entirely, so pass empty args to it
+            args = {} if bound_redacted else resolve_args(bindings, values)
             if isinstance(kernel, AxorKernel):
                 driving = pending_call.get("arg_bindings", {}).get("recipient", "v_none")  # type: ignore[union-attr]
                 decision = gate_with_governor(

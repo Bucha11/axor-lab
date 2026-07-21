@@ -71,12 +71,22 @@ def actual_usd(input_tokens: int, output_tokens: int, model: str) -> float:
 
 @dataclass(frozen=True)
 class CostBudget:
-    """A HARD run-wide ceiling — the enforcement half the cost layer promised but
-    never had (it only ever printed an estimate). Any set limit is checked
-    against ACTUAL usage BEFORE the first trial and BEFORE every provider call
-    inside a trial's agent loop, so the run stops the moment a ceiling is reached
-    rather than after a whole trial's worth of calls has already overshot it
-    (review r11, r12). Unset limits (None) don't bind."""
+    """A run-wide spending ceiling checked against ACTUAL usage BEFORE the first
+    trial and BEFORE every provider call inside a trial's agent loop, so the run
+    stops the moment a ceiling is reached rather than after a whole trial's worth
+    of calls has already overshot it (review r11, r12). Unset limits (None) don't
+    bind.
+
+    Honest about how HARD each ceiling is (review r16 P2):
+      - `max_input_tokens` / `max_output_tokens` are HARD — Lab counts the tokens
+        it sends/receives and caps each call's `max_tokens`, so these bind exactly.
+      - `max_usd` is BEST-EFFORT, not a provider-guaranteed dollar cap: it is
+        derived from Lab's ILLUSTRATIVE price table (not your provider's real
+        billing), and the pre-spend check reserves a PROJECTED input size that is
+        not perfectly predictable. Treat it as a close estimate that stops the run
+        near the figure, and set a token ceiling too when an exact bound matters.
+        `is_overshot` reports honestly when the last call crossed (not merely
+        reached) a ceiling."""
 
     max_usd: float | None = None
     max_input_tokens: int | None = None

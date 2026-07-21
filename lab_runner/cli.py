@@ -1152,14 +1152,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--real-kernel", action="store_true",
         help="govern with the installed axor-core kernel (not the reference)",
     )
-    # hard run-wide cost ceilings (review r11): checked against ACTUAL usage
-    # between trials, so the run stops before the next provider call
+    # run-wide cost ceilings (review r11): checked against ACTUAL usage between
+    # trials, so the run stops before the next provider call. Token ceilings are
+    # HARD; the USD ceiling is BEST-EFFORT (illustrative prices, projected input),
+    # not a provider-guaranteed dollar cap (review r16 P2)
     p_run.add_argument("--max-usd", type=float, default=None,
-                       help="stop the run once estimated spend reaches this USD ceiling")
+                       help="stop near this USD figure (BEST-EFFORT: illustrative prices, "
+                            "not a provider-guaranteed cap — pair with --max-*-tokens for a hard bound)")
     p_run.add_argument("--max-input-tokens", type=int, default=None,
-                       help="stop the run once actual input tokens reach this ceiling")
+                       help="hard ceiling: stop once actual input tokens reach this")
     p_run.add_argument("--max-output-tokens", type=int, default=None,
-                       help="stop the run once actual output tokens reach this ceiling")
+                       help="hard ceiling: stop once actual output tokens reach this")
     p_run.add_argument(
         "--overwrite", action="store_true",
         help="replace a non-empty --out directory (clears stale traces first)",
