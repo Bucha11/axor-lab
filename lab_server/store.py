@@ -139,27 +139,48 @@ class PublicationStore:
     # which is invariant to bundle_id/created/packaging — the packaging-sensitive
     # bundle_ref was escapable by re-serialising the same evidence.
     _lineage_tombstones: set[str] = field(default_factory=set)
+    # LEGACY round-14 tombstones stored only a bundle_ref (content_hash of the
+    # whole bundle), which is a different hash domain than evidence_lineage_ref —
+    # so a new publish comparing lineage refs would not match them. Kept in a
+    # separate set that publish also checks (review r16).
+    _bundle_ref_tombstones: set[str] = field(default_factory=set)
     _lock: threading.RLock = field(default_factory=threading.RLock)
+
+    @property
+    def _lineage_dir(self) -> Path:
+        return self.root / "_lineage_tombstones"
 
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        # a DURABLE lineage-tombstone registry, independent of any publication
+        # directory: takedown finality does not depend on a complete per-directory
+        # sweep (review r16). Load it FIRST.
+        if self._lineage_dir.is_dir():
+            for tomb_file in self._lineage_dir.glob("*.json"):
+                try:
+                    rec = json.loads(tomb_file.read_text())
+                    if isinstance(rec, dict) and rec.get("evidence_lineage_ref"):
+                        self._lineage_tombstones.add(str(rec["evidence_lineage_ref"]))
+                except (OSError, ValueError):
+                    continue
         # TWO-PASS cold load (review r15): collect EVERY tombstone (id + evidence
         # lineage) BEFORE loading any publication, so a sibling publication of a
         # taken-down evidence can never be admitted just because its directory
         # sorts ahead of the tombstone's. A one-pass sorted walk could load the
         # sibling first and then never remove it.
-        directories = sorted(self.root.glob("*/"))
+        directories = sorted(d for d in self.root.glob("*/") if d.name != "_lineage_tombstones")
         for directory in directories:
             try:
                 if (directory / "tombstone.json").is_file():
                     self._tombstones.add(directory.name)
                     tomb = json.loads((directory / "tombstone.json").read_text())
                     if isinstance(tomb, dict):
-                        # prefer the stable lineage ref; fall back to a legacy
-                        # bundle_ref-only tombstone (round-14 records)
-                        lineage = tomb.get("evidence_lineage_ref") or tomb.get("bundle_ref")
-                        if lineage:
-                            self._lineage_tombstones.add(str(lineage))
+                        # a stable lineage ref → the lineage set; a legacy
+                        # bundle_ref-only tombstone → the legacy set (r16)
+                        if tomb.get("evidence_lineage_ref"):
+                            self._lineage_tombstones.add(str(tomb["evidence_lineage_ref"]))
+                        elif tomb.get("bundle_ref"):
+                            self._bundle_ref_tombstones.add(str(tomb["bundle_ref"]))
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
                 continue
         for directory in directories:
@@ -248,7 +269,10 @@ class PublicationStore:
             # STABLE evidence lineage (invariant to bundle_id/created/packaging),
             # so "takedown is final" means the evidence is gone — not just one
             # wording of it, and not just one packaging of it (review r14/r15).
-            if stored.lineage_ref in self._lineage_tombstones:
+            if (
+                stored.lineage_ref in self._lineage_tombstones
+                or content_hash(bundle) in self._bundle_ref_tombstones
+            ):
                 raise PublishRejected(
                     f"the evidence (lineage {stored.lineage_ref}) was taken down and cannot "
                     "be re-published under any metadata or packaging; restoring taken-down "
@@ -326,27 +350,35 @@ class PublicationStore:
         repackaged bytes. Removing only the exact id left the sibling public."""
         with self._lock:
             stored = self._cache.get(publication_id)
-            if stored is None and publication_id not in self._tombstones:
+            # IDEMPOTENT: a repeat takedown of an already-tombstoned id is a no-op —
+            # never re-run the sweep with an EMPTY lineage (stored is None), which
+            # would overwrite the tombstone with evidence_lineage_ref="" and lose
+            # finality after a restart (review r16 P0).
+            if stored is None:
+                if publication_id in self._tombstones:
+                    return
                 raise NotFound(f"publication {publication_id} not found")
-            lineage = stored.lineage_ref if stored is not None else ""
+            lineage = stored.lineage_ref
+            # CRASH-SAFE + DURABLE (review r16): write the lineage tombstone to the
+            # standalone registry FIRST and fsync it, so finality holds even if the
+            # process dies before the per-directory bodies are removed. A future
+            # cold load reads the registry and blocks re-publish regardless of
+            # whether every sibling directory was swept.
+            if lineage:
+                self._write_lineage_tombstone(lineage)
+                self._lineage_tombstones.add(lineage)
             # every currently-cached publication on this lineage (the target plus
             # any sibling) is retired together — otherwise a sibling published
             # BEFORE the takedown stays served (review r15)
-            targets = [publication_id]
-            if lineage:
-                targets = sorted(
-                    {publication_id}
-                    | {pid for pid, s in self._cache.items() if s.lineage_ref == lineage}
-                )
+            targets = sorted(
+                {publication_id}
+                | {pid for pid, s in self._cache.items() if lineage and s.lineage_ref == lineage}
+            )
             for pid in targets:
                 self._cache.pop(pid, None)
                 directory = self._dir(pid)
-                for name in ("publication.json", "bundle.json"):
-                    (directory / name).unlink(missing_ok=True)
-                traces_dir = directory / "traces"
-                if traces_dir.is_dir():
-                    for path in traces_dir.glob("*.json"):
-                        path.unlink()
+                # tombstone the directory BEFORE deleting its bodies, so a crash
+                # mid-delete still leaves a tombstone, not a resurrectable orphan
                 _write_atomic(
                     directory / "tombstone.json",
                     json.dumps({
@@ -355,8 +387,27 @@ class PublicationStore:
                     }),
                 )
                 self._tombstones.add(pid)
-            if lineage:
-                self._lineage_tombstones.add(lineage)
+                for name in ("publication.json", "bundle.json"):
+                    (directory / name).unlink(missing_ok=True)
+                traces_dir = directory / "traces"
+                if traces_dir.is_dir():
+                    for path in traces_dir.glob("*.json"):
+                        path.unlink()
+
+    def _write_lineage_tombstone(self, lineage: str) -> None:
+        """Persist a lineage tombstone to the standalone durable registry (a file
+        named by the lineage hash), then fsync the directory (review r16)."""
+        self._lineage_dir.mkdir(parents=True, exist_ok=True)
+        name = lineage.removeprefix("sha256:") + ".json"
+        _write_atomic(self._lineage_dir / name, json.dumps({"evidence_lineage_ref": lineage}))
+        try:
+            fd = os.open(self._lineage_dir, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
 
     def add_attestation(self, publication_id: str, attestation: dict[str, object]) -> StoredPublication:
         errors = validate_artifact(attestation, "attestation")
