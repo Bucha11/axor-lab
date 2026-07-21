@@ -7,6 +7,7 @@ zero), not merely large.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import unittest
 
@@ -500,6 +501,85 @@ class TestBridgeExportPortability(unittest.TestCase):
             cfg["config_hash"] = "sha256:" + "0" * 64
             deploy.write_text(json.dumps(cfg))
             self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+
+    def test_verify_cp_export_checks_bridge_analysis_and_stale_files(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out)]), 0)
+            # tampering the bridge-analysis file is caught by the manifest (r20)
+            ba = out / "bridge-analysis.json"
+            obj = json.loads(ba.read_text())
+            obj["treated"] = {"violations": 0, "n": 999}
+            ba.write_text(json.dumps(obj))
+            self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+            # restore, then a STALE/injected file is caught too
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out), "--overwrite"]), 0)
+            (out / "sneaky.txt").write_text("not in the manifest")
+            self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+
+    def test_reexport_requires_overwrite_and_clears_stale(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out)]), 0)
+            stale = out / "bridge-traces" / "stale.json"
+            stale.write_text("{}")
+            # a re-export into a non-empty dir without --overwrite is refused
+            self.assertNotEqual(
+                main(["export-cp", str(bdir), "--condition", "governed", "--out", str(out)]), 0
+            )
+            # with --overwrite the stale file is gone and the export verifies
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out), "--overwrite"]), 0)
+            self.assertFalse(stale.exists())
+            self.assertEqual(main(["verify-cp-export", str(out)]), 0)
+
+    @unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl not installed")
+    def test_signed_manifest_verifies_and_wrong_key_fails(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from nacl.signing import SigningKey
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import EXIT_UNVERIFIED, main
+
+        sk = SigningKey.generate()
+        priv, pub = bytes(sk).hex(), bytes(sk.verify_key).hex()
+        wrong = bytes(SigningKey.generate().verify_key).hex()
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out), "--author", "acme", "--sign-key", priv]), 0)
+            # correct key → verified (0)
+            self.assertEqual(main(["verify-cp-export", str(out), "--pubkey", pub]), 0)
+            # signed but no key → UNVERIFIED (5), not a silent pass
+            self.assertEqual(main(["verify-cp-export", str(out)]), EXIT_UNVERIFIED)
+            # wrong key → INVALID (1)
+            self.assertEqual(main(["verify-cp-export", str(out), "--pubkey", wrong]), 1)
 
 
 class TestExportVerifiesGraph(unittest.TestCase):

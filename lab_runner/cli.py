@@ -767,7 +767,17 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
         export = export_cp(bundle, regressions, condition_id=args.condition, traces=traces)
     except CPExportError as exc:
         raise RunnerError(str(exc)) from exc
+    import shutil
+
     out = Path(args.out)
+    # a re-export must NOT leave stale files behind (review r20): an earlier export
+    # with an earned bridge, or extra regression traces, would linger and the
+    # manifest verifier would flag them — or worse, a reader would trust them. A
+    # non-empty directory requires --overwrite, and --overwrite REPLACES it wholly.
+    if out.exists() and any(out.iterdir()):
+        if not getattr(args, "overwrite", False):
+            raise RunnerError(f"{out} is not empty; pass --overwrite to replace it")
+        shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
     (out / "production-todo.md").write_text(export.production_todo)
@@ -815,7 +825,21 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
                     (bt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
                         json.dumps(trace, indent=2, ensure_ascii=False)
                     )
+    # a full-file MANIFEST binds EVERY file in the export, so verify-cp-export
+    # checks the whole directory (not just cp-deploy.json + source-bundle) and can
+    # detect a tampered bridge-analysis, a swapped trace, or a stale leftover. When
+    # an author key is supplied it is SIGNED, so a reader can confirm WHO released
+    # this exact handoff — derivability is not authenticity (review r20).
+    manifest = _cp_export_manifest(out, export.config)
+    if getattr(args, "author", None) and getattr(args, "sign_key", None):
+        from lab_contracts.signing import sign_bundle
+
+        manifest["author"] = args.author
+        manifest["signature"] = sign_bundle(manifest, args.sign_key)
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
+    print(f"  manifest: {len(manifest['files'])} files"
+          + (" (signed)" if manifest.get("signature") else " (unsigned — derivability + integrity only)"))
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
     # the parametric_config_hash is the carry-over key: kernel + policy + manifests
     # (effect classes, driving args, untrusted-field taint) with allowlist $inputs
@@ -839,30 +863,116 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
-    """Recompute a CP export FROM SCRATCH out of its own directory and confirm it
-    equals the shipped cp-deploy.json (review r19).
+def _cp_export_manifest(out: Path, config: dict[str, object]) -> dict[str, object]:
+    """A versioned, full-file manifest of a CP export directory (review r20): the
+    sha256 of EVERY file, plus the semantic refs (deploy config, source bundle,
+    regression set) an author signs over. verify-cp-export uses it to detect a
+    tampered bridge-analysis, a swapped trace, OR a stale leftover file — not just
+    to recompute cp-deploy.json."""
+    import hashlib
 
-    A reader must not have to trust the exporter: the self-contained directory
-    carries the full source bundle + every trace, so this re-runs the ENTIRE
-    handoff — graph verification, the design-aware bridge, the recorded runtime
-    provenance — and checks the recomputed config is byte-identical to the one on
-    disk. Any drift (a doctored deploy config, a swapped trace, a tampered
-    analysis) makes the recomputation differ and fails."""
+    files: dict[str, str] = {}
+    for path in sorted(out.rglob("*")):
+        if path.is_file() and path.name != "manifest.json":
+            rel = str(path.relative_to(out)).replace("\\", "/")
+            files[rel] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    src: dict[str, object] = config.get("source", {})  # type: ignore[assignment]
+    return {
+        "schema_version": "axor-cp-export-manifest/v1",
+        "condition_id": src.get("condition_id"),
+        "baseline_condition_id": src.get("baseline_condition_id"),
+        "deploy_config_ref": content_hash(config),
+        "source_bundle_ref": files.get("source-bundle/bundle.json"),
+        "regression_set_ref": content_hash(config.get("regressions", [])),
+        "bridge_analysis_ref": src.get("bridge_analysis_ref"),
+        "files": files,
+    }
+
+
+def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
+    """Verify a CP export directory: its full-file MANIFEST, its (optional)
+    SIGNATURE, and — recomputing from scratch — that the shipped cp-deploy.json is
+    exactly derivable from the embedded evidence (review r19/r20).
+
+    Three distinct guarantees, reported separately and honestly:
+      - INTEGRITY: every file matches the manifest hash and there are no unlisted
+        (stale/injected) files — so a tampered bridge-analysis or a leftover from
+        an earlier export is caught;
+      - AUTHENTICITY: when the manifest is signed, the signature verifies against a
+        supplied key, proving WHO released this exact handoff (derivability alone
+        does not — a different but internally-consistent config also recomputes);
+      - DERIVABILITY: the deploy config recomputes byte-identical from
+        source-bundle/ (graph + design-aware bridge + recorded runtime provenance).
+    """
     from .cp_export import CPExportError, export_cp
 
     directory = Path(args.dir)
     deploy_path = directory / "cp-deploy.json"
     if not deploy_path.is_file():
         raise RunnerError(f"{directory} has no cp-deploy.json — not a CP export directory")
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.is_file():
+        raise RunnerError(
+            f"{directory} has no manifest.json — this export predates full-file verification; "
+            "re-export with a current axor-lab so it carries its own manifest"
+        )
+    manifest: dict[str, object] = json.loads(manifest_path.read_text())
+    unverified = False
+    # 1) INTEGRITY — every listed file's hash matches, and nothing unlisted exists
+    import hashlib
+
+    files: dict[str, str] = manifest.get("files", {})  # type: ignore[assignment]
+    for rel, want in files.items():
+        path = directory / rel
+        if not path.is_file():
+            print(f"cp-export: INVALID — manifest names a missing file {rel!r}", file=sys.stderr)
+            return EXIT_FAILURE
+        got = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        if got != str(want):
+            print(f"cp-export: INVALID — {rel} does not match its manifest hash", file=sys.stderr)
+            return EXIT_FAILURE
+    on_disk = {
+        str(p.relative_to(directory)).replace("\\", "/")
+        for p in directory.rglob("*") if p.is_file() and p.name != "manifest.json"
+    }
+    extra = sorted(on_disk - set(files))
+    if extra:
+        print(f"cp-export: INVALID — files not in the manifest (stale or injected): {extra}",
+              file=sys.stderr)
+        return EXIT_FAILURE
+    print(f"cp-export: manifest INTEGRITY OK ({len(files)} files, no stale/unlisted)")
+    # 2) AUTHENTICITY — verify the signature when present
+    if manifest.get("signature"):
+        from lab_contracts.signing import (
+            SignatureInvalid,
+            SignatureUnavailable,
+            verify_bundle_signature,
+        )
+
+        pubkey = getattr(args, "pubkey", None)
+        if not pubkey:
+            print("cp-export: UNVERIFIED — signed manifest but no --pubkey to check it",
+                  file=sys.stderr)
+            unverified = True
+        else:
+            try:
+                verify_bundle_signature(manifest, str(manifest["signature"]), pubkey)
+            except SignatureInvalid as exc:
+                print(f"cp-export: INVALID — manifest signature does not verify: {exc}",
+                      file=sys.stderr)
+                return EXIT_FAILURE
+            except SignatureUnavailable as exc:
+                print(f"cp-export: UNVERIFIED — {exc}", file=sys.stderr)
+                unverified = True
+            else:
+                print(f"cp-export: signature VERIFIED (author {manifest.get('author')!r})")
+    else:
+        print("cp-export: unsigned manifest — integrity + derivability only, NOT authenticity")
+    # 3) DERIVABILITY — recompute the deploy config from the embedded evidence
     shipped: dict[str, object] = json.loads(deploy_path.read_text())
     source_dir = directory / "source-bundle"
     if not (source_dir / "bundle.json").is_file():
-        raise RunnerError(
-            f"{directory} has no source-bundle/ — this export was not written self-contained; "
-            "re-export with a current axor-lab so it carries its own evidence"
-        )
-    # read + schema-validate + hash-verify the embedded source bundle and traces
+        raise RunnerError(f"{directory} has no source-bundle/ — cannot recompute the handoff")
     bundle, traces = read_bundle_dir(source_dir)
     src: dict[str, object] = shipped.get("source", {})  # type: ignore[assignment]
     condition_id = str(src.get("condition_id")) if src.get("condition_id") else None
@@ -880,11 +990,9 @@ def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_FAILURE
-    verified = shipped.get("verified") is True
-    earned = bool(recomputed.earned_bridge)
-    print(f"cp-export: RECOMPUTED OK from {source_dir} ({len(traces)} traces)")
-    print(f"  config recomputes byte-identical; verified={verified}; earned_bridge={earned}")
-    return EXIT_OK
+    print(f"cp-export: RECOMPUTED OK from {source_dir} ({len(traces)} traces); "
+          f"verified={shipped.get('verified') is True}; earned_bridge={bool(recomputed.earned_bridge)}")
+    return EXIT_UNVERIFIED if unverified else EXIT_OK
 
 
 def _cmd_import_incident(args: argparse.Namespace) -> int:
@@ -1462,13 +1570,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--condition", default=None,
         help="which enforcing condition to deploy (required when several enforce)",
     )
+    p_export.add_argument("--overwrite", action="store_true",
+                          help="replace a non-empty output directory (clears stale files)")
+    p_export.add_argument("--author", default=None, help="author id to sign the export manifest as")
+    p_export.add_argument("--sign-key", dest="sign_key", default=None,
+                          help="Ed25519 private key (hex) to sign the export manifest")
     p_export.set_defaults(func=_cmd_export_cp)
 
     p_verify_cp = sub.add_parser(
         "verify-cp-export",
-        help="recompute a CP export from its own directory and confirm it matches cp-deploy.json",
+        help="verify a CP export's manifest, signature, and that cp-deploy.json recomputes",
     )
     p_verify_cp.add_argument("dir", help="a CP export directory produced by export-cp")
+    p_verify_cp.add_argument("--pubkey", default=None,
+                             help="Ed25519 public key (hex) to verify a signed manifest")
     p_verify_cp.set_defaults(func=_cmd_verify_cp_export)
 
     p_incident = sub.add_parser(
