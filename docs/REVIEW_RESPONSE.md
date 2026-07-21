@@ -381,3 +381,35 @@ evidence, the canonicalizer matches RFC 8785 byte-for-byte, a fail-closed
 incident is publishable, the gateway is a real conformity boundary, a partial
 run is labelled honestly, and a published result is verifiable offline — are
 closed.
+
+## Fifteenth review round — verification closure
+
+Round 14's fixes were real, but several guarantees were closed only at the first
+level: a bundle tombstone was not evidence-lineage removal, a receipt's presence
+was not a verified signature, a replay returning a verdict was not a replay that
+was actually possible, a lower stored estimate was not an earned bridge, and a
+finalized trace was not a safely delivered one. This round closes those to
+verification: a label is not granted unless the thing it names is proven. Eight
+patches, each with proving tests. Suite green: **586 tests**.
+
+| Round-15 finding | Fix | Proof |
+|---|---|---|
+| **P0** evidence takedown removed only the exact publication id and keyed on a packaging-sensitive bundle_ref — a sibling published earlier stayed public, and repackaging the same evidence escaped the tombstone | `evidence_lineage_ref` hashes only the load-bearing evidence (scenarios/conditions/manifests/completed-trial coords+refs/aggregate defs); takedown retires EVERY sibling on that lineage and blocks re-publish under altered metadata or repackaged bytes; reads guard on it; cold load is two-pass | `test_evidence_lineage_takedown.py` |
+| **P0** `axor-lab verify` exited 0 for an unverified signature, and verify_receipt accepted integrity=signed with the signature stripped | verify_receipt is a strict state machine (hash_verified ⇒ no signature; signed ⇒ ed25519 + non-empty signature/author/key_id that MUST verify; trust-anchor binding); the CLI returns 5 (unverified), 1 (invalid), 0 (verified) distinctly | `test_verification_outcome.py` |
+| **P0/P1** a redacted sensitive value a decision turned on was replayed against a hash sentinel yet reported match/mismatch; a fail-closed reason was not in the replay core | new `redacted_input_unavailable` status (exact replay refused, publish rejects it); `_verdict_core` includes `driving_unresolved` when the driving value is null; EvidenceCase claims exact only for a replayable status | `test_replay_capability.py` |
+| **P1** the server acceptance receipt was an unsigned, unpersisted blob the CLI ignored; the download carried the bundle but not the publication body | `PublicationStore.acceptance()` builds a deterministic, content-addressed, (optionally) Ed25519-signed axor-lab-acceptance/v1 receipt; it is persisted and returned; the download carries the publication + acceptance; `axor-lab publish` saves it | `test_server_acceptance.py` |
+| **P1** a test's power was read from a marginal aggregate n (a 1-pair McNemar rode an n=100); the server did not recompute the two_proportion interval or reject unknown test fields; hosted claims hid the planned/completed denominator | tests carry effective_n + status and are dropped when underpowered; check_aggregates recomputes the interval and rejects unrecognized fields; claims report completed/planned and flag condition-imbalanced missingness | `test_statistical_completeness.py` |
+| **P1** the CP earned bridge was true on a lower stored estimate alone — a 1-vs-1 run "earned" it; config_hash omitted the tool manifests | the bridge requires a minimum effect delta, minimum effective n, balanced arms, and an aggregate n not exceeding recorded completed trials; `executable_config_hash` binds the manifests; a pin with no recorded decision is rejected | `test_cp_bridge_policy.py` |
+| **P1** the gateway could evict a finalized trace before the client's first read | a run is FINALIZED_UNDELIVERED until its trace is fetched; eviction only takes delivered runs, else refuses (429) | `test_gateway_conformity.py` |
+| **P1** a mixed-kernel run wrote a bundle that failed its own schema; USD-only budgets weren't hard; condition order was a temporal confound; the signature schema described the wrong bytes; the page curl wasn't runnable | kernel_version optional + kernel_versions; write_bundle_dir schema-validates pre-swap; `output_cap` caps output at affordable USD; counterbalanced+recorded condition order; signature description fixed; curl uses an absolute origin | `test_contract_parity_r15.py` |
+
+Still deferred (documented): a cryptographic trusted-runtime attestation that
+would make a matched-pairs pairing (and `explicit_flow_tracked`) VERIFIED rather
+than uploader-declared, a token-accurate cost model, and a self-contained bundle
+that embeds the whole experiment document. The load-bearing round-15 goal —
+every `signed` requires a verified signature, every exact claim requires
+reconstructible inputs, takedown follows a stable lineage and removes all
+siblings, server acceptance is portable and checkable, statistical claims show
+their denominator, the production bridge rests on powered evidence, a finalized
+trace cannot be lost before delivery, and config_hash identifies the whole
+executable config — is closed.
