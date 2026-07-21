@@ -167,33 +167,80 @@ def condition_config_hash(kernel: str, policy: dict[str, object] | None) -> str:
     return content_hash({"kernel": kernel, "policy": policy or {}})
 
 
+def compiled_governor_config(
+    kernel: str,
+    policy: dict[str, object] | None,
+    tool_manifests: list[dict[str, object]],
+    inputs: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """The canonical, fully-normalized EXECUTABLE governor config — the exact
+    control the governor runs, in one place (review r15/r16).
+
+    condition_config_hash covers only kernel + policy, but the governor's verdicts
+    ALSO turn on the manifests: each sink's effect class (→ egress membership),
+    its driving args, whether it is an untrusted SOURCE, the per-field
+    ``untrusted_fields`` taint patterns the governor mints taint from, and any
+    allowlist value-policy. The old executable hash bound ``effect`` and
+    ``args_schema`` but NOT ``untrusted_fields`` — so two manifests that taint
+    different result fields (and therefore govern differently) hashed identically.
+    This binds them: a changed egress sink, driving arg, OR untrusted-field
+    pattern yields a different canonical config. ``$inputs.x`` allowlist refs are
+    expanded when ``inputs`` is supplied (runtime), left symbolic otherwise (the
+    scenario-independent carry-over identity)."""
+    from .inputs import expand_list
+    from .semantics import EGRESS_CLASSES
+
+    egress: list[str] = []
+    untrusted_sources: list[str] = []
+    driving: dict[str, list[str]] = {}
+    taint_fields: dict[str, list[str]] = {}
+    for manifest in tool_manifests:
+        tool_id = str(manifest.get("id"))
+        effect: dict[str, object] = manifest.get("effect", {}) or {}  # type: ignore[assignment]
+        classes = {str(effect.get("default_class"))}
+        classes.update(str(rule["class"]) for rule in effect.get("resolve", []))  # type: ignore[union-attr]
+        if classes & EGRESS_CLASSES:
+            egress.append(tool_id)
+        fields = [str(p) for p in manifest.get("untrusted_fields", [])]  # type: ignore[union-attr]
+        if fields:
+            untrusted_sources.append(tool_id)
+            taint_fields[tool_id] = sorted(fields)
+        args = [str(a) for a in effect.get("driving_args", [])]  # type: ignore[union-attr]
+        if args:
+            driving[tool_id] = args
+    egress.sort()
+    untrusted_sources.sort()
+    value_policies: dict[str, object] = {}
+    allowlist = (policy or {}).get("allowlist")
+    if allowlist:
+        resolved = (
+            list(expand_list(list(allowlist), inputs))  # type: ignore[arg-type]
+            if inputs is not None else list(allowlist)  # type: ignore[arg-type]
+        )
+        for sink in egress:
+            arg = (driving.get(sink) or ["recipient"])[0]
+            value_policies[sink] = {arg: {"enum": resolved}}
+    return {
+        "kernel": kernel,
+        "egress_sinks": egress,
+        "untrusted_sources": untrusted_sources,
+        "untrusted_fields": taint_fields,
+        "driving_args": driving,
+        "value_policies": value_policies,
+    }
+
+
 def executable_config_hash(
     kernel: str,
     policy: dict[str, object] | None,
     tool_manifests: list[dict[str, object]],
 ) -> str:
-    """The hash of the FULL config the governor actually executes (review r15).
-
-    condition_config_hash covers only kernel + policy, but the real governor's
-    verdicts ALSO turn on the tool manifests — each sink's effect class, driving
-    args, and effect-resolution rules. Two experiments with the same kernel and
-    policy but different manifests (a different egress sink, different
-    driving_args, an untrusted-source rule) govern differently, so the plain
-    config_hash is not a sufficient carry-over identity for a production handoff.
-    This hash binds the manifests too, so a Control Plane deploy keyed on it
-    reproduces the exact executable config Lab measured."""
-    tools = sorted(
-        (
-            {
-                "id": str(m.get("id")),
-                "effect": m.get("effect", {}),
-                "args_schema": m.get("args_schema", {}),
-            }
-            for m in tool_manifests
-        ),
-        key=lambda t: t["id"],
-    )
-    return content_hash({"kernel": kernel, "policy": policy or {}, "tools": tools})
+    """sha256 over the canonical compiled governor config (review r15/r16): a
+    Control Plane deploy keyed on it reproduces the exact executable config Lab
+    measured — manifests, untrusted-field taint patterns, and allowlist included.
+    The carry-over identity is scenario-independent (allowlist ``$inputs`` refs
+    stay symbolic), so it is stable across the scenarios the config was run on."""
+    return content_hash(compiled_governor_config(kernel, policy, tool_manifests))
 
 
 def world_digest(inputs: dict[str, object], fixtures: dict[str, object] | None) -> str:

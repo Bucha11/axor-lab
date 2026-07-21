@@ -1,133 +1,117 @@
-"""Control Plane earned-bridge policy + executable config hash (review r15).
-
-A lower stored estimate is not a production signal: the earned bridge now
-requires a meaningful, powered, balanced delta whose n does not exceed the
-completed trials the bundle recorded. And the carry-over key is the FULL
-executable config hash, which changes when the tool manifests (driving args,
-effect classes) change — not just kernel+policy.
+"""Control Plane earned-bridge is derived from evidence, not stored aggregates
+(review r16). The bridge recomputes ASR from the TRACES; fabricated
+hash-consistent aggregates cannot earn it; the denominator is the full completed
+set; and the delta must be statistically separated (its 95% interval excludes
+zero), not merely large.
 """
 
 from __future__ import annotations
 
 import unittest
 
-from lab_contracts import condition_config_hash, executable_config_hash
+from tests import support
+from lab_analysis import binary_aggregate
+from lab_contracts import build_bundle, content_hash
+from lab_runner import ScriptedAgent, run_experiment_suite
 from lab_runner.cp_export import earned_bridge
 
-KERNEL = "reference_taint_floor_kernel"
+CREATED = "2026-07-20T12:00:00+00:00"
 
 
-def _bundle(base_n: int, treated_n: int, base_breach: int, treated_breach: int,
-            base_completed: int | None = None, treated_completed: int | None = None) -> dict:
-    from lab_analysis import binary_aggregate
-
-    base_completed = base_n if base_completed is None else base_completed
-    treated_completed = treated_n if treated_completed is None else treated_completed
-    conditions = [
-        {"schema_version": "condition/v1", "id": "baseline", "enforcement": "off",
-         "kernel": KERNEL, "policy": {}},
-        {"schema_version": "condition/v1", "id": "governed", "enforcement": "on",
-         "kernel": KERNEL, "policy": {"profile": "strict"}},
-    ]
-    for c in conditions:
-        c["config_hash"] = condition_config_hash(KERNEL, c["policy"])
-    trials = (
-        [{"trial_id": f"b{i}", "scenario_id": "s", "condition_id": "baseline",
-          "seed": f"s{i:03d}", "repeat_index": i, "status": "completed", "trace_ref": f"rb{i}"}
-         for i in range(base_completed)]
-        + [{"trial_id": f"g{i}", "scenario_id": "s", "condition_id": "governed",
-            "seed": f"s{i:03d}", "repeat_index": i, "status": "completed", "trace_ref": f"rg{i}"}
-           for i in range(treated_completed)]
+def _trace_pools():
+    """Run the real slice; return (violating_traces, clean_traces) — the
+    ungoverned run violates, the governed run is denied (no violation)."""
+    result = run_experiment_suite(
+        [support.banking_scenario()], support.manifests(), support.conditions(),
+        support.kernel_registry(), repeats=30, run_id="r_pool", agent=ScriptedAgent(attack_rate=1.0),
     )
+    scenario = support.banking_scenario()
+    from lab_runner import evaluate
+    violating, clean = [], []
+    for trace in result.traces.values():
+        if evaluate(scenario["violation"], trace, scenario.get("inputs", {})):
+            violating.append(trace)
+        else:
+            clean.append(trace)
+    return violating, clean
+
+
+_VIOLATING, _CLEAN = _trace_pools()
+
+
+def _bundle(base_violations: int, base_n: int, treated_violations: int, treated_n: int):
+    """Build a bundle whose ungoverned/governed conditions have EXACTLY the given
+    violation counts, by binding trials to real violating/clean traces."""
+    assert base_violations <= min(base_n, len(_VIOLATING))
+    assert treated_violations <= min(treated_n, len(_VIOLATING))
+    scenario = support.banking_scenario()
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+
+    def _add(cid: str, n: int, violations: int):
+        nonlocal order
+        for i in range(n):
+            src = (_VIOLATING if i < violations else _CLEAN)[i % 30]
+            # give each trial a distinct trace by tagging the trace_id
+            trace = {**src, "trace_id": f"t_{cid}_{i}"}
+            ref = content_hash(trace)
+            traces[str(trace["trace_id"])] = trace
+            trials.append({
+                "trial_id": f"tr_{cid}_{i}", "scenario_id": str(scenario["name"]),
+                "condition_id": cid, "seed": f"s{i:03d}", "repeat_index": i,
+                "status": "completed", "trace_ref": ref, "execution_order": order,
+            })
+            order += 1
+
+    _add("ungoverned", base_n, base_violations)
+    _add("governed", treated_n, treated_violations)
+    # honest aggregates recomputed from the same counts
     aggregates = [
-        binary_aggregate("ASR", "baseline", base_breach, base_n),
-        binary_aggregate("ASR", "governed", treated_breach, treated_n),
+        binary_aggregate("ASR", "ungoverned", base_violations, base_n),
+        binary_aggregate("ASR", "governed", treated_violations, treated_n),
     ]
-    return {
-        "schema_version": "bundle/v1", "bundle_id": "b", "conditions": conditions,
-        "aggregates": aggregates, "tool_manifests": [], "trials": trials,
-    }
+    bundle = build_bundle(
+        bundle_id="b_cpb", created=CREATED, scenarios=[scenario], conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
 
 
-class TestEarnedBridgePolicy(unittest.TestCase):
-    def test_powered_balanced_delta_earns_the_bridge(self) -> None:
-        # 24 vs 24, ASR 0.75 -> 0.10, big delta → earned
-        self.assertTrue(earned_bridge(_bundle(24, 24, 18, 2)))
+class TestEvidenceDerivedBridge(unittest.TestCase):
+    def test_powered_separated_delta_earns_from_traces(self) -> None:
+        bundle, traces = _bundle(24, 24, 0, 24)  # ASR 1.0 -> 0.0
+        self.assertTrue(earned_bridge(bundle, traces=traces))
 
-    def test_one_vs_one_delta_does_not_earn(self) -> None:
-        # baseline 1/1=1.0, governed 0/1=0.0 — the review's example. Not earned.
-        self.assertFalse(earned_bridge(_bundle(1, 1, 1, 0)))
+    def test_no_traces_cannot_earn(self) -> None:
+        bundle, _ = _bundle(24, 24, 0, 24)
+        self.assertFalse(earned_bridge(bundle))  # no traces → not verifiable
 
-    def test_below_minimum_effective_n_does_not_earn(self) -> None:
-        # a clean 10 vs 10 delta is still under the minimum effective n
-        self.assertFalse(earned_bridge(_bundle(10, 10, 8, 0)))
+    def test_below_minimum_n_does_not_earn(self) -> None:
+        bundle, traces = _bundle(8, 8, 0, 8)
+        self.assertFalse(earned_bridge(bundle, traces=traces))
 
-    def test_tiny_effect_does_not_earn(self) -> None:
-        # 24 vs 24 but only a 0.04 delta (below the 0.10 minimum)
-        self.assertFalse(earned_bridge(_bundle(24, 24, 12, 11)))
+    def test_no_real_effect_does_not_earn(self) -> None:
+        bundle, traces = _bundle(24, 24, 24, 24)  # both arms violate → delta 0
+        self.assertFalse(earned_bridge(bundle, traces=traces))
 
-    def test_imbalanced_arms_do_not_earn(self) -> None:
-        # baseline 40, governed 5 — a lopsided partial run, even with a big delta
-        self.assertFalse(earned_bridge(_bundle(40, 5, 30, 0)))
+    def test_cp_bridge_rejects_fabricated_hash_consistent_aggregates(self) -> None:
+        # real traces show NO effect (both arms violate), but the aggregates are
+        # fabricated to claim a perfect governed result. The bridge recomputes
+        # from traces, so the fabrication is ignored → not earned.
+        bundle, traces = _bundle(24, 24, 24, 24)
+        gov = next(a for a in bundle["aggregates"] if a["condition_id"] == "governed")
+        gov["estimate"] = 0.0  # fabricated: claim governance eliminated the attack
+        self.assertFalse(earned_bridge(bundle, traces=traces))
 
-    def test_aggregate_n_exceeding_completed_trials_does_not_earn(self) -> None:
-        # aggregates claim 24 each, but only 1 completed trial exists per condition
-        self.assertFalse(earned_bridge(
-            _bundle(24, 24, 18, 2, base_completed=1, treated_completed=1)
-        ))
-
-
-class TestExecutableConfigHash(unittest.TestCase):
-    def _manifest(self, driving: list[str]) -> dict:
-        return {"id": "send_money", "effect": {"default_class": "EXPORT", "driving_args": driving}}
-
-    def test_hash_changes_when_driving_args_change(self) -> None:
-        a = executable_config_hash(KERNEL, {}, [self._manifest(["recipient"])])
-        b = executable_config_hash(KERNEL, {}, [self._manifest(["recipient", "body"])])
-        self.assertNotEqual(a, b)
-
-    def test_hash_differs_from_plain_config_hash(self) -> None:
-        manifests = [self._manifest(["recipient"])]
-        self.assertNotEqual(
-            executable_config_hash(KERNEL, {}, manifests),
-            condition_config_hash(KERNEL, {}),
-        )
-
-    def test_hash_is_manifest_order_independent(self) -> None:
-        m1 = {"id": "a", "effect": {}}
-        m2 = {"id": "b", "effect": {}}
-        self.assertEqual(
-            executable_config_hash(KERNEL, {}, [m1, m2]),
-            executable_config_hash(KERNEL, {}, [m2, m1]),
-        )
-
-
-class TestPinWithoutDecision(unittest.TestCase):
-    def test_cp_rejects_pin_with_no_recorded_decision(self) -> None:
-        from lab_contracts import content_hash
-        from lab_runner.cp_export import CPExportError, export_cp
-
-        # a trace with events but NO gate_decision — nothing to regress against
-        trace = {
-            "schema_version": "trace/v1", "trace_id": "t_nodec",
-            "trial": {"run_id": "r", "scenario_id": "s", "condition_id": "governed",
-                      "seed": "s000", "repeat_index": 0},
-            "producer": {"mode": "wrapped_code", "provenance_fidelity": "heuristic_attribution",
-                         "kernel_version": KERNEL, "runtime": "x"},
-            "events": [{"seq": 0, "node": "root", "type": "tool_result", "tool": "read_txns",
-                        "produces_value_ids": []}],
-            "values": [],
-        }
-        ref = content_hash(trace)
-        bundle = _bundle(24, 24, 18, 2)
-        bundle["trials"].append({
-            "trial_id": "t_nodec", "scenario_id": "s", "condition_id": "governed",
-            "seed": "s999", "repeat_index": 99, "status": "completed", "trace_ref": ref,
-        })
-        pin = {"trace_id": "t_nodec", "expected_verdict": "DENY"}
-        with self.assertRaises(CPExportError) as ctx:
-            export_cp(bundle, regressions=[pin], traces={"t_nodec": trace}, condition_id="governed")
-        self.assertIn("no recorded gate decision", str(ctx.exception))
+    def test_cp_bridge_requires_interval_to_exclude_zero(self) -> None:
+        # a real delta of 0.15 (20/20 vs 17/20) clears the min-delta gate, but at
+        # n=20 the difference's 95% interval includes zero → not a production
+        # signal → not earned
+        bundle, traces = _bundle(20, 20, 17, 20)
+        self.assertFalse(earned_bridge(bundle, traces=traces))
 
 
 if __name__ == "__main__":

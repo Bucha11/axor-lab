@@ -413,3 +413,35 @@ siblings, server acceptance is portable and checkable, statistical claims show
 their denominator, the production bridge rests on powered evidence, a finalized
 trace cannot be lost before delivery, and config_hash identifies the whole
 executable config — is closed.
+
+## Sixteenth review round — the artifact-vs-execution gap
+
+Round 15 closed *labels* to verification. Round 16 closes the gap between a
+thing EXISTING in an artifact and it actually being EXECUTED / TRUE: a proof
+object existing is not that it was checked; a pinned kernel version being written
+is not that that kernel ran; a stored aggregate is not evidence; a stored
+acceptance is not the one the server signed. Most dangerous first — a real
+`axor-core@X` artifact silently replayed under the reference kernel and written
+bit-identical. Seven patches + two lower-severity fixes, each with proving tests.
+Suite green: **613 tests**.
+
+| Round-16 finding | Fix | Proof |
+|---|---|---|
+| **P0** a bundle pinning `axor-core@X` on a machine without that exact build fell through to `registry.get()`, which minted a reference kernel for any string — so it replayed under the one-gate reference kernel yet claimed the pinned build and wrote a bit-identical verdict | `resolve_kernel` satisfies a real-kernel pin ONLY with the exact installed build; missing/mismatched raises `UnknownKernelError` → `REPLAY_UNSUPPORTED_KERNEL`, never a silent substitution; the standard slice pins `reference_taint_floor_kernel` and says so | `test_kernel_identity.py` |
+| **P0** a downloaded server package could have its receipt stripped (or its publication/acceptance edited) and `verify` still exited 0 | `verify` detects a server package and REQUIRES a receipt + a publication-binding check + an acceptance state-machine check (`verify_publication_binding`, `verify_acceptance`); a stripped receipt or edited claim fails | `test_package_verification.py` |
+| **P0** a repeated takedown erased the stable lineage tombstone after a restart; a crash between tombstone and body-sweep left an orphan servable; array-order permutation dodged the lineage guard | durable `_lineage_tombstones` registry loaded first on cold start; takedown is idempotent and writes the lineage tombstone (fsync) before deleting bodies; `evidence_lineage_ref` maps scenarios/conditions/manifests by id→content-hash (order-independent) | `test_lineage_durability.py` |
+| **P1** the Control Plane earned bridge read the uploaded aggregates — a hand-built bundle could earn it with fabricated but hash-consistent numbers | the bridge RECOMPUTES ASR from the traces via the scenario's own `violation` predicate; earns only on a powered, balanced, statistically-separated delta (2-proportion 95% interval excludes zero); without traces it is unverifiable → not earned | `test_cp_bridge_policy.py` |
+| **P1** McNemar's `effective_n` was the total matched-pair count (a 200-pair, 1-discordant run read as powered); the server didn't reject inconclusive uploaded tests or demand the exact test shape | `effective_n` is the DISCORDANT n (b+c); the server recompute demands the exact test shape and refuses a test it recomputes as inconclusive (runner/server parity) | `test_statistical_completeness.py` |
+| **P1** `executable_config_hash` bound `effect`+`args_schema` but NOT `untrusted_fields`, so manifests that taint different fields hashed identically; the real kernel never expanded `$inputs` allowlists | one canonical `compiled_governor_config` (untrusted-field taint patterns included) is the sole source of the hash AND the runner's governor kwargs; real-kernel allowlists expand `$inputs` against scenario inputs; export-cp surfaces the executable hash as the carry-over key | `test_real_kernel.py` |
+| **P1** the gateway marked a run `delivered` (evictable) inside the GET handler, before the socket write — a failed write or a client crash lost a trace the client never received | the trace is frozen at finalize; GET serves it and is repeatable without marking delivered; a new `POST /trace/ack` is the only thing that marks delivered → evictable; an unacked trace stays retrievable | `test_gateway_conformity.py` |
+| **P1** the persisted `acceptance.json` was never read on load; every `acceptance()` re-minted, re-signing under whatever key the server held NOW — a rotation silently replaced the historical attestation | the receipt is restored from disk (binding-verified) and served verbatim; signature verification is the reader's job with the publishing key; a tampered file is dropped and re-minted clean | `test_server_acceptance.py` |
+| **P2** replay flagged the WHOLE trace `redacted_input_unavailable` even under enforcement off, where the verdict is an arg-independent ALLOW; `--max-usd` read as a hard cap | the off-path replays exactly without the redacted value → MATCH; docs/CLI name the USD ceiling BEST-EFFORT (illustrative prices) and the token ceilings HARD | `test_replay_capability.py` |
+
+The round-16 goal — a pinned kernel is the kernel that ran or the trace is
+`unsupported_kernel`; a downloaded package's receipt/publication/acceptance are
+all verified before `verify` exits 0; takedown is durable, crash-safe, and
+order-independent; the CP bridge and every hosted statistic are recomputed from
+evidence, never trusted from an uploaded number; the executable-config identity
+binds the whole compiled governor config; a finalized trace is delivered only
+when the client acknowledges it; and the acceptance served is the one the server
+signed — is closed.

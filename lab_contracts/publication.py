@@ -97,6 +97,36 @@ def derive_publication_id(publication: dict[str, object]) -> str:
     return f"e_{content_hash(body).removeprefix('sha256:')[:32]}"
 
 
+def verify_publication_binding(
+    publication: dict[str, object], bundle: dict[str, object]
+) -> list[str]:
+    """Offline checks binding a downloaded publication to its bundle (review r16).
+
+    A reproduction package's publication body was never verified — a reader could
+    edit the question, claims, or integrity and the verifier stayed green. This
+    confirms the publication is schema-valid, its id content-addresses its own
+    body, and its bundle_ref is the content hash of the bundle actually shipped —
+    so the claims a reader sees are provably the ones the id commits to over THIS
+    evidence. Returns a list of problems (empty ⇒ bound)."""
+    from .canonical import content_hash
+    from .semantics import validate_artifact
+
+    problems = [f"publication: {e}" for e in validate_artifact(publication, "publication")]
+    pid = str(publication.get("publication_id", ""))
+    if pid != derive_publication_id(publication):
+        problems.append(
+            f"publication_id {pid!r} does not content-address the publication body "
+            "(claims/question/integrity may have been edited)"
+        )
+    bref = str(publication.get("bundle_ref", ""))
+    if bref != content_hash(bundle):
+        problems.append(
+            f"publication.bundle_ref {bref!r} != content_hash of the shipped bundle "
+            f"{content_hash(bundle)!r}"
+        )
+    return problems
+
+
 def finalize_publication_id(publication: dict[str, object]) -> dict[str, object]:
     """Set publication_id (and its derived reproductions_ref) from the content
     address of the body. Call after building a publication with a placeholder id."""

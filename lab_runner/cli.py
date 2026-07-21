@@ -277,27 +277,29 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _package_receipt(path: Path) -> dict[str, object] | None:
-    """The portable verification receipt from a downloaded `.json` package, or
-    None for a bundle DIRECTORY (which ships no receipt)."""
+_REPRODUCTION_PACKAGE_SCHEMA = "axor-reproduction-package/v1"
+
+
+def _package_data(path: Path) -> dict[str, object] | None:
+    """The raw JSON of a downloaded `.json` package, or None for a bundle
+    DIRECTORY (which ships no receipt/publication/acceptance)."""
     if not path.is_file():
         return None
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    receipt = data.get("receipt") if isinstance(data, dict) else None
-    return receipt if isinstance(receipt, dict) else None
+    return data if isinstance(data, dict) else None
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
     """Standalone, offline verification of a downloaded reproduction package —
-    NO server trusted (review r14). Confirms: content hashes verify, verdicts
-    replay bit-identically, and (for a downloaded package) the portable receipt's
-    signed_ref matches the bundle and any author signature verifies."""
+    NO server trusted. Confirms content hashes, bit-identical replay, and — for a
+    server-issued package — that EVERY proof object is present and binds: the
+    author receipt (signed_ref/signature), the publication (id + bundle_ref +
+    claims), and the server acceptance (semantic report + signature). Stripping
+    any proof from a server package is a failure, not a silent pass (review r16)."""
     path = Path(args.package)
-    # read_bundle_source runs schema validation + verify_bundle (content hashes);
-    # a corrupt package is a clean RunnerError → exit 1, not a traceback
     bundle, traces = read_bundle_source(path)
     print(f"content hashes: OK ({len(traces)} trace(s), {len(bundle['conditions'])} conditions)")  # type: ignore[arg-type]
     versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
@@ -308,33 +310,78 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         return EXIT_FAILURE
     print(f"replay: bit-identical over {len(report.decisions)} trace(s)")
 
-    receipt = _package_receipt(path)
-    if receipt is None:
+    data = _package_data(path)
+    receipt = data.get("receipt") if data else None
+    # a SERVER reproduction package (bears the package schema, or carries a
+    # publication/acceptance) MUST present every proof object — a bundle directory
+    # or a bare {bundle,traces} package legitimately has none
+    is_server_package = bool(data) and (
+        str(data.get("schema_version")) == _REPRODUCTION_PACKAGE_SCHEMA
+        or "publication" in data or "acceptance" in data
+    )
+    if not isinstance(receipt, dict):
+        if is_server_package:
+            print("receipt: MISSING from a server package (stripped?) — refusing to pass",
+                  file=sys.stderr)
+            return EXIT_FAILURE
         print("receipt: none (a bundle directory carries no portable receipt)")
         return EXIT_OK
-    from lab_contracts.signing import SignatureInvalid, SignatureUnavailable, verify_receipt
 
-    pubkey = getattr(args, "pubkey", None)
-    expected_author = getattr(args, "author", None)
+    from lab_contracts.publication import verify_publication_binding
+    from lab_contracts.signing import (
+        SignatureInvalid,
+        SignatureUnavailable,
+        verify_acceptance,
+        verify_receipt,
+    )
+
+    unverified = False  # a signature we could not check (distinct from invalid)
+    # 1) author receipt
     try:
-        verify_receipt(bundle, receipt, pubkey, expected_author=expected_author)
+        verify_receipt(bundle, receipt, getattr(args, "pubkey", None),
+                       expected_author=getattr(args, "author", None))
     except SignatureInvalid as exc:
         print(f"receipt: INVALID — {exc}", file=sys.stderr)
         return EXIT_FAILURE
     except SignatureUnavailable as exc:
-        # signed_ref + structure OK, but the signature itself could NOT be checked
-        # (no key supplied / PyNaCl absent). This is NOT a pass — return a distinct
-        # nonzero code so a CI gate never treats "unverified" as "verified" (r15)
-        print(f"receipt: UNVERIFIED (integrity OK, authenticity unchecked) — {exc}", file=sys.stderr)
-        return EXIT_UNVERIFIED
-    if str(receipt.get("integrity")) == "signed":
-        print(
-            f"receipt: signature VERIFIED (author {receipt.get('author')!r}, "
-            f"key {receipt.get('key_id')!r})"
-        )
+        print(f"receipt: UNVERIFIED — {exc}", file=sys.stderr)
+        unverified = True
     else:
-        print(f"receipt: signed_ref OK ({receipt.get('integrity')}; hash-only, no signature)")
-    return EXIT_OK
+        kind = "signature VERIFIED" if str(receipt.get("integrity")) == "signed" else "signed_ref OK (hash-only)"
+        print(f"receipt: {kind}")
+
+    if is_server_package:
+        publication = data.get("publication")
+        acceptance = data.get("acceptance")
+        if not isinstance(publication, dict) or not isinstance(acceptance, dict):
+            print("package: MISSING publication or acceptance (server package) — refusing to pass",
+                  file=sys.stderr)
+            return EXIT_FAILURE
+        # 2) publication binds to the bundle and its own id
+        problems = verify_publication_binding(publication, bundle)
+        if problems:
+            print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
+            return EXIT_FAILURE
+        print("publication: bound (id + bundle_ref + claims)")
+        # 3) server acceptance binds + (optionally) verifies
+        try:
+            verify_acceptance(
+                acceptance, publication,
+                server_pubkey_hex=getattr(args, "server_pubkey", None),
+                expected_server=getattr(args, "server", None),
+                expected_key_id=getattr(args, "server_key_id", None),
+            )
+        except SignatureInvalid as exc:
+            print(f"acceptance: INVALID — {exc}", file=sys.stderr)
+            return EXIT_FAILURE
+        except SignatureUnavailable as exc:
+            print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
+            unverified = True
+        else:
+            signed = str(acceptance.get("algorithm")) == "ed25519"
+            print(f"acceptance: {'signature VERIFIED' if signed else 'bound (unsigned)'}")
+
+    return EXIT_UNVERIFIED if unverified else EXIT_OK
 
 
 def _cmd_pin(args: argparse.Namespace) -> int:
@@ -640,7 +687,12 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
-    print(f"  config_hash (carry-over key): {export.config['config_hash']}")
+    # the executable_config_hash is the TRUE carry-over key: it binds the kernel,
+    # policy, AND the manifests (effect classes, driving args, untrusted-field
+    # taint) the governor actually runs — the plain config_hash covers only
+    # kernel+policy and two runs with different manifests share it (review r16)
+    print(f"  executable_config_hash (carry-over key): {export.config['executable_config_hash']}")
+    print(f"  config_hash (kernel+policy anchor): {export.config['config_hash']}")
     print(f"  regressions carried: {len(carried)}"
           + (f" (frozen trace bodies in {out}/regression-traces/)" if carried else ""))
     print(f"  production-todo (NOT reused): {out}/production-todo.md")
@@ -1100,14 +1152,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--real-kernel", action="store_true",
         help="govern with the installed axor-core kernel (not the reference)",
     )
-    # hard run-wide cost ceilings (review r11): checked against ACTUAL usage
-    # between trials, so the run stops before the next provider call
+    # run-wide cost ceilings (review r11): checked against ACTUAL usage between
+    # trials, so the run stops before the next provider call. Token ceilings are
+    # HARD; the USD ceiling is BEST-EFFORT (illustrative prices, projected input),
+    # not a provider-guaranteed dollar cap (review r16 P2)
     p_run.add_argument("--max-usd", type=float, default=None,
-                       help="stop the run once estimated spend reaches this USD ceiling")
+                       help="stop near this USD figure (BEST-EFFORT: illustrative prices, "
+                            "not a provider-guaranteed cap — pair with --max-*-tokens for a hard bound)")
     p_run.add_argument("--max-input-tokens", type=int, default=None,
-                       help="stop the run once actual input tokens reach this ceiling")
+                       help="hard ceiling: stop once actual input tokens reach this")
     p_run.add_argument("--max-output-tokens", type=int, default=None,
-                       help="stop the run once actual output tokens reach this ceiling")
+                       help="hard ceiling: stop once actual output tokens reach this")
     p_run.add_argument(
         "--overwrite", action="store_true",
         help="replace a non-empty --out directory (clears stale traces first)",
@@ -1128,6 +1183,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_verify.add_argument(
         "--author", help="expected author id (trust anchor); the receipt's author must match it"
+    )
+    p_verify.add_argument(
+        "--server-pubkey", help="server Ed25519 public key (hex) to verify the acceptance receipt"
+    )
+    p_verify.add_argument(
+        "--server", help="expected server_id (trust anchor) for the acceptance receipt"
+    )
+    p_verify.add_argument(
+        "--server-key-id", help="expected server key_id (trust anchor) for the acceptance receipt"
     )
     p_verify.set_defaults(func=_cmd_verify)
 

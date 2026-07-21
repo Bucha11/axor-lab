@@ -28,7 +28,10 @@ def _bundle_and_traces(environment: dict | None = None):
     conditions = support.conditions()
     result = run_experiment_suite(
         [scenario], support.manifests(), conditions, support.kernel_registry(),
-        repeats=10, run_id="r_sc",
+        # enough repeats that the DISCORDANT pairs (McNemar's real sample) clear
+        # the minimum effective n — at attack_rate 0.6 the concordant pairs (agent
+        # never attacked) don't count toward the test's power (review r16)
+        repeats=24, run_id="r_sc",
     )
     pairs = result.pairs("ungoverned", "governed", metric="ASR")
     aggregates = [
@@ -65,6 +68,28 @@ class TestTestEffectiveN(unittest.TestCase):
         self.assertIn("test", agg)
         self.assertEqual(agg["test"]["status"], "conclusive")
 
+    def test_mcnemar_effective_n_is_discordant_n(self) -> None:
+        # McNemar's power lives in the DISCORDANT pairs (b + c); the concordant
+        # pairs (both arms same) contribute nothing. A 200-pair run that is almost
+        # all concordant is NOT a 200-observation test (review r16).
+        pairs = (
+            [(True, False)] * 5     # b = 5 (baseline succeeds, treated doesn't)
+            + [(False, True)] * 3   # c = 3 (treated succeeds, baseline doesn't)
+            + [(True, True)] * 10   # concordant — no power
+            + [(False, False)] * 4  # concordant — no power
+        )
+        test = mcnemar_test(pairs, vs="baseline")
+        self.assertEqual(test["discordant"], {"b": 5, "c": 3})
+        self.assertEqual(test["paired_n"], 22)         # the matched-pair denominator
+        self.assertEqual(test["effective_n"], 8)       # b + c, NOT 22
+        self.assertEqual(test["status"], "inconclusive")  # 8 < 10
+
+    def test_mcnemar_with_ten_discordant_is_conclusive_regardless_of_concordant(self) -> None:
+        pairs = [(True, False)] * 10 + [(True, True)] * 500  # 10 discordant, 500 noise
+        test = mcnemar_test(pairs, vs="baseline")
+        self.assertEqual(test["effective_n"], 10)
+        self.assertEqual(test["status"], "conclusive")
+
 
 class TestServerRecomputesWholeTest(unittest.TestCase):
     def test_unknown_test_fields_are_rejected(self) -> None:
@@ -99,6 +124,54 @@ class TestServerRecomputesWholeTest(unittest.TestCase):
         gov["test"]["interval"] = {"method": "newcombe", "low": 0.9, "high": 1.0}
         problems = check_aggregates(bundle, traces)
         self.assertTrue(any("interval" in p for p in problems), problems)
+
+    def test_server_rejects_inconclusive_uploaded_test(self) -> None:
+        # a caller manually attaches an UNDERPOWERED test (few discordant pairs) —
+        # one the runner's binary_aggregate would have dropped. The server must
+        # recompute it as inconclusive and refuse to mint a reproducible claim over
+        # it, achieving parity with the tool that built the bundle (review r16).
+        result = run_experiment_suite(
+            [support.banking_scenario()], support.manifests(), support.conditions(),
+            support.kernel_registry(), repeats=10, run_id="r_incon",  # only ~7 discordant
+        )
+        pairs = result.pairs("ungoverned", "governed", metric="ASR")
+        underpowered = mcnemar_test(pairs, vs="ungoverned")
+        self.assertEqual(underpowered["status"], "inconclusive")
+        aggregates = [
+            binary_aggregate("ASR", "ungoverned", sum(1 for b, _ in pairs if b), len(pairs)),
+            binary_aggregate("ASR", "governed", sum(1 for _, t in pairs if t), len(pairs)),
+        ]
+        # binary_aggregate dropped the test; re-attach it by hand as a fabricator would
+        gov = next(a for a in aggregates if a["condition_id"] == "governed")
+        gov["test"] = underpowered
+        bundle = build_bundle(
+            bundle_id="b_incon", created=CREATED, scenarios=[support.banking_scenario()],
+            conditions=support.conditions(), tool_manifests=list(support.manifests().values()),
+            environment=support.environment(), trials=result.trials, aggregates=aggregates,
+            traces=result.traces,
+        )
+        traces = {str(t["trace_id"]): t for t in result.traces.values()}
+        problems = check_aggregates(bundle, traces)
+        self.assertTrue(any("inconclusive" in p for p in problems), problems)
+
+    def test_server_requires_exact_recomputed_test_shape(self) -> None:
+        # the uploaded test must carry PRECISELY the recomputed fields: a missing
+        # required field (dropped paired_n) and a stale value are both refused, not
+        # just extra fields (review r16).
+        bundle, traces = _bundle_and_traces()
+        gov = next(a for a in bundle["aggregates"] if a["condition_id"] == "governed")
+        self.assertEqual(check_aggregates(bundle, traces), [])  # honest first
+
+        missing = copy.deepcopy(bundle)
+        mgov = next(a for a in missing["aggregates"] if a["condition_id"] == "governed")
+        del mgov["test"]["paired_n"]
+        self.assertTrue(any("missing recomputed field" in p
+                            for p in check_aggregates(missing, traces)))
+
+        stale = copy.deepcopy(bundle)
+        sgov = next(a for a in stale["aggregates"] if a["condition_id"] == "governed")
+        sgov["test"]["effective_n"] = int(sgov["test"]["effective_n"]) + 3  # stale power
+        self.assertTrue(any("effective_n" in p for p in check_aggregates(stale, traces)))
 
 
 class TestHostedClaimReportsMissingness(unittest.TestCase):

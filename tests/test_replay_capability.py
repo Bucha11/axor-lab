@@ -83,6 +83,22 @@ class TestRedactedInputUnavailable(unittest.TestCase):
         self.assertEqual(cf["claim_kind"], "not_exactly_replayable")
         self.assertEqual(cf["replay_status"], REPLAY_REDACTED_INPUT_UNAVAILABLE)
 
+    def test_redacted_value_under_enforcement_off_still_replays_match(self) -> None:
+        # an UNGOVERNED (enforcement off) trace's verdict is an unconditional ALLOW
+        # that never inspects the args, so redacting the bound recipient does NOT
+        # make replay unavailable — flagging it there was over-conservative (r16 P2)
+        ungoverned = support.conditions()[0]
+        kernel = default_registry((str(ungoverned["kernel"]),)).get(str(ungoverned["kernel"]))
+        clean = run_trial(
+            support.banking_scenario(), support.manifests(), ungoverned, kernel,
+            run_id="r", seed="s000", repeat_index=0, agent=ScriptedAgent(attack_rate=1.0),
+        ).trace
+        redacted = _redact_bound_recipient(clean)
+        _, status = replay_trace_status(
+            redacted, ungoverned, kernel, support.manifests(), self.inputs
+        )
+        self.assertEqual(status, REPLAY_MATCH)
+
 
 class TestDrivingUnresolvedInCore(unittest.TestCase):
     def test_driving_unresolved_kind_and_arg_are_part_of_replay_core(self) -> None:

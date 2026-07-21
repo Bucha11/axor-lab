@@ -11,7 +11,12 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_contracts import condition_config_hash
+from lab_contracts import (
+    compiled_governor_config,
+    condition_config_hash,
+    content_hash,
+    executable_config_hash,
+)
 from lab_runner import (
     AxorKernel,
     ScriptedAgent,
@@ -160,6 +165,83 @@ class TestRealKernelRepin(unittest.TestCase):
         )
         env = _environment(resolved, "scripted")
         self.assertNotIn("kernel_version", env)
+
+
+class TestExecutableConfigHash(unittest.TestCase):
+    """The carry-over key is the hash of the COMPILED governor config — manifests
+    and their untrusted-field taint patterns included, not just kernel+policy
+    (review r16). This runs regardless of axor-core (the hash is pure)."""
+
+    def test_executable_config_hash_equals_hash_of_compiled_governor_config(self) -> None:
+        kernel = support.KERNEL_PINNED
+        policy = {"profile": "strict"}
+        manifests = list(support.manifests().values())
+        h = executable_config_hash(kernel, policy, manifests)
+        # it is literally the content hash of the canonical compiled config...
+        self.assertEqual(h, content_hash(compiled_governor_config(kernel, policy, manifests)))
+        # ...and that compiled config IS the config the runner's governor runs
+        # (egress sinks / untrusted sources / driving args all agree)
+        canon = compiled_governor_config(kernel, policy, manifests)
+        gc = governor_config(support.manifests(), policy)
+        self.assertEqual(set(canon["egress_sinks"]), gc["egress_sinks"])
+        self.assertEqual(set(canon["untrusted_sources"]), gc["untrusted_sources"])
+        self.assertEqual(canon["driving_args"], gc["driving_args"])
+        # it binds more than kernel+policy — a different identity than the plain anchor
+        self.assertNotEqual(h, condition_config_hash(kernel, policy))
+
+    def test_executable_config_hash_changes_with_untrusted_fields(self) -> None:
+        kernel = support.KERNEL_PINNED
+        policy = {"profile": "strict"}
+        manifests = list(support.manifests().values())
+        before = executable_config_hash(kernel, policy, manifests)
+        # taint a DIFFERENT result field — the governor now mints taint from a new
+        # source, so it governs differently; the old hash (effect+args_schema only)
+        # missed this entirely
+        tampered = support.deep({m["id"]: m for m in manifests})["read_txns"]
+        tampered["untrusted_fields"] = ["result.transactions[].amount"]
+        new_manifests = [tampered if m["id"] == "read_txns" else m for m in manifests]
+        after = executable_config_hash(kernel, policy, new_manifests)
+        self.assertNotEqual(before, after)
+
+        # and dropping untrusted_fields entirely also moves the hash
+        stripped = support.deep({m["id"]: m for m in manifests})["read_txns"]
+        stripped.pop("untrusted_fields", None)
+        dropped = [stripped if m["id"] == "read_txns" else m for m in manifests]
+        self.assertNotEqual(before, executable_config_hash(kernel, policy, dropped))
+
+    def test_input_backed_allowlist_expands_in_compiled_config(self) -> None:
+        # $inputs.known_ibans in the policy allowlist expands to the concrete IBANs
+        # against the scenario inputs — parity with the reference kernel's
+        # _resolve_allowlist; the literal "$inputs.known_ibans" must NOT survive
+        policy = {"profile": "strict", "allowlist": ["$inputs.known_ibans"]}
+        inputs = support.banking_scenario()["inputs"]
+        compiled = compiled_governor_config(
+            support.KERNEL_PINNED, policy, list(support.manifests().values()), inputs
+        )
+        enums = [vp for vp in compiled["value_policies"].values()]
+        flat = [v for vp in enums for arg in vp.values() for v in arg["enum"]]
+        self.assertIn(support.LANDLORD_IBAN, flat)
+        self.assertNotIn("$inputs.known_ibans", flat)
+
+
+@unittest.skipUnless(axor_available(), "axor-core not installed")
+class TestRealKernelInputAllowlist(unittest.TestCase):
+    def test_real_kernel_expands_allowlist_input_refs(self) -> None:
+        # a real-kernel condition whose allowlist is input-backed must enforce the
+        # CONCRETE destinations — the governor config carries the expanded IBANs,
+        # not the symbolic "$inputs.known_ibans" the governor could never match
+        version = real_kernel_version()
+        policy = {"profile": "strict", "trust_model": "content-ledger",
+                  "allowlist": ["$inputs.known_ibans"]}
+        inputs = support.banking_scenario()["inputs"]
+        kernel = resolve_kernel(
+            version, support.manifests(), policy, KernelRegistry(kernels=()), inputs,
+        )
+        self.assertIsInstance(kernel, AxorKernel)
+        vps = kernel.config.get("value_policies", {})
+        flat = [v for vp in vps.values() for arg in vp.values() for v in arg["enum"]]
+        self.assertIn(support.LANDLORD_IBAN, flat)
+        self.assertNotIn("$inputs.known_ibans", flat)
 
 
 if __name__ == "__main__":

@@ -85,10 +85,15 @@ def evidence_lineage_ref(bundle: dict[str, object]) -> str:
         [str(a.get("metric")), str(a.get("condition_id")), str(a.get("comparison_design", "matched_pairs"))]
         for a in bundle.get("aggregates", [])  # type: ignore[union-attr]
     )
+    # ID → content-hash MAPS, not raw arrays: the manifest/scenario/condition
+    # order is not part of the executable semantics (the server/replay index by
+    # id), so a cosmetic reordering must map to the SAME lineage — an array-order
+    # hash let a takedown be dodged by permuting the arrays (review r16). Canonical
+    # JSON sorts the map keys, making the hash order-independent.
     lineage = {
-        "scenarios": bundle.get("scenarios", []),
-        "conditions": bundle.get("conditions", []),
-        "tool_manifests": bundle.get("tool_manifests", []),
+        "scenarios": {str(s.get("name")): content_hash(s) for s in bundle.get("scenarios", [])},  # type: ignore[union-attr]
+        "conditions": {str(c.get("id")): content_hash(c) for c in bundle.get("conditions", [])},  # type: ignore[union-attr]
+        "tool_manifests": {str(m.get("id")): content_hash(m) for m in bundle.get("tool_manifests", [])},  # type: ignore[union-attr]
         "completed_trials": completed,
         "aggregates": aggregates,
     }

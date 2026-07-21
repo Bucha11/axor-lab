@@ -156,22 +156,52 @@ def _environment_is_deterministic(bundle: dict[str, object]) -> bool:
     return provider in _DETERMINISTIC_PROVIDERS
 
 
-def _reject_unknown_test_fields(
+def _values_match(uploaded: object, recomputed: object) -> bool:
+    """Deep equality with float tolerance — the uploaded value came through JSON
+    but was produced by the SAME statistics functions, so an honest field
+    reproduces the recompute exactly (numbers within a tiny tolerance)."""
+    if isinstance(recomputed, dict):
+        if not isinstance(uploaded, dict) or set(uploaded) != set(recomputed):
+            return False
+        return all(_values_match(uploaded[k], recomputed[k]) for k in recomputed)
+    if isinstance(recomputed, bool) or isinstance(uploaded, bool):
+        return uploaded is recomputed
+    if isinstance(recomputed, (int, float)) and isinstance(uploaded, (int, float)):
+        return abs(float(uploaded) - float(recomputed)) <= 1e-6
+    return uploaded == recomputed
+
+
+def _test_shape_problems(
     test: dict[str, object], rec: dict[str, object], key: tuple[str, str]
 ) -> list[str]:
-    """The bundle schema allows arbitrary `test` properties (additionalProperties);
-    the SERVER does not (review r15). Any field the recomputed test does not
-    produce is refused, and effective_n/status (when present) must match the
-    recomputation — a fabricated interval/field can't ride along unchecked."""
+    """The uploaded test must be the EXACT recomputed shape (review r15/r16).
+
+    The bundle schema allows arbitrary `test` properties (additionalProperties);
+    the SERVER does not. The uploaded test must carry precisely the fields the
+    server recomputes — no extra fields riding along unchecked, and no missing
+    field silently defaulting — and every value must reproduce the recompute.
+    This subsumes the old per-field checks: a fabricated interval, a dropped
+    discordant count, or a stale effective_n all fail the same shape gate."""
+    # a test the server recomputes as underpowered is one the RUNNER would never
+    # have attached (binary_aggregate drops tests below the minimum effective n),
+    # so accepting it here would mint a 'statistically reproducible' claim over a
+    # test the tool that made the bundle would have refused to publish (review r16)
+    if str(rec.get("status")) == "inconclusive":
+        return [
+            f"{key}: test is underpowered (recomputed status 'inconclusive', "
+            f"effective_n {rec.get('effective_n')}) — the runner would not attach it; "
+            "refusing to publish an inconclusive test as a reproducible claim"
+        ]
+    missing = sorted(set(rec.keys()) - set(test.keys()))
+    extra = sorted(set(test.keys()) - set(rec.keys()))
     problems: list[str] = []
-    allowed = set(rec.keys()) | {"reason"}
-    extra = sorted(set(test.keys()) - allowed)
+    if missing:
+        problems.append(f"{key}: test is missing recomputed field(s) {missing}")
     if extra:
         problems.append(f"{key}: test carries unrecognized field(s) {extra} the server does not recompute")
-    if "effective_n" in test and int(test["effective_n"]) != int(rec.get("effective_n", -2)):  # type: ignore[arg-type]
-        problems.append(f"{key}: test.effective_n {test['effective_n']} != recomputed {rec.get('effective_n')}")
-    if "status" in test and str(test["status"]) != str(rec.get("status", "")):
-        problems.append(f"{key}: test.status {test['status']!r} != recomputed {rec.get('status')!r}")
+    for field in sorted(set(rec.keys()) & set(test.keys())):
+        if not _values_match(test[field], rec[field]):
+            problems.append(f"{key}: test.{field} {test[field]!r} != recomputed {rec[field]!r}")
     return problems
 
 
@@ -194,24 +224,10 @@ def _check_test(
         )
         if str(test.get("name")) != "two_proportion":
             return [f"{key}: independent_samples must use two_proportion, not {test.get('name')!r}"]
-        problems = _reject_unknown_test_fields(test, rec, key)
-        if abs(float(test.get("difference", 0.0)) - float(rec["difference"])) > 1e-9:  # type: ignore[arg-type]
-            problems.append(f"{key}: test.difference {test.get('difference')} != {rec['difference']}")
-        if abs(float(test.get("p", -1)) - float(rec["p"])) > 1e-9:  # type: ignore[arg-type]
-            problems.append(f"{key}: test.p {test.get('p')} != recomputed {rec['p']}")
-        # the INTERVAL was a fabrication gap: difference+p matched but a bogus
-        # Newcombe interval rode along unchecked (review r15)
-        ui: dict[str, object] = test.get("interval", {})  # type: ignore[assignment]
-        ri: dict[str, object] = rec["interval"]  # type: ignore[assignment]
-        if (
-            str(ui.get("method")) != str(ri.get("method"))
-            or abs(float(ui.get("low", 0.0)) - float(ri["low"])) > 1e-6  # type: ignore[arg-type]
-            or abs(float(ui.get("high", 0.0)) - float(ri["high"])) > 1e-6  # type: ignore[arg-type]
-        ):
-            problems.append(f"{key}: test.interval {ui} != recomputed {ri}")
-        if str(test.get("design", "independent_samples")) != "independent_samples":
-            problems.append(f"{key}: test.design {test.get('design')!r} != independent_samples")
-        return problems
+        # the whole test must be the EXACT recomputed shape — difference, p, the
+        # Newcombe interval, design, effective_n, status — nothing fabricated rides
+        # along, nothing underpowered is accepted (review r15/r16)
+        return _test_shape_problems(test, rec, key)
     # matched pairs → McNemar
     pairs = [
         (r[baseline_id][field], r[treated_id][field])
@@ -220,13 +236,6 @@ def _check_test(
     rec = mcnemar_test(pairs, vs=baseline_id)
     if str(test.get("name")) != "mcnemar":
         return [f"{key}: matched_pairs must use mcnemar, not {test.get('name')!r}"]
-    problems = _reject_unknown_test_fields(test, rec, key)
-    if int(test.get("paired_n", -1)) != int(rec["paired_n"]):  # type: ignore[arg-type]
-        problems.append(f"{key}: test.paired_n {test.get('paired_n')} != recomputed {rec['paired_n']}")
-    ud: dict[str, object] = test.get("discordant", {})  # type: ignore[assignment]
-    rd: dict[str, object] = rec["discordant"]  # type: ignore[assignment]
-    if int(ud.get("b", -1)) != int(rd["b"]) or int(ud.get("c", -1)) != int(rd["c"]):  # type: ignore[arg-type]
-        problems.append(f"{key}: test.discordant {ud} != recomputed {rd}")
-    if abs(float(test.get("p", -1)) - float(rec["p"])) > 1e-9:  # type: ignore[arg-type]
-        problems.append(f"{key}: test.p {test.get('p')} != recomputed {rec['p']}")
-    return problems
+    # exact recomputed shape: discordant{b,c}, paired_n, effective_n (the
+    # discordant n), p, status — an underpowered (inconclusive) McNemar is refused
+    return _test_shape_problems(test, rec, key)

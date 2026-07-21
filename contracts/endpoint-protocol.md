@@ -14,8 +14,11 @@ POST /runs/{run_id}/events          ← tool_result { values:[{value_id, decisio
                                     ← tool_call_intent { tool, arg_bindings:{arg→value_id}, args? }
      → for a tool_call_intent: { decision:{verdict, gate, driving_value_id, reason}, authoritative_args }
 POST /runs/{run_id}/finalize        → freeze the run; no further events
-GET  /runs/{run_id}/trace           → the assembled trace/v1 (only after finalize)
+GET  /runs/{run_id}/trace           → the frozen trace/v1 (only after finalize); repeatable
+POST /runs/{run_id}/trace/ack       → confirm the client stored the trace → run becomes evictable
 ```
+
+- Delivery is CLIENT-CONFIRMED: a `GET /trace` returns the frozen body but does NOT mark the run delivered — the socket write can fail after the handler returns, or the client can crash before persisting the body. Only an explicit `POST /trace/ack` marks the run `delivered`, after which it is eligible for quota eviction. A fetched-but-unacknowledged trace stays retrievable (the identical frozen bytes) so the fetch can be retried; the run quota refuses new runs (`429`) rather than dropping an unacknowledged trace.
 
 - The gate decides on `authoritative_args`, assembled SOLELY from `arg_bindings → decision_value` (never the client's concrete `args`, which are accepted only as an assertion and canonical-hash-checked against the bound values). A binding to an unknown value id, an unbound decision-relevant/required/asserted arg, or a mismatched assertion is refused (`4xx`) — never a silent ALLOW.
 - `authoritative_args` is the COMPLETE, executable call: every schema-required arg (and every arg the caller will pass) must be bound to a ledger value, so a cooperating proxy runs exactly it, not a bound subset topped up with unrecorded values.
