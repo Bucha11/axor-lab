@@ -206,6 +206,153 @@ def _two_scenario_bundle(arm_scenarios, design=None):
     return bundle, traces
 
 
+def _controlled_bundle(pairs, scenarios_of=None, design=None):
+    """A matched bundle over one scenario 'scn' (unless `scenarios_of[i]` overrides
+    per pair) with FULL control of each pair's (base, treated) outcome: True =
+    violating trace, False = clean trace, None = a FAILED trial (no trace). Lets a
+    test build a specific discordant b/c count or seed both-arm failures."""
+    base = support.banking_scenario()
+    names = sorted({(scenarios_of or {}).get(i, "scn") for i in range(len(pairs))})
+    scenarios = [{**base, "name": n} for n in names]
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+    for i, (base_out, treated_out) in enumerate(pairs):
+        scn = (scenarios_of or {}).get(i, "scn")
+        for cid, outcome in (("ungoverned", base_out), ("governed", treated_out)):
+            trial = {"trial_id": f"tr_{cid}_{i}", "scenario_id": scn,
+                     "condition_id": cid, "seed": f"s{i:03d}", "repeat_index": i,
+                     "execution_order": order}
+            order += 1
+            if outcome is None:
+                trial["status"] = "failed"
+                trial["failure_reason"] = "seeded failure"
+            else:
+                trace = {**(_VIOLATING if outcome else _CLEAN)[i % 30],
+                         "trace_id": f"t_{cid}_{i}"}
+                ref = content_hash(trace)
+                traces[str(trace["trace_id"])] = trace
+                trial["status"] = "completed"
+                trial["trace_ref"] = ref
+            trials.append(trial)
+    agg_design = {"comparison_design": design} if design else {}
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned",
+                         sum(1 for b, _ in pairs if b), sum(1 for b, _ in pairs if b is not None),
+                         **agg_design),
+        binary_aggregate("ASR", "governed",
+                         sum(1 for _, t in pairs if t), sum(1 for _, t in pairs if t is not None),
+                         **agg_design),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_ctl", created=CREATED, scenarios=scenarios, conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
+
+
+class TestCausalValidity(unittest.TestCase):
+    def test_matched_bridge_requires_minimum_absolute_effect(self) -> None:
+        # 200 pairs, 180 concordant, 15 discordant favouring governance, 5 against.
+        # McNemar is significant (p<0.05) but the NET risk reduction is only
+        # (15-5)/200 = 0.05 < the 0.10 floor → practical significance gate fails,
+        # so the bridge is NOT earned despite the significant p (review r20).
+        pairs = ([(True, False)] * 15 + [(False, True)] * 5
+                 + [(True, True)] * 90 + [(False, False)] * 90)
+        bundle, traces = _controlled_bundle(pairs)
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_matched_bridge_earns_when_effect_clears_the_floor(self) -> None:
+        # same shape but 40 discordant-b vs 5-c over 200 → net (40-5)/200 = 0.175
+        pairs = ([(True, False)] * 40 + [(False, True)] * 5
+                 + [(True, True)] * 80 + [(False, False)] * 75)
+        bundle, traces = _controlled_bundle(pairs)
+        self.assertTrue(earned_bridge(bundle, traces=traces))
+        from lab_runner.cp_export import bridge_analysis
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertGreaterEqual(analysis["paired"]["absolute_risk_reduction"], 0.10)
+
+    def test_matched_bridge_counts_both_failed_units_as_dropped(self) -> None:
+        # 24 completed discordant-b pairs (earns) + 6 pairs where BOTH arms FAILED.
+        # The planned denominator must include the failed pairs (review r20).
+        pairs = [(True, False)] * 24 + [(None, None)] * 6
+        bundle, traces = _controlled_bundle(pairs)
+        from lab_runner.cp_export import bridge_analysis
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertEqual(analysis["paired"]["planned_pairs"], 30)
+        self.assertEqual(analysis["paired"]["completed_pairs"], 24)
+        self.assertEqual(analysis["paired"]["dropped_pairs"], 6)
+
+    def test_independent_bridge_rejects_inverse_scenario_weighting(self) -> None:
+        # THE r20 confound: same scenario SET, equal totals, every per-scenario arm
+        # ratio exactly 0.5 — but baseline is 40 hard/20 easy while governed is 20
+        # hard/40 easy. governance changed NOTHING (hard always violates, easy
+        # never); the pooled ASR delta is pure reweighting. Exact per-scenario
+        # balance must reject it.
+        bundle, traces = _weighting_confound_bundle()
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_bridge_rejects_duplicate_metric_condition_aggregates(self) -> None:
+        bundle, traces = _controlled_bundle([(True, False)] * 24)
+        # inject a SECOND ASR aggregate for governed → the design read is ambiguous
+        bundle["aggregates"].append(
+            binary_aggregate("ASR", "governed", 0, 24, comparison_design="independent_samples")
+        )
+        with self.assertRaises(CPExportError):
+            earned_bridge(bundle, traces=traces)
+
+    def test_multiple_baselines_require_explicit_selection(self) -> None:
+        bundle, traces = _controlled_bundle([(True, False)] * 24)
+        # add a SECOND enforcement-off condition → baseline is ambiguous
+        conditions = list(bundle["conditions"])
+        off = next(c for c in conditions if c["enforcement"] == "off")
+        conditions.append({**off, "id": "ungoverned2"})
+        bundle["conditions"] = conditions
+        with self.assertRaises(CPExportError):
+            earned_bridge(bundle, traces=traces)
+
+
+def _weighting_confound_bundle():
+    """Same scenario set + equal totals, but a DIFFERENT per-scenario mix per arm:
+    baseline 40 hard/20 easy, governed 20 hard/40 easy; hard always violates, easy
+    never — so the pooled ASR differs purely by weighting, not governance."""
+    base = support.banking_scenario()
+    scenarios = [{**base, "name": "hard"}, {**base, "name": "easy"}]
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+
+    def _add(cid, scn, violating, n):
+        nonlocal order
+        pool = _VIOLATING if violating else _CLEAN
+        for k in range(n):
+            trace = {**pool[k % 30], "trace_id": f"t_{cid}_{scn}_{k}"}
+            ref = content_hash(trace)
+            traces[str(trace["trace_id"])] = trace
+            trials.append({"trial_id": f"tr_{cid}_{scn}_{k}", "scenario_id": scn,
+                           "condition_id": cid, "seed": f"s{order:03d}", "repeat_index": order,
+                           "status": "completed", "trace_ref": ref, "execution_order": order})
+            order += 1
+
+    _add("ungoverned", "hard", True, 40)
+    _add("ungoverned", "easy", False, 20)
+    _add("governed", "hard", True, 20)
+    _add("governed", "easy", False, 40)
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned", 40, 60, comparison_design="independent_samples"),
+        binary_aggregate("ASR", "governed", 20, 60, comparison_design="independent_samples"),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_conf", created=CREATED, scenarios=scenarios, conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
+
+
 class TestDesignAwareBridge(unittest.TestCase):
     def test_disjoint_scenarios_do_not_earn_despite_huge_delta(self) -> None:
         # THE false bridge (r19): baseline runs 24 HEAVY scenarios (ASR 1.0),
