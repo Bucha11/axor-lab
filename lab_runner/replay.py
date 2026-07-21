@@ -254,7 +254,8 @@ def replay_bundle(
         # distinct from a divergence, and never counted as reproduced.
         try:
             kernel = resolve_kernel(
-                str(condition["kernel"]), manifests, condition.get("policy"), _Shim()  # type: ignore[arg-type]
+                str(condition["kernel"]), manifests, condition.get("policy"), _Shim(),  # type: ignore[arg-type]
+                scenario.get("inputs", {}),  # $inputs allowlist expands the same as the live run
             )
         except Exception:  # noqa: BLE001 — unavailable/unknown kernel is a status, not a crash
             out.append((trace_id, ()))

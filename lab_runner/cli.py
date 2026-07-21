@@ -687,7 +687,12 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
-    print(f"  config_hash (carry-over key): {export.config['config_hash']}")
+    # the executable_config_hash is the TRUE carry-over key: it binds the kernel,
+    # policy, AND the manifests (effect classes, driving args, untrusted-field
+    # taint) the governor actually runs — the plain config_hash covers only
+    # kernel+policy and two runs with different manifests share it (review r16)
+    print(f"  executable_config_hash (carry-over key): {export.config['executable_config_hash']}")
+    print(f"  config_hash (kernel+policy anchor): {export.config['config_hash']}")
     print(f"  regressions carried: {len(carried)}"
           + (f" (frozen trace bodies in {out}/regression-traces/)" if carried else ""))
     print(f"  production-todo (NOT reused): {out}/production-todo.md")

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from lab_contracts.semantics import EGRESS_CLASSES
+from lab_contracts import compiled_governor_config
 
 from .errors import UnknownKernelError
 
@@ -80,6 +80,7 @@ def resolve_kernel(
     manifests: dict[str, dict[str, object]],
     policy: dict[str, object] | None,
     registry: object,
+    inputs: dict[str, object] | None = None,
 ) -> object:
     """Pick the kernel for a condition. A REAL-kernel pin (`axor-core@X`) is
     satisfied ONLY by the exact installed build; the reference kernel is used
@@ -103,14 +104,16 @@ def resolve_kernel(
                 f"{version} is pinned but the installed build is {real_kernel_version()} — "
                 "refusing to run a different build than pinned"
             )
-        return AxorKernel(version=version, config=governor_config(manifests, policy))
+        return AxorKernel(version=version, config=governor_config(manifests, policy, inputs))
     # a genuine reference version → the reference registry (which raises
     # UnknownKernelError for a version it does not know)
     return registry.get(version)  # type: ignore[attr-defined]
 
 
 def governor_config(
-    manifests: dict[str, dict[str, object]], policy: dict[str, object] | None
+    manifests: dict[str, dict[str, object]],
+    policy: dict[str, object] | None,
+    inputs: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Map Lab tool manifests + condition policy → ToolCallGovernor kwargs.
 
@@ -119,35 +122,22 @@ def governor_config(
     - driving_args: each sink's effect.driving_args;
     - value_policies: an allowlist becomes an enum destination policy
       (the sound, paraphrase-proof control the kernel supersedes taint with).
-    """
-    egress: set[str] = set()
-    untrusted: set[str] = set()
-    driving: dict[str, list[str]] = {}
-    for tool_id, manifest in manifests.items():
-        effect: dict[str, object] = manifest.get("effect", {})  # type: ignore[assignment]
-        classes = {str(effect.get("default_class"))}
-        classes.update(str(rule["class"]) for rule in effect.get("resolve", []))  # type: ignore[union-attr]
-        if classes & EGRESS_CLASSES:
-            egress.add(tool_id)
-        if manifest.get("untrusted_fields"):
-            untrusted.add(tool_id)
-        args = list(effect.get("driving_args", []))  # type: ignore[arg-type]
-        if args:
-            driving[tool_id] = args
+
+    The compilation is the SAME canonical mapping the executable_config_hash is
+    taken over (lab_contracts.compiled_governor_config), so the fingerprint and
+    the config the governor actually runs cannot drift (review r16). ``$inputs.x``
+    allowlist refs are expanded against the scenario inputs — parity with the
+    reference kernel's per-trial `_resolve_allowlist`, so a real-kernel run with
+    an input-backed allowlist enforces the concrete destinations, not the literal
+    ``"$inputs.known_ibans"`` string."""
+    canon = compiled_governor_config("", policy, list(manifests.values()), inputs)
     config: dict[str, object] = {
-        "egress_sinks": egress,
-        "untrusted_sources": untrusted,
-        "driving_args": driving,
+        "egress_sinks": set(canon["egress_sinks"]),  # type: ignore[arg-type]
+        "untrusted_sources": set(canon["untrusted_sources"]),  # type: ignore[arg-type]
+        "driving_args": canon["driving_args"],
     }
-    allowlist = (policy or {}).get("allowlist")
-    if allowlist:
-        # an operator allowlist → an enum value_policy on each egress sink's
-        # driving arg (the kernel's decidable destination control)
-        value_policies: dict[str, object] = {}
-        for sink in egress:
-            arg = (driving.get(sink) or ["recipient"])[0]
-            value_policies[sink] = {arg: {"enum": list(allowlist)}}
-        config["value_policies"] = value_policies
+    if canon["value_policies"]:
+        config["value_policies"] = canon["value_policies"]
     return config
 
 

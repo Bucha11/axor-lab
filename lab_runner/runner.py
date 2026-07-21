@@ -346,7 +346,10 @@ def run_experiment(
     result = ExperimentResult(run_id=run_id)
     order = 0
     for condition in conditions:
-        kernel = resolve_kernel(str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry)
+        kernel = resolve_kernel(
+            str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry,
+            scenario.get("inputs", {}),
+        )
         for repeat_index in range(repeats):
             _run_one(result, scenario, manifests, condition, kernel, run_id,
                      f"s{repeat_index:03d}", repeat_index, agent, execution_order=order)
@@ -497,15 +500,21 @@ def run_experiment_suite(
             result.stopped_reason = reason
             _exclude_remaining(0, reason)  # NOTHING ran → n=0/total, not n=0/0
             return result
-    kernels: dict[str, object] = {}
+    kernels: dict[tuple[str, str], object] = {}
     for index, (scenario, condition, repeat_index) in enumerate(plan):
         cid = str(condition["id"])
-        if cid not in kernels:
-            kernels[cid] = resolve_kernel(
-                str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry
+        # key the kernel by (condition, scenario): an input-backed allowlist
+        # ($inputs.x) resolves against THIS scenario's inputs, so two scenarios
+        # under the same condition must not share a kernel with a stale allowlist
+        # expansion (review r16)
+        cache_key = (cid, str(scenario["name"]))
+        if cache_key not in kernels:
+            kernels[cache_key] = resolve_kernel(
+                str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry,
+                scenario.get("inputs", {}),
             )
         try:
-            _run_one(result, scenario, manifests, condition, kernels[cid], run_id,
+            _run_one(result, scenario, manifests, condition, kernels[cache_key], run_id,
                      f"s{repeat_index:03d}", repeat_index, agent, execution_order=index)
         except CostCeilingReached as stop:
             # the guard fired mid-trial, BEFORE a provider call — stop the whole

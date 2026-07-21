@@ -10,6 +10,7 @@ lab_analysis.
 from .bundle import build_bundle, evidence_lineage_ref, verify_bundle
 from .canonical import (
     canonical_json,
+    compiled_governor_config,
     condition_config_hash,
     content_hash,
     executable_config_hash,
@@ -58,6 +59,7 @@ __all__ = [
     "evidence_lineage_ref",
     "build_publication",
     "canonical_json",
+    "compiled_governor_config",
     "condition_config_hash",
     "executable_config_hash",
     "content_hash",
