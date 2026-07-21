@@ -54,6 +54,7 @@ _CLIENT_FAULTS = (KeyError, TypeError, ValueError, AttributeError)
 _RUNS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
 _TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trace$")
 _FINALIZE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/finalize$")
+_ACK_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trace/ack$")
 _MAX_BODY = 8 * 1024 * 1024
 
 
@@ -80,11 +81,19 @@ class _Run:
     seq: int = 0
     labels_carried: bool = True
     finalized: bool = False
-    # delivery lifecycle (review r15): a finalized run is FINALIZED_UNDELIVERED
-    # until its trace has actually been fetched at least once, then DELIVERED.
-    # Only a DELIVERED run is safe to evict for quota — a finalized-but-unread
-    # trace must never be discarded before the client can read it.
+    # delivery lifecycle (review r15/r16): a finalized run is FINALIZED_UNDELIVERED
+    # until the client explicitly ACKNOWLEDGES receipt (POST /trace/ack), then
+    # DELIVERED. A GET of the trace is NOT proof of delivery — the socket write
+    # can fail after the handler returns, or the client can crash before storing
+    # the body — so `delivered` is never set on GET (review r16). Only a DELIVERED
+    # (acknowledged) run is safe to evict for quota; a fetched-but-unacked trace
+    # stays retrievable so the client can retry the fetch.
     delivered: bool = False
+    # the frozen trace snapshot taken at finalize — served on every GET and by the
+    # ack check, so the body a client acknowledges is exactly the one it read and
+    # is stable regardless of later run mutation (there is none post-finalize, but
+    # the snapshot makes delivery independent of re-assembly)
+    frozen_trace: dict[str, object] | None = field(default=None, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
     def labels_of(self, value_id: str) -> tuple[str, ...]:
@@ -253,7 +262,26 @@ def make_gateway(
                         })
                         return
                     run.finalized = True
+                    # freeze the conformant body once, so every GET and the ack
+                    # serve the identical bytes independent of quota/re-assembly
+                    run.frozen_trace = trace
                 self._json(200, {"ok": True, "finalized": True})
+                return
+
+            ack = _ACK_RE.match(self.path)
+            if ack:
+                run = self._authorized_run(ack.group(1))
+                if run is None:
+                    return
+                with run.lock:
+                    if not run.finalized:
+                        self._json(409, {"error": "run not finalized; nothing to acknowledge"})
+                        return
+                    # the client confirms it has STORED the trace body — only now is
+                    # the run safe to evict for quota. Delivery is client-confirmed,
+                    # never inferred from a GET that may not have arrived (review r16)
+                    run.delivered = True
+                self._json(200, {"ok": True, "delivered": True})
                 return
 
             events = _RUNS_RE.match(self.path)
@@ -408,10 +436,12 @@ def make_gateway(
                     # never publish a mid-write trace — require explicit finalize
                     self._json(409, {"error": "run not finalized; POST /finalize first"})
                     return
-                trace = run.trace()  # consistent snapshot under the lock
-                # the trace has now been delivered at least once → the run becomes
-                # evictable for quota (review r15)
-                run.delivered = True
+                # serve the FROZEN snapshot; a GET does NOT mark the run delivered.
+                # Delivery is only confirmed by an explicit POST /trace/ack, so a
+                # GET whose socket write fails (or a client that crashes before
+                # storing the body) leaves the trace retrievable, never evicted
+                # before the client actually has it (review r16)
+                trace = run.frozen_trace if run.frozen_trace is not None else run.trace()
             self._json(200, trace)
 
         def _read_body(self) -> dict[str, object]:

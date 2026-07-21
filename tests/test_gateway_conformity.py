@@ -187,15 +187,47 @@ class TestRunEviction(_Base):
     def test_trace_is_evicted_only_after_delivery(self) -> None:
         a_id, a_secret = self._open()
         b_id, b_secret = self._open()
-        # finalize AND read A → now delivered, hence evictable
+        # finalize, read, AND acknowledge A → now delivered, hence evictable
         self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
         self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
+        self.assertEqual(self._post(f"/runs/{a_id}/trace/ack", {}, a_secret)[0], 200)
         # a new open now succeeds by evicting the delivered run A
         status, opened = self._post("/runs", {})
         self.assertEqual(status, 201, opened)
         # A is gone (evicted); B still lives
         self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 404)
         self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 409)  # live, not finalized
+
+    def test_trace_is_not_delivered_until_acknowledged(self) -> None:
+        # a GET is NOT delivery: after finalize + read (but no ack) the run is
+        # still un-evictable, so a third open is refused rather than dropping an
+        # un-acknowledged trace (review r16)
+        a_id, a_secret = self._open()
+        self._open()
+        self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)  # fetched...
+        status, body = self._post("/runs", {})
+        self.assertEqual(status, 429, body)  # ...but NOT delivered, so not evicted
+        self.assertIn("no delivered finalized run", body["error"])
+        # once the client acknowledges receipt, the run becomes evictable
+        self.assertEqual(self._post(f"/runs/{a_id}/trace/ack", {}, a_secret)[0], 200)
+        self.assertEqual(self._post("/runs", {})[0], 201)
+
+    def test_failed_socket_delivery_keeps_trace_retryable(self) -> None:
+        # model a delivery that never reached the client: it fetched the body but
+        # never acknowledged (a dropped connection, a crash before storing). The
+        # trace must stay retrievable and un-evicted so the fetch can be retried —
+        # the identical frozen body every time (review r16)
+        a_id, a_secret = self._open()
+        self._open()
+        self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
+        _, first = self._get(f"/runs/{a_id}/trace", a_secret)   # "lost" delivery
+        # a third open must NOT evict the un-acked A
+        self.assertEqual(self._post("/runs", {})[0], 429)
+        # retry the fetch — same run, same frozen body, byte-for-byte
+        status, second = self._get(f"/runs/{a_id}/trace", a_secret)
+        self.assertEqual(status, 200)
+        self.assertEqual(content_hash(first), content_hash(second))
 
 
 if __name__ == "__main__":
