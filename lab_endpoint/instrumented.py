@@ -114,7 +114,7 @@ def assemble_and_gate(
                 effect: dict[str, object] = manifests[item.tool].get("effect", {})  # type: ignore[assignment]
                 driving_args = list(effect.get("driving_args", []))  # type: ignore[arg-type]
                 driving_value_id = (
-                    item.arg_bindings.get(str(driving_args[0])) if driving_args else "v_none"
+                    item.arg_bindings.get(str(driving_args[0])) if driving_args else None
                 )
                 enforcement = str(condition["enforcement"])
                 blind = redacted_untrusted_bindings(values, dict(item.arg_bindings))
@@ -123,12 +123,13 @@ def assemble_and_gate(
                     # redacted untrusted-derived value bound to a gated arg leaves
                     # the governor's taint incomplete, so we DENY rather than let it
                     # decide fail-open. The two surfaces share the rule so they
-                    # cannot drift.
-                    decision = provenance_unavailable_decision(str(driving_value_id), blind)
+                    # cannot drift. A null driving_value_id (no driving args) carries
+                    # a driving_unresolved reason so the trace passes semantics (r19).
+                    decision = provenance_unavailable_decision(driving_value_id, blind)
                 else:
                     decision = gate_with_governor(
                         kernel.config, enforcement, registrations,
-                        item.tool, authoritative, str(driving_value_id),
+                        item.tool, authoritative, str(driving_value_id or "v_none"),
                     )
             else:
                 arg_labels = {

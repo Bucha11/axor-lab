@@ -291,6 +291,14 @@ class TestAckBoundToBytes(_Base):
         _, _, ref = self._finalized()
         self.assertTrue(ref.startswith("sha256:"))
 
+    def test_repeated_finalize_returns_same_trace_ref(self) -> None:
+        # an idempotent retry (the first response was lost in transit) must return
+        # the SAME trace_ref, not a bare {finalized:true} the client can't ack (r19)
+        rid, secret, ref = self._finalized()
+        status, body = self._post(f"/runs/{rid}/finalize", {}, secret)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["trace_ref"], ref)
+
     def test_get_exposes_the_same_trace_ref(self) -> None:
         rid, secret, ref = self._finalized()
         _, trace = self._get(f"/runs/{rid}/trace", secret)

@@ -266,7 +266,7 @@ def make_gateway(
         if isinstance(kernel, AxorKernel):
             effect: dict[str, object] = manifests[tool].get("effect", {})  # type: ignore[assignment]
             driving_args = list(effect.get("driving_args", []))  # type: ignore[arg-type]
-            driving_value_id = arg_bindings.get(str(driving_args[0])) if driving_args else "v_none"
+            driving_value_id = arg_bindings.get(str(driving_args[0])) if driving_args else None
             enforcement = str(condition["enforcement"])
             blind = redacted_untrusted_bindings(run.values, arg_bindings)
             if enforcement != "off" and blind:
@@ -274,11 +274,11 @@ def make_gateway(
                 # value(s) the client redacted; the governor cannot register that
                 # taint, so an ALLOW would be fail-open. Provenance we cannot
                 # reconstruct is provenance we deny on (review r18).
-                decision = provenance_unavailable_decision(str(driving_value_id), blind)
+                decision = provenance_unavailable_decision(driving_value_id, blind)
             else:
                 decision = gate_with_governor(
                     kernel.config, enforcement,
-                    run.untrusted_registrations(), tool, args, str(driving_value_id),
+                    run.untrusted_registrations(), tool, args, str(driving_value_id or "v_none"),
                 )
         else:
             decision = kernel.decide(
@@ -358,7 +358,12 @@ def make_gateway(
                     return
                 with run.lock:
                     if run.finalized:
-                        self._json(200, {"ok": True, "finalized": True})
+                        # idempotent: a retried finalize returns the SAME trace_ref
+                        # the first one did, so a client whose first response was
+                        # lost in transit can still learn the ref it must ack —
+                        # rather than a bare {finalized:true} it cannot act on (r19)
+                        ref = content_hash(run.frozen_trace) if run.frozen_trace else None
+                        self._json(200, {"ok": True, "finalized": True, "trace_ref": ref})
                         return
                     # the assembled trace must be a CONFORMANT trace/v1 before we
                     # freeze and serve it — validate schema AND semantics at the

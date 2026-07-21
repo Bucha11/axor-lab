@@ -110,19 +110,32 @@ def redacted_untrusted_bindings(
 
 
 def provenance_unavailable_decision(
-    driving_value_id: str, blind: list[str]
+    driving_value_id: str | None, blind: list[str]
 ) -> dict[str, object]:
     """The fail-closed DENY a real-kernel gate returns when its decision depends on
     an untrusted-derived value the client redacted: the taint cannot be
-    reconstructed, so provenance we cannot see is provenance we deny on (r18)."""
-    return {
+    reconstructed, so provenance we cannot see is provenance we deny on (r18).
+
+    When the sink has NO driving args, there is no ledger value to name as the
+    driver, so `driving_value_id` is null with a typed `driving_unresolved` reason
+    — the shape trace_semantics requires (a non-null id must resolve in the
+    ledger; the "v_none" sentinel did not, so the fail-closed trace failed its own
+    semantics, review r19). A redacted DRIVING value keeps its real (redacted)
+    ledger id, which does resolve."""
+    decision: dict[str, object] = {
         "verdict": "DENY", "gate": "provenance_unavailable",
-        "driving_value_id": str(driving_value_id), "projection": "untrusted-derived",
+        "projection": "untrusted-derived",
         "reason": (
             f"redacted untrusted-derived value(s) {blind} bound to a gated arg — "
             "taint cannot be reconstructed; failing closed"
         ),
     }
+    if driving_value_id is None:
+        decision["driving_value_id"] = None
+        decision["driving_unresolved"] = {"kind": "no_driving_args"}
+    else:
+        decision["driving_value_id"] = str(driving_value_id)
+    return decision
 
 
 def provenance_fidelity(trusted_runtime: bool, labels_carried: bool) -> str:

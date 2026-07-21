@@ -91,10 +91,15 @@ def _write_atomic(path: Path, text: str, *, durable: bool = False) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
         # os.write may write FEWER bytes than requested (a "short write"); loop
-        # until every byte lands or the target is silently truncated (review r18)
+        # until every byte lands or the target is silently truncated (review r18).
+        # A write of 0 on a non-empty buffer would spin forever — treat it as a
+        # hard error, never an infinite loop (review r19).
         view = memoryview(data)
         while view:
-            view = view[os.write(fd, view):]
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("os.write returned 0 on a non-empty buffer")
+            view = view[written:]
         if durable:
             os.fsync(fd)  # the CONTENTS reach disk before we rename over the target
     finally:
