@@ -161,9 +161,10 @@ def binary_aggregate(
     if comparison_design is not None:
         aggregate["comparison_design"] = comparison_design
     # attach the test ONLY when it is powered on its OWN terms: the aggregate's
-    # marginal n clears the minimum AND the test's effective_n (paired_n for
-    # McNemar, min-arm for two_proportion) does too — so a 1-pair McNemar can't
-    # ride a large marginal n and be read as significant (review r15)
+    # marginal n clears the minimum AND the test's effective_n (DISCORDANT n for
+    # McNemar, min-arm for two_proportion) does too — so a McNemar riding on 1
+    # discordant pair can't ride a large marginal n and be read as significant
+    # (review r15/r16)
     if (
         test is not None
         and not is_inconclusive(aggregate)
@@ -183,17 +184,21 @@ def mcnemar_test(pairs: Sequence[tuple[bool, bool]], vs: str) -> dict[str, objec
     b = sum(1 for base, treated in pairs if base and not treated)
     c = sum(1 for base, treated in pairs if not base and treated)
     paired_n = len(pairs)
-    # McNemar's sample is the PAIRED n (the intersection of completed baseline and
-    # treated trials), NOT a marginal aggregate n — a paired_n of 1 riding on an
-    # n=100 aggregate is not a real comparison (review r15). The test carries its
-    # own effective_n + status so a caller never reads a marginal n as its power.
-    status, reason = _test_status(paired_n)
+    # McNemar's POWER comes ONLY from the DISCORDANT pairs (b + c): concordant
+    # pairs (both arms same outcome) contribute nothing to the test — the exact
+    # binomial is computed over b+c alone. So the effective sample is the
+    # discordant n, NOT the total matched-pairs n (review r16). A 200-pair run
+    # that is 199 concordant + 1 discordant has the power of ONE observation, and
+    # reporting effective_n=200 would badly overstate it. paired_n is retained as
+    # context (the matched-pair denominator), but status/power key off discordant_n.
+    discordant_n = b + c
+    status, reason = _test_status(discordant_n)
     test: dict[str, object] = {
         "name": "mcnemar",
         "vs": vs,
         "discordant": {"b": b, "c": c},
         "paired_n": paired_n,
-        "effective_n": paired_n,
+        "effective_n": discordant_n,
         "status": status,
         "p": mcnemar_exact(b, c),
     }
