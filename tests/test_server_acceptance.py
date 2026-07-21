@@ -305,6 +305,108 @@ class TestAcceptanceReceipt(unittest.TestCase):
         self.assertEqual(served, historical)                      # opaque, untouched
 
 
+class TestAcceptanceHistoryChainOnLoad(unittest.TestCase):
+    """A persisted reacceptance/v1 asserts (supersedes.previous_ref) that its
+    superseded predecessor is preserved in the append-only acceptance-history. An
+    offline verifier reconstructs that chain from the on-disk history; if the ref
+    does not resolve it REJECTS the re-attestation. The server must never serve a
+    package the offline verifier would reject, so the chain is re-resolved on cold
+    load — a missing or corrupt predecessor is itself a forensic event (review r20).
+    """
+
+    def _reaccepted_store(self, root: Path):
+        # publish, tamper the original acceptance, reload once → a reacceptance/v1
+        # whose previous_ref resolves to the archived (tampered) original
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(root=root, server_id="axor-lab-server-A",
+                                 clock=lambda: "2026-01-01T00:00:00Z")
+        pid = str(store.publish(bundle, traces, question="q").publication["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))
+        reaccept = PublicationStore(
+            root=root, server_id="axor-lab-server-A",
+            clock=lambda: "2026-01-01T00:00:00Z",
+        ).get(pid).acceptance
+        self.assertEqual(reaccept["schema_version"], "axor-lab-reacceptance/v1")
+        return pid, reaccept
+
+    def test_reacceptance_with_unresolvable_previous_ref_is_reattested(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        pid, reaccept = self._reaccepted_store(root)
+        prev_ref = str(reaccept["supersedes"]["previous_ref"])
+
+        # DELETE the whole append-only history: the on-disk reacceptance still
+        # verifies (signature + binding intact) but its previous_ref now resolves
+        # to nothing — an offline verifier would reject the broken chain.
+        hdir = root / pid / "acceptance-history"
+        for f in hdir.glob("*.json"):
+            f.unlink()
+
+        served = PublicationStore(
+            root=root, server_id="axor-lab-server-A",
+            clock=lambda: "2026-03-03T00:00:00Z",
+        ).get(pid).acceptance
+        # the server did NOT serve the broken-chain record verbatim: it re-attested
+        self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
+        self.assertEqual(served["reaccepted_at"], "2026-03-03T00:00:00Z")
+        self.assertIn("did not resolve", str(served["supersedes"]["reason"]))
+        # and the new receipt's chain DOES resolve: the previous (broken) record was
+        # archived, so its ref is present in the rebuilt history
+        store2 = PublicationStore(root=root, server_id="axor-lab-server-A")
+        refs = [h["ref"] for h in store2.acceptance_history(pid)]
+        self.assertIn(str(served["supersedes"]["previous_ref"]), refs)
+        # it supersedes the previously-served reacceptance, not the ancient original
+        self.assertEqual(str(served["supersedes"]["previous_ref"]), content_hash(reaccept))
+        self.assertNotEqual(prev_ref, str(served["supersedes"]["previous_ref"]))
+
+    def test_corrupt_history_record_breaks_chain_and_triggers_reattest(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        pid, reaccept = self._reaccepted_store(root)
+
+        # tamper the ARCHIVED predecessor's bytes without renaming the file: its
+        # recomputed content hash no longer matches the ref it is filed under, so
+        # previous_ref cannot resolve to a hash-consistent record.
+        hdir = root / pid / "acceptance-history"
+        victim = next(hdir.glob("*.json"))
+        doc = json.loads(victim.read_text())
+        doc["injected"] = "tamper"
+        victim.write_text(json.dumps(doc))
+
+        served = PublicationStore(
+            root=root, server_id="axor-lab-server-A",
+            clock=lambda: "2026-04-04T00:00:00Z",
+        ).get(pid).acceptance
+        self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
+        self.assertIn("did not resolve", str(served["supersedes"]["reason"]))
+
+    def test_broken_chain_reattestation_is_stable_across_reloads(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        pid, _ = self._reaccepted_store(root)
+        for f in (root / pid / "acceptance-history").glob("*.json"):
+            f.unlink()
+
+        first = PublicationStore(
+            root=root, server_id="axor-lab-server-A",
+            clock=lambda: "2026-05-05T00:00:00Z",
+        ).get(pid).acceptance
+        # a SECOND cold load must read the repaired reacceptance verbatim — its
+        # chain now resolves, so it is not re-stamped with a fresh timestamp
+        second = PublicationStore(
+            root=root, server_id="axor-lab-server-A",
+            clock=lambda: "2099-09-09T00:00:00Z",
+        ).get(pid).acceptance
+        self.assertEqual(first, second)
+        self.assertEqual(second["reaccepted_at"], "2026-05-05T00:00:00Z")
+
+
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")
 class TestSignedAcceptance(unittest.TestCase):
     def test_signed_acceptance_verifies_with_the_server_key(self) -> None:

@@ -74,6 +74,15 @@ class AxorKernel:
     def is_real(self) -> bool:
         return True
 
+    @property
+    def behavior_version(self) -> str:
+        """Identity that reflects behavior-changing flags (mirrors the reference
+        Kernel), so the trial can record the ACTUAL resolved backend it ran under,
+        not just the declared version string (review r20)."""
+        if not self.taint_floor_enabled:
+            return f"{self.version}+taint_floor=off"
+        return self.version
+
 
 def resolve_kernel(
     version: str,

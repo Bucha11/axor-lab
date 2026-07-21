@@ -563,6 +563,7 @@ class PublicationStore:
         pub: dict[str, object],
         bundle: dict[str, object],
         previous: dict[str, object],
+        reason: str = "persisted acceptance failed verification on load",
     ) -> dict[str, object]:
         """Mint a REACCEPTANCE event (review r18) after the persisted acceptance was
         found DAMAGED/FORGED under a known key. This is NOT a silent re-mint: it is
@@ -581,7 +582,7 @@ class PublicationStore:
             "semantic_report": report,
             "reaccepted_at": self.clock(),
             "supersedes": {
-                "reason": "persisted acceptance failed verification on load",
+                "reason": reason,
                 "previous_ref": content_hash(previous),
                 "previous_key_id": previous.get("key_id"),
                 "previous_algorithm": previous.get("algorithm"),
@@ -974,10 +975,60 @@ class PublicationStore:
             # key (a forgery/damage). Preserve the damaged original and re-attest
             # with a distinct, linked reacceptance — never a silent clean re-mint.
             return self._quarantine_and_reaccept(directory, publication, bundle, acc)
+        if is_reacceptance and not self._chain_resolves(directory, acc):
+            # signature + binding are fine, but the forensic chain this reacceptance
+            # CLAIMS — supersedes.previous_ref — does NOT resolve to a stored record
+            # in the append-only acceptance-history. verify_reacceptance only sees
+            # that previous_ref is a non-empty string; the history it points into is
+            # server-side state the offline verifier reconstructs from disk, so an
+            # offline verifier handed this tree would REJECT the re-attestation as an
+            # unresolvable chain. The server must never serve what that verifier
+            # rejects: treat the broken link as a forensic event, archive this record
+            # and re-attest so the served receipt links to a resolvable history
+            # (review r20).
+            return self._quarantine_and_reaccept(
+                directory, publication, bundle, acc,
+                reason="persisted reacceptance previous_ref did not resolve in "
+                       "the append-only acceptance-history",
+            )
         return acc
 
     def _history_dir(self, directory: Path) -> Path:
         return directory / "acceptance-history"
+
+    def _history_index(self, directory: Path) -> dict[str, dict[str, object]]:
+        """{content_hash: record} of every archived acceptance-history record whose
+        bytes STILL hash to the ref they are filed under. A tampered archive file
+        (its recomputed hash no longer equals its filename) is not indexed, so a
+        `previous_ref` pointing at it will not resolve — a corrupted history entry
+        breaks the chain exactly as a missing one does (review r20)."""
+        index: dict[str, dict[str, object]] = {}
+        hdir = self._history_dir(directory)
+        if hdir.is_dir():
+            for pathname in sorted(hdir.glob("*.json")):
+                try:
+                    record = json.loads(pathname.read_text())
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                ref = content_hash(record)
+                if ref.removeprefix("sha256:") == pathname.stem:
+                    index[ref] = record
+        return index
+
+    def _chain_resolves(self, directory: Path, acc: dict[str, object]) -> bool:
+        """A reacceptance/v1 supersedes a prior receipt named by
+        supersedes.previous_ref. For the re-attestation to be verifiable offline
+        that prior receipt must be PRESERVED in the append-only acceptance-history,
+        content-addressed by exactly that ref. Confirm the immediate previous_ref
+        resolves to a stored, hash-matching record; a missing or corrupt one means
+        the chain has been broken since it was minted (review r20)."""
+        supersedes = acc.get("supersedes")
+        if not isinstance(supersedes, dict):
+            return False
+        ref = str(supersedes.get("previous_ref", ""))
+        return bool(ref) and ref in self._history_index(directory)
 
     def _archive_superseded(self, directory: Path, record: dict[str, object]) -> str:
         """Append a superseded/forensic record to the APPEND-ONLY acceptance history,
@@ -1013,12 +1064,18 @@ class PublicationStore:
         publication: dict[str, object],
         bundle: dict[str, object],
         invalid: dict[str, object],
+        reason: str = "persisted acceptance failed verification on load",
     ) -> dict[str, object]:
         """Archive the damaged acceptance to the append-only history and mint+persist
         a linked reacceptance/v1 event (review r18/r19). Repeated corruption keeps
-        EVERY superseded record — the previous_ref chain stays resolvable."""
+        EVERY superseded record — the previous_ref chain stays resolvable.
+
+        Because `invalid` is archived here BEFORE the new receipt is minted, the new
+        reacceptance's own previous_ref (= content_hash(invalid)) resolves on the very
+        next load: a broken-chain re-attestation therefore CONVERGES rather than being
+        re-minted on every reload (review r20)."""
         self._archive_superseded(directory, invalid)
-        reacceptance = self._reaccept(publication, bundle, invalid)
+        reacceptance = self._reaccept(publication, bundle, invalid, reason=reason)
         _write_atomic(directory / "acceptance.json", json.dumps(reacceptance, indent=2))
         return reacceptance
 

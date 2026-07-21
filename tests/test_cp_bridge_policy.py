@@ -7,16 +7,53 @@ zero), not merely large.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import unittest
 
 from tests import support
 from lab_analysis import binary_aggregate
-from lab_contracts import build_bundle, content_hash
+from lab_contracts import (
+    CONFIG_COMPILER_VERSION,
+    build_bundle,
+    content_hash,
+    runtime_config_hash,
+    verify_bundle,
+)
 from lab_runner import ScriptedAgent, run_experiment_suite
 from lab_runner.cp_export import CPExportError, earned_bridge
 
 CREATED = "2026-07-20T12:00:00+00:00"
+
+_CONDS = {c["id"]: c for c in support.conditions()}
+_MANIFESTS = list(support.manifests().values())
+
+
+def _runtime_fields(cid: str, inputs: dict) -> dict[str, object]:
+    """The runtime provenance a real run records on a completed trial — computed the
+    same way the runner does, so a hand-built fixture is SCHEMA-valid (completed
+    trials must carry it, review r20) and config_provenance reads it as
+    recorded_at_execution rather than reconstructed_legacy."""
+    cond = _CONDS[cid]
+    return {
+        "runtime_config_hash": runtime_config_hash(
+            str(cond["kernel"]), cond.get("policy"), _MANIFESTS, inputs,
+        ),
+        "config_compiler_version": CONFIG_COMPILER_VERSION,
+        "resolved_kernel_fingerprint": str(cond["kernel"]),
+    }
+
+
+def _bind_trace(src: dict, cid: str, scn: str, seed: str, repeat_index: int) -> dict:
+    """A copy of a real trace whose identity AND embedded `trial` block are rebound
+    to the fabricated coordinates, so the bundle passes the Trial<->Trace graph
+    verifier (review r20 finding #10) — not just earned_bridge in isolation. The
+    producer.kernel_version and inputs_digest already match (both conditions share
+    the reference kernel; the renamed scenarios keep the same inputs)."""
+    trace_id = f"t_{cid}_{scn}_{seed}_{repeat_index}"
+    trial = {**src.get("trial", {}), "scenario_id": scn, "condition_id": cid,
+             "seed": seed, "repeat_index": repeat_index}
+    return {**src, "trace_id": trace_id, "trial": trial}
 
 
 def _trace_pools():
@@ -178,16 +215,19 @@ def _two_scenario_bundle(arm_scenarios, design=None):
     traces: dict[str, dict[str, object]] = {}
     trials: list[dict[str, object]] = []
     order = 0
+    inputs = dict(base.get("inputs", {}))
     for cid, scns in arm_scenarios.items():
         pool = _VIOLATING if cid == "ungoverned" else _CLEAN
         for i, scn in enumerate(scns):
-            trace = {**pool[i % 30], "trace_id": f"t_{cid}_{i}"}
+            seed = f"s{i:03d}"
+            trace = _bind_trace(pool[i % 30], cid, scn, seed, i)
             ref = content_hash(trace)
             traces[str(trace["trace_id"])] = trace
             trials.append({
                 "trial_id": f"tr_{cid}_{i}", "scenario_id": scn,
-                "condition_id": cid, "seed": f"s{i:03d}", "repeat_index": i,
+                "condition_id": cid, "seed": seed, "repeat_index": i,
                 "status": "completed", "trace_ref": ref, "execution_order": order,
+                **_runtime_fields(cid, inputs),
             })
             order += 1
     agg_design = {"comparison_design": design} if design else {}
@@ -200,6 +240,160 @@ def _two_scenario_bundle(arm_scenarios, design=None):
     ]
     bundle = build_bundle(
         bundle_id="b_comp", created=CREATED, scenarios=scenarios, conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
+
+
+def _controlled_bundle(pairs, scenarios_of=None, design=None):
+    """A matched bundle over one scenario 'scn' (unless `scenarios_of[i]` overrides
+    per pair) with FULL control of each pair's (base, treated) outcome: True =
+    violating trace, False = clean trace, None = a FAILED trial (no trace). Lets a
+    test build a specific discordant b/c count or seed both-arm failures."""
+    base = support.banking_scenario()
+    names = sorted({(scenarios_of or {}).get(i, "scn") for i in range(len(pairs))})
+    scenarios = [{**base, "name": n} for n in names]
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+    inputs = dict(base.get("inputs", {}))
+    for i, (base_out, treated_out) in enumerate(pairs):
+        scn = (scenarios_of or {}).get(i, "scn")
+        for cid, outcome in (("ungoverned", base_out), ("governed", treated_out)):
+            seed = f"s{i:03d}"
+            trial = {"trial_id": f"tr_{cid}_{i}", "scenario_id": scn,
+                     "condition_id": cid, "seed": seed, "repeat_index": i,
+                     "execution_order": order}
+            order += 1
+            if outcome is None:
+                trial["status"] = "failed"
+                trial["failure_reason"] = "seeded failure"
+            else:
+                trace = _bind_trace((_VIOLATING if outcome else _CLEAN)[i % 30],
+                                    cid, scn, seed, i)
+                ref = content_hash(trace)
+                traces[str(trace["trace_id"])] = trace
+                trial["status"] = "completed"
+                trial["trace_ref"] = ref
+                trial.update(_runtime_fields(cid, inputs))
+            trials.append(trial)
+    agg_design = {"comparison_design": design} if design else {}
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned",
+                         sum(1 for b, _ in pairs if b), sum(1 for b, _ in pairs if b is not None),
+                         **agg_design),
+        binary_aggregate("ASR", "governed",
+                         sum(1 for _, t in pairs if t), sum(1 for _, t in pairs if t is not None),
+                         **agg_design),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_ctl", created=CREATED, scenarios=scenarios, conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
+
+
+class TestCausalValidity(unittest.TestCase):
+    def test_matched_bridge_requires_minimum_absolute_effect(self) -> None:
+        # 200 pairs, 180 concordant, 15 discordant favouring governance, 5 against.
+        # McNemar is significant (p<0.05) but the NET risk reduction is only
+        # (15-5)/200 = 0.05 < the 0.10 floor → practical significance gate fails,
+        # so the bridge is NOT earned despite the significant p (review r20).
+        pairs = ([(True, False)] * 15 + [(False, True)] * 5
+                 + [(True, True)] * 90 + [(False, False)] * 90)
+        bundle, traces = _controlled_bundle(pairs)
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_matched_bridge_earns_when_effect_clears_the_floor(self) -> None:
+        # same shape but 40 discordant-b vs 5-c over 200 → net (40-5)/200 = 0.175
+        pairs = ([(True, False)] * 40 + [(False, True)] * 5
+                 + [(True, True)] * 80 + [(False, False)] * 75)
+        bundle, traces = _controlled_bundle(pairs)
+        self.assertTrue(earned_bridge(bundle, traces=traces))
+        from lab_runner.cp_export import bridge_analysis
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertGreaterEqual(analysis["paired"]["absolute_risk_reduction"], 0.10)
+
+    def test_matched_bridge_counts_both_failed_units_as_dropped(self) -> None:
+        # 24 completed discordant-b pairs (earns) + 6 pairs where BOTH arms FAILED.
+        # The planned denominator must include the failed pairs (review r20).
+        pairs = [(True, False)] * 24 + [(None, None)] * 6
+        bundle, traces = _controlled_bundle(pairs)
+        from lab_runner.cp_export import bridge_analysis
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertEqual(analysis["paired"]["planned_pairs"], 30)
+        self.assertEqual(analysis["paired"]["completed_pairs"], 24)
+        self.assertEqual(analysis["paired"]["dropped_pairs"], 6)
+
+    def test_independent_bridge_rejects_inverse_scenario_weighting(self) -> None:
+        # THE r20 confound: same scenario SET, equal totals, every per-scenario arm
+        # ratio exactly 0.5 — but baseline is 40 hard/20 easy while governed is 20
+        # hard/40 easy. governance changed NOTHING (hard always violates, easy
+        # never); the pooled ASR delta is pure reweighting. Exact per-scenario
+        # balance must reject it.
+        bundle, traces = _weighting_confound_bundle()
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_bridge_rejects_duplicate_metric_condition_aggregates(self) -> None:
+        bundle, traces = _controlled_bundle([(True, False)] * 24)
+        # inject a SECOND ASR aggregate for governed → the design read is ambiguous
+        bundle["aggregates"].append(
+            binary_aggregate("ASR", "governed", 0, 24, comparison_design="independent_samples")
+        )
+        with self.assertRaises(CPExportError):
+            earned_bridge(bundle, traces=traces)
+
+    def test_multiple_baselines_require_explicit_selection(self) -> None:
+        bundle, traces = _controlled_bundle([(True, False)] * 24)
+        # add a SECOND enforcement-off condition → baseline is ambiguous
+        conditions = list(bundle["conditions"])
+        off = next(c for c in conditions if c["enforcement"] == "off")
+        conditions.append({**off, "id": "ungoverned2"})
+        bundle["conditions"] = conditions
+        with self.assertRaises(CPExportError):
+            earned_bridge(bundle, traces=traces)
+
+
+def _weighting_confound_bundle():
+    """Same scenario set + equal totals, but a DIFFERENT per-scenario mix per arm:
+    baseline 40 hard/20 easy, governed 20 hard/40 easy; hard always violates, easy
+    never — so the pooled ASR differs purely by weighting, not governance."""
+    base = support.banking_scenario()
+    scenarios = [{**base, "name": "hard"}, {**base, "name": "easy"}]
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+
+    inputs = dict(base.get("inputs", {}))
+
+    def _add(cid, scn, violating, n):
+        nonlocal order
+        pool = _VIOLATING if violating else _CLEAN
+        for k in range(n):
+            seed = f"s{order:03d}"
+            trace = _bind_trace(pool[k % 30], cid, scn, seed, order)
+            ref = content_hash(trace)
+            traces[str(trace["trace_id"])] = trace
+            trials.append({"trial_id": f"tr_{cid}_{scn}_{k}", "scenario_id": scn,
+                           "condition_id": cid, "seed": seed, "repeat_index": order,
+                           "status": "completed", "trace_ref": ref, "execution_order": order,
+                           **_runtime_fields(cid, inputs)})
+            order += 1
+
+    _add("ungoverned", "hard", True, 40)
+    _add("ungoverned", "easy", False, 20)
+    _add("governed", "hard", True, 20)
+    _add("governed", "easy", False, 40)
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned", 40, 60, comparison_design="independent_samples"),
+        binary_aggregate("ASR", "governed", 20, 60, comparison_design="independent_samples"),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_conf", created=CREATED, scenarios=scenarios, conditions=conditions,
         tool_manifests=list(support.manifests().values()), environment=support.environment(),
         trials=trials, aggregates=aggregates, traces=traces,
     )
@@ -245,6 +439,42 @@ class TestDesignAwareBridge(unittest.TestCase):
         # reader can see the arms tested the same composition
         self.assertEqual(set(analysis["scenario_balance"]["ungoverned"]), set(shared))
         self.assertEqual(analysis["scenario_balance"]["governed"][shared[0]], 1)
+
+    def test_design_aware_fixtures_are_graph_and_schema_valid(self) -> None:
+        # the design-aware fixtures are not just fed to earned_bridge in isolation:
+        # they are GRAPH-valid and SCHEMA-valid bundles, so the assertions exercise
+        # the same evidence a production export_cp would accept, not a bundle the
+        # real handoff would reject at verify_bundle (review r20 finding #10)
+        from lab_contracts import validate_artifact
+
+        shared = [f"scn-{i}" for i in range(24)]
+        for bundle, traces in (
+            _controlled_bundle([(True, False)] * 24),
+            _controlled_bundle([(True, False)] * 24 + [(None, None)] * 6),
+            _two_scenario_bundle({"ungoverned": shared, "governed": shared}),
+            _weighting_confound_bundle(),
+        ):
+            verify_bundle(bundle, traces)  # must NOT raise
+            self.assertEqual(validate_artifact(bundle, "bundle"), [])
+
+    def test_earning_fixture_survives_the_real_export_cp_path(self) -> None:
+        # the honest matched-design fixture is exported through the FULL production
+        # handoff (schema + graph + bridge), and the confounded/disjoint fixtures are
+        # refused there too — proving the design gate holds on the real path, not
+        # only inside earned_bridge (review r20 finding #10)
+        from lab_runner.cp_export import export_cp
+
+        earn_bundle, earn_traces = _controlled_bundle([(True, False)] * 24)
+        export = export_cp(earn_bundle, condition_id="governed", traces=earn_traces)
+        self.assertTrue(export.earned_bridge)
+        self.assertTrue(export.config["source"]["bridge_analysis"])
+
+        confound_bundle, confound_traces = _weighting_confound_bundle()
+        export2 = export_cp(confound_bundle, condition_id="governed", traces=confound_traces)
+        # the bundle is valid and exportable, but the confounded design earns NO
+        # bridge — the production config carries no unearned causal claim
+        self.assertFalse(export2.earned_bridge)
+        self.assertIsNone(export2.config["source"].get("bridge_analysis"))
 
 
 def _real_slice_bundle():
@@ -353,6 +583,85 @@ class TestBridgeExportPortability(unittest.TestCase):
             cfg["config_hash"] = "sha256:" + "0" * 64
             deploy.write_text(json.dumps(cfg))
             self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+
+    def test_verify_cp_export_checks_bridge_analysis_and_stale_files(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out)]), 0)
+            # tampering the bridge-analysis file is caught by the manifest (r20)
+            ba = out / "bridge-analysis.json"
+            obj = json.loads(ba.read_text())
+            obj["treated"] = {"violations": 0, "n": 999}
+            ba.write_text(json.dumps(obj))
+            self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+            # restore, then a STALE/injected file is caught too
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out), "--overwrite"]), 0)
+            (out / "sneaky.txt").write_text("not in the manifest")
+            self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+
+    def test_reexport_requires_overwrite_and_clears_stale(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out)]), 0)
+            stale = out / "bridge-traces" / "stale.json"
+            stale.write_text("{}")
+            # a re-export into a non-empty dir without --overwrite is refused
+            self.assertNotEqual(
+                main(["export-cp", str(bdir), "--condition", "governed", "--out", str(out)]), 0
+            )
+            # with --overwrite the stale file is gone and the export verifies
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out), "--overwrite"]), 0)
+            self.assertFalse(stale.exists())
+            self.assertEqual(main(["verify-cp-export", str(out)]), 0)
+
+    @unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl not installed")
+    def test_signed_manifest_verifies_and_wrong_key_fails(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from nacl.signing import SigningKey
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import EXIT_UNVERIFIED, main
+
+        sk = SigningKey.generate()
+        priv, pub = bytes(sk).hex(), bytes(sk.verify_key).hex()
+        wrong = bytes(SigningKey.generate().verify_key).hex()
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out), "--author", "acme", "--sign-key", priv]), 0)
+            # correct key → verified (0)
+            self.assertEqual(main(["verify-cp-export", str(out), "--pubkey", pub]), 0)
+            # signed but no key → UNVERIFIED (5), not a silent pass
+            self.assertEqual(main(["verify-cp-export", str(out)]), EXIT_UNVERIFIED)
+            # wrong key → INVALID (1)
+            self.assertEqual(main(["verify-cp-export", str(out), "--pubkey", wrong]), 1)
 
 
 class TestExportVerifiesGraph(unittest.TestCase):
@@ -486,6 +795,75 @@ class TestMandatoryRuntimeProvenance(unittest.TestCase):
         with self.assertRaises(CPExportError) as ctx:
             export_cp(doctored, condition_id="governed", traces=traces)
         self.assertIn("no recorded runtime_config_hash", str(ctx.exception))
+
+
+class TestExecutionProvenanceEnforcement(unittest.TestCase):
+    def test_completed_trial_requires_runtime_config_hash(self) -> None:
+        from lab_contracts import validate_artifact
+        bundle, _ = _real_slice_bundle()
+        ct = next(t for t in bundle["trials"] if t["status"] == "completed")
+        del ct["runtime_config_hash"]
+        errs = validate_artifact(bundle, "bundle")
+        self.assertTrue(any("runtime_config_hash" in e for e in errs))
+
+    def test_completed_trial_requires_config_compiler_version(self) -> None:
+        from lab_contracts import validate_artifact
+        bundle, _ = _real_slice_bundle()
+        ct = next(t for t in bundle["trials"] if t["status"] == "completed")
+        del ct["config_compiler_version"]
+        errs = validate_artifact(bundle, "bundle")
+        self.assertTrue(any("config_compiler_version" in e for e in errs))
+
+    def test_runtime_hash_records_resolved_kernel_fingerprint(self) -> None:
+        # the runner records the ACTUAL resolved backend fingerprint on the trial,
+        # not just the declared condition.kernel string (review r20)
+        result = run_experiment_suite(
+            [support.banking_scenario()], support.manifests(), support.conditions(),
+            support.kernel_registry(), repeats=2, run_id="r_fp",
+        )
+        for trial in (t for t in result.trials if t["status"] == "completed"):
+            self.assertTrue(trial.get("resolved_kernel_fingerprint"))
+
+    def test_divergent_runtime_hashes_for_same_pair_are_rejected(self) -> None:
+        # two completed trials of the SAME (scenario, condition) recording DIFFERENT
+        # runtime hashes is a compiler/config drift the builder must not silently
+        # collapse to one (review r20)
+        from lab_contracts import build_bundle
+        bundle, traces = _real_slice_bundle()
+        gov = [t for t in bundle["trials"]
+               if t["status"] == "completed" and t["condition_id"] == "governed"]
+        gov[0]["runtime_config_hash"] = "sha256:" + "a" * 64
+        gov[1]["runtime_config_hash"] = "sha256:" + "b" * 64  # divergent
+        with self.assertRaises(ValueError) as ctx:
+            build_bundle(
+                bundle_id="b_div", created=CREATED, scenarios=bundle["scenarios"],
+                conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+                environment={k: v for k, v in bundle["environment"].items()
+                             if k != "config_provenance"},
+                trials=bundle["trials"], aggregates=bundle["aggregates"], traces=traces,
+            )
+        self.assertIn("divergent runtime_config_hash", str(ctx.exception))
+
+    def test_evidence_export_refuses_reconstructed_provenance(self) -> None:
+        # a bundle whose provenance was reconstructed at build time (not recorded at
+        # execution) is refused an evidence-backed export (review r20)
+        import copy
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+        bundle, traces = _real_slice_bundle()
+        env = dict(bundle["environment"])  # type: ignore[union-attr]
+        prov = copy.deepcopy(env["config_provenance"])
+        prov["provenance_status"] = "reconstructed_legacy"
+        env["config_provenance"] = prov
+        doctored = build_bundle(
+            bundle_id="b_recon", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+            traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(doctored, condition_id="governed", traces=traces)
+        self.assertIn("reconstructed", str(ctx.exception))
 
 
 if __name__ == "__main__":

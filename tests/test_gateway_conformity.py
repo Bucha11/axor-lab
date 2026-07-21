@@ -254,6 +254,44 @@ class TestLosslessRetention(_Base):
         self.assertEqual(d_status, 200)
         self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 200)  # B still intact
 
+    def _finalize_big(self):
+        """Finalize a run whose frozen trace is far larger than an empty one, so its
+        byte footprint can exceed a byte budget an empty trace fits under."""
+        rid, secret = self._open()
+        self._post(f"/runs/{rid}/events", {
+            "type": "tool_result", "tool": "read_txns",
+            "values": [{"value_id": "v_r", "decision_value": SAFE_IBAN, "labels": ["prompt_given"],
+                        "sources": [{"kind": "external_read", "origin_ref": "o"}]},
+                       {"value_id": "v_a", "decision_value": 1200, "labels": ["prompt_given"],
+                        "sources": [{"kind": "external_read", "origin_ref": "o"}]}],
+        }, secret)
+        for _ in range(6):
+            self._post(f"/runs/{rid}/events", {
+                "type": "tool_call_intent", "tool": "send_money",
+                "arg_bindings": {"recipient": "v_r", "amount": "v_a"},
+            }, secret)
+        status, body = self._post(f"/runs/{rid}/finalize", {}, secret)
+        return rid, secret, str(body.get("trace_ref", "")), status
+
+    def test_impossible_finalize_never_evicts_acknowledged_traces(self) -> None:
+        # an incoming run larger than the WHOLE byte budget can never be admitted.
+        # It must be refused up front WITHOUT evicting anything — the old code fell
+        # into the eviction loop and deleted every acknowledged (delivered) trace one
+        # by one before still returning 429, destroying durable evidence for a run
+        # that was never admissible (review r20 finding #8).
+        self.max_retained = 100          # count is not the constraint here
+        self.max_retained_bytes = 1500   # fits two small acked traces, not one big run
+        self.setUp()
+        a_id, a_secret, a_ref, a_status = self._finalize(fetch=True, ack=True)
+        b_id, b_secret, b_ref, b_status = self._finalize(fetch=True, ack=True)
+        self.assertEqual((a_status, b_status), (200, 200))
+        # both are DELIVERED (acked) and therefore eligible for eviction
+        _, _, _, big_status = self._finalize_big()
+        self.assertEqual(big_status, 429)  # the oversized run is refused
+        # the acknowledged evidence was NOT sacrificed to make impossible room
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
+        self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 200)
+
     def test_preopened_runs_cannot_overflow_retention_on_finalize(self) -> None:
         # THE r19 bypass: pre-open many active runs while retained is empty, then
         # finalize them all. Retention is capped at 2, so only 2 finalize into the
