@@ -34,7 +34,7 @@ from lab_contracts import (
     validate_artifact,
 )
 
-from .axor_backend import resolve_kernel, resolve_kernel_for_trace
+from .axor_backend import resolve_candidate_kernel_for_trace, resolve_kernel
 from .bundle_io import (
     PACKAGING,
     read_bundle_dir,
@@ -469,14 +469,18 @@ def _cmd_regress(args: argparse.Namespace) -> int:
         # gate off (the fingerprint marks it a different kernel, review r4)
         kernel: object = Kernel(version=version, taint_floor_enabled=False)
     else:
-        # regress under the SAME kernel run/replay would use — so a real
-        # axor-core pin regresses under the real governor, not the reference
-        # taint-floor kernel (review r6: one kernel path everywhere). Each pin
-        # resolves its OWN kernel so a real-kernel allowlist expands against that
-        # pin's scenario inputs, not a single baked expansion (review r17).
+        # regress under the CANDIDATE kernel — the one named by --kernel or the
+        # chosen regression condition — NOT the kernel the trace was recorded
+        # under (review r18). Each pin resolves the candidate against its OWN
+        # scenario inputs so a real-kernel allowlist expands per scenario. The
+        # candidate resolver takes policy/enforcement from the selected condition
+        # and the version from the override, so `regress --kernel axor-core@X`
+        # actually runs axor-core@X.
         registry = default_registry((version,))
         kernel = resolve_kernel(version, manifests, condition.get("policy"), registry)  # type: ignore[arg-type]
-        kernel_for = lambda trace: resolve_kernel_for_trace(bundle, trace, registry)  # noqa: E731
+        kernel_for = lambda trace: resolve_candidate_kernel_for_trace(  # noqa: E731
+            bundle, trace, condition, args.kernel, registry
+        )
     # each pinned trace replays against ITS OWN scenario's inputs — a single
     # shared inputs dict would replay every pin under the first scenario's
     # allowlist / effect-resolution inputs (review r12)

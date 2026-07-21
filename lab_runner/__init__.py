@@ -14,8 +14,10 @@ from .axor_backend import (
     gate_with_governor,
     governor_config,
     real_kernel_version,
+    resolve_candidate_kernel_for_trace,
     resolve_kernel,
     resolve_kernel_for_trace,
+    resolve_recorded_kernel_for_trace,
 )
 from .errors import (
     ConfirmationRequired,
@@ -60,8 +62,10 @@ __all__ = [
     "gate_with_governor",
     "governor_config",
     "real_kernel_version",
+    "resolve_candidate_kernel_for_trace",
     "resolve_kernel",
     "resolve_kernel_for_trace",
+    "resolve_recorded_kernel_for_trace",
     "ExperimentFileError",
     "ExperimentResult",
     "Kernel",

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from lab_contracts.canonical import content_hash
 
+from .errors import UnknownKernelError
 from .replay import (
     REPLAY_MALFORMED_TRACE,
     REPLAY_MATCH,
@@ -96,22 +97,36 @@ def check_pins(
     kernel resolved once carries the wrong allowlist for a second scenario. When
     given, it overrides the single `kernel` per pin (which is kept for the version
     fingerprint and as the fallback)."""
-    # report the BEHAVIOR fingerprint (version + behavior-changing flags), not
-    # just the version string — a taint_floor-off variant must be visibly a
-    # different kernel, never the same identity with different verdicts (r4)
-    version = getattr(kernel, "behavior_version", None) or getattr(kernel, "version", "unknown")
+    # the fallback fingerprint (used for pins we never actually replay — missing
+    # or tampered traces). The REPLAYED fingerprint is taken from the ACTUAL
+    # per-trace kernel below, so the report can never claim a kernel that did not
+    # decide (review r18).
+    def _fingerprint(k: object) -> str:
+        return str(getattr(k, "behavior_version", None) or getattr(k, "version", "unknown"))
+
+    fallback_version = _fingerprint(kernel)
     results: list[dict[str, object]] = []
     by_id = {str(t["trace_id"]): t for t in traces.values()}
     for pinned in pins:
         trace = by_id.get(pinned.trace_id)
         if trace is None:
-            results.append(_result(pinned, "TRACE_MISSING", version, STATUS_MISSING))
+            results.append(_result(pinned, "TRACE_MISSING", fallback_version, STATUS_MISSING))
             continue
         if content_hash(trace) != pinned.trace_ref:
-            results.append(_result(pinned, "TRACE_TAMPERED", version, STATUS_TAMPERED))
+            results.append(_result(pinned, "TRACE_TAMPERED", fallback_version, STATUS_TAMPERED))
             continue
         trace_inputs = inputs_for(trace) if inputs_for is not None else (inputs or {})
-        trace_kernel = kernel_for(trace) if kernel_for is not None else kernel
+        # resolving the per-trace kernel can fail (an unavailable/unknown candidate
+        # kernel) — that is a STATUS, not a crash inside the loop (review r18)
+        try:
+            trace_kernel = kernel_for(trace) if kernel_for is not None else kernel
+        except UnknownKernelError:
+            results.append(
+                _result(pinned, "UNSUPPORTED_KERNEL", fallback_version, STATUS_UNSUPPORTED_KERNEL)
+            )
+            continue
+        # the fingerprint reported for THIS pin is the kernel that actually ran it
+        version = _fingerprint(trace_kernel)
         recomputed, replay_status = replay_trace_status(
             trace, condition, trace_kernel, manifests, trace_inputs
         )
