@@ -88,6 +88,11 @@ class StoredPublication:
     # publication.json integrity field alone (review r9)
     author: str | None = None
     signature: str | None = None
+    # the server ACCEPTANCE receipt as it was MINTED AND SIGNED AT PUBLISH TIME —
+    # restored from disk on load and served verbatim, never re-minted (review r16).
+    # Re-deriving it would re-sign with whatever key the server holds NOW, silently
+    # replacing the historical attestation (and its key_id) when the key rotates.
+    acceptance: dict[str, object] | None = None
     # the STABLE evidence lineage this publication rests on (review r15) — the
     # takedown/read guards key on this, not on the packaging-sensitive bundle_ref
     lineage_ref: str = ""
@@ -455,8 +460,17 @@ class PublicationStore:
         of what it verified before minting, portable and cryptographically checkable
         rather than an unsigned JSON blob. It content-addresses the semantic report
         (what the handshake checked) and is Ed25519-signed with the server key when
-        one is configured (else algorithm=unsigned). Deterministic — no wall-clock —
-        so a re-derivation on download re-produces the same signed bytes."""
+        one is configured (else algorithm=unsigned).
+
+        When a publication was loaded from disk its acceptance is RESTORED verbatim
+        (stored.acceptance) — the immutable record the server signed at publish time
+        — never re-minted: re-deriving it would re-sign under whatever key the server
+        holds NOW, silently swapping the historical attestation (and its key_id) on
+        key rotation (review r16). Only a fresh publish (no restored acceptance)
+        mints one here; the mint is deterministic so it reproduces identical bytes
+        under the same key."""
+        if stored.acceptance is not None:
+            return stored.acceptance
         pub = stored.publication
         report = {
             "replay": "bit_identical",
@@ -672,10 +686,12 @@ class PublicationStore:
                 json.dumps({"author": stored.author, "signature": stored.signature}),
             )
         # the server acceptance receipt — the persisted, (optionally) signed record
-        # of what the handshake verified (review r15)
-        _write_atomic(
-            directory / "acceptance.json", json.dumps(self.acceptance(stored), indent=2)
-        )
+        # of what the handshake verified (review r15). Mint it ONCE and pin it onto
+        # the in-memory record too, so a later key rotation cannot change the
+        # attestation of an already-published result — in memory or on disk (r16).
+        acceptance = self.acceptance(stored)
+        stored.acceptance = acceptance
+        _write_atomic(directory / "acceptance.json", json.dumps(acceptance, indent=2))
         self._persist_reproductions(stored)
 
     def _persist_reproductions(self, stored: StoredPublication) -> None:
@@ -767,11 +783,53 @@ class PublicationStore:
             except ValueError:
                 raw = ()
         reproductions = list(rebuild_reproduction_log(raw, self.known_keys, publication_id))
+        acceptance = self._load_acceptance(directory, publication)
         self._cache[publication_id] = StoredPublication(
             publication=publication, bundle=bundle, traces=traces, reproductions=reproductions,
             author=author if integrity == "signed" else None,
             signature=signature if integrity == "signed" else None,
+            acceptance=acceptance,
         )
+
+    def _load_acceptance(
+        self, directory: Path, publication: dict[str, object]
+    ) -> dict[str, object] | None:
+        """Restore the persisted acceptance receipt, BINDING-verified against the
+        publication (review r16). Returns the ORIGINAL signed bytes so a rotated
+        server key cannot silently re-attest with a new key/key_id; a tampered or
+        mismatched file is dropped (None → acceptance() re-mints under the current
+        key). The signature is deliberately NOT checked here against the current
+        server key: the key that SIGNED this receipt may no longer be the one the
+        server holds, so verifying against the live key would wrongly discard a
+        valid historical attestation on every rotation. Signature verification is
+        the reader's job, offline, with the publishing key (verify_acceptance +
+        the receipt's key_id); the server only re-confirms the receipt still binds
+        THIS publication (publication_id, bundle_ref, semantic_report_ref)."""
+        path = directory / "acceptance.json"
+        if not path.is_file():
+            return None
+        try:
+            acc = json.loads(path.read_text())
+        except ValueError:
+            return None
+        if not isinstance(acc, dict):
+            return None
+        from lab_contracts.signing import (
+            SignatureInvalid,
+            SignatureUnavailable,
+            verify_acceptance,
+        )
+
+        try:
+            # no server_pubkey_hex → binding-only: a signed receipt passes the
+            # binding checks then raises SignatureUnavailable (which we accept),
+            # while any binding mismatch raises SignatureInvalid (which we reject)
+            verify_acceptance(acc, publication)
+        except SignatureUnavailable:
+            pass  # signed & bound; the original signature is preserved for readers
+        except SignatureInvalid:
+            return None  # tampered / does not bind this publication → re-mint clean
+        return acc
 
     def _load_reproductions_only(self, publication_id: str) -> None:
         """A taken-down publication keeps only its attestation record."""

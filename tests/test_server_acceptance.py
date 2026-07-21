@@ -77,6 +77,49 @@ class TestAcceptanceReceipt(unittest.TestCase):
         stored = store.publish(bundle, traces, question="q")
         self.assertEqual(store.acceptance(stored), store.acceptance(stored))
 
+    def test_persisted_acceptance_is_restored_on_load_not_reminted(self) -> None:
+        # publish under server identity A, persisting acceptance.json...
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store_a = PublicationStore(root=root, server_id="axor-lab-server-A")
+        stored = store_a.publish(bundle, traces, question="q")
+        pid = str(stored.publication["publication_id"])
+        original = json.loads((root / pid / "acceptance.json").read_text())
+        self.assertEqual(original["server_id"], "axor-lab-server-A")
+
+        # ...reload with a DIFFERENT server identity B on the same dir. The served
+        # acceptance must be the ORIGINAL (server_id A), not re-minted under B —
+        # otherwise the historical attestation silently changes (review r16)
+        store_b = PublicationStore(root=root, server_id="axor-lab-server-B")
+        reloaded = store_b.get(pid)
+        acc = store_b.acceptance(reloaded)
+        self.assertEqual(acc["server_id"], "axor-lab-server-A")
+        self.assertEqual(acc, original)
+
+    def test_tampered_acceptance_is_dropped_and_reminted(self) -> None:
+        # a hand-edited acceptance.json (semantic_report_ref no longer binds its
+        # report) must NOT be restored; the server re-mints a clean one on load
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(root=root, server_id="axor-lab-server-A")
+        stored = store.publish(bundle, traces, question="q")
+        pid = str(stored.publication["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))  # ref no longer matches report
+
+        store2 = PublicationStore(root=root, server_id="axor-lab-server-A")
+        reloaded = store2.get(pid)
+        self.assertIsNone(reloaded.acceptance)  # tampered file was dropped on load
+        served = store2.acceptance(reloaded)     # re-minted clean from the evidence
+        self.assertNotIn("FABRICATED_CHECK", served["semantic_report"]["verified"])
+        self.assertEqual(served["semantic_report_ref"], content_hash(served["semantic_report"]))
+
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")
 class TestSignedAcceptance(unittest.TestCase):
@@ -100,6 +143,36 @@ class TestSignedAcceptance(unittest.TestCase):
         self.assertEqual(acc["key_id"], "lab-prod-2026")
         # the signature verifies over the receipt minus its signature field
         verify_bundle_signature(acc, str(acc["signature"]), pub)  # must NOT raise
+
+    def test_signed_acceptance_survives_server_key_rotation(self) -> None:
+        # publish under key/key_id A, then reload the server with a ROTATED key B.
+        # The served acceptance must still carry key_id A and verify under pubkey A
+        # — the historical attestation is NOT re-signed with B (review r16 P1)
+        from nacl.signing import SigningKey
+
+        from lab_contracts.signing import verify_bundle_signature
+
+        sk_a = SigningKey.generate()
+        priv_a, pub_a = bytes(sk_a).hex(), bytes(sk_a.verify_key).hex()
+        priv_b = bytes(SigningKey.generate()).hex()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store_a = PublicationStore(
+            root=root, server_id="lab.example.com",
+            server_key_id="lab-prod-2026", server_signing_key=priv_a,
+        )
+        stored = store_a.publish(bundle, traces, question="q")
+        pid = str(stored.publication["publication_id"])
+
+        rotated = PublicationStore(
+            root=root, server_id="lab.example.com",
+            server_key_id="lab-prod-2027", server_signing_key=priv_b,  # rotated
+        )
+        acc = rotated.acceptance(rotated.get(pid))
+        self.assertEqual(acc["key_id"], "lab-prod-2026")   # the ORIGINAL key_id
+        verify_bundle_signature(acc, str(acc["signature"]), pub_a)  # verifies under A, not B
 
 
 if __name__ == "__main__":
