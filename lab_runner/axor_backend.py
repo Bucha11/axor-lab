@@ -81,13 +81,31 @@ def resolve_kernel(
     policy: dict[str, object] | None,
     registry: object,
 ) -> object:
-    """Pick the kernel for a condition: the REAL axor-core governor ONLY when
-    the pinned version EXACTLY matches the installed axor-core, else the
-    reference kernel. We never silently run a different build than pinned — a
-    condition pinning axor-core@0.4.2 does not get the installed 0.9.2 (that
-    would be the version-is-metadata dishonesty the review flagged)."""
-    if HAS_AXOR_CORE and version == real_kernel_version():
+    """Pick the kernel for a condition. A REAL-kernel pin (`axor-core@X`) is
+    satisfied ONLY by the exact installed build; the reference kernel is used
+    ONLY for a genuine reference version — it NEVER masquerades as `axor-core@X`.
+
+    The round-15 code fell through to `registry.get(version)` for any version,
+    and `default_registry` builds a reference `Kernel(version=...)` for ANY string
+    — so a bundle pinning `axor-core@0.9.2` on a machine without it replayed under
+    the one-gate reference kernel yet still claimed the pinned build (review r16
+    P0). Now a real-kernel pin that is missing or mismatched raises
+    UnknownKernelError, which the replay layer surfaces as
+    REPLAY_UNSUPPORTED_KERNEL — never a silent substitution."""
+    if is_real_kernel_version(version):
+        if not HAS_AXOR_CORE:
+            raise UnknownKernelError(
+                f"{version} is pinned but axor-core is not installed — refusing to "
+                "substitute the reference kernel under a real-kernel version label"
+            )
+        if version != real_kernel_version():
+            raise UnknownKernelError(
+                f"{version} is pinned but the installed build is {real_kernel_version()} — "
+                "refusing to run a different build than pinned"
+            )
         return AxorKernel(version=version, config=governor_config(manifests, policy))
+    # a genuine reference version → the reference registry (which raises
+    # UnknownKernelError for a version it does not know)
     return registry.get(version)  # type: ignore[attr-defined]
 
 

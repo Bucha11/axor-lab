@@ -14,8 +14,12 @@ sys.path.insert(0, str(REPO_ROOT))
 from lab_contracts import condition_config_hash, validate_artifact  # noqa: E402
 from lab_runner import Kernel, KernelRegistry  # noqa: E402
 
-KERNEL_PINNED = "axor-core@0.4.2"
-KERNEL_NO_TAINT_FLOOR = "axor-core@0.5.0-hypothetical-no-taint-floor"
+# the standard slice runs the REFERENCE kernel and says so — it must not pin a
+# fake `axor-core@X` that (before r16) silently fell back to the reference kernel
+# while claiming a real build. Real-kernel behavior is exercised separately with
+# the actually-installed build (test_real_kernel).
+KERNEL_PINNED = "reference_taint_floor_kernel"
+KERNEL_NO_TAINT_FLOOR = "reference_taint_floor_kernel+variant-no-taint-floor"
 
 
 def schema_errors(obj: dict[str, object], schema_name: str) -> list[str]:
