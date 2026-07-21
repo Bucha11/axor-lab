@@ -8,8 +8,44 @@ canonical serialization. `verify_bundle` is what the server runs on upload
 
 from __future__ import annotations
 
-from .canonical import content_hash, world_digest
+from .canonical import (
+    CONFIG_COMPILER_VERSION,
+    content_hash,
+    runtime_config_hash,
+    world_digest,
+)
 from .errors import BundleIntegrityError
+
+
+def config_provenance(
+    scenarios: list[dict[str, object]],
+    conditions: list[dict[str, object]],
+    tool_manifests: list[dict[str, object]],
+    trials: list[dict[str, object]],
+) -> dict[str, object]:
+    """The build-time governor-config provenance (review r18): for each
+    (scenario, condition) pair that has a COMPLETED trial, the concrete
+    runtime_config_hash the SAME process compiled — so a later export can verify
+    the config it reproduces matches what actually ran, not a re-compilation under
+    a drifted compiler. Keyed ``"<scenario_id>|<condition_id>"``."""
+    scen_by_id = {str(s["name"]): s for s in scenarios}
+    cond_by_id = {str(c["id"]): c for c in conditions}
+    hashes: dict[str, str] = {}
+    for trial in trials:
+        if trial.get("status") != "completed":
+            continue
+        sid, cid = str(trial.get("scenario_id")), str(trial.get("condition_id"))
+        key = f"{sid}|{cid}"
+        if key in hashes:
+            continue
+        scenario, condition = scen_by_id.get(sid), cond_by_id.get(cid)
+        if scenario is None or condition is None:
+            continue
+        hashes[key] = runtime_config_hash(
+            str(condition["kernel"]), condition.get("policy"), tool_manifests,
+            scenario.get("inputs", {}),  # type: ignore[arg-type]
+        )
+    return {"compiler_version": CONFIG_COMPILER_VERSION, "runtime_config_hashes": hashes}
 
 
 def build_bundle(
@@ -25,6 +61,17 @@ def build_bundle(
     packaging: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Assemble a bundle/v1 dict; `created` is caller-supplied (determinism)."""
+    # record the build-time runtime-config provenance INTO the environment (the
+    # same process that ran the trials compiles these), unless the caller already
+    # supplied it — so an export can later prove the config it reproduces is the
+    # one that ran, not a re-compilation (review r18)
+    if "config_provenance" not in environment:
+        environment = {
+            **environment,
+            "config_provenance": config_provenance(
+                scenarios, conditions, tool_manifests, trials
+            ),
+        }
     hashes: dict[str, str] = {}
     for scenario in scenarios:
         hashes[f"scenario:{scenario['name']}"] = content_hash(scenario)

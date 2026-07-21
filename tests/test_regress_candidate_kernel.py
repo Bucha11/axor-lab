@@ -16,7 +16,7 @@ from pathlib import Path
 
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
-from lab_contracts import build_bundle, condition_config_hash, content_hash
+from lab_contracts import build_bundle, content_hash
 from lab_runner import (
     AxorKernel,
     axor_available,

@@ -99,6 +99,22 @@
             "type": "string"
           },
           "description": "the distinct condition kernels when a run mixes kernels (kernel_version is omitted then; each trace's producer.kernel_version stays authoritative)"
+        },
+        "config_provenance": {
+          "type": "object",
+          "description": "build-time governor-config provenance (review r18): the compiler version and the per-(scenario|condition) runtime_config_hash computed by the SAME process that ran the trials, so an export can verify the runtime config it reproduces matches what actually ran.",
+          "additionalProperties": false,
+          "properties": {
+            "compiler_version": {
+              "type": "string"
+            },
+            "runtime_config_hashes": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },

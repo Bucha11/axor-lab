@@ -752,6 +752,23 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
                 json.dumps(trace, indent=2, ensure_ascii=False)
             )
     source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
+    # export the FROZEN bridge trace BODIES so the earned-bridge analysis is
+    # independently recomputable from the export directory alone — the analysis
+    # receipt carries only trace hashes, not the bytes to re-evaluate the
+    # violation predicate over (review r18)
+    analysis: dict[str, object] | None = source.get("bridge_analysis")  # type: ignore[assignment]
+    if analysis is not None:
+        by_ref = {content_hash(t): t for t in traces.values()}
+        bt_dir = out / "bridge-traces"
+        bt_dir.mkdir(exist_ok=True)
+        trial_refs: dict[str, list[str]] = analysis["trial_refs"]  # type: ignore[assignment]
+        for refs in trial_refs.values():
+            for ref in refs:
+                trace = by_ref.get(ref)
+                if trace is not None:
+                    (bt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
+                        json.dumps(trace, indent=2, ensure_ascii=False)
+                    )
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
     # the parametric_config_hash is the carry-over key: kernel + policy + manifests

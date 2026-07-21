@@ -20,11 +20,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lab_contracts import (
+    CONFIG_COMPILER_VERSION,
     condition_config_hash,
     content_hash,
     parametric_policy_hash,
     runtime_config_hash,
+    validate_artifact,
+    verify_bundle,
 )
+from lab_contracts.errors import BundleIntegrityError
 
 _VALID_VERDICTS = frozenset({"ALLOW", "DENY"})
 
@@ -70,7 +74,23 @@ def export_cp(
     The condition to deploy is chosen EXPLICITLY when several enforce, so the
     exported policy is provably the one whose aggregate showed the delta — not
     just the first enforcement-on condition (which could differ from the one the
-    earned bridge measured, deploying a config that never changed the outcome)."""
+    earned bridge measured, deploying a config that never changed the outcome).
+
+    export_cp is a PRODUCTION HANDOFF boundary and does not trust the caller's
+    discipline (review r18): it re-runs the full bundle graph verification
+    (schema + Trial<->Trace binding + trace-metadata) before anything, so a
+    schema-valid, hash-resolving, but graph-invalid bundle (a trial citing a trace
+    whose own coordinates disagree) is refused rather than silently exported."""
+    if traces is not None:
+        for problem_source, obj in (("bundle", bundle), *((f"trace {t.get('trace_id')}", t)
+                                                          for t in traces.values())):
+            errs = validate_artifact(obj, "bundle" if problem_source == "bundle" else "trace")
+            if errs:
+                raise CPExportError(f"{problem_source} failed schema validation: {errs[:5]}")
+        try:
+            verify_bundle(bundle, traces)
+        except BundleIntegrityError as exc:
+            raise CPExportError(f"bundle graph is not verifiable: {exc}") from exc
     governed = _select_condition(bundle, condition_id)
     policy: dict[str, object] = governed.get("policy", {})  # type: ignore[assignment]
     kernel = str(governed["kernel"])
@@ -108,10 +128,16 @@ def export_cp(
     # captured per-scenario as runtime_config_hashes (review r17).
     manifests: list[dict[str, object]] = bundle["tool_manifests"]  # type: ignore[assignment]
     parametric_hash = parametric_policy_hash(kernel, policy, manifests)
+    # the per-scenario CONCRETE runtime hashes. These are RECOMPUTED here but must
+    # AGREE with what the bundle recorded at build time (environment.
+    # config_provenance): if the config compiler drifted between the run and this
+    # export, the recomputed hash is the CURRENT compilation, not the one that ran
+    # — so a mismatch is a hard error, not a silently-synthesized value (review r18).
     runtime_hashes = {
         str(s["name"]): runtime_config_hash(kernel, policy, manifests, s.get("inputs", {}))
         for s in bundle.get("scenarios", [])  # type: ignore[union-attr]
     }
+    _verify_recorded_runtime_hashes(bundle, str(governed["id"]), runtime_hashes)
     source: dict[str, object] = {
         "bundle_id": bundle.get("bundle_id"),
         "condition_id": governed["id"],
@@ -142,6 +168,34 @@ def export_cp(
         production_todo=_render_todo(),
         earned_bridge=earned,
     )
+
+
+def _verify_recorded_runtime_hashes(
+    bundle: dict[str, object], condition_id: str, recomputed: dict[str, str]
+) -> None:
+    """The runtime config hashes RECOMPUTED at export time must equal the ones the
+    bundle RECORDED at build time for this condition (review r18). A difference
+    means the governor-config compiler changed between the run and the export, so
+    the export would ship a config identity that never actually ran."""
+    env: dict[str, object] = bundle.get("environment", {})  # type: ignore[assignment]
+    prov: dict[str, object] = env.get("config_provenance", {})  # type: ignore[assignment]
+    recorded: dict[str, object] = prov.get("runtime_config_hashes", {})  # type: ignore[assignment]
+    if not recorded:
+        return  # a legacy bundle without recorded provenance — nothing to check against
+    compiler = str(prov.get("compiler_version", ""))
+    if compiler and compiler != CONFIG_COMPILER_VERSION:
+        raise CPExportError(
+            f"bundle recorded config_provenance.compiler_version {compiler!r} but this build "
+            f"compiles config with {CONFIG_COMPILER_VERSION!r} — refusing to export a runtime "
+            "config identity under a different compiler than the one that ran"
+        )
+    for scenario_id, rhash in recomputed.items():
+        key = f"{scenario_id}|{condition_id}"
+        if key in recorded and str(recorded[key]) != rhash:
+            raise CPExportError(
+                f"runtime_config_hash for {key} recomputes to {rhash} but the bundle recorded "
+                f"{recorded[key]} at run time — the compiled config does not match what ran"
+            )
 
 
 def _validate_pins(

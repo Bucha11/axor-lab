@@ -250,6 +250,13 @@ def parametric_policy_hash(
 executable_config_hash = parametric_policy_hash
 
 
+# the identity of the governor-config COMPILER (compiled_governor_config). If the
+# compilation logic changes in a way that alters the canonical config, bump this
+# so a recorded runtime_config_hash can be told apart from a re-compiled one under
+# a different compiler (review r18).
+CONFIG_COMPILER_VERSION = "axor-governor-config/v1"
+
+
 def runtime_config_hash(
     kernel: str,
     policy: dict[str, object] | None,

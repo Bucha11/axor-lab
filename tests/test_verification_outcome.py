@@ -26,7 +26,7 @@ from lab_contracts.signing import (
     verify_receipt,
 )
 from lab_runner import run_experiment_suite
-from lab_runner.cli import EXIT_FAILURE, EXIT_OK, EXIT_UNVERIFIED, main
+from lab_runner.cli import EXIT_FAILURE, EXIT_OK, main
 
 _HAS_NACL = importlib.util.find_spec("nacl") is not None
 CREATED = "2026-07-20T12:00:00+00:00"

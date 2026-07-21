@@ -7,6 +7,7 @@ zero), not merely large.
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from tests import support
@@ -157,6 +158,149 @@ class TestEvidenceDerivedBridge(unittest.TestCase):
         # receipt is content-addressable
         self.assertTrue(analysis["trial_refs"]["governed"])
         self.assertTrue(content_hash(analysis).startswith("sha256:"))
+
+
+def _real_slice_bundle():
+    """A real run-suite bundle+traces that passes verify_bundle when untouched."""
+    from lab_analysis import mcnemar_test
+    from lab_contracts import build_bundle
+
+    scenario = support.banking_scenario()
+    conditions = support.conditions()
+    result = run_experiment_suite(
+        [scenario], support.manifests(), conditions, support.kernel_registry(),
+        repeats=8, run_id="r_graph",
+    )
+    pairs = result.pairs("ungoverned", "governed", metric="ASR")
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned", sum(1 for b, _ in pairs if b), len(pairs)),
+        binary_aggregate("ASR", "governed", sum(1 for _, t in pairs if t), len(pairs),
+                         test=mcnemar_test(pairs, vs="ungoverned")),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_graph", created=CREATED, scenarios=[scenario], conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=result.trials, aggregates=aggregates, traces=result.traces,
+    )
+    return bundle, result.traces
+
+
+def _powered_real_bundle():
+    """A real, POWERED slice (ungoverned all-violate, governed all-deny) that both
+    earns the bridge and passes verify_bundle."""
+    from lab_analysis import mcnemar_test
+    from lab_contracts import build_bundle
+
+    scenario = support.banking_scenario()
+    conditions = support.conditions()
+    result = run_experiment_suite(
+        [scenario], support.manifests(), conditions, support.kernel_registry(),
+        repeats=24, run_id="r_pow", agent=ScriptedAgent(attack_rate=1.0),
+    )
+    pairs = result.pairs("ungoverned", "governed", metric="ASR")
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned", sum(1 for b, _ in pairs if b), len(pairs)),
+        binary_aggregate("ASR", "governed", sum(1 for _, t in pairs if t), len(pairs),
+                         test=mcnemar_test(pairs, vs="ungoverned")),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_pow", created=CREATED, scenarios=[scenario], conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=result.trials, aggregates=aggregates, traces=result.traces,
+    )
+    return bundle, result.traces
+
+
+class TestBridgeExportPortability(unittest.TestCase):
+    def test_bridge_export_contains_recomputable_evidence(self) -> None:
+        # the CLI export writes the FROZEN bridge trace bodies, so the earned-bridge
+        # analysis is independently recomputable from the export directory alone
+        import tempfile
+        from pathlib import Path
+
+        from lab_contracts import content_hash
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out)]), 0)
+            cfg = json.loads((out / "cp-deploy.json").read_text())
+            self.assertTrue(cfg["source"]["bridge_analysis"])  # earned
+            # every trial_ref in the analysis has a frozen body on disk
+            refs = [r for v in cfg["source"]["bridge_analysis"]["trial_refs"].values() for r in v]
+            self.assertTrue(refs)
+            for ref in refs:
+                body = out / "bridge-traces" / (ref.removeprefix("sha256:") + ".json")
+                self.assertTrue(body.is_file())
+                self.assertEqual(content_hash(json.loads(body.read_text())), ref)
+
+
+class TestExportVerifiesGraph(unittest.TestCase):
+    def test_export_cp_calls_verify_bundle(self) -> None:
+        # a graph-invalid bundle (a completed trial whose trace's own coordinates
+        # disagree) is refused by export_cp, which runs the full bundle graph
+        # verification rather than trusting caller discipline (review r18)
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _real_slice_bundle()
+        export_cp(bundle, condition_id="governed", traces=traces)  # clean → ok
+        for trial in bundle["trials"]:
+            if trial.get("status") == "completed" and trial["condition_id"] == "governed":
+                trial["condition_id"] = "ungoverned"  # now disagrees with its trace
+                break
+        with self.assertRaises(CPExportError):
+            export_cp(bundle, condition_id="governed", traces=traces)
+
+    def test_export_cp_rejects_trial_trace_coordinate_mismatch(self) -> None:
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _real_slice_bundle()
+        for trial in bundle["trials"]:
+            if trial.get("status") == "completed":
+                trial["scenario_id"] = "some-other-scenario"  # trace disagrees
+                break
+        with self.assertRaises(CPExportError):
+            export_cp(bundle, condition_id="governed", traces=traces)
+
+
+class TestRecordedRuntimeHash(unittest.TestCase):
+    def test_runtime_config_hash_is_recorded_during_run(self) -> None:
+        from lab_contracts import CONFIG_COMPILER_VERSION
+
+        bundle, _ = _real_slice_bundle()
+        prov = bundle["environment"]["config_provenance"]
+        self.assertEqual(prov["compiler_version"], CONFIG_COMPILER_VERSION)
+        self.assertTrue(prov["runtime_config_hashes"])
+
+    def test_export_rejects_recomputed_runtime_hash_different_from_recorded(self) -> None:
+        # REBUILD with a doctored-but-content-consistent provenance (build_bundle
+        # keeps a pre-supplied config_provenance and hashes it), so the failure is
+        # the runtime-hash CHECK — not an incidental content-hash mismatch — proving
+        # the export refuses a config identity that never actually ran (review r18)
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _real_slice_bundle()
+        env = dict(bundle["environment"])  # type: ignore[union-attr]
+        prov = {"compiler_version": env["config_provenance"]["compiler_version"],
+                "runtime_config_hashes": dict(env["config_provenance"]["runtime_config_hashes"])}
+        gov_key = next(k for k in prov["runtime_config_hashes"] if k.endswith("|governed"))
+        prov["runtime_config_hashes"][gov_key] = "sha256:" + "0" * 64  # doctored
+        env["config_provenance"] = prov
+        doctored = build_bundle(
+            bundle_id="b_doc", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+            traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(doctored, condition_id="governed", traces=traces)
+        self.assertIn("does not match what ran", str(ctx.exception))
 
 
 if __name__ == "__main__":
