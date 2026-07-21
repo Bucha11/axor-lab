@@ -554,6 +554,25 @@ def _bridge_outcomes(
     return outcomes, refs
 
 
+def _status_matrix(bundle: dict[str, object], condition_id: str) -> dict[str, dict[str, int]]:
+    """Per-scenario {planned, completed, failed, excluded} counts for a condition
+    (review r21). Completed-only balance is not enough for a causal claim: two arms
+    can show identical COMPLETED per-scenario counts while one arm selectively lost
+    half a scenario's PLANNED samples — a different assigned population with a
+    condition-correlated missingness mechanism. This matrix exposes both."""
+    matrix: dict[str, dict[str, int]] = {}
+    for trial in bundle.get("trials", []):  # type: ignore[union-attr]
+        if str(trial.get("condition_id")) != condition_id:
+            continue
+        sid = str(trial.get("scenario_id"))
+        status = str(trial.get("status"))
+        row = matrix.setdefault(sid, {"planned": 0, "completed": 0, "failed": 0, "excluded": 0})
+        row["planned"] += 1
+        if status in ("completed", "failed", "excluded"):
+            row[status] += 1
+    return matrix
+
+
 def _arm_coords(
     bundle: dict[str, object], condition_id: str
 ) -> set[tuple[str, str, int, str]]:
@@ -668,17 +687,19 @@ def _earned_for(
         # no ATTESTED experiment design → the analysis method is unknown, so the
         # bridge is not earned (never a silent default to matched_pairs, review r21)
         return False, None
+    base_matrix = _status_matrix(bundle, baseline_id)
+    treated_matrix = _status_matrix(bundle, condition_id)
     if design == "matched_pairs":
         # the PLANNED set includes failed/excluded units too (review r20)
         planned_coords = _arm_coords(bundle, baseline_id) | _arm_coords(bundle, condition_id)
         earned, extra = _earned_matched(
             outcomes, base_coords, treated_coords, base_balance, planned_coords,
-            baseline_id, condition_id,
+            baseline_id, condition_id, base_matrix, treated_matrix,
         )
     else:
         earned, extra = _earned_independent(
             outcomes, base_coords, treated_coords, base_balance, treated_balance,
-            baseline_id, condition_id,
+            baseline_id, condition_id, base_matrix, treated_matrix,
         )
     if not earned:
         return False, None
@@ -709,6 +730,8 @@ def _earned_matched(
     planned_coords: "set[tuple[str, str, int, str]]",
     baseline_id: str,
     treated_id: str,
+    base_matrix: dict[str, dict[str, int]],
+    treated_matrix: dict[str, dict[str, int]],
 ) -> tuple[bool, dict[str, object]]:
     """Matched-pairs earn: pair the SAME experimental units across arms and test
     with McNemar over the discordant pairs (review r19). Statistical significance
@@ -757,6 +780,11 @@ def _earned_matched(
             "discordant": discordant,
             "absolute_risk_reduction": net_risk_reduction,
         },
+        # the effect is a COMPLETE-CASE estimand over the pairs that finished in BOTH
+        # arms — the receipt names it and carries the per-scenario missingness so a
+        # reader can judge whether the dropped units bias it (review r21)
+        "estimand": "matched_complete_case_net_risk_reduction",
+        "missingness": _missingness_report(base_matrix, treated_matrix, baseline_id, treated_id),
         "test": test,
     }
 
@@ -769,25 +797,38 @@ def _earned_independent(
     treated_balance: dict[str, int],
     baseline_id: str,
     treated_id: str,
+    base_matrix: dict[str, dict[str, int]],
+    treated_matrix: dict[str, dict[str, int]],
 ) -> tuple[bool, dict[str, object]]:
-    """Independent-samples earn: the arms are independently sampled (live model),
-    so the pairing is nominal — but the arms must have the SAME scenario mix before
-    the pooled two-proportion interval is consulted (review r19/r20).
+    """Independent-samples earn: the arms are independently sampled (live model), so
+    the pairing is nominal — but the arms must have the SAME scenario mix AND the same
+    PLANNED allocation and missingness before the pooled two-proportion interval is
+    consulted (review r19/r20/r21).
 
-    An APPROXIMATE per-scenario balance (ratio >= 0.5) was not enough (review r20):
-    two arms with identical scenario sets and equal totals can still reweight a
-    hard scenario against an easy one and manufacture a delta from pure composition
-    (baseline 40 hard / 20 easy vs governed 20 hard / 40 easy — each scenario ratio
-    is exactly 0.5, yet governance changed nothing). So the per-scenario arm counts
-    must be EXACTLY equal: then the pooled rate is a fixed-weight average and the
-    delta cannot be a weighting artefact. The receipt also carries the
-    scenario-standardized estimates so a reader sees the per-scenario effect."""
+    Exact per-scenario COMPLETED balance (review r20) closed the reweighting attack,
+    but completed counts alone are blind to missingness: baseline could PLAN 100 hard
+    and complete 50 while governed PLANS 50 hard and completes 50 — identical completed
+    counts, but baseline selectively lost half its hard samples, so the arms are
+    different assigned populations with a condition-correlated dropout. So the arms
+    must ALSO match, per scenario, on planned count and on failed+excluded (the missing
+    count). The effect is then a complete-case estimand over a symmetric design; the
+    receipt names it and carries the missingness."""
     from lab_analysis import two_proportion_test
 
     base_n, treated_n = len(base_coords), len(treated_coords)
     # EXACT per-scenario balance — identical composition, not merely a similar one
     if base_balance != treated_balance:
         return False, {}
+    # PLANNED allocation AND missingness must be symmetric per scenario — otherwise
+    # the completed arms are different populations (condition-correlated dropout)
+    for sid in set(base_matrix) | set(treated_matrix):
+        b_row = base_matrix.get(sid, {})
+        t_row = treated_matrix.get(sid, {})
+        if b_row.get("planned", 0) != t_row.get("planned", 0):
+            return False, {}
+        if (b_row.get("failed", 0) + b_row.get("excluded", 0)
+                != t_row.get("failed", 0) + t_row.get("excluded", 0)):
+            return False, {}
     base_v = sum(1 for c in base_coords if outcomes[c][baseline_id])
     treated_v = sum(1 for c in treated_coords if outcomes[c][treated_id])
     if base_v / base_n - treated_v / treated_n < _MIN_EFFECT_DELTA:
@@ -814,7 +855,29 @@ def _earned_independent(
         "baseline": {"violations": base_v, "n": base_n},
         "treated": {"violations": treated_v, "n": treated_n},
         "difference_interval": interval,
+        # a complete-case estimand over a design whose PLANNED allocation and
+        # missingness are symmetric across arms (checked above) — named so a reader
+        # knows it is not an ITT effect (review r21)
+        "estimand": "independent_complete_case_symmetric_allocation",
+        "missingness": _missingness_report(base_matrix, treated_matrix, baseline_id, treated_id),
         "test": test,
+    }
+
+
+def _missingness_report(
+    base_matrix: dict[str, dict[str, int]],
+    treated_matrix: dict[str, dict[str, int]],
+    baseline_id: str,
+    treated_id: str,
+) -> dict[str, object]:
+    """The per-scenario planned/completed/failed/excluded matrices for both arms, so
+    a reader can independently judge whether the dropped units bias the complete-case
+    effect (review r21). The gates above already require the design to be symmetric;
+    this makes the evidence for that transparent in the receipt."""
+    return {
+        "unit": "per_scenario_status_counts",
+        baseline_id: {s: dict(row) for s, row in sorted(base_matrix.items())},
+        treated_id: {s: dict(row) for s, row in sorted(treated_matrix.items())},
     }
 
 

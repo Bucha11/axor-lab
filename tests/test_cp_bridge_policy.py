@@ -520,6 +520,81 @@ def _weighting_confound_bundle():
     return bundle, traces
 
 
+def _missingness_confound_bundle():
+    """An INDEPENDENT design with EXACTLY-equal completed per-scenario counts but
+    ASYMMETRIC missingness: baseline 'hard' completes 24 of 48 planned (24 failed),
+    governed 'hard' completes 24 of 24 planned (0 failed). Completed balance is
+    perfect, but baseline selectively dropped half its hard samples — a
+    condition-correlated dropout the completed-only balance is blind to (review r21)."""
+    base = support.banking_scenario()
+    scenarios = [{**base, "name": "hard"}, {**base, "name": "easy"}]
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+    inputs = dict(base.get("inputs", {}))
+
+    def _add(cid, scn, violating, completed, failed=0):
+        nonlocal order
+        pool = _VIOLATING if violating else _CLEAN
+        for _ in range(completed):
+            seed = f"s{order:03d}"
+            trace = _bind_trace(pool[order % 30], cid, scn, seed, order)
+            traces[str(trace["trace_id"])] = trace
+            trials.append({"trial_id": f"tr_{cid}_{scn}_{order}", "scenario_id": scn,
+                           "condition_id": cid, "seed": seed, "repeat_index": order,
+                           "status": "completed", "trace_ref": content_hash(trace),
+                           "execution_order": order, **_runtime_fields(cid, inputs)})
+            order += 1
+        for _ in range(failed):
+            trials.append({"trial_id": f"tr_{cid}_{scn}_{order}", "scenario_id": scn,
+                           "condition_id": cid, "seed": f"s{order:03d}", "repeat_index": order,
+                           "status": "failed", "failure_reason": "seeded", "execution_order": order})
+            order += 1
+
+    # completed: base hard 24 / easy 24 ; gov hard 24 / easy 24  → balance passes
+    # planned:   base hard 48 (24 failed) ; gov hard 24           → asymmetric dropout
+    _add("ungoverned", "hard", True, 24, failed=24)
+    _add("ungoverned", "easy", False, 24)
+    _add("governed", "hard", False, 24)
+    _add("governed", "easy", False, 24)
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned", 24, 48, comparison_design="independent_samples"),
+        binary_aggregate("ASR", "governed", 0, 48, comparison_design="independent_samples"),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_miss", created=CREATED, scenarios=scenarios, conditions=conditions,
+        tool_manifests=list(support.manifests().values()),
+        environment={**support.environment(),
+                     "experiment_design": support.experiment_design(
+                         "independent_samples", deterministic=False)},
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
+
+
+class TestMissingnessAwareBridge(unittest.TestCase):
+    def test_independent_bridge_rejects_asymmetric_planned_missingness(self) -> None:
+        # completed per-scenario counts are exactly equal, but baseline dropped half
+        # its planned 'hard' samples — the arms are different populations, so the
+        # bridge is NOT earned despite the apparent delta (review r21)
+        bundle, traces = _missingness_confound_bundle()
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_matched_receipt_names_estimand_and_missingness(self) -> None:
+        from lab_runner.cp_export import bridge_analysis
+
+        pairs = [(True, False)] * 24 + [(None, None)] * 6  # 6 both-failed pairs
+        bundle, traces = _controlled_bundle(pairs)
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertEqual(analysis["estimand"], "matched_complete_case_net_risk_reduction")
+        miss = analysis["missingness"]
+        self.assertEqual(miss["unit"], "per_scenario_status_counts")
+        # the receipt carries per-scenario planned/completed/failed counts per arm
+        self.assertIn("governed", miss)
+        self.assertIn("ungoverned", miss)
+
+
 class TestDesignAwareBridge(unittest.TestCase):
     def test_disjoint_scenarios_do_not_earn_despite_huge_delta(self) -> None:
         # THE false bridge (r19): baseline runs 24 HEAVY scenarios (ASR 1.0),
