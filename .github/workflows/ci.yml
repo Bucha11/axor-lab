@@ -101,8 +101,13 @@ jobs:
         # here — not just test_real_kernel — so a real-kernel regression on the
         # endpoint or replay surfaces cannot hide behind a stdlib-job skip.
         run: |
-          pip install "axor-core>=0.9"
+          # PIN the kernel to an EXACT version (review r20): a floating ">=0.9"
+          # lets a future axor-core release drift into the integration job, so a
+          # green run no longer proves the SAME kernel the evidence was measured
+          # against still behaves. Bump this deliberately, with the suites re-run.
+          pip install "axor-core==0.9.2"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
+          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.9.2' else 'axor-core version drift: expected 0.9.2, got ' + axor_core.__version__)"
           python -c "from lab_runner import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.
@@ -149,13 +154,34 @@ jobs:
         run: |
           pip install "pynacl>=1.5"
           python -c "import importlib.util as u; assert u.find_spec('nacl'), 'PyNaCl must be present so the crypto tests RUN, not skip'"
+          # capture the run's exit code AND output (no pipe, so a FAILURE still
+          # fails the job), then assert there were no skips — mirroring the
+          # real-kernel job. With PyNaCl installed, a @skipUnless(_HAS_NACL) test
+          # that still skips means the signing path did NOT execute; a green job
+          # with silent skips is exactly the false-confidence this job exists to
+          # prevent (review r20).
+          set +e
           python -m unittest -v \
             tests.test_hardening \
             tests.test_entitlement \
             tests.test_package_verification \
             tests.test_portable_receipt \
             tests.test_server_acceptance \
-            tests.test_verification_outcome
+            tests.test_verification_outcome > crypto.log 2>&1
+          rc=$?
+          set -e
+          cat crypto.log
+          test "$rc" -eq 0 || { echo "::error::crypto suites failed"; exit "$rc"; }
+          python - <<'PY'
+          import re, sys
+          log = open("crypto.log").read()
+          m = re.search(r"skipped=(\d+)", log)
+          skipped = int(m.group(1)) if m else 0
+          if skipped:
+              print(f"::error::{skipped} crypto test(s) skipped with PyNaCl installed", file=sys.stderr)
+              sys.exit(1)
+          print("no unexpected skips in the crypto suites")
+          PY
 
   packaging:
     name: Wheel installs and runs outside the checkout
