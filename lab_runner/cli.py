@@ -380,6 +380,30 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
         return EXIT_FAILURE
     print("publication: bound (id + bundle_ref + claims)")
+    # 2b) the AUTHOR receipt's integrity must match the publication's — otherwise a
+    # `signed` publication can be downgraded by swapping in a valid hash-only
+    # receipt (the author signature stripped) while the server acceptance stays
+    # signed, and verify would still exit 0. The portable author receipt exists
+    # precisely to prove author authenticity WITHOUT trusting the server, so a
+    # signed publication must carry a signed, VERIFIED author receipt (review r18).
+    pub_integrity = str(publication.get("integrity", "hash_verified"))
+    receipt_integrity = str(receipt.get("integrity", "hash_verified"))
+    if receipt_integrity != pub_integrity:
+        print(
+            f"receipt: INTEGRITY MISMATCH — receipt is {receipt_integrity!r} but the "
+            f"publication is {pub_integrity!r} (author-signature downgrade?) — refusing to pass",
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
+    if pub_integrity == "signed" and not getattr(args, "pubkey", None):
+        # a signed publication whose author signature we hold no key to check is
+        # UNVERIFIED, never a pass (the server acceptance is a separate attestation)
+        print(
+            "receipt: UNVERIFIED — signed publication but no author public key (--pubkey) "
+            "was supplied to verify its receipt",
+            file=sys.stderr,
+        )
+        unverified = True
     # 3) server acceptance binds + (optionally) verifies. verify_acceptance now
     # also requires acceptance.integrity == publication.integrity.
     try:
