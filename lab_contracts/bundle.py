@@ -290,14 +290,21 @@ def _verify_trace_metadata(
                     f"scenario {scen.get('name')!r} inputs+fixtures"
                 )
     environment: dict[str, object] = bundle.get("environment", {})  # type: ignore[assignment]
+    kernels = {str(c.get("kernel")) for c in bundle["conditions"]}  # type: ignore[union-attr]
     env_kernel = environment.get("kernel_version")
-    if env_kernel is not None:
-        kernels = {str(c.get("kernel")) for c in bundle["conditions"]}  # type: ignore[union-attr]
-        if str(env_kernel) not in kernels:
-            errors.append(
-                f"environment.kernel_version {env_kernel!r} matches no condition kernel "
-                f"{sorted(kernels)}"
-            )
+    if env_kernel is not None and str(env_kernel) not in kernels:
+        errors.append(
+            f"environment.kernel_version {env_kernel!r} matches no condition kernel "
+            f"{sorted(kernels)}"
+        )
+    # a mixed-kernel bundle records kernel_versions (plural); it must name exactly
+    # the distinct condition kernels — no phantom kernel, none missing (review r15)
+    env_kernels = environment.get("kernel_versions")
+    if env_kernels is not None and set(map(str, env_kernels)) != kernels:  # type: ignore[arg-type]
+        errors.append(
+            f"environment.kernel_versions {sorted(map(str, env_kernels))} != the condition "  # type: ignore[arg-type]
+            f"kernels {sorted(kernels)}"
+        )
 
 
 def _check(hashes: dict[str, str], key: str, artifact: object, errors: list[str]) -> None:

@@ -1025,6 +1025,13 @@ def _environment(
     # producer.kernel_version, bound to its own condition, stays authoritative).
     if len(kernels) == 1:
         env["kernel_version"] = kernels[0]
+    else:
+        # a mixed-kernel run omits the single global kernel_version (now optional
+        # in the schema) and records the distinct kernels explicitly, so the
+        # bundle is schema-VALID and readable rather than a write-now/read-never
+        # artifact (review r15). Each trace's producer.kernel_version stays
+        # authoritative for its own condition.
+        env["kernel_versions"] = kernels
     return env
 
 

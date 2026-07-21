@@ -130,8 +130,10 @@ def render_publication(stored: StoredPublication) -> str:
     pid_txt = esc(pub["publication_id"])
     body.append("<h2>Reproduce</h2>")
     body.append(
-        "<pre># download the reproduction package (bundle + frozen traces + receipt)\n"
-        f"curl -s /api/publications/{pid_txt}/bundle -o {pid_txt}.json\n\n"
+        "<pre># set your Lab server's origin (a root-relative path is not a runnable URL)\n"
+        'AXOR_LAB_URL="https://lab.example.com"\n\n'
+        "# download the reproduction package (bundle + frozen traces + receipt)\n"
+        f'curl -fsS "$AXOR_LAB_URL/api/publications/{pid_txt}/bundle" -o {pid_txt}.json\n\n'
         "# verify it offline — content hashes, replay, and the portable receipt\n"
         f"axor-lab verify {pid_txt}.json\n\n"
         "# or replay just the governance verdicts over the frozen evidence (EXACT)\n"

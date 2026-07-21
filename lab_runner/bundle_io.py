@@ -76,7 +76,20 @@ def write_bundle_dir(
         raise RunnerError(
             f"{directory} is not empty; pass overwrite=True to replace it"
         )
-    # fail before touching the filesystem if the bundle is not self-consistent
+    # fail before touching the filesystem if the bundle is not self-consistent —
+    # SCHEMA-validate the bundle and every trace too, not just the content-hash
+    # graph, so a schema-invalid bundle (e.g. a mixed-kernel env missing
+    # kernel_version) is caught at write time rather than written and only found
+    # unreadable later by replay/publish (review r15)
+    schema_errors = validate_artifact(bundle, "bundle")
+    for trace in traces.values():
+        schema_errors += [
+            f"trace {trace.get('trace_id')}: {e}" for e in validate_artifact(trace, "trace")
+        ]
+    if schema_errors:
+        raise RunnerError(
+            f"refusing to write a schema-invalid bundle: {'; '.join(schema_errors[:10])}"
+        )
     verify_bundle(bundle, traces)
 
     parent = directory.parent
