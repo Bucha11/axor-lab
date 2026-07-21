@@ -968,7 +968,19 @@ class PublicationStore:
             # historical key, or unsigned) we still enforce the binding checks
             verify(acc, publication, server_pubkey_hex=pubkey)
         except SignatureUnavailable:
-            # signed & bound, but we hold no key for it → keep as opaque historical
+            # signed & bound, but we hold no key for it → keep as opaque historical.
+            # An unknown key gates only the SIGNATURE step: the STRUCTURE and the
+            # history CHAIN are server-side facts independent of the key, so a
+            # reacceptance must STILL be well-formed and resolvable to root before it
+            # is served — otherwise an unsigned-to-us record could smuggle a missing
+            # timestamp, absent supersedes, or a broken ancestry (review r21).
+            if is_reacceptance and not (
+                self._reacceptance_structural_ok(acc) and self._chain_resolves(directory, acc)
+            ):
+                return self._reaccept_broken_chain(
+                    directory, publication, bundle, acc,
+                    reason="unknown-key reacceptance failed structural or history-chain validation",
+                )
             return acc
         except SignatureInvalid:
             # binding mismatch, integrity mismatch, OR a bad signature under a KNOWN
@@ -976,22 +988,29 @@ class PublicationStore:
             # with a distinct, linked reacceptance — never a silent clean re-mint.
             return self._quarantine_and_reaccept(directory, publication, bundle, acc)
         if is_reacceptance and not self._chain_resolves(directory, acc):
-            # signature + binding are fine, but the forensic chain this reacceptance
-            # CLAIMS — supersedes.previous_ref — does NOT resolve to a stored record
-            # in the append-only acceptance-history. verify_reacceptance only sees
-            # that previous_ref is a non-empty string; the history it points into is
-            # server-side state the offline verifier reconstructs from disk, so an
-            # offline verifier handed this tree would REJECT the re-attestation as an
-            # unresolvable chain. The server must never serve what that verifier
-            # rejects: treat the broken link as a forensic event, archive this record
-            # and re-attest so the served receipt links to a resolvable history
-            # (review r20).
-            return self._quarantine_and_reaccept(
+            # signature + binding are fine, but the forensic ancestry this
+            # reacceptance CLAIMS does not resolve to a root through the append-only
+            # acceptance-history (a missing/corrupt link at any depth). An offline
+            # verifier reconstructing the full chain would REJECT it, and the server
+            # must never serve what that verifier rejects. Re-root the live chain at a
+            # forensic marker so the re-attestation resolves fully on the next load
+            # rather than walking back into the broken link (review r20/r21).
+            return self._reaccept_broken_chain(
                 directory, publication, bundle, acc,
                 reason="persisted reacceptance previous_ref did not resolve in "
                        "the append-only acceptance-history",
             )
         return acc
+
+    @staticmethod
+    def _reacceptance_structural_ok(acc: dict[str, object]) -> bool:
+        """A reacceptance/v1 must carry a timestamp and link to a predecessor — the
+        same structural invariants verify_reacceptance enforces, checkable without a
+        signing key (review r21)."""
+        supersedes = acc.get("supersedes")
+        return bool(str(acc.get("reaccepted_at", ""))) and (
+            isinstance(supersedes, dict) and bool(str(supersedes.get("previous_ref", "")))
+        )
 
     def _history_dir(self, directory: Path) -> Path:
         return directory / "acceptance-history"
@@ -1017,18 +1036,34 @@ class PublicationStore:
                     index[ref] = record
         return index
 
-    def _chain_resolves(self, directory: Path, acc: dict[str, object]) -> bool:
-        """A reacceptance/v1 supersedes a prior receipt named by
-        supersedes.previous_ref. For the re-attestation to be verifiable offline
-        that prior receipt must be PRESERVED in the append-only acceptance-history,
-        content-addressed by exactly that ref. Confirm the immediate previous_ref
-        resolves to a stored, hash-matching record; a missing or corrupt one means
-        the chain has been broken since it was minted (review r20)."""
-        supersedes = acc.get("supersedes")
-        if not isinstance(supersedes, dict):
-            return False
-        ref = str(supersedes.get("previous_ref", ""))
-        return bool(ref) and ref in self._history_index(directory)
+    def _chain_resolves(self, directory: Path, acc: dict[str, object], *, max_depth: int = 64) -> bool:
+        """Walk the WHOLE supersedes ancestry to a ROOT (review r21).
+
+        A reacceptance/v1 names its predecessor by supersedes.previous_ref. r20
+        confirmed only the IMMEDIATE hop resolved — but the archived predecessor can
+        itself be a reacceptance whose OWN previous_ref no longer resolves, so a
+        deeper break went unnoticed and an offline verifier reconstructing the full
+        chain would still reject it. Follow every link through the hash-checked
+        history index until reaching a ROOT (an acceptance/v1 or a forensic marker
+        with no predecessor). Every hop must resolve to a stored, hash-matching
+        record; a missing/corrupt link, a cycle, or an over-deep chain fails."""
+        index = self._history_index(directory)
+        seen: set[str] = set()
+        node = acc
+        depth = 0
+        while True:
+            supersedes = node.get("supersedes")
+            if not isinstance(supersedes, dict) or not str(supersedes.get("previous_ref", "")):
+                return True  # a root: no predecessor to resolve
+            ref = str(supersedes["previous_ref"])
+            if ref in seen or depth >= max_depth:
+                return False  # a cycle, or an implausibly deep chain
+            seen.add(ref)
+            depth += 1
+            prev = index.get(ref)
+            if prev is None:
+                return False  # a broken link — the predecessor is missing or corrupt
+            node = prev
 
     def _archive_superseded(self, directory: Path, record: dict[str, object]) -> str:
         """Append a superseded/forensic record to the APPEND-ONLY acceptance history,
@@ -1046,7 +1081,12 @@ class PublicationStore:
     def acceptance_history(self, publication_id: str) -> list[dict[str, object]]:
         """Every superseded acceptance/forensic record for a publication, sorted by
         ref — the full chain a reader needs to resolve each reacceptance's
-        previous_ref back to actual stored bytes (review r19)."""
+        previous_ref back to actual stored bytes (review r19).
+
+        Only HASH-VALID entries are returned: a record whose recomputed content hash
+        no longer equals the ref it is filed under is corrupt and is OMITTED, so a
+        reproduction package can never carry a garbage history entry a reader would
+        trust or that would falsely appear to satisfy a previous_ref (review r21)."""
         history: list[dict[str, object]] = []
         hdir = self._history_dir(self._dir(publication_id))
         if hdir.is_dir():
@@ -1055,8 +1095,44 @@ class PublicationStore:
                     record = json.loads(pathname.read_text())
                 except ValueError:
                     continue
-                history.append({"ref": f"sha256:{pathname.stem}", "record": record})
+                if not isinstance(record, dict):
+                    continue
+                ref = content_hash(record)
+                if ref.removeprefix("sha256:") != pathname.stem:
+                    continue  # tampered/corrupt archive entry — omit it
+                history.append({"ref": ref, "record": record})
         return history
+
+    def _reaccept_broken_chain(
+        self,
+        directory: Path,
+        publication: dict[str, object],
+        bundle: dict[str, object],
+        invalid: dict[str, object],
+        reason: str,
+    ) -> dict[str, object]:
+        """Re-attest over a reacceptance whose ANCESTRY is broken (a missing/corrupt
+        link at some depth, or an unknown-key record that fails structural/chain
+        validation). Unlike _quarantine_and_reaccept — which points the new receipt at
+        `invalid` and so keeps walking back into the broken link — this RE-ROOTS the
+        live chain at a forensic marker with NO predecessor. The new reacceptance's
+        ancestry is therefore new → marker (root), which resolves fully on the next
+        load, so the repair CONVERGES instead of re-minting every reload (review r21).
+        `invalid` is still archived, so the damaged record is preserved for audit."""
+        self._archive_superseded(directory, invalid)
+        supersedes = invalid.get("supersedes")
+        unresolved = str(supersedes.get("previous_ref", "")) if isinstance(supersedes, dict) else ""
+        marker = {
+            "schema_version": "axor-lab-acceptance-forensic/v1",
+            "status": "broken_chain",
+            "reason": reason,
+            "broken_record_ref": content_hash(invalid),
+            "unresolved_ref": unresolved,
+        }
+        self._archive_superseded(directory, marker)
+        reacceptance = self._reaccept(publication, bundle, marker, reason=reason)
+        _write_atomic(directory / "acceptance.json", json.dumps(reacceptance, indent=2))
+        return reacceptance
 
     def _quarantine_and_reaccept(
         self,

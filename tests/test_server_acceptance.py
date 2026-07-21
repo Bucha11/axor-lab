@@ -354,14 +354,19 @@ class TestAcceptanceHistoryChainOnLoad(unittest.TestCase):
         self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
         self.assertEqual(served["reaccepted_at"], "2026-03-03T00:00:00Z")
         self.assertIn("did not resolve", str(served["supersedes"]["reason"]))
-        # and the new receipt's chain DOES resolve: the previous (broken) record was
-        # archived, so its ref is present in the rebuilt history
+        # and the new receipt's ancestry RESOLVES: it is re-rooted at a forensic
+        # broken_chain marker (a root with no predecessor), and both that marker and
+        # the archived broken reacceptance are preserved in the history (review r21)
         store2 = PublicationStore(root=root, server_id="axor-lab-server-A")
-        refs = [h["ref"] for h in store2.acceptance_history(pid)]
-        self.assertIn(str(served["supersedes"]["previous_ref"]), refs)
-        # it supersedes the previously-served reacceptance, not the ancient original
-        self.assertEqual(str(served["supersedes"]["previous_ref"]), content_hash(reaccept))
-        self.assertNotEqual(prev_ref, str(served["supersedes"]["previous_ref"]))
+        history = store2.acceptance_history(pid)
+        refs = [h["ref"] for h in history]
+        marker_ref = str(served["supersedes"]["previous_ref"])
+        self.assertIn(marker_ref, refs)  # the re-root marker resolves
+        marker = next(h["record"] for h in history if h["ref"] == marker_ref)
+        self.assertEqual(marker["status"], "broken_chain")
+        self.assertEqual(marker["broken_record_ref"], content_hash(reaccept))  # broken record kept
+        self.assertIn(content_hash(reaccept), refs)
+        self.assertNotEqual(prev_ref, marker_ref)
 
     def test_corrupt_history_record_breaks_chain_and_triggers_reattest(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -405,6 +410,49 @@ class TestAcceptanceHistoryChainOnLoad(unittest.TestCase):
         ).get(pid).acceptance
         self.assertEqual(first, second)
         self.assertEqual(second["reaccepted_at"], "2026-05-05T00:00:00Z")
+
+    def test_deep_ancestry_break_is_detected(self) -> None:
+        # R2 -> R1 -> original. Delete the ORIGINAL (a DEEP break): R2's immediate
+        # link to R1 still resolves, but the full ancestry no longer reaches a root,
+        # so a recursive walk rejects it and the server re-attests (review r21).
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        # build R1 by corrupting the original, then R2 by corrupting R1
+        pid, r1 = self._reaccepted_store(root)
+        acc_file = root / pid / "acceptance.json"
+        r1_doc = json.loads(acc_file.read_text())
+        r1_doc["semantic_report"]["verified"].append("FAB2")
+        acc_file.write_text(json.dumps(r1_doc))
+        r2 = PublicationStore(root=root, server_id="axor-lab-server-A",
+                              clock=lambda: "2026-02-02T00:00:00Z").get(pid).acceptance
+        self.assertEqual(r2["schema_version"], "axor-lab-reacceptance/v1")
+        # the ORIGINAL acceptance/v1 is the chain root; delete it from history
+        hist = PublicationStore(root=root, server_id="axor-lab-server-A").acceptance_history(pid)
+        root_ref = next(h["ref"] for h in hist
+                        if h["record"].get("schema_version") == "axor-lab-acceptance/v1")
+        (root / pid / "acceptance-history" / (root_ref.removeprefix("sha256:") + ".json")).unlink()
+        # R2's immediate previous (R1) still resolves, but the deep root is gone
+        served = PublicationStore(root=root, server_id="axor-lab-server-A",
+                                  clock=lambda: "2026-06-06T00:00:00Z").get(pid).acceptance
+        self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
+        self.assertNotEqual(served["reaccepted_at"], r2["reaccepted_at"])  # re-attested
+        # the repaired chain resolves and is stable on the next load
+        again = PublicationStore(root=root, server_id="axor-lab-server-A",
+                                 clock=lambda: "2099-01-01T00:00:00Z").get(pid).acceptance
+        self.assertEqual(served, again)
+
+    def test_acceptance_history_omits_hash_invalid_entries(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        pid, _ = self._reaccepted_store(root)
+        hdir = root / pid / "acceptance-history"
+        before = len(PublicationStore(root=root).acceptance_history(pid))
+        # drop a garbage file whose content does not hash to its filename
+        (hdir / ("f" * 64 + ".json")).write_text('{"garbage": true}')
+        after = PublicationStore(root=root).acceptance_history(pid)
+        self.assertEqual(len(after), before)  # the corrupt entry is omitted
 
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")
