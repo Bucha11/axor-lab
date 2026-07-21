@@ -167,6 +167,7 @@ def export_cp(
         for sid in executed if sid in scen_by_id
     }
     _verify_recorded_runtime_hashes(bundle, governed_id, runtime_hashes, require=True)
+    fingerprint = _resolved_kernel_fingerprint(bundle, governed_id, kernel)
     source: dict[str, object] = {
         "bundle_id": bundle.get("bundle_id"),
         "condition_id": governed["id"],
@@ -186,6 +187,10 @@ def export_cp(
         "kernel": kernel,
         "policy": policy,
         "config_hash": recorded,  # the recorded kernel+policy fingerprint
+        # the ACTUAL resolved kernel behaviour identity the evidence was measured on
+        # (incl. behaviour-changing flags) — carried into the handoff so a reader sees
+        # the deployed `kernel` reproduces the behaviour that earned the bridge (r21)
+        "resolved_kernel_fingerprint": fingerprint,
         # the carry-over key (symbolic $inputs); re-parameterized in production
         "parametric_config_hash": parametric_hash,
         # per-scenario concrete config identity (what actually ran) — NOT carried
@@ -249,6 +254,50 @@ def export_cp_template(
         },
     }
     return CPExport(config=config, production_todo=_render_todo(), earned_bridge=False)
+
+
+def _resolved_kernel_fingerprint(
+    bundle: dict[str, object], condition_id: str, declared_kernel: str
+) -> str:
+    """The ACTUAL resolved-kernel behaviour identity the treated condition ran under,
+    MANDATORY and consistent for an evidence-backed handoff (review r21).
+
+    The runtime_config_hash is computed from the DECLARED kernel string, so evidence
+    measured on a behaviour-modified backend (e.g. taint_floor OFF under a governed
+    label) could otherwise hand off a config recommending the plain declared kernel
+    — deploying a different behaviour than the one that earned the bridge. Every
+    completed trial of the treated condition must carry resolved_kernel_fingerprint,
+    they must AGREE, and the fingerprint must equal the declared kernel: a divergence
+    means the deployed `kernel` would not reproduce the measured behaviour, so the
+    export is refused rather than shipped with a misleading identity."""
+    prints = {
+        str(t.get("resolved_kernel_fingerprint"))
+        for t in bundle.get("trials", [])  # type: ignore[union-attr]
+        if t.get("status") == "completed" and str(t.get("condition_id")) == condition_id
+        and t.get("resolved_kernel_fingerprint")
+    }
+    completed = [
+        t for t in bundle.get("trials", [])  # type: ignore[union-attr]
+        if t.get("status") == "completed" and str(t.get("condition_id")) == condition_id
+    ]
+    if not completed:
+        raise CPExportError(
+            f"condition {condition_id!r} has no completed trial to prove its resolved kernel"
+        )
+    if len(prints) != 1:
+        raise CPExportError(
+            f"condition {condition_id!r} completed trials do not carry ONE resolved_kernel_"
+            f"fingerprint ({sorted(prints)}) — an evidence-backed export cannot prove the "
+            "behaviour that ran"
+        )
+    fingerprint = next(iter(prints))
+    if fingerprint != declared_kernel:
+        raise CPExportError(
+            f"resolved kernel fingerprint {fingerprint!r} diverges from the declared kernel "
+            f"{declared_kernel!r} — the evidence was measured on a behaviour-modified backend, "
+            "so deploying the declared kernel would not reproduce it; refusing the handoff"
+        )
+    return fingerprint
 
 
 def _verify_recorded_runtime_hashes(

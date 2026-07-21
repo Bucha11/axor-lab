@@ -946,6 +946,42 @@ class TestExecutionProvenanceEnforcement(unittest.TestCase):
         for trial in (t for t in result.trials if t["status"] == "completed"):
             self.assertTrue(trial.get("resolved_kernel_fingerprint"))
 
+    def test_cp_export_carries_the_resolved_kernel_fingerprint(self) -> None:
+        # the handoff records the ACTUAL resolved kernel behaviour the evidence was
+        # measured on, so a reader can see the deployed kernel reproduces it (r21)
+        from lab_runner.cp_export import export_cp
+
+        bundle, traces = _powered_real_bundle()
+        export = export_cp(bundle, condition_id="governed", traces=traces)
+        gov = next(c for c in bundle["conditions"] if c["id"] == "governed")
+        self.assertEqual(export.config["resolved_kernel_fingerprint"], str(gov["kernel"]))
+
+    def test_cp_export_refuses_behavior_modified_kernel(self) -> None:
+        # evidence measured on a behaviour-modified backend (fingerprint diverges
+        # from the declared kernel) cannot hand off the plain declared kernel — it
+        # would deploy a different behaviour than the one that earned the bridge (r21)
+        import copy
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _powered_real_bundle()
+        kernel = str(next(c for c in bundle["conditions"] if c["id"] == "governed")["kernel"])
+        trials = copy.deepcopy(bundle["trials"])
+        for t in trials:
+            if t["status"] == "completed" and t["condition_id"] == "governed":
+                t["resolved_kernel_fingerprint"] = kernel + "+taint_floor=off"
+        # rebuild so content hashes match the mutated trials (verify_bundle runs first)
+        mutated = build_bundle(
+            bundle_id="b_bmk", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment={k: v for k, v in bundle["environment"].items()
+                         if k != "config_provenance"},
+            trials=trials, aggregates=bundle["aggregates"], traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(mutated, condition_id="governed", traces=traces)
+        self.assertIn("behaviour-modified", str(ctx.exception))
+
     def test_divergent_runtime_hashes_for_same_pair_are_rejected(self) -> None:
         # two completed trials of the SAME (scenario, condition) recording DIFFERENT
         # runtime hashes is a compiler/config drift the builder must not silently
