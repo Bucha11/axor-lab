@@ -162,3 +162,60 @@ def verify_receipt(
         verify_bundle_signature(bundle, str(signature), author_pubkey_hex)
         return
     raise SignatureInvalid(f"unknown receipt integrity {integrity!r}")
+
+
+def verify_acceptance(
+    acceptance: dict[str, object],
+    publication: dict[str, object],
+    *,
+    server_pubkey_hex: str | None = None,
+    expected_server: str | None = None,
+    expected_key_id: str | None = None,
+) -> None:
+    """Verify a server acceptance receipt, offline (review r16).
+
+    The round-15 acceptance was created and served but NEVER checked by the
+    verifier. This binds it to the publication (publication_id + bundle_ref),
+    confirms the semantic report is content-addressed by semantic_report_ref, and
+    — as a strict state machine — requires a `signed` (ed25519) acceptance to
+    carry a signature/key_id/server_id that MUST verify against a supplied server
+    key; `expected_server`/`expected_key_id` bind the caller's trust anchor. An
+    `unsigned` acceptance must carry no signature. A signed acceptance with no key
+    to check it is SignatureUnavailable, never a pass."""
+    if str(acceptance.get("schema_version", "")) != "axor-lab-acceptance/v1":
+        raise SignatureInvalid(
+            f"unexpected acceptance schema {acceptance.get('schema_version')!r}"
+        )
+    if str(acceptance.get("publication_id")) != str(publication.get("publication_id")):
+        raise SignatureInvalid("acceptance.publication_id does not match the publication")
+    if str(acceptance.get("bundle_ref")) != str(publication.get("bundle_ref")):
+        raise SignatureInvalid("acceptance.bundle_ref does not match the publication")
+    report = acceptance.get("semantic_report")
+    if not isinstance(report, dict) or str(acceptance.get("semantic_report_ref")) != content_hash(report):
+        raise SignatureInvalid("acceptance.semantic_report_ref does not match the semantic_report")
+    algorithm = str(acceptance.get("algorithm", ""))
+    if algorithm == "unsigned":
+        if acceptance.get("signature"):
+            raise SignatureInvalid("unsigned acceptance must not carry a signature")
+        return
+    if algorithm == "ed25519":
+        sig = acceptance.get("signature")
+        key_id = acceptance.get("key_id")
+        server = acceptance.get("server_id")
+        if not sig or not key_id or not server:
+            raise SignatureInvalid("signed acceptance must carry a signature, key_id, and server_id")
+        if expected_server is not None and str(server) != str(expected_server):
+            raise SignatureInvalid(
+                f"acceptance server_id {server!r} is not the expected trust anchor {expected_server!r}"
+            )
+        if expected_key_id is not None and str(key_id) != str(expected_key_id):
+            raise SignatureInvalid(
+                f"acceptance key_id {key_id!r} is not the expected {expected_key_id!r}"
+            )
+        if not server_pubkey_hex:
+            raise SignatureUnavailable(
+                "signed acceptance but no server public key was supplied to verify it"
+            )
+        verify_bundle_signature(acceptance, str(sig), server_pubkey_hex)
+        return
+    raise SignatureInvalid(f"unknown acceptance algorithm {algorithm!r}")

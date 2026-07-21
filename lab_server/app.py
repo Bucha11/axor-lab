@@ -107,6 +107,11 @@ def make_server(
                     # named a directory the reader never received (review r13).
                     stored = self._readable(store.get(api_bundle.group(1)))
                     self._json(200, {
+                        # a VERSIONED reproduction package — the verifier treats a
+                        # package bearing this schema as server-issued, so every
+                        # proof object (receipt/publication/acceptance) is MANDATORY
+                        # and stripping one is a verification failure (review r16)
+                        "schema_version": "axor-reproduction-package/v1",
                         # the PUBLICATION body travels too, so an offline reader can
                         # verify the author/server actually asserted THESE claims —
                         # not just that the bundle bytes are intact (review r15)
