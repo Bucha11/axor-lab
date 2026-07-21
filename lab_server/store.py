@@ -13,8 +13,16 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def _utc_now_iso() -> str:
+    """Wall-clock UTC timestamp for a re-attestation event. Injectable via the
+    store's `clock` field so tests can pin the moment a reacceptance is stamped."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 from lab_contracts import (
     BundleIntegrityError,
@@ -162,6 +170,9 @@ class PublicationStore:
     # one whose key_id is unknown is kept as an opaque UNVERIFIED historical record
     # (never re-issued under the current key); a bad signature is quarantined.
     known_server_keys: dict[str, str] = field(default_factory=dict)
+    # wall clock used to timestamp a REACCEPTANCE event (review r18). Injectable
+    # so a test can pin the moment; defaults to real UTC now.
+    clock: Callable[[], str] = _utc_now_iso
     _cache: dict[str, StoredPublication] = field(default_factory=dict)
     _tombstones: set[str] = field(default_factory=set)
     # STABLE evidence lineage refs that were taken down — a takedown removes the
@@ -496,17 +507,7 @@ class PublicationStore:
         if stored.acceptance is not None:
             return stored.acceptance
         pub = stored.publication
-        # the report lists only the LOAD-BEARING checks that actually ran (r17):
-        # a bundle with no aggregates was never statistics-recomputed, so claiming
-        # "statistics_recomputed" would attest a check that did not happen
-        has_aggregates = bool(stored.bundle.get("aggregates"))
-        verified = ["bundle_schema", "trace_schema", "content_hashes", "replay_bit_identical"]
-        verified.append("statistics_recomputed" if has_aggregates else "statistics_not_applicable")
-        report = {
-            "replay": "bit_identical",
-            "statistics": str(pub.get("statistics_integrity") or "none"),
-            "verified": verified,
-        }
+        report = self._semantic_report(pub, stored.bundle)
         acc: dict[str, object] = {
             "schema_version": "axor-lab-acceptance/v1",
             "server_id": self.server_id,
@@ -516,17 +517,69 @@ class PublicationStore:
             "semantic_report_ref": content_hash(report),
             "semantic_report": report,
         }
+        return self._sign_record(acc)
+
+    def _semantic_report(
+        self, pub: dict[str, object], bundle: dict[str, object]
+    ) -> dict[str, object]:
+        """The load-bearing checks that actually ran (r17): a bundle with no
+        aggregates was never statistics-recomputed, so claiming
+        "statistics_recomputed" would attest a check that did not happen."""
+        has_aggregates = bool(bundle.get("aggregates"))
+        verified = ["bundle_schema", "trace_schema", "content_hashes", "replay_bit_identical"]
+        verified.append("statistics_recomputed" if has_aggregates else "statistics_not_applicable")
+        return {
+            "replay": "bit_identical",
+            "statistics": str(pub.get("statistics_integrity") or "none"),
+            "verified": verified,
+        }
+
+    def _sign_record(self, rec: dict[str, object]) -> dict[str, object]:
+        """Ed25519-sign a receipt (acceptance or reacceptance) with the server key
+        when one is configured; else mark it algorithm=unsigned."""
         if self.server_signing_key:
             from lab_contracts.signing import sign_bundle
 
-            acc["algorithm"] = "ed25519"
-            acc["key_id"] = self.server_key_id or self.server_id
+            rec["algorithm"] = "ed25519"
+            rec["key_id"] = self.server_key_id or self.server_id
             # sign_bundle signs the canonical receipt with its own `signature`
             # field removed — set every other field first so all are covered
-            acc["signature"] = sign_bundle(acc, self.server_signing_key)
+            rec["signature"] = sign_bundle(rec, self.server_signing_key)
         else:
-            acc["algorithm"] = "unsigned"
-        return acc
+            rec["algorithm"] = "unsigned"
+        return rec
+
+    def _reaccept(
+        self,
+        pub: dict[str, object],
+        bundle: dict[str, object],
+        previous: dict[str, object],
+    ) -> dict[str, object]:
+        """Mint a REACCEPTANCE event (review r18) after the persisted acceptance was
+        found DAMAGED/FORGED under a known key. This is NOT a silent re-mint: it is
+        a distinct, timestamped `reacceptance/v1` record that preserves and LINKS to
+        the invalid previous receipt (by content hash + its claimed key_id), so the
+        history shows an original attestation failed and the server re-attested —
+        rather than a clean acceptance/v1 impersonating the publish-time record."""
+        report = self._semantic_report(pub, bundle)
+        rec: dict[str, object] = {
+            "schema_version": "axor-lab-reacceptance/v1",
+            "server_id": self.server_id,
+            "publication_id": str(pub["publication_id"]),
+            "bundle_ref": str(pub.get("bundle_ref", "")),
+            "integrity": str(pub.get("integrity", "hash_verified")),
+            "semantic_report_ref": content_hash(report),
+            "semantic_report": report,
+            "reaccepted_at": self.clock(),
+            "supersedes": {
+                "reason": "persisted acceptance failed verification on load",
+                "previous_ref": content_hash(previous),
+                "previous_key_id": previous.get("key_id"),
+                "previous_algorithm": previous.get("algorithm"),
+                "previous_schema_version": previous.get("schema_version"),
+            },
+        }
+        return self._sign_record(rec)
 
     @staticmethod
     def _derive_id(publication: dict[str, object]) -> str:
@@ -810,7 +863,7 @@ class PublicationStore:
             except ValueError:
                 raw = ()
         reproductions = list(rebuild_reproduction_log(raw, self.known_keys, publication_id))
-        acceptance = self._load_acceptance(directory, publication)
+        acceptance = self._load_acceptance(directory, publication, bundle)
         self._cache[publication_id] = StoredPublication(
             publication=publication, bundle=bundle, traces=traces, reproductions=reproductions,
             author=author if integrity == "signed" else None,
@@ -832,23 +885,34 @@ class PublicationStore:
         return keyring
 
     def _load_acceptance(
-        self, directory: Path, publication: dict[str, object]
+        self,
+        directory: Path,
+        publication: dict[str, object],
+        bundle: dict[str, object],
     ) -> dict[str, object] | None:
         """Restore the persisted acceptance receipt, verified against the
-        publication AND the server keyring (review r16/r17).
+        publication AND the server keyring (review r16/r17/r18).
 
         Binding is always re-confirmed (publication_id, bundle_ref,
-        semantic_report_ref). For a SIGNED acceptance the signature is now checked
+        semantic_report_ref). For a SIGNED acceptance the signature is checked
         against a HISTORICAL keyring, not blindly trusted:
           - key_id KNOWN to the keyring → the signature MUST verify; a forged
-            receipt (recomputed report hash + bogus signature) is quarantined
-            (dropped → acceptance() re-mints a clean one under the current key);
+            receipt (recomputed report hash + bogus signature) is DAMAGED;
           - key_id UNKNOWN (the signing key rotated out and was not retained) → the
             ORIGINAL is kept as an opaque UNVERIFIED historical record — preserved,
             NEVER re-issued under the current key (that would forge a fresh
             attestation), and surfaced as unverifiable to a reader lacking the key.
         An unsigned acceptance is restored as-is (Patch 2 makes the verifier treat
-        it as unverified, not an authenticated pass)."""
+        it as unverified, not an authenticated pass).
+
+        A DAMAGED/FORGED record under a known key is NOT silently dropped-then-
+        reminted as a clean acceptance/v1 (review r18): that would erase the fact
+        the on-disk attestation failed and impersonate the publish-time record.
+        Instead the invalid bytes are QUARANTINED (acceptance.invalid.json) and a
+        distinct, timestamped `reacceptance/v1` event — linking to the quarantined
+        original — is minted, persisted, and served. A previously-minted
+        reacceptance/v1 on disk is itself verified and restored verbatim so the
+        re-attestation is stable across reloads."""
         path = directory / "acceptance.json"
         if not path.is_file():
             return None
@@ -862,22 +926,42 @@ class PublicationStore:
             SignatureInvalid,
             SignatureUnavailable,
             verify_acceptance,
+            verify_reacceptance,
         )
 
         keyring = self._server_keyring()
         pubkey = keyring.get(str(acc.get("key_id"))) if str(acc.get("algorithm")) == "ed25519" else None
+        is_reacceptance = str(acc.get("schema_version", "")) == "axor-lab-reacceptance/v1"
+        verify = verify_reacceptance if is_reacceptance else verify_acceptance
         try:
             # with a pubkey we fully verify the signature; without one (unknown
             # historical key, or unsigned) we still enforce the binding checks
-            verify_acceptance(acc, publication, server_pubkey_hex=pubkey)
+            verify(acc, publication, server_pubkey_hex=pubkey)
         except SignatureUnavailable:
             # signed & bound, but we hold no key for it → keep as opaque historical
-            pass
+            return acc
         except SignatureInvalid:
             # binding mismatch, integrity mismatch, OR a bad signature under a KNOWN
-            # key (a forgery) → drop; do not serve or preserve it
-            return None
+            # key (a forgery/damage). Preserve the damaged original and re-attest
+            # with a distinct, linked reacceptance — never a silent clean re-mint.
+            return self._quarantine_and_reaccept(directory, publication, bundle, acc)
         return acc
+
+    def _quarantine_and_reaccept(
+        self,
+        directory: Path,
+        publication: dict[str, object],
+        bundle: dict[str, object],
+        invalid: dict[str, object],
+    ) -> dict[str, object]:
+        """Move the damaged acceptance aside (preserving the FIRST damaged copy)
+        and mint+persist a linked reacceptance/v1 event (review r18)."""
+        quarantine = directory / "acceptance.invalid.json"
+        if not quarantine.exists():
+            _write_atomic(quarantine, json.dumps(invalid, indent=2))
+        reacceptance = self._reaccept(publication, bundle, invalid)
+        _write_atomic(directory / "acceptance.json", json.dumps(reacceptance, indent=2))
+        return reacceptance
 
     def _load_reproductions_only(self, publication_id: str) -> None:
         """A taken-down publication keeps only its attestation record."""

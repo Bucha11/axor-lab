@@ -146,6 +146,42 @@ class TestServerPackageVerification(unittest.TestCase):
         pkg["receipt"]["integrity"] = "signed"
         self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_FAILURE)
 
+    def test_package_with_reacceptance_still_verifies(self) -> None:
+        # a package whose acceptance is a REACCEPTANCE/v1 (the server found its
+        # persisted acceptance damaged and re-attested) must verify with the same
+        # rigour as an acceptance/v1 — the verifier accepts the linked
+        # re-attestation, it does not choke on the schema (review r18)
+        root = Path(self.tmp.name) / "store"
+        pid = str(self.pkg["publication"]["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))
+        reloaded = PublicationStore(root=root).get(pid)
+        self.assertEqual(reloaded.acceptance["schema_version"], "axor-lab-reacceptance/v1")
+        pkg = json.loads(json.dumps(self.pkg))
+        pkg["acceptance"] = reloaded.acceptance
+        self.assertEqual(
+            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_OK
+        )
+
+    def test_forged_reacceptance_report_is_rejected(self) -> None:
+        # a reacceptance whose semantic_report_ref no longer binds its report must
+        # be refused, exactly like a forged acceptance (review r18)
+        root = Path(self.tmp.name) / "store"
+        pid = str(self.pkg["publication"]["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))
+        reloaded = PublicationStore(root=root).get(pid)
+        pkg = json.loads(json.dumps(self.pkg))
+        pkg["acceptance"] = reloaded.acceptance
+        pkg["acceptance"]["semantic_report"]["replay"] = "fabricated"
+        self.assertEqual(
+            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_FAILURE
+        )
+
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")
 class TestSignedPackageVerification(unittest.TestCase):

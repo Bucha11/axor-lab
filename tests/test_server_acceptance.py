@@ -98,9 +98,65 @@ class TestAcceptanceReceipt(unittest.TestCase):
         self.assertEqual(acc["server_id"], "axor-lab-server-A")
         self.assertEqual(acc, original)
 
-    def test_tampered_acceptance_is_dropped_and_reminted(self) -> None:
+    def test_invalid_historical_acceptance_is_not_silently_reminted(self) -> None:
         # a hand-edited acceptance.json (semantic_report_ref no longer binds its
-        # report) must NOT be restored; the server re-mints a clean one on load
+        # report) must NOT be silently dropped and replaced by a clean
+        # acceptance/v1 that impersonates the publish-time record (review r18).
+        # Instead the damaged original is QUARANTINED and the server re-attests
+        # with a DISTINCT reacceptance/v1 event.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(root=root, server_id="axor-lab-server-A",
+                                 clock=lambda: "2020-01-01T00:00:00Z")
+        stored = store.publish(bundle, traces, question="q")
+        pid = str(stored.publication["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))  # ref no longer matches report
+
+        store2 = PublicationStore(root=root, server_id="axor-lab-server-A",
+                                  clock=lambda: "2020-01-01T00:00:00Z")
+        reloaded = store2.get(pid)
+        served = store2.acceptance(reloaded)
+        # NOT a clean acceptance/v1 masquerading as the original — a re-attestation
+        self.assertEqual(served["schema_version"], "axor-lab-reacceptance/v1")
+        self.assertNotIn("FABRICATED_CHECK", served["semantic_report"]["verified"])
+        self.assertEqual(served["semantic_report_ref"], content_hash(served["semantic_report"]))
+        # the damaged original was preserved, not erased
+        quarantine = root / pid / "acceptance.invalid.json"
+        self.assertTrue(quarantine.is_file())
+        self.assertEqual(json.loads(quarantine.read_text()), tampered)
+
+    def test_reacceptance_is_a_distinct_timestamped_event(self) -> None:
+        # the re-attestation is a NEW, timestamped event — not the publish-time
+        # acceptance under a different guise (review r18)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        original = PublicationStore(root=root, server_id="axor-lab-server-A")
+        stored = original.publish(bundle, traces, question="q")
+        pid = str(stored.publication["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))
+
+        reloaded = PublicationStore(
+            root=root, server_id="axor-lab-server-A",
+            clock=lambda: "2026-07-21T12:00:00Z",
+        ).get(pid)
+        self.assertEqual(reloaded.acceptance["schema_version"], "axor-lab-reacceptance/v1")
+        self.assertEqual(reloaded.acceptance["reaccepted_at"], "2026-07-21T12:00:00Z")
+        # the original acceptance/v1 carried no such timestamp field
+        self.assertNotIn("reaccepted_at", stored.acceptance)
+
+    def test_reacceptance_links_to_invalid_previous_receipt(self) -> None:
+        # the re-attestation NAMES the invalid receipt it replaces, by content hash
+        # (review r18): the history is auditable, not a silent swap
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -111,14 +167,39 @@ class TestAcceptanceReceipt(unittest.TestCase):
         acc_file = root / pid / "acceptance.json"
         tampered = json.loads(acc_file.read_text())
         tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
-        acc_file.write_text(json.dumps(tampered))  # ref no longer matches report
+        acc_file.write_text(json.dumps(tampered))
 
-        store2 = PublicationStore(root=root, server_id="axor-lab-server-A")
-        reloaded = store2.get(pid)
-        self.assertIsNone(reloaded.acceptance)  # tampered file was dropped on load
-        served = store2.acceptance(reloaded)     # re-minted clean from the evidence
-        self.assertNotIn("FABRICATED_CHECK", served["semantic_report"]["verified"])
-        self.assertEqual(served["semantic_report_ref"], content_hash(served["semantic_report"]))
+        reloaded = PublicationStore(root=root, server_id="axor-lab-server-A").get(pid)
+        supersedes = reloaded.acceptance["supersedes"]
+        self.assertEqual(supersedes["previous_ref"], content_hash(tampered))
+        self.assertEqual(supersedes["previous_schema_version"], "axor-lab-acceptance/v1")
+
+    def test_reacceptance_is_stable_across_reloads(self) -> None:
+        # once re-attested, a second cold load reads the persisted reacceptance/v1,
+        # verifies it, and restores it VERBATIM — it does not re-quarantine or
+        # re-stamp a fresh timestamp every load (review r18)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(root=root, server_id="axor-lab-server-A")
+        stored = store.publish(bundle, traces, question="q")
+        pid = str(stored.publication["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))
+
+        first = PublicationStore(
+            root=root, server_id="axor-lab-server-A",
+            clock=lambda: "2026-07-21T12:00:00Z",
+        ).get(pid).acceptance
+        second = PublicationStore(
+            root=root, server_id="axor-lab-server-A",
+            clock=lambda: "2099-01-01T00:00:00Z",  # would differ if re-stamped
+        ).get(pid).acceptance
+        self.assertEqual(first, second)
+        self.assertEqual(second["reaccepted_at"], "2026-07-21T12:00:00Z")
 
     def test_missing_historical_key_does_not_reissue_acceptance_silently(self) -> None:
         # a SIGNED acceptance whose signing key is not in the keyring (rotated out

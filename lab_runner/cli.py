@@ -350,6 +350,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         SignatureInvalid,
         SignatureUnavailable,
         verify_acceptance,
+        verify_reacceptance,
         verify_receipt,
     )
 
@@ -405,9 +406,14 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         )
         unverified = True
     # 3) server acceptance binds + (optionally) verifies. verify_acceptance now
-    # also requires acceptance.integrity == publication.integrity.
+    # also requires acceptance.integrity == publication.integrity. A server that
+    # found its persisted acceptance damaged re-attests with a distinct, linked
+    # `reacceptance/v1` event (review r18) — verify it with the same rigour, and
+    # tell the reader an original attestation was superseded.
+    is_reacceptance = str(acceptance.get("schema_version", "")) == "axor-lab-reacceptance/v1"
+    verify_acc = verify_reacceptance if is_reacceptance else verify_acceptance
     try:
-        verify_acceptance(
+        verify_acc(
             acceptance, publication,
             server_pubkey_hex=getattr(args, "server_pubkey", None),
             expected_server=getattr(args, "server", None),
@@ -420,6 +426,13 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
         unverified = True
     else:
+        if is_reacceptance:
+            supersedes = acceptance.get("supersedes")
+            prev_ref = supersedes.get("previous_ref") if isinstance(supersedes, dict) else "?"
+            print(
+                f"acceptance: RE-ATTESTATION (reacceptance/v1) — the original acceptance "
+                f"was superseded (previous_ref={prev_ref}) at {acceptance.get('reaccepted_at')}",
+            )
         if str(acceptance.get("algorithm")) == "ed25519":
             print("acceptance: signature VERIFIED")
         elif getattr(args, "allow_unsigned_server", False):
