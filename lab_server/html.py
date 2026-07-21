@@ -176,9 +176,14 @@ def render_evidence(stored: StoredPublication, trace_id: str, policy_id: str | N
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     # use the REAL axor-core governor when the condition pins the installed
     # version, exactly as replay/regress do — an EvidenceCase for a real-kernel
-    # trace must not silently reason with the reference kernel (review r12).
+    # trace must not silently reason with the reference kernel (review r12) — and
+    # pass THIS trace's scenario inputs so a real-kernel `$inputs` allowlist
+    # expands to concrete values, not the symbolic ref (review r17).
     version = str(condition["kernel"])
-    kernel = resolve_kernel(version, manifests, condition.get("policy"), default_registry((version,)))
+    kernel = resolve_kernel(
+        version, manifests, condition.get("policy"),
+        default_registry((version,)), scenario.get("inputs", {}),  # type: ignore[union-attr]
+    )
     case = build_evidence_case(trace, scenario, condition, kernel, manifests)
     chain: dict[str, object] = case["chain"]  # type: ignore[assignment]
     modes: dict[str, object] = case["modes"]  # type: ignore[assignment]

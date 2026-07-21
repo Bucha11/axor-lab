@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from lab_contracts import validate_artifact, world_digest
+from lab_runner import resolve_kernel
+from lab_runner.axor_backend import AxorKernel, gate_with_governor
 from lab_runner.kernel import Kernel, default_registry
 
 from .gating import GatingError, gated_args, normalize_value_hash, provenance_fidelity
@@ -73,7 +75,7 @@ class _Run:
     condition: dict[str, object]
     scenario_id: str
     inputs: dict[str, object]
-    kernel: Kernel
+    kernel: Kernel | AxorKernel
     trusted_runtime: bool = False
     fixtures: dict[str, object] = field(default_factory=dict)
     values: list[dict[str, object]] = field(default_factory=list)
@@ -102,6 +104,23 @@ class _Run:
                 return tuple(value["labels"])  # type: ignore[arg-type]
         return ()
 
+    def untrusted_registrations(self) -> list[tuple[str, object]]:
+        """The (producing-tool, value) pairs the real governor taint-registers —
+        every untrusted-derived value that carries its bytes. A redacted sensitive
+        value has no decision_value to register (the client withheld it), so its
+        taint is not reconstructable here; the governor then sees less taint, which
+        is the honest limit of an advisory boundary over an untrusted caller."""
+        producer: dict[str, str] = {}
+        for event in self.events:
+            if event.get("type") == "tool_result":
+                for vid in event.get("produces_value_ids", []) or []:  # type: ignore[union-attr]
+                    producer[str(vid)] = str(event.get("tool"))
+        regs: list[tuple[str, object]] = []
+        for value in self.values:
+            if "untrusted_derived" in value.get("labels", []) and "decision_value" in value:
+                regs.append((producer.get(str(value["value_id"]), ""), value["decision_value"]))
+        return regs
+
     def trace(self) -> dict[str, object]:
         return {
             "schema_version": "trace/v1",
@@ -112,7 +131,9 @@ class _Run:
                 "mode": PRODUCER_MODE,
                 # fidelity is an operator-attested-runtime claim, not client-set
                 "provenance_fidelity": provenance_fidelity(self.trusted_runtime, self.labels_carried),
-                "kernel_version": str(self.condition["kernel"]), "runtime": "lab-gateway@0.1",
+                # the kernel_version is the RESOLVED backend's version — the kernel
+                # that actually decided — not the raw condition string (review r17)
+                "kernel_version": str(self.kernel.version), "runtime": "lab-gateway@0.1",
             },
             "inputs_digest": world_digest(self.inputs, self.fixtures),
             "events": list(self.events),
@@ -149,7 +170,16 @@ def make_gateway(
     import hmac
     import secrets
 
-    kernel = default_registry((str(condition["kernel"]),)).get(str(condition["kernel"]))
+    # resolve the kernel through the ONE shared resolver (review r17): a real
+    # `axor-core@X` pin is satisfied ONLY by the exact installed build — otherwise
+    # UnknownKernelError is raised HERE, at construction, rather than the gateway
+    # silently building a reference Kernel under the real-kernel label and writing
+    # a trace that claims the production build. `$inputs` allowlists expand against
+    # this scenario's inputs, exactly as the live runner does.
+    registry = default_registry((str(condition["kernel"]),))
+    kernel = resolve_kernel(
+        str(condition["kernel"]), manifests, condition.get("policy"), registry, inputs
+    )
     runs: dict[str, _Run] = {}
     run_secrets: dict[str, str] = {}
     global_lock = threading.Lock()  # guards run creation + the runs/secrets maps
@@ -164,11 +194,24 @@ def make_gateway(
         run.events.append({"seq": run.seq, "node": "root", "type": "tool_call_intent",
                            "tool": tool, "call_id": call_id, "arg_bindings": arg_bindings})
         run.seq += 1
-        decision = kernel.decide(
-            enforcement=str(condition["enforcement"]), manifest=manifests[tool], args=args,
-            arg_labels={n: run.labels_of(v) for n, v in arg_bindings.items()},
-            arg_bindings=arg_bindings, inputs=inputs, policy=condition.get("policy"),  # type: ignore[arg-type]
-        )
+        # the SAME live/replay dispatch the runner uses: the real axor-core
+        # governor for an AxorKernel, the reference kernel otherwise — so the
+        # decision surface never runs a reference kernel under a real-kernel label
+        # (review r17)
+        if isinstance(kernel, AxorKernel):
+            effect: dict[str, object] = manifests[tool].get("effect", {})  # type: ignore[assignment]
+            driving_args = list(effect.get("driving_args", []))  # type: ignore[arg-type]
+            driving_value_id = arg_bindings.get(str(driving_args[0])) if driving_args else "v_none"
+            decision = gate_with_governor(
+                kernel.config, str(condition["enforcement"]),
+                run.untrusted_registrations(), tool, args, str(driving_value_id),
+            )
+        else:
+            decision = kernel.decide(
+                enforcement=str(condition["enforcement"]), manifest=manifests[tool], args=args,
+                arg_labels={n: run.labels_of(v) for n, v in arg_bindings.items()},
+                arg_bindings=arg_bindings, inputs=inputs, policy=condition.get("policy"),  # type: ignore[arg-type]
+            )
         run.events.append({"seq": run.seq, "node": "root", "type": "gate_decision",
                            "call_id": call_id, "decision": decision})
         run.seq += 1

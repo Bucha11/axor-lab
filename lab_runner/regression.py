@@ -76,6 +76,7 @@ def check_pins(
     inputs: dict[str, object] | None = None,
     *,
     inputs_for: "Callable[[dict[str, object]], dict[str, object]] | None" = None,
+    kernel_for: "Callable[[dict[str, object]], object] | None" = None,
 ) -> list[dict[str, object]]:
     """Re-run every pinned trace under `kernel`; report, never raise.
 
@@ -88,7 +89,13 @@ def check_pins(
     shared `inputs` dict is wrong for a multi-scenario bundle, where pin B would
     replay against scenario A's allowlist / effect-resolution inputs and produce
     a false regression or a false pass (review r12). `inputs` remains as a legacy
-    fallback applied to every pin when no resolver is given."""
+    fallback applied to every pin when no resolver is given.
+
+    `kernel_for(trace)` resolves EACH trace's own kernel (review r17): a real
+    AxorKernel bakes its `$inputs`-expanded allowlist at resolve time, so a single
+    kernel resolved once carries the wrong allowlist for a second scenario. When
+    given, it overrides the single `kernel` per pin (which is kept for the version
+    fingerprint and as the fallback)."""
     # report the BEHAVIOR fingerprint (version + behavior-changing flags), not
     # just the version string — a taint_floor-off variant must be visibly a
     # different kernel, never the same identity with different verdicts (r4)
@@ -104,8 +111,9 @@ def check_pins(
             results.append(_result(pinned, "TRACE_TAMPERED", version, STATUS_TAMPERED))
             continue
         trace_inputs = inputs_for(trace) if inputs_for is not None else (inputs or {})
+        trace_kernel = kernel_for(trace) if kernel_for is not None else kernel
         recomputed, replay_status = replay_trace_status(
-            trace, condition, kernel, manifests, trace_inputs
+            trace, condition, trace_kernel, manifests, trace_inputs
         )
         # a MATCH requires the replay to be STRUCTURALLY sound, not just that the
         # recomputed verdict SEQUENCE happens to equal the pin. A malformed trace

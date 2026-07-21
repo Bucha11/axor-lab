@@ -11,9 +11,11 @@ from .agents import AgentAdapter, ScriptedAgent, resolve_agent
 from .axor_backend import (
     AxorKernel,
     axor_available,
+    gate_with_governor,
     governor_config,
     real_kernel_version,
     resolve_kernel,
+    resolve_kernel_for_trace,
 )
 from .errors import (
     ConfirmationRequired,
@@ -55,9 +57,11 @@ __all__ = [
     "AxorKernel",
     "ConfirmationRequired",
     "axor_available",
+    "gate_with_governor",
     "governor_config",
     "real_kernel_version",
     "resolve_kernel",
+    "resolve_kernel_for_trace",
     "ExperimentFileError",
     "ExperimentResult",
     "Kernel",

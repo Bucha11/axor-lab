@@ -34,7 +34,7 @@ from lab_contracts import (
     validate_artifact,
 )
 
-from .axor_backend import resolve_kernel
+from .axor_backend import resolve_kernel, resolve_kernel_for_trace
 from .bundle_io import (
     PACKAGING,
     read_bundle_dir,
@@ -432,6 +432,7 @@ def _cmd_regress(args: argparse.Namespace) -> int:
     condition = _enforcing_condition(bundle, args.condition)
     version = args.kernel or str(condition["kernel"])
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    kernel_for = None
     if args.disable_taint_floor:
         # explicit variant demonstration: force the reference kernel with the
         # gate off (the fingerprint marks it a different kernel, review r4)
@@ -439,15 +440,19 @@ def _cmd_regress(args: argparse.Namespace) -> int:
     else:
         # regress under the SAME kernel run/replay would use — so a real
         # axor-core pin regresses under the real governor, not the reference
-        # taint-floor kernel (review r6: one kernel path everywhere)
-        kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
-                                default_registry((version,)))
+        # taint-floor kernel (review r6: one kernel path everywhere). Each pin
+        # resolves its OWN kernel so a real-kernel allowlist expands against that
+        # pin's scenario inputs, not a single baked expansion (review r17).
+        registry = default_registry((version,))
+        kernel = resolve_kernel(version, manifests, condition.get("policy"), registry)  # type: ignore[arg-type]
+        kernel_for = lambda trace: resolve_kernel_for_trace(bundle, trace, registry)  # noqa: E731
     # each pinned trace replays against ITS OWN scenario's inputs — a single
     # shared inputs dict would replay every pin under the first scenario's
     # allowlist / effect-resolution inputs (review r12)
     results = check_pins(
         pins, traces, condition, kernel, manifests,
         inputs_for=lambda trace: _scenario_for(bundle, trace).get("inputs", {}),  # type: ignore[union-attr,arg-type]
+        kernel_for=kernel_for,
     )
     for result in results:
         print(
@@ -505,12 +510,15 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         raise RunnerError(str(exc)) from exc
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     # resolve the SAME kernel replay/regress use — the REAL axor-core governor
-    # when the condition pins the installed build — not always the reference
-    # kernel via default_registry, which would render reference-kernel verdicts
-    # under a production kernel version (review r12)
+    # when the condition pins the installed build — and pass THIS trace's scenario
+    # inputs so a real-kernel `$inputs` allowlist expands to the concrete values,
+    # not the symbolic ref (review r12/r17). The condition may be a policy-override
+    # counterfactual, so we keep it and only thread the scenario inputs.
     version = str(condition["kernel"])
-    kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
-                            default_registry((version,)))
+    kernel = resolve_kernel(
+        version, manifests, condition.get("policy"),  # type: ignore[arg-type]
+        default_registry((version,)), scenario.get("inputs", {}),  # type: ignore[union-attr]
+    )
     case = build_evidence_case(trace, scenario, condition, kernel, manifests, governed_twin=twin)
     print(json.dumps(case, indent=2, ensure_ascii=False))
     return EXIT_OK
@@ -769,10 +777,12 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
             )
 
     # 4. replay the incident under its OWN recorded condition before writing — a
-    # wrong/reconstructed condition would surface here as a mismatch
+    # wrong/reconstructed condition would surface here as a mismatch. Pass the
+    # scenario inputs so a real-kernel `$inputs` allowlist expands to the concrete
+    # values the incident actually ran under, not the symbolic ref (review r17).
     kernel = resolve_kernel(
         str(condition["kernel"]), manifests_by_id, condition.get("policy"),  # type: ignore[arg-type]
-        default_registry((str(condition["kernel"]),)),
+        default_registry((str(condition["kernel"]),)), scenario.get("inputs", {}),  # type: ignore[arg-type]
     )
     _, status = replay_trace_status(
         trace, condition, kernel, manifests_by_id, scenario.get("inputs", {}),  # type: ignore[arg-type]

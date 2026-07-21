@@ -110,6 +110,33 @@ def resolve_kernel(
     return registry.get(version)  # type: ignore[attr-defined]
 
 
+def resolve_kernel_for_trace(
+    bundle: dict[str, object], trace: dict[str, object], registry: object | None = None,
+) -> object:
+    """The ONE way to resolve the exact kernel a trace ran under (review r17).
+
+    Every non-runner surface — CLI regress, CLI/HTML EvidenceCase, incident import
+    — must resolve the kernel THROUGH THIS, so it always (a) uses the shared
+    real-vs-reference resolver and (b) expands `$inputs.*` allowlists against the
+    trace's OWN scenario inputs. A single kernel resolved without per-trace
+    scenario inputs bakes the wrong (or symbolic) allowlist into an AxorKernel and
+    silently mis-governs a multi-scenario bundle."""
+    from .kernel import default_registry
+
+    trial: dict[str, object] = trace.get("trial", {})  # type: ignore[assignment]
+    conditions = {str(c["id"]): c for c in bundle["conditions"]}  # type: ignore[union-attr]
+    scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
+    condition = conditions[str(trial["condition_id"])]
+    scenario = scenarios.get(str(trial.get("scenario_id")), {})
+    manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    version = str(condition["kernel"])
+    reg = registry if registry is not None else default_registry((version,))
+    return resolve_kernel(
+        version, manifests, condition.get("policy"), reg,
+        scenario.get("inputs", {}),  # type: ignore[union-attr]
+    )
+
+
 def governor_config(
     manifests: dict[str, dict[str, object]],
     policy: dict[str, object] | None,
