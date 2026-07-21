@@ -635,5 +635,74 @@ class TestMandatoryRuntimeProvenance(unittest.TestCase):
         self.assertIn("no recorded runtime_config_hash", str(ctx.exception))
 
 
+class TestExecutionProvenanceEnforcement(unittest.TestCase):
+    def test_completed_trial_requires_runtime_config_hash(self) -> None:
+        from lab_contracts import validate_artifact
+        bundle, _ = _real_slice_bundle()
+        ct = next(t for t in bundle["trials"] if t["status"] == "completed")
+        del ct["runtime_config_hash"]
+        errs = validate_artifact(bundle, "bundle")
+        self.assertTrue(any("runtime_config_hash" in e for e in errs))
+
+    def test_completed_trial_requires_config_compiler_version(self) -> None:
+        from lab_contracts import validate_artifact
+        bundle, _ = _real_slice_bundle()
+        ct = next(t for t in bundle["trials"] if t["status"] == "completed")
+        del ct["config_compiler_version"]
+        errs = validate_artifact(bundle, "bundle")
+        self.assertTrue(any("config_compiler_version" in e for e in errs))
+
+    def test_runtime_hash_records_resolved_kernel_fingerprint(self) -> None:
+        # the runner records the ACTUAL resolved backend fingerprint on the trial,
+        # not just the declared condition.kernel string (review r20)
+        result = run_experiment_suite(
+            [support.banking_scenario()], support.manifests(), support.conditions(),
+            support.kernel_registry(), repeats=2, run_id="r_fp",
+        )
+        for trial in (t for t in result.trials if t["status"] == "completed"):
+            self.assertTrue(trial.get("resolved_kernel_fingerprint"))
+
+    def test_divergent_runtime_hashes_for_same_pair_are_rejected(self) -> None:
+        # two completed trials of the SAME (scenario, condition) recording DIFFERENT
+        # runtime hashes is a compiler/config drift the builder must not silently
+        # collapse to one (review r20)
+        from lab_contracts import build_bundle
+        bundle, traces = _real_slice_bundle()
+        gov = [t for t in bundle["trials"]
+               if t["status"] == "completed" and t["condition_id"] == "governed"]
+        gov[0]["runtime_config_hash"] = "sha256:" + "a" * 64
+        gov[1]["runtime_config_hash"] = "sha256:" + "b" * 64  # divergent
+        with self.assertRaises(ValueError) as ctx:
+            build_bundle(
+                bundle_id="b_div", created=CREATED, scenarios=bundle["scenarios"],
+                conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+                environment={k: v for k, v in bundle["environment"].items()
+                             if k != "config_provenance"},
+                trials=bundle["trials"], aggregates=bundle["aggregates"], traces=traces,
+            )
+        self.assertIn("divergent runtime_config_hash", str(ctx.exception))
+
+    def test_evidence_export_refuses_reconstructed_provenance(self) -> None:
+        # a bundle whose provenance was reconstructed at build time (not recorded at
+        # execution) is refused an evidence-backed export (review r20)
+        import copy
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+        bundle, traces = _real_slice_bundle()
+        env = dict(bundle["environment"])  # type: ignore[union-attr]
+        prov = copy.deepcopy(env["config_provenance"])
+        prov["provenance_status"] = "reconstructed_legacy"
+        env["config_provenance"] = prov
+        doctored = build_bundle(
+            bundle_id="b_recon", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+            traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(doctored, condition_id="governed", traces=traces)
+        self.assertIn("reconstructed", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

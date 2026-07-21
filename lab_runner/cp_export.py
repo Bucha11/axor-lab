@@ -276,6 +276,14 @@ def _verify_recorded_runtime_hashes(
                 "that cannot be proven to be what ran (rebuild with a runner that records it)"
             )
         return
+    # the provenance must have been RECORDED at execution, not reconstructed at
+    # build time from a completed trial that never recorded its own hash (review r20)
+    if require and str(prov.get("provenance_status")) != "recorded_at_execution":
+        raise CPExportError(
+            "config_provenance.provenance_status is not 'recorded_at_execution' — the runtime "
+            "config was reconstructed at build time, not recorded when the trials ran; an "
+            "evidence-backed CP export refuses reconstructed provenance"
+        )
     compiler = str(prov.get("compiler_version", ""))
     if compiler != CONFIG_COMPILER_VERSION:
         raise CPExportError(

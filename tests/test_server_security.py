@@ -20,7 +20,7 @@ from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle
 from lab_runner import run_experiment_suite
-from lab_server import PublishRejected, make_server
+from lab_server import make_server
 from lab_server.store import PublicationStore
 
 CREATED = "2026-07-19T12:00:00+00:00"
@@ -66,8 +66,11 @@ class TestPathTraversal(unittest.TestCase):
             trace = next(iter(result.traces.values()))
             trace["trace_id"] = "../../../../etc/pwned"
             traces = {trace["trace_id"]: trace}
-            # the trial must bind to THIS trace's own coordinates (graph verifier)
+            # the trial must bind to THIS trace's own coordinates (graph verifier);
+            # reuse the runner-recorded runtime provenance so the completed trial is
+            # schema-valid (review r20)
             tt = trace["trial"]
+            recorded = next(t for t in result.trials if t["status"] == "completed")
             # rebuild the bundle so content hashes match the mutated trace
             bundle = build_bundle(
                 bundle_id="b_evil", created=CREATED, scenarios=[scenario], conditions=conditions,
@@ -75,7 +78,9 @@ class TestPathTraversal(unittest.TestCase):
                 trials=[{"trial_id": "t0", "scenario_id": tt["scenario_id"],
                          "condition_id": tt["condition_id"], "seed": tt["seed"],
                          "repeat_index": tt["repeat_index"],
-                         "status": "completed", "trace_ref": content_hash(trace)}],
+                         "status": "completed", "trace_ref": content_hash(trace),
+                         "runtime_config_hash": recorded["runtime_config_hash"],
+                         "config_compiler_version": recorded["config_compiler_version"]}],
                 aggregates=[], traces=traces,
             )
             store.publish(bundle, traces, question="q")

@@ -36,22 +36,42 @@ def config_provenance(
     scen_by_id = {str(s["name"]): s for s in scenarios}
     cond_by_id = {str(c["id"]): c for c in conditions}
     hashes: dict[str, dict[str, str]] = {}
+    all_recorded = True  # every completed trial carried a runtime hash it recorded
     for trial in trials:
         if trial.get("status") != "completed":
             continue
         sid, cid = str(trial.get("scenario_id")), str(trial.get("condition_id"))
-        if cid in hashes.get(sid, {}):
-            continue
         scenario, condition = scen_by_id.get(sid), cond_by_id.get(cid)
         if scenario is None or condition is None:
             continue
         recorded = trial.get("runtime_config_hash")
-        rhash = str(recorded) if recorded else runtime_config_hash(
-            str(condition["kernel"]), condition.get("policy"), tool_manifests,
-            scenario.get("inputs", {}),  # type: ignore[arg-type]
-        )
+        if recorded:
+            rhash = str(recorded)
+        else:
+            # a completed trial that never RECORDED its runtime config at execution:
+            # reconstruct it at build time, but mark the whole provenance as
+            # reconstructed so an evidence export can refuse it (review r20)
+            all_recorded = False
+            rhash = runtime_config_hash(
+                str(condition["kernel"]), condition.get("policy"), tool_manifests,
+                scenario.get("inputs", {}),  # type: ignore[arg-type]
+            )
+        prior = hashes.get(sid, {}).get(cid)
+        if prior is not None and prior != rhash:
+            # two completed trials of the SAME (scenario, condition) ran under
+            # DIFFERENT compiled configs — a mid-run compiler/config drift, a
+            # mutated manifest, or inconsistent hand-built evidence. Aggregating to
+            # one hash would silently hide it; refuse the ambiguous bundle (r20).
+            raise ValueError(
+                f"divergent runtime_config_hash for ({sid!r}, {cid!r}): {prior} vs {rhash} — "
+                "completed trials of the same scenario/condition must share one runtime config"
+            )
         hashes.setdefault(sid, {})[cid] = rhash
-    return {"compiler_version": CONFIG_COMPILER_VERSION, "runtime_config_hashes": hashes}
+    return {
+        "compiler_version": CONFIG_COMPILER_VERSION,
+        "provenance_status": "recorded_at_execution" if all_recorded else "reconstructed_legacy",
+        "runtime_config_hashes": hashes,
+    }
 
 
 def build_bundle(

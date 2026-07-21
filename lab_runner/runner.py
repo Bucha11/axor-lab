@@ -343,10 +343,15 @@ def _run_one(
         str(condition["kernel"]), condition.get("policy"),
         list(manifests.values()), scenario.get("inputs", {}),  # type: ignore[arg-type]
     )
+    # the ACTUAL resolved backend's behavior identity — not just the declared
+    # condition.kernel string — so a registry that returns a behavior-changed
+    # kernel (e.g. taint_floor off) under a version label is auditable (review r20)
+    fingerprint = getattr(kernel, "behavior_version", str(getattr(kernel, "version", "")))
     result.add(
         trial_key,
         {**base, "status": "completed", "trace_ref": content_hash(outcome.trace),
-         "runtime_config_hash": rch, "config_compiler_version": CONFIG_COMPILER_VERSION},
+         "runtime_config_hash": rch, "config_compiler_version": CONFIG_COMPILER_VERSION,
+         "resolved_kernel_fingerprint": str(fingerprint)},
         outcome,
     )
 

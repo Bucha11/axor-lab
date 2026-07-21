@@ -108,6 +108,10 @@
             "compiler_version": {
               "type": "string"
             },
+            "provenance_status": {
+              "enum": [ "recorded_at_execution", "reconstructed_legacy" ],
+              "description": "recorded_at_execution when every completed trial carried its own runtime_config_hash; reconstructed_legacy when the builder had to recompute one — an evidence-backed CP export refuses the latter (review r20)"
+            },
             "runtime_config_hashes": {
               "type": "object",
               "description": "nested {scenario_id: {condition_id: runtime_config_hash}} recorded at execution; the nesting avoids the ambiguity of a '<sid>|<cid>' string key",
@@ -176,12 +180,28 @@
             "type": "string",
             "description": "the governor-config compiler version that produced runtime_config_hash at execution"
           },
+          "resolved_kernel_fingerprint": {
+            "type": "string",
+            "description": "the ACTUAL resolved kernel backend's behavior identity (incl. behavior-changing flags), recorded at execution — distinct from the declared condition.kernel string (review r20)"
+          },
           "execution_order": {
             "type": "integer",
             "minimum": 0,
             "description": "the 0-based order this trial was EXECUTED in (conditions are counterbalanced across blocks), so a temporal confound is auditable"
           }
-        }
+        },
+        "allOf": [
+          {
+            "description": "a COMPLETED trial must carry its trace + the runtime config it ran under, recorded at execution (review r20) — provenance cannot be synthesized later",
+            "if": {
+              "properties": { "status": { "const": "completed" } },
+              "required": [ "status" ]
+            },
+            "then": {
+              "required": [ "trace_ref", "runtime_config_hash", "config_compiler_version" ]
+            }
+          }
+        ]
       }
     },
     "aggregates": {

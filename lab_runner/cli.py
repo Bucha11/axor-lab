@@ -967,11 +967,21 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
             "refusing to import a bundle whose verdicts don't reproduce"
         )
 
+    # a completed trial carries the runtime config it ran under, recorded from the
+    # incident's own condition + scenario inputs (review r20)
+    from lab_contracts import CONFIG_COMPILER_VERSION, runtime_config_hash
+
+    incident_rch = runtime_config_hash(
+        str(condition["kernel"]), condition.get("policy"), manifests,
+        scenario.get("inputs", {}),  # type: ignore[arg-type]
+    )
     trials = [{
         "trial_id": content_hash(trace), "scenario_id": str(trial["scenario_id"]),
         "condition_id": str(trial["condition_id"]), "seed": str(trial["seed"]),
         "repeat_index": int(trial["repeat_index"]), "status": "completed",
         "trace_ref": content_hash(trace),
+        "runtime_config_hash": incident_rch,
+        "config_compiler_version": CONFIG_COMPILER_VERSION,
     }]
     bundle = build_bundle(
         bundle_id="b_incident_" + content_hash(trace).removeprefix("sha256:")[:32],
