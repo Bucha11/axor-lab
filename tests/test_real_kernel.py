@@ -224,6 +224,55 @@ class TestExecutableConfigHash(unittest.TestCase):
         self.assertNotIn("$inputs.known_ibans", flat)
 
 
+class TestParametricVsRuntimeConfigHash(unittest.TestCase):
+    """The parametric carry-over identity (symbolic $inputs) is NOT the concrete
+    per-scenario runtime config identity (review r17). Naming the parametric hash
+    "the full runtime config" was dishonest: two scenarios share it yet govern
+    differently once an input-backed allowlist expands."""
+
+    def _manifests(self):
+        return list(support.manifests().values())
+
+    def test_parametric_policy_hash_differs_from_runtime_config_hash(self) -> None:
+        from lab_contracts import parametric_policy_hash, runtime_config_hash
+
+        kernel = support.KERNEL_PINNED
+        policy = {"profile": "strict", "allowlist": ["$inputs.known_ibans"]}
+        inputs = support.banking_scenario()["inputs"]
+        parametric = parametric_policy_hash(kernel, policy, self._manifests())
+        runtime = runtime_config_hash(kernel, policy, self._manifests(), inputs)
+        # the parametric hash keeps $inputs symbolic; the runtime hash expands it —
+        # for an input-backed allowlist they MUST differ
+        self.assertNotEqual(parametric, runtime)
+
+    def test_runtime_config_hash_changes_with_scenario_inputs(self) -> None:
+        from lab_contracts import parametric_policy_hash, runtime_config_hash
+
+        kernel = support.KERNEL_PINNED
+        policy = {"profile": "strict", "allowlist": ["$inputs.known_ibans"]}
+        ms = self._manifests()
+        h_a = runtime_config_hash(kernel, policy, ms, {"known_ibans": ["IBAN_A"]})
+        h_b = runtime_config_hash(kernel, policy, ms, {"known_ibans": ["IBAN_B"]})
+        self.assertNotEqual(h_a, h_b)  # different concrete allowlists → different runtime
+        # but the parametric identity is stable across those scenarios
+        p_a = parametric_policy_hash(kernel, policy, ms)
+        p_b = parametric_policy_hash(kernel, policy, ms)
+        self.assertEqual(p_a, p_b)
+
+    def test_runtime_hash_equals_parametric_when_no_input_refs(self) -> None:
+        # a policy with a LITERAL allowlist (no $inputs) has nothing to expand, so
+        # the parametric and runtime identities coincide
+        from lab_contracts import parametric_policy_hash, runtime_config_hash
+
+        kernel = support.KERNEL_PINNED
+        policy = {"profile": "strict", "allowlist": ["DE00LITERAL"]}
+        ms = self._manifests()
+        self.assertEqual(
+            parametric_policy_hash(kernel, policy, ms),
+            runtime_config_hash(kernel, policy, ms, {"known_ibans": ["x"]}),
+        )
+
+
 @unittest.skipUnless(axor_available(), "axor-core not installed")
 class TestRealKernelInputAllowlist(unittest.TestCase):
     def test_real_kernel_expands_allowlist_input_refs(self) -> None:

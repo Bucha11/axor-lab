@@ -59,9 +59,21 @@ def _bundle_and_traces() -> tuple[dict, dict]:
 
 
 def _write_pkg(tmp: str, bundle: dict, receipt: dict, traces: dict) -> Path:
+    """Write a full VERSIONED reproduction envelope with the given (test-chosen)
+    receipt injected — the receipt state machine is exercised INSIDE the envelope,
+    since a bare {bundle,traces,receipt} JSON is no longer auto-accepted (r17)."""
+    from lab_server.store import PublicationStore
+
+    store = PublicationStore(root=Path(tmp) / "store")
+    stored = store.publish(bundle, traces, question="q")
     path = Path(tmp) / "download.json"
     path.write_text(json.dumps({
-        "bundle": bundle, "traces": list(traces.values()), "receipt": receipt,
+        "schema_version": "axor-reproduction-package/v1",
+        "publication": stored.publication,
+        "bundle": stored.bundle,
+        "traces": list(stored.traces.values()),
+        "receipt": receipt,  # the test's chosen receipt, over the same bundle
+        "acceptance": store.acceptance(stored),
     }))
     return path
 
@@ -109,7 +121,8 @@ class TestCliVerifyExitCodes(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             pkg = _write_pkg(tmp, bundle, forged, traces)
-            self.assertEqual(main(["verify", str(pkg)]), EXIT_FAILURE)
+            # a forged signed receipt is INVALID regardless of the acceptance mode
+            self.assertEqual(main(["verify", str(pkg), "--allow-unsigned-server"]), EXIT_FAILURE)
 
     def test_signed_receipt_without_pubkey_exits_unverified(self) -> None:
         bundle, traces = _bundle_and_traces()
@@ -117,14 +130,17 @@ class TestCliVerifyExitCodes(unittest.TestCase):
                                 key_id="acme", signature="ab" * 32)
         with tempfile.TemporaryDirectory() as tmp:
             pkg = _write_pkg(tmp, bundle, receipt, traces)
-            self.assertEqual(main(["verify", str(pkg)]), EXIT_UNVERIFIED)
+            # allow-unsigned isolates the UNVERIFIED to the receipt (no pubkey)
+            self.assertEqual(
+                main(["verify", str(pkg), "--allow-unsigned-server"]), EXIT_UNVERIFIED
+            )
 
     def test_hash_verified_package_still_passes(self) -> None:
         bundle, traces = _bundle_and_traces()
         receipt = build_receipt(bundle, integrity="hash_verified")
         with tempfile.TemporaryDirectory() as tmp:
             pkg = _write_pkg(tmp, bundle, receipt, traces)
-            self.assertEqual(main(["verify", str(pkg)]), EXIT_OK)
+            self.assertEqual(main(["verify", str(pkg), "--allow-unsigned-server"]), EXIT_OK)
 
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")

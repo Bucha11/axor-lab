@@ -13,12 +13,13 @@ POST /runs                          → { run_id, run_secret }        # run_secr
 POST /runs/{run_id}/events          ← tool_result { values:[{value_id, decision_value, labels, sources}], labels_carried? }
                                     ← tool_call_intent { tool, arg_bindings:{arg→value_id}, args? }
      → for a tool_call_intent: { decision:{verdict, gate, driving_value_id, reason}, authoritative_args }
-POST /runs/{run_id}/finalize        → freeze the run; no further events
-GET  /runs/{run_id}/trace           → the frozen trace/v1 (only after finalize); repeatable
-POST /runs/{run_id}/trace/ack       → confirm the client stored the trace → run becomes evictable
+POST /runs/{run_id}/finalize        → freeze the run; returns { trace_ref } — no further events
+GET  /runs/{run_id}/trace           → the frozen trace/v1 (only after finalize); repeatable; ETag = trace_ref
+POST /runs/{run_id}/trace/ack       → { trace_ref } confirm the client stored THAT body → run becomes evictable
 ```
 
-- Delivery is CLIENT-CONFIRMED: a `GET /trace` returns the frozen body but does NOT mark the run delivered — the socket write can fail after the handler returns, or the client can crash before persisting the body. Only an explicit `POST /trace/ack` marks the run `delivered`, after which it is eligible for quota eviction. A fetched-but-unacknowledged trace stays retrievable (the identical frozen bytes) so the fetch can be retried; the run quota refuses new runs (`429`) rather than dropping an unacknowledged trace.
+- Delivery is CLIENT-CONFIRMED and BOUND TO THE BYTES: a `GET /trace` returns the frozen body (and its `trace_ref` as the `ETag`) but does NOT mark the run delivered — the socket write can fail after the handler returns, or the client can crash before persisting the body. `POST /trace/ack` marks the run `delivered` only when (a) the trace was actually fetched first, and (b) the body carries a `trace_ref` equal to `content_hash(frozen_trace)`. An ack before any GET (`409`), or with a missing/wrong `trace_ref` (`400`), does NOT deliver the run and does NOT make it evictable. A fetched-but-unacknowledged trace stays retrievable (identical frozen bytes) so the fetch can be retried.
+- Quotas are SPLIT: `max_runs` bounds only the ACTIVE (non-finalized) runs — finalizing frees the active slot, so a flood of finalized-but-unacknowledged runs can never exhaust the active quota and block new work. Retained finalized traces have their own budget and evict acknowledged (delivered) runs first.
 
 - The gate decides on `authoritative_args`, assembled SOLELY from `arg_bindings → decision_value` (never the client's concrete `args`, which are accepted only as an assertion and canonical-hash-checked against the bound values). A binding to an unknown value id, an unbound decision-relevant/required/asserted arg, or a mismatched assertion is refused (`4xx`) — never a silent ALLOW.
 - `authoritative_args` is the COMPLETE, executable call: every schema-required arg (and every arg the caller will pass) must be bound to a ledger value, so a cooperating proxy runs exactly it, not a bound subset topped up with unrecorded values.

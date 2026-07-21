@@ -230,17 +230,40 @@ def compiled_governor_config(
     }
 
 
-def executable_config_hash(
+def parametric_policy_hash(
     kernel: str,
     policy: dict[str, object] | None,
     tool_manifests: list[dict[str, object]],
 ) -> str:
-    """sha256 over the canonical compiled governor config (review r15/r16): a
-    Control Plane deploy keyed on it reproduces the exact executable config Lab
-    measured — manifests, untrusted-field taint patterns, and allowlist included.
-    The carry-over identity is scenario-independent (allowlist ``$inputs`` refs
-    stay symbolic), so it is stable across the scenarios the config was run on."""
+    """The PARAMETRIC config identity (review r17): sha256 over the compiled
+    governor config with allowlist ``$inputs`` refs left SYMBOLIC. It is
+    scenario-independent — stable across every scenario the policy ran on — and is
+    the honest Control Plane carry-over key: the SAME parametric policy transfers,
+    to be re-parameterized with PRODUCTION inputs. It does NOT identify any one
+    scenario's concrete executed config (use runtime_config_hash for that)."""
     return content_hash(compiled_governor_config(kernel, policy, tool_manifests))
+
+
+# executable_config_hash was the r15/r16 name for the parametric identity. It is
+# retained as an alias; `parametric_policy_hash` is the honest name (it does not
+# capture the runtime `$inputs` expansion — see runtime_config_hash).
+executable_config_hash = parametric_policy_hash
+
+
+def runtime_config_hash(
+    kernel: str,
+    policy: dict[str, object] | None,
+    tool_manifests: list[dict[str, object]],
+    inputs: dict[str, object] | None,
+) -> str:
+    """The CONCRETE runtime config identity (review r17): sha256 over the compiled
+    governor config with allowlist ``$inputs`` refs EXPANDED against `inputs`.
+    Two scenarios whose input-backed allowlists resolve to different concrete
+    destinations govern differently and have DIFFERENT runtime hashes, even though
+    they share one parametric policy. This is the fingerprint of what actually ran
+    for a given scenario — recorded per (scenario, condition), not carried over as
+    if it were the production config."""
+    return content_hash(compiled_governor_config(kernel, policy, tool_manifests, inputs))
 
 
 def world_digest(inputs: dict[str, object], fixtures: dict[str, object] | None) -> str:

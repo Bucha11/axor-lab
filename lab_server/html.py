@@ -107,8 +107,16 @@ def render_publication(stored: StoredPublication) -> str:
 
     body.append("<h2>Methodology</h2>")
     environment: dict[str, object] = stored.bundle["environment"]  # type: ignore[assignment]
+    # a mixed-kernel bundle omits the singular `kernel_version` and carries a
+    # `kernel_versions` LIST instead (contract allows both). Reading the singular
+    # key unconditionally KeyError'd → 400 on a valid publication (review r17).
+    if "kernel_version" in environment:
+        kernel_label = esc(str(environment["kernel_version"]))
+    else:
+        versions = environment.get("kernel_versions", [])  # type: ignore[union-attr]
+        kernel_label = esc(", ".join(str(v) for v in versions)) or "(mixed / unspecified)"
     body.append(
-        f"<p>Kernel <code>{esc(environment['kernel_version'])}</code>; "
+        f"<p>Kernel <code>{kernel_label}</code>; "
         f"model <code>{esc(environment['model']['id'])}</code>.</p>"  # type: ignore[index]
     )
     # show what ACTUALLY differs between conditions — the contract supports
@@ -176,9 +184,14 @@ def render_evidence(stored: StoredPublication, trace_id: str, policy_id: str | N
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     # use the REAL axor-core governor when the condition pins the installed
     # version, exactly as replay/regress do — an EvidenceCase for a real-kernel
-    # trace must not silently reason with the reference kernel (review r12).
+    # trace must not silently reason with the reference kernel (review r12) — and
+    # pass THIS trace's scenario inputs so a real-kernel `$inputs` allowlist
+    # expands to concrete values, not the symbolic ref (review r17).
     version = str(condition["kernel"])
-    kernel = resolve_kernel(version, manifests, condition.get("policy"), default_registry((version,)))
+    kernel = resolve_kernel(
+        version, manifests, condition.get("policy"),
+        default_registry((version,)), scenario.get("inputs", {}),  # type: ignore[union-attr]
+    )
     case = build_evidence_case(trace, scenario, condition, kernel, manifests)
     chain: dict[str, object] = case["chain"]  # type: ignore[assignment]
     modes: dict[str, object] = case["modes"]  # type: ignore[assignment]

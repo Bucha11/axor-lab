@@ -34,7 +34,7 @@ from lab_contracts import (
     validate_artifact,
 )
 
-from .axor_backend import resolve_kernel
+from .axor_backend import resolve_kernel, resolve_kernel_for_trace
 from .bundle_io import (
     PACKAGING,
     read_bundle_dir,
@@ -310,22 +310,40 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         return EXIT_FAILURE
     print(f"replay: bit-identical over {len(report.decisions)} trace(s)")
 
-    data = _package_data(path)
-    receipt = data.get("receipt") if data else None
-    # a SERVER reproduction package (bears the package schema, or carries a
-    # publication/acceptance) MUST present every proof object — a bundle directory
-    # or a bare {bundle,traces} package legitimately has none
-    is_server_package = bool(data) and (
-        str(data.get("schema_version")) == _REPRODUCTION_PACKAGE_SCHEMA
-        or "publication" in data or "acceptance" in data
-    )
-    if not isinstance(receipt, dict):
-        if is_server_package:
-            print("receipt: MISSING from a server package (stripped?) — refusing to pass",
-                  file=sys.stderr)
-            return EXIT_FAILURE
+    # A bundle DIRECTORY is a local artifact that never carried server proofs — it
+    # verifies as bundle-integrity + replay only, and cannot be "downgraded".
+    if path.is_dir():
         print("receipt: none (a bundle directory carries no portable receipt)")
         return EXIT_OK
+
+    data = _package_data(path)
+    # A downloaded `.json` MUST be a VERSIONED reproduction envelope. Detection can
+    # no longer key on the PRESENCE of a publication/acceptance/receipt: an
+    # attacker downgrades a server package to a bare {bundle,traces} by stripping
+    # the envelope AND every proof at once, and autodetection then reads it as an
+    # honest bare package and exits 0. The envelope schema_version is the one
+    # marker whose ABSENCE is meaningful — a bare file without --allow-bare is
+    # refused, so a stripped server package cannot masquerade as bare (review r17).
+    has_envelope = bool(data) and str(data.get("schema_version")) == _REPRODUCTION_PACKAGE_SCHEMA
+    if not has_envelope:
+        if not getattr(args, "allow_bare", False):
+            print(
+                f"package: NOT a versioned reproduction envelope (missing schema_version "
+                f"{_REPRODUCTION_PACKAGE_SCHEMA!r}). A server package cannot be silently "
+                "downgraded to a bare bundle — pass --allow-bare to verify a local "
+                "bundle+traces file as bare (integrity + replay only, no server proofs).",
+                file=sys.stderr,
+            )
+            return EXIT_VALIDATION
+        print("package: bare (bundle+traces only, --allow-bare) — no server proofs to check")
+        return EXIT_OK
+
+    assert data is not None
+    receipt = data.get("receipt")
+    if not isinstance(receipt, dict):
+        print("receipt: MISSING from a server package (stripped?) — refusing to pass",
+              file=sys.stderr)
+        return EXIT_FAILURE
 
     from lab_contracts.publication import verify_publication_binding
     from lab_contracts.signing import (
@@ -350,36 +368,49 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         kind = "signature VERIFIED" if str(receipt.get("integrity")) == "signed" else "signed_ref OK (hash-only)"
         print(f"receipt: {kind}")
 
-    if is_server_package:
-        publication = data.get("publication")
-        acceptance = data.get("acceptance")
-        if not isinstance(publication, dict) or not isinstance(acceptance, dict):
-            print("package: MISSING publication or acceptance (server package) — refusing to pass",
-                  file=sys.stderr)
-            return EXIT_FAILURE
-        # 2) publication binds to the bundle and its own id
-        problems = verify_publication_binding(publication, bundle)
-        if problems:
-            print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
-            return EXIT_FAILURE
-        print("publication: bound (id + bundle_ref + claims)")
-        # 3) server acceptance binds + (optionally) verifies
-        try:
-            verify_acceptance(
-                acceptance, publication,
-                server_pubkey_hex=getattr(args, "server_pubkey", None),
-                expected_server=getattr(args, "server", None),
-                expected_key_id=getattr(args, "server_key_id", None),
-            )
-        except SignatureInvalid as exc:
-            print(f"acceptance: INVALID — {exc}", file=sys.stderr)
-            return EXIT_FAILURE
-        except SignatureUnavailable as exc:
-            print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
-            unverified = True
+    publication = data.get("publication")
+    acceptance = data.get("acceptance")
+    if not isinstance(publication, dict) or not isinstance(acceptance, dict):
+        print("package: MISSING publication or acceptance (server package) — refusing to pass",
+              file=sys.stderr)
+        return EXIT_FAILURE
+    # 2) publication binds to the bundle and its own id
+    problems = verify_publication_binding(publication, bundle)
+    if problems:
+        print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
+        return EXIT_FAILURE
+    print("publication: bound (id + bundle_ref + claims)")
+    # 3) server acceptance binds + (optionally) verifies. verify_acceptance now
+    # also requires acceptance.integrity == publication.integrity.
+    try:
+        verify_acceptance(
+            acceptance, publication,
+            server_pubkey_hex=getattr(args, "server_pubkey", None),
+            expected_server=getattr(args, "server", None),
+            expected_key_id=getattr(args, "server_key_id", None),
+        )
+    except SignatureInvalid as exc:
+        print(f"acceptance: INVALID — {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    except SignatureUnavailable as exc:
+        print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
+        unverified = True
+    else:
+        if str(acceptance.get("algorithm")) == "ed25519":
+            print("acceptance: signature VERIFIED")
+        elif getattr(args, "allow_unsigned_server", False):
+            print("acceptance: unsigned (accepted via --allow-unsigned-server; local dev only)")
         else:
-            signed = str(acceptance.get("algorithm")) == "ed25519"
-            print(f"acceptance: {'signature VERIFIED' if signed else 'bound (unsigned)'}")
+            # an UNSIGNED acceptance proves only internal self-consistency, NOT that
+            # a specific Axor Lab server ran the checks — anyone can mint one. It is
+            # not an authenticated server verification, so it is UNVERIFIED (r17).
+            print(
+                "acceptance: UNVERIFIED — unsigned server acceptance is not an authenticated "
+                "verification (pass --server-pubkey to check a signed one, or "
+                "--allow-unsigned-server for local development)",
+                file=sys.stderr,
+            )
+            unverified = True
 
     return EXIT_UNVERIFIED if unverified else EXIT_OK
 
@@ -432,6 +463,7 @@ def _cmd_regress(args: argparse.Namespace) -> int:
     condition = _enforcing_condition(bundle, args.condition)
     version = args.kernel or str(condition["kernel"])
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
+    kernel_for = None
     if args.disable_taint_floor:
         # explicit variant demonstration: force the reference kernel with the
         # gate off (the fingerprint marks it a different kernel, review r4)
@@ -439,15 +471,19 @@ def _cmd_regress(args: argparse.Namespace) -> int:
     else:
         # regress under the SAME kernel run/replay would use — so a real
         # axor-core pin regresses under the real governor, not the reference
-        # taint-floor kernel (review r6: one kernel path everywhere)
-        kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
-                                default_registry((version,)))
+        # taint-floor kernel (review r6: one kernel path everywhere). Each pin
+        # resolves its OWN kernel so a real-kernel allowlist expands against that
+        # pin's scenario inputs, not a single baked expansion (review r17).
+        registry = default_registry((version,))
+        kernel = resolve_kernel(version, manifests, condition.get("policy"), registry)  # type: ignore[arg-type]
+        kernel_for = lambda trace: resolve_kernel_for_trace(bundle, trace, registry)  # noqa: E731
     # each pinned trace replays against ITS OWN scenario's inputs — a single
     # shared inputs dict would replay every pin under the first scenario's
     # allowlist / effect-resolution inputs (review r12)
     results = check_pins(
         pins, traces, condition, kernel, manifests,
         inputs_for=lambda trace: _scenario_for(bundle, trace).get("inputs", {}),  # type: ignore[union-attr,arg-type]
+        kernel_for=kernel_for,
     )
     for result in results:
         print(
@@ -505,12 +541,15 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         raise RunnerError(str(exc)) from exc
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     # resolve the SAME kernel replay/regress use — the REAL axor-core governor
-    # when the condition pins the installed build — not always the reference
-    # kernel via default_registry, which would render reference-kernel verdicts
-    # under a production kernel version (review r12)
+    # when the condition pins the installed build — and pass THIS trace's scenario
+    # inputs so a real-kernel `$inputs` allowlist expands to the concrete values,
+    # not the symbolic ref (review r12/r17). The condition may be a policy-override
+    # counterfactual, so we keep it and only thread the scenario inputs.
     version = str(condition["kernel"])
-    kernel = resolve_kernel(version, manifests, condition.get("policy"),  # type: ignore[arg-type]
-                            default_registry((version,)))
+    kernel = resolve_kernel(
+        version, manifests, condition.get("policy"),  # type: ignore[arg-type]
+        default_registry((version,)), scenario.get("inputs", {}),  # type: ignore[union-attr]
+    )
     case = build_evidence_case(trace, scenario, condition, kernel, manifests, governed_twin=twin)
     print(json.dumps(case, indent=2, ensure_ascii=False))
     return EXIT_OK
@@ -687,12 +726,16 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
-    # the executable_config_hash is the TRUE carry-over key: it binds the kernel,
-    # policy, AND the manifests (effect classes, driving args, untrusted-field
-    # taint) the governor actually runs — the plain config_hash covers only
-    # kernel+policy and two runs with different manifests share it (review r16)
-    print(f"  executable_config_hash (carry-over key): {export.config['executable_config_hash']}")
+    # the parametric_config_hash is the carry-over key: kernel + policy + manifests
+    # (effect classes, driving args, untrusted-field taint) with allowlist $inputs
+    # left SYMBOLIC — the same parametric policy transfers, re-parameterized with
+    # production inputs. It is NOT a byte-identical runtime config: that depends on
+    # scenario inputs and is recorded per-scenario as runtime_config_hashes (r17).
+    print(f"  parametric_config_hash (carry-over key): {export.config['parametric_config_hash']}")
     print(f"  config_hash (kernel+policy anchor): {export.config['config_hash']}")
+    runtime_hashes: dict[str, object] = export.config["runtime_config_hashes"]  # type: ignore[assignment]
+    if runtime_hashes:
+        print(f"  runtime_config_hashes (per-scenario concrete config): {len(runtime_hashes)} scenario(s)")
     print(f"  regressions carried: {len(carried)}"
           + (f" (frozen trace bodies in {out}/regression-traces/)" if carried else ""))
     print(f"  production-todo (NOT reused): {out}/production-todo.md")
@@ -769,10 +812,12 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
             )
 
     # 4. replay the incident under its OWN recorded condition before writing — a
-    # wrong/reconstructed condition would surface here as a mismatch
+    # wrong/reconstructed condition would surface here as a mismatch. Pass the
+    # scenario inputs so a real-kernel `$inputs` allowlist expands to the concrete
+    # values the incident actually ran under, not the symbolic ref (review r17).
     kernel = resolve_kernel(
         str(condition["kernel"]), manifests_by_id, condition.get("policy"),  # type: ignore[arg-type]
-        default_registry((str(condition["kernel"]),)),
+        default_registry((str(condition["kernel"]),)), scenario.get("inputs", {}),  # type: ignore[arg-type]
     )
     _, status = replay_trace_status(
         trace, condition, kernel, manifests_by_id, scenario.get("inputs", {}),  # type: ignore[arg-type]
@@ -1192,6 +1237,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_verify.add_argument(
         "--server-key-id", help="expected server key_id (trust anchor) for the acceptance receipt"
+    )
+    p_verify.add_argument(
+        "--allow-bare", action="store_true",
+        help="verify a bare {bundle,traces} JSON (no versioned envelope) as integrity+replay only; "
+             "without this a non-envelope JSON is refused so a server package cannot be downgraded",
+    )
+    p_verify.add_argument(
+        "--allow-unsigned-server", action="store_true",
+        help="accept an UNSIGNED server acceptance as passing (local dev only); by default an "
+             "unsigned acceptance is UNVERIFIED because it is not an authenticated server verification",
     )
     p_verify.set_defaults(func=_cmd_verify)
 

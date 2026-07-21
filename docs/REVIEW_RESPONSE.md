@@ -445,3 +445,32 @@ evidence, never trusted from an uploaded number; the executable-config identity
 binds the whole compiled governor config; a finalized trace is delivered only
 when the client acknowledges it; and the acceptance served is the one the server
 signed — is closed.
+
+## Seventeenth review round — Boundary Unification
+
+Round 16 fixed the most dangerous defects in the CORE runner/replay/server
+pipeline. Round 17 closes the gap between a primitive EXISTING and it being
+applied to EVERY surface: a correct resolver ≠ every execution surface using it;
+a versioned package ≠ a package that can't be stripped back to bare; a stored
+acceptance ≠ its historical signature verified; a bridge recomputed from traces ≠
+one that used the FULL trace set; a delivery ack ≠ an ack bound to specific
+bytes. Seven patches, each with proving tests. Suite green: **644 tests**.
+
+| Round-17 finding | Fix | Proof |
+|---|---|---|
+| **P0** the HTTP gateway and in-process endpoint built a reference Kernel for any version string, so a real `axor-core@X` condition produced a reference-kernel decision under a production-kernel trace label | both surfaces resolve through the shared `resolve_kernel` (real build or UnknownKernelError at construction) and dispatch to the real governor for an AxorKernel; a new `resolve_kernel_for_trace` threads each trace's scenario inputs through CLI regress / CLI+HTML EvidenceCase / incident import | `test_endpoint_kernel_identity.py` |
+| **P0** a server package could be downgraded to a bare `{bundle,traces}` by stripping the envelope + every proof, then verified with exit 0; an unsigned acceptance passed as a server verification | `verify` requires a versioned envelope by default (`--allow-bare` to opt into bare integrity+replay only); an unsigned acceptance is UNVERIFIED (exit 5) unless `--allow-unsigned-server`; `verify_acceptance` binds acceptance.integrity to publication.integrity | `test_package_verification.py` |
+| **P1** the persisted acceptance was restored on load without verifying its signature — a forged signed acceptance (recomputed report hash + bogus signature) was served as trusted | a historical server keyring verifies a known key's signature (forgery → quarantined); an unknown (rotated-out) key is kept as an opaque UNVERIFIED historical record, never re-issued under the current key | `test_server_acceptance.py` |
+| **P1** the CP bridge silently skipped completed trials whose trace was absent, so a cherry-picked favourable subset could earn it; supporting refs named stored aggregates it never consulted | `_recompute_asr` raises on any missing completed-trial trace (full evidence required); the bridge emits an immutable `cp_bridge_analysis/v1` receipt and supporting refs point at it | `test_cp_bridge_policy.py` |
+| **P1** `executable_config_hash` always compiled with symbolic `$inputs`, yet was named the full runtime carry-over key — two scenarios with different input-backed allowlists shared it while governing differently | split `parametric_policy_hash` (symbolic, the honest carry-over key) from `runtime_config_hash` (concrete, per-scenario `$inputs` expanded); export-cp emits both | `test_real_kernel.py` |
+| **P1** the gateway ack accepted any POST after finalize (not bound to the delivered bytes, fireable before any GET); finalized-unacked runs permanently exhausted the run quota | finalize returns `trace_ref`, GET exposes it (ETag), ack requires a prior fetch + `trace_ref == content_hash(frozen_trace)`; `max_runs` bounds only ACTIVE runs so finalized ones can't block new opens | `test_gateway_conformity.py` |
+| **P1/P2** a valid mixed-kernel publication 400'd on the page (`kernel_version` KeyError); the acceptance always claimed `statistics_recomputed`; the "durable" tombstone fsync'd only the directory, not the file bytes | the page renders `kernel_versions`; the report lists `statistics_not_applicable` when there are no aggregates; `_write_atomic(durable=True)` fsyncs the contents before the rename | `test_surface_parity.py` |
+
+The round-17 goal — one kernel resolver on every execution surface; a package
+that cannot be silently downgraded and an unsigned acceptance that never reads as
+authenticated; a historical acceptance whose signature is verified, not assumed;
+a CP bridge that requires the complete evidence graph and names it; a carry-over
+key that is honestly parametric, distinct from the concrete runtime config; a
+delivery ack bound to the exact bytes with a quota that can't be exhausted by
+unacked runs; and every valid artifact surviving the page, the report, and a
+power loss — is closed.

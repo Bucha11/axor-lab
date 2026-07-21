@@ -120,6 +120,32 @@ class TestAcceptanceReceipt(unittest.TestCase):
         self.assertNotIn("FABRICATED_CHECK", served["semantic_report"]["verified"])
         self.assertEqual(served["semantic_report_ref"], content_hash(served["semantic_report"]))
 
+    def test_missing_historical_key_does_not_reissue_acceptance_silently(self) -> None:
+        # a SIGNED acceptance whose signing key is not in the keyring (rotated out
+        # and not retained) is kept as an OPAQUE historical record — preserved with
+        # its original key_id/signature, never silently re-issued under a new key
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(root=root, server_id="axor-lab-server-A")
+        stored = store.publish(bundle, traces, question="q")
+        pid = str(stored.publication["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        historical = json.loads(acc_file.read_text())
+        # make it a signed receipt from a key we no longer hold (binding intact)
+        historical["algorithm"] = "ed25519"
+        historical["key_id"] = "rotated-out-2024"
+        historical["signature"] = "ab" * 32
+        acc_file.write_text(json.dumps(historical))
+
+        # reload with NO key for "rotated-out-2024" in the keyring
+        reloaded = PublicationStore(root=root, server_id="axor-lab-server-B").get(pid)
+        served = PublicationStore(root=root, server_id="axor-lab-server-B").acceptance(reloaded)
+        self.assertEqual(served["key_id"], "rotated-out-2024")   # preserved
+        self.assertEqual(served["signature"], "ab" * 32)          # not re-signed
+        self.assertEqual(served, historical)                      # opaque, untouched
+
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")
 class TestSignedAcceptance(unittest.TestCase):
@@ -173,6 +199,72 @@ class TestSignedAcceptance(unittest.TestCase):
         acc = rotated.acceptance(rotated.get(pid))
         self.assertEqual(acc["key_id"], "lab-prod-2026")   # the ORIGINAL key_id
         verify_bundle_signature(acc, str(acc["signature"]), pub_a)  # verifies under A, not B
+
+    def test_historical_keyring_verifies_rotated_acceptance(self) -> None:
+        # publish under key A, reload with rotated key B BUT with A retained in the
+        # historical keyring → the signature is verified (not just binding-checked)
+        # and the original receipt is served
+        from nacl.signing import SigningKey
+
+        from lab_contracts.signing import verify_bundle_signature
+
+        sk_a = SigningKey.generate()
+        priv_a, pub_a = bytes(sk_a).hex(), bytes(sk_a.verify_key).hex()
+        priv_b = bytes(SigningKey.generate()).hex()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store_a = PublicationStore(
+            root=root, server_id="lab.example.com",
+            server_key_id="key-A", server_signing_key=priv_a,
+        )
+        pid = str(store_a.publish(bundle, traces, question="q").publication["publication_id"])
+
+        rotated = PublicationStore(
+            root=root, server_id="lab.example.com",
+            server_key_id="key-B", server_signing_key=priv_b,
+            known_server_keys={"key-A": pub_a},  # retain the old key
+        )
+        acc = rotated.acceptance(rotated.get(pid))
+        self.assertEqual(acc["key_id"], "key-A")
+        verify_bundle_signature(acc, str(acc["signature"]), pub_a)
+
+    def test_forged_signed_acceptance_with_recomputed_report_hash_is_rejected_on_load(self) -> None:
+        # tamper the semantic report AND recompute its ref (binding-consistent) so
+        # only the SIGNATURE is now wrong. With the signing key in the keyring the
+        # forgery is detected on load and dropped — it is never served
+        from nacl.signing import SigningKey
+
+        sk = SigningKey.generate()
+        priv, pub = bytes(sk).hex(), bytes(sk.verify_key).hex()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bundle, traces = _bundle_and_traces()
+        store = PublicationStore(
+            root=root, server_id="lab.example.com",
+            server_key_id="key-A", server_signing_key=priv,
+        )
+        pid = str(store.publish(bundle, traces, question="q").publication["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        forged = json.loads(acc_file.read_text())
+        forged["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        forged["semantic_report_ref"] = content_hash(forged["semantic_report"])  # binding-consistent
+        acc_file.write_text(json.dumps(forged))  # signature no longer matches the body
+
+        reloaded = PublicationStore(
+            root=root, server_id="lab.example.com",
+            server_key_id="key-A", server_signing_key=priv,
+            known_server_keys={"key-A": pub},
+        ).get(pid)
+        self.assertIsNone(reloaded.acceptance)  # forgery detected under a known key → dropped
+        served = PublicationStore(
+            root=root, server_id="lab.example.com",
+            server_key_id="key-A", server_signing_key=priv,
+            known_server_keys={"key-A": pub},
+        ).acceptance(reloaded)
+        self.assertNotIn("FABRICATED_CHECK", served["semantic_report"]["verified"])
 
 
 if __name__ == "__main__":

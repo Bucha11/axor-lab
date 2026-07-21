@@ -14,6 +14,8 @@ from .canonical import (
     condition_config_hash,
     content_hash,
     executable_config_hash,
+    parametric_policy_hash,
+    runtime_config_hash,
     world_digest,
 )
 from .errors import (
@@ -62,6 +64,8 @@ __all__ = [
     "compiled_governor_config",
     "condition_config_hash",
     "executable_config_hash",
+    "parametric_policy_hash",
+    "runtime_config_hash",
     "content_hash",
     "world_digest",
     "contracts_dir",

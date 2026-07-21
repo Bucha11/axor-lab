@@ -135,30 +135,44 @@ class TestServerServesAndAccepts(unittest.TestCase):
 
 
 class TestCliVerify(unittest.TestCase):
+    """The receipt is verified INSIDE a versioned reproduction envelope. A bare
+    {bundle,traces,receipt} JSON is no longer auto-accepted — that was the
+    downgrade path (review r17) — so these build the full server package."""
+
+    def _package(self, tmp: str) -> tuple[dict, Path]:
+        from lab_server.store import PublicationStore
+
+        store = PublicationStore(root=Path(tmp) / "store")
+        bundle, traces = _publishable_bundle()
+        stored = store.publish(bundle, traces, question="q")
+        pkg = {
+            "schema_version": "axor-reproduction-package/v1",
+            "publication": stored.publication,
+            "bundle": stored.bundle,
+            "traces": list(stored.traces.values()),
+            "receipt": stored.receipt(),
+            "acceptance": store.acceptance(stored),
+        }
+        return pkg, Path(tmp) / "download.json"
+
     def test_verify_a_downloaded_package_passes(self) -> None:
         from lab_runner.cli import main
 
-        bundle, traces = _publishable_bundle()
-        receipt = build_receipt(bundle, integrity="hash_verified")
         with tempfile.TemporaryDirectory() as tmp:
-            pkg_path = Path(tmp) / "download.json"
-            pkg_path.write_text(json.dumps({
-                "bundle": bundle, "traces": list(traces.values()), "receipt": receipt,
-            }))
-            self.assertEqual(main(["verify", str(pkg_path)]), 0)
+            pkg, path = self._package(tmp)
+            path.write_text(json.dumps(pkg))
+            # the receipt (and publication) verify; the acceptance is unsigned in a
+            # keyless store, so local-dev mode is needed for a clean pass
+            self.assertEqual(main(["verify", str(path), "--allow-unsigned-server"]), 0)
 
     def test_verify_detects_a_tampered_receipt(self) -> None:
         from lab_runner.cli import main
 
-        bundle, traces = _publishable_bundle()
-        bad = build_receipt(bundle, integrity="hash_verified")
-        bad["signed_ref"] = "0" * 64  # does not match the bundle
         with tempfile.TemporaryDirectory() as tmp:
-            pkg_path = Path(tmp) / "download.json"
-            pkg_path.write_text(json.dumps({
-                "bundle": bundle, "traces": list(traces.values()), "receipt": bad,
-            }))
-            self.assertEqual(main(["verify", str(pkg_path)]), 1)
+            pkg, path = self._package(tmp)
+            pkg["receipt"]["signed_ref"] = "0" * 64  # does not match the bundle
+            path.write_text(json.dumps(pkg))
+            self.assertEqual(main(["verify", str(path), "--allow-unsigned-server"]), 1)
 
     def test_malformed_package_is_a_clean_error_not_a_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
