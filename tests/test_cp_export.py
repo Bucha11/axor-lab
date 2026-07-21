@@ -25,7 +25,7 @@ def _bundle_and_traces(governance_helps: bool = True):
     conditions = support.conditions()
     result = run_experiment_suite(
         [scenario], support.manifests(), conditions, support.kernel_registry(),
-        repeats=10, run_id="r_cp",
+        repeats=20, run_id="r_cp",  # >= the earned-bridge minimum effective n (r15)
     )
     pairs = result.pairs("ungoverned", "governed", metric="ASR")
     ungoverned_breaches = sum(1 for b, _ in pairs if b) if governance_helps else 0
@@ -207,14 +207,22 @@ def _multi_enforcing_bundle() -> dict[str, object]:
     ]
     for condition in conditions:
         condition["config_hash"] = condition_config_hash(KERNEL, condition["policy"])
+    # 20 completed trials per condition so the earned bridge clears the minimum
+    # effective n and the aggregate n matches recorded evidence (review r15)
+    trials = [
+        {"trial_id": f"t_{cid}_{i}", "scenario_id": "s", "condition_id": cid,
+         "seed": f"s{i:03d}", "repeat_index": i, "status": "completed", "trace_ref": f"ref_{cid}_{i}"}
+        for cid in ("baseline", "strict", "allowlist") for i in range(20)
+    ]
     aggregates = [
-        binary_aggregate("ASR", "baseline", 8, 10),
-        binary_aggregate("ASR", "strict", 8, 10),      # no delta vs baseline
-        binary_aggregate("ASR", "allowlist", 1, 10),   # real delta vs baseline
+        binary_aggregate("ASR", "baseline", 16, 20),
+        binary_aggregate("ASR", "strict", 16, 20),      # no delta vs baseline
+        binary_aggregate("ASR", "allowlist", 2, 20),    # real delta vs baseline
     ]
     return {
         "schema_version": "bundle/v1", "bundle_id": "b_multi",
         "conditions": conditions, "aggregates": aggregates, "tool_manifests": [],
+        "trials": trials,
     }
 
 
