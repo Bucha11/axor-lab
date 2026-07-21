@@ -136,6 +136,13 @@ class PublicationStore:
     server_id: str = "lab.local"
     server_key_id: str | None = None
     server_signing_key: str | None = None
+    # historical server public keys (key_id → Ed25519 pubkey hex) so a SIGNED
+    # acceptance minted under a now-rotated key can still be VERIFIED on load
+    # rather than blindly trusted (review r17). The store's current signing key is
+    # added automatically. A signed acceptance whose key_id is in here MUST verify;
+    # one whose key_id is unknown is kept as an opaque UNVERIFIED historical record
+    # (never re-issued under the current key); a bad signature is quarantined.
+    known_server_keys: dict[str, str] = field(default_factory=dict)
     _cache: dict[str, StoredPublication] = field(default_factory=dict)
     _tombstones: set[str] = field(default_factory=set)
     # STABLE evidence lineage refs that were taken down — a takedown removes the
@@ -791,20 +798,37 @@ class PublicationStore:
             acceptance=acceptance,
         )
 
+    def _server_keyring(self) -> dict[str, str]:
+        """key_id → Ed25519 pubkey (hex): the configured historical keys PLUS the
+        store's current signing key (derived), for verifying loaded acceptances."""
+        keyring = dict(self.known_server_keys)
+        if self.server_signing_key:
+            try:
+                from nacl.signing import SigningKey
+            except ImportError:  # pragma: no cover - env without PyNaCl
+                return keyring
+            pub = SigningKey(bytes.fromhex(self.server_signing_key)).verify_key.encode().hex()
+            keyring[str(self.server_key_id or self.server_id)] = pub
+        return keyring
+
     def _load_acceptance(
         self, directory: Path, publication: dict[str, object]
     ) -> dict[str, object] | None:
-        """Restore the persisted acceptance receipt, BINDING-verified against the
-        publication (review r16). Returns the ORIGINAL signed bytes so a rotated
-        server key cannot silently re-attest with a new key/key_id; a tampered or
-        mismatched file is dropped (None → acceptance() re-mints under the current
-        key). The signature is deliberately NOT checked here against the current
-        server key: the key that SIGNED this receipt may no longer be the one the
-        server holds, so verifying against the live key would wrongly discard a
-        valid historical attestation on every rotation. Signature verification is
-        the reader's job, offline, with the publishing key (verify_acceptance +
-        the receipt's key_id); the server only re-confirms the receipt still binds
-        THIS publication (publication_id, bundle_ref, semantic_report_ref)."""
+        """Restore the persisted acceptance receipt, verified against the
+        publication AND the server keyring (review r16/r17).
+
+        Binding is always re-confirmed (publication_id, bundle_ref,
+        semantic_report_ref). For a SIGNED acceptance the signature is now checked
+        against a HISTORICAL keyring, not blindly trusted:
+          - key_id KNOWN to the keyring → the signature MUST verify; a forged
+            receipt (recomputed report hash + bogus signature) is quarantined
+            (dropped → acceptance() re-mints a clean one under the current key);
+          - key_id UNKNOWN (the signing key rotated out and was not retained) → the
+            ORIGINAL is kept as an opaque UNVERIFIED historical record — preserved,
+            NEVER re-issued under the current key (that would forge a fresh
+            attestation), and surfaced as unverifiable to a reader lacking the key.
+        An unsigned acceptance is restored as-is (Patch 2 makes the verifier treat
+        it as unverified, not an authenticated pass)."""
         path = directory / "acceptance.json"
         if not path.is_file():
             return None
@@ -820,15 +844,19 @@ class PublicationStore:
             verify_acceptance,
         )
 
+        keyring = self._server_keyring()
+        pubkey = keyring.get(str(acc.get("key_id"))) if str(acc.get("algorithm")) == "ed25519" else None
         try:
-            # no server_pubkey_hex → binding-only: a signed receipt passes the
-            # binding checks then raises SignatureUnavailable (which we accept),
-            # while any binding mismatch raises SignatureInvalid (which we reject)
-            verify_acceptance(acc, publication)
+            # with a pubkey we fully verify the signature; without one (unknown
+            # historical key, or unsigned) we still enforce the binding checks
+            verify_acceptance(acc, publication, server_pubkey_hex=pubkey)
         except SignatureUnavailable:
-            pass  # signed & bound; the original signature is preserved for readers
+            # signed & bound, but we hold no key for it → keep as opaque historical
+            pass
         except SignatureInvalid:
-            return None  # tampered / does not bind this publication → re-mint clean
+            # binding mismatch, integrity mismatch, OR a bad signature under a KNOWN
+            # key (a forgery) → drop; do not serve or preserve it
+            return None
         return acc
 
     def _load_reproductions_only(self, publication_id: str) -> None:
