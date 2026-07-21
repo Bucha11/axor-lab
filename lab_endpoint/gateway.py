@@ -390,8 +390,13 @@ def make_gateway(
                         })
                         return
                     # the ack MUST name the exact frozen bytes: a missing or wrong
-                    # trace_ref does not confirm delivery and must NOT make the run
-                    # evictable (review r17). Delivery is bound to the content hash.
+                    # trace_ref does not confirm receipt and must NOT make the run
+                    # evictable (review r17). This is a CLIENT-DECLARED delivery
+                    # acknowledgement, not server-verified delivery: the server can
+                    # prove the client FETCHED the bytes and echoed their content
+                    # hash, but it cannot prove the client durably STORED them — so
+                    # the honest guarantee is "the client asserts it has this exact
+                    # trace", which is enough to make eviction safe (review r18).
                     expected_ref = content_hash(run.frozen_trace)
                     if str(body.get("trace_ref")) != expected_ref:
                         self._json(400, {
@@ -399,8 +404,8 @@ def make_gateway(
                             "expected": expected_ref,
                         })
                         return
-                    run.delivered = True
-                self._json(200, {"ok": True, "delivered": True})
+                    run.delivered = True  # client-declared acknowledgement of receipt
+                self._json(200, {"ok": True, "acknowledged": True, "delivery": "client-declared"})
                 return
 
             events = _RUNS_RE.match(self.path)

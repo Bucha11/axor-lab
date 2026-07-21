@@ -95,12 +95,19 @@ jobs:
         # a job named "real-kernel integration" must not be green without
         # running: no `|| echo` swallowing a failed install, and an explicit
         # import assertion so the integration tests cannot silently skip
-        # (review r6). If axor-core is not installable here, this job fails
-        # loudly — configure the install source rather than skip past it.
+        # (review r6/r18). If axor-core is not installable here, this job fails
+        # loudly — configure the install source rather than skip past it. EVERY
+        # suite carrying @skipUnless(axor_available()) real-kernel tests runs
+        # here — not just test_real_kernel — so a real-kernel regression on the
+        # endpoint or replay surfaces cannot hide behind a stdlib-job skip.
         run: |
           pip install "axor-core>=0.9"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
-          python -m unittest tests.test_real_kernel -v
+          python -c "from lab_runner import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
+          python -m unittest -v \
+            tests.test_real_kernel \
+            tests.test_endpoint_kernel_identity \
+            tests.test_replay_capability
 
   crypto:
     name: Signing tests actually run (PyNaCl installed)
@@ -112,11 +119,20 @@ jobs:
           python-version: "3.12"
       - name: Install PyNaCl so the Ed25519 bundle + license signing tests do NOT skip
         # the stdlib CI job runs everything but skips the crypto paths; this job
-        # exists so those paths are exercised in CI, not silently skipped
+        # exists so those paths are exercised in CI, not silently skipped. EVERY
+        # suite carrying @skipUnless(_HAS_NACL) signature tests runs here — the
+        # portable receipt, server acceptance, reproduction-package and
+        # verification-outcome proofs, not just the two original suites (r18).
         run: |
           pip install "pynacl>=1.5"
-          python -m unittest tests.test_hardening tests.test_entitlement -v
-          python -c "import importlib.util as u; assert u.find_spec('nacl'), 'PyNaCl must be present'"
+          python -c "import importlib.util as u; assert u.find_spec('nacl'), 'PyNaCl must be present so the crypto tests RUN, not skip'"
+          python -m unittest -v \
+            tests.test_hardening \
+            tests.test_entitlement \
+            tests.test_package_verification \
+            tests.test_portable_receipt \
+            tests.test_server_acceptance \
+            tests.test_verification_outcome
 
   packaging:
     name: Wheel installs and runs outside the checkout

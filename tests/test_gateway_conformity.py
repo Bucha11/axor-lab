@@ -304,7 +304,10 @@ class TestAckBoundToBytes(_Base):
         self._get(f"/runs/{rid}/trace", secret)
         status, body = self._post(f"/runs/{rid}/trace/ack", {"trace_ref": ref}, secret)
         self.assertEqual(status, 200, body)
-        self.assertTrue(body["delivered"])
+        # the ack is a CLIENT-DECLARED acknowledgement, not server-verified
+        # delivery — the response says so honestly (review r18)
+        self.assertTrue(body["acknowledged"])
+        self.assertEqual(body["delivery"], "client-declared")
 
     def test_failed_socket_delivery_keeps_trace_retryable(self) -> None:
         # a fetched-but-unacked trace stays retrievable, byte-for-byte

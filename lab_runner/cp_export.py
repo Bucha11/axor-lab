@@ -1,18 +1,22 @@
 """Control Plane export — the earned bridge (plan B2, control-plane-handoff.md).
 
-What carries over (reused, identical): the validated policy + `config_hash`,
-the tool manifests, and any pinned regression cases. What must be ADDED for
-production (the honest half, NOT reused): real tool bindings, credentials,
-deployment topology, notifications/owners. This module emits the first as an
-`axor-cp-deploy/v1` config and the second as a `production-todo.md`, so the
-handoff never reads as "nothing is re-done."
+What carries over (reused, identical): the validated policy, the tool manifests,
+and any pinned regression cases. What must be ADDED for production (the honest
+half, NOT reused): real tool bindings, credentials, deployment topology,
+notifications/owners. This module emits the first as an `axor-cp-deploy/v1`
+config and the second as a `production-todo.md`, so the handoff never reads as
+"nothing is re-done."
 
-The `config_hash` is the carry-over KEY: it is emitted byte-identical to the
-RECORDED hash on the condition the researcher measured (never synthesized here),
-so the Control Plane governs under exactly the config Lab validated. Regression
-pins are validated against the bundle's own traces before they carry over — a
-pin for a trace this bundle never contained, or one asserting a verdict sequence
-the frozen trace never produced, is rejected rather than shipped as a CP test.
+The `parametric_config_hash` is the carry-over KEY: it fingerprints the kernel +
+policy with symbolic `$inputs`, so it stays identical when the Control Plane
+re-parameterizes the SAME policy with production inputs. The `config_hash` is the
+RECORDED fingerprint of the CONCRETE config the measured condition ran under
+(emitted byte-identical, never synthesized here) and `runtime_config_hashes` are
+its per-scenario concrete fingerprints — both describe the specific Lab run, not
+what production will hash, so they anchor provenance rather than carry over (r17/r18).
+Regression pins are validated against the bundle's own traces before they carry
+over — a pin for a trace this bundle never contained, or one asserting a verdict
+sequence the frozen trace never produced, is rejected rather than shipped as a CP test.
 """
 
 from __future__ import annotations
@@ -475,7 +479,10 @@ def _render_todo() -> str:
         lines.append(f"- **{key}** — {description}")
     lines.append("")
     lines.append(
-        "The exported `config_hash` is the carry-over key: the Control Plane "
-        "governs under exactly the config measured in Lab."
+        "The exported `parametric_config_hash` is the carry-over key: it fingerprints "
+        "the kernel + policy with symbolic `$inputs`, so it stays identical when the "
+        "Control Plane re-parameterizes the SAME policy with production inputs. The "
+        "`config_hash`/`runtime_config_hashes` fingerprint the CONCRETE config the Lab "
+        "run measured — they do not carry over, because production inputs differ (r18)."
     )
     return "\n".join(lines) + "\n"

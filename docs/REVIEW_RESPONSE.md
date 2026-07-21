@@ -474,3 +474,36 @@ key that is honestly parametric, distinct from the concrete runtime config; a
 delivery ack bound to the exact bytes with a quota that can't be exhausted by
 unacked runs; and every valid artifact surviving the page, the report, and a
 power loss — is closed.
+
+## Eighteenth review round — Candidate and Proof Closure
+
+Round 17 unified the surfaces. Round 18 closes the gap between a primitive
+EXISTING and it *applying to every surface, being internally consistent, and
+having been recorded during runtime*: a kernel resolver ≠ the one that resolves
+the candidate a `regress --kernel` asks about; a signed publication ≠ a receipt
+whose integrity matches it; a lossless-delivery lifecycle ≠ a retention cap that
+never sheds unread evidence; a bridge that requires all refs ≠ one that verifies
+the evidence graph and proves the runtime config it recommends actually ran; a
+verifier that rejects a forged acceptance ≠ a history honest that the original
+failed; an atomic write ≠ one that survives a short `os.write`; a taint model ≠
+one that fails closed when the taint was redacted. Seven patches, each with
+proving tests. Suite green: **675 tests**.
+
+| Round-18 finding | Fix | Proof |
+|---|---|---|
+| **P0** `regress --kernel X` rebuilt each trace's ORIGINAL recorded kernel, not the candidate X the user asked to test — so a counterfactual regression silently re-ran the old kernel | split `resolve_recorded_kernel_for_trace` (exact replay: trace's own condition) from `resolve_candidate_kernel_for_trace` (policy from the candidate condition, version from `--kernel`, inputs from the trace's scenario); regress uses the candidate resolver | `test_regress_candidate_kernel.py` |
+| **P0** the retained-trace quota evicted a finalized-but-unread trace to make room, dropping evidence the client had never received | retention evicts ONLY an acknowledged (DELIVERED) trace; if the cap is full and nothing is acked, the gateway FAILS CLOSED (429) rather than shed unread evidence — for both the count cap and a new byte cap | `test_gateway_conformity.py::TestLosslessRetention` |
+| **P0/P1** a `signed` publication verified green while carrying a hash-only author receipt (the author signature stripped, the server acceptance left signed) — a proof-level downgrade | `verify` requires `receipt.integrity == publication.integrity`, and a signed publication with no `--pubkey` to check its receipt is UNVERIFIED, not a pass; the receipt/publication/acceptance integrity claims must all agree | `test_package_verification.py`, `test_verification_outcome.py` |
+| **P1** the CP bridge required all trace refs but never verified the evidence GRAPH they came from, and per-scenario runtime hashes were recomputed at export time, not proven to match what ran | `export_cp` runs `validate_artifact` + `verify_bundle` on the traces (tamper/re-point → `CPExportError`); `config_provenance` records each completed trial's `runtime_config_hash` at build time, cross-checked on export ("does not match what ran"); frozen bridge trace bodies travel with the deploy config | `test_cp_bridge_policy.py` |
+| **P1** a damaged/forged persisted acceptance under a known key was silently dropped, then lazily re-minted as a clean `acceptance/v1` indistinguishable from the publish-time record | the invalid bytes are QUARANTINED (`acceptance.invalid.json`) and a distinct, timestamped `reacceptance/v1` — linking to the invalid original by content hash — is minted, persisted, and served; `verify` reports the re-attestation instead of choking on the schema | `test_server_acceptance.py` |
+| **P1** an existing primitive did not hold on every branch: `_write_atomic` ignored short `os.write`s; replay caught bare `Exception` and mislabelled internal bugs `unsupported_kernel`; a real-kernel gate skipped redacted untrusted taint (fail-open); the in-process endpoint silently dropped unknown event types; a run had no byte quota | full-write loop; replay narrowed to `UnknownKernelError` (internal errors propagate); both endpoint surfaces DENY `provenance_unavailable` on a redacted untrusted driving value; unknown event type raises; per-run + retained byte quotas | `test_r18_hardening.py` |
+| **P1/P2** green CI skipped every crypto/real-kernel-gated suite except two; the production-todo named the concrete `config_hash` the carry-over key; the delivery ack claimed `delivered` though the server only knows the client fetched+echoed the ref | the real-kernel CI job runs `test_endpoint_kernel_identity` + `test_replay_capability` (asserting axor imports), the crypto job runs the package/receipt/acceptance/verification suites (asserting PyNaCl); the todo names `parametric_config_hash`; the ack response is honestly `client-declared` | `.github/workflows/ci.yml`, `test_cp_export.py`, `test_gateway_conformity.py` |
+
+The round-18 goal — a regression that tests the kernel the user named, not the
+one the trace recorded; a retention cap that never drops unread evidence; a
+signed publication whose author receipt cannot be downgraded; a CP handoff that
+verifies the evidence graph and proves the runtime config it recommends is the
+one that ran; an acceptance history honest that an original attestation failed;
+primitives that hold on the short-write, internal-error, redacted-taint and
+unknown-event branches; and a CI that runs the crypto and real-kernel proofs
+rather than skipping past them — is closed.
