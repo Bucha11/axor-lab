@@ -507,3 +507,40 @@ one that ran; an acceptance history honest that an original attestation failed;
 primitives that hold on the short-write, internal-error, redacted-taint and
 unknown-event branches; and a CI that runs the crypto and real-kernel proofs
 rather than skipping past them — is closed.
+
+## Nineteenth review round — Experimental and Historical Closure
+
+Rounds 16–18 hardened the integrity spine: a properly-verified artifact can no
+longer be forged. Round 19 asks the next question — does a properly-verified
+artifact prove the CAUSAL claim written on it, and is its lifecycle honest end to
+end? The most dangerous defect this round was not in crypto or the server but in
+the earned-bridge statistics: a full, graph-valid evidence set with equal arm
+sizes and a large, statistically-separated ASR delta could still be a COMPOSITION
+contrast (heavy scenarios in one arm, light in the other) rather than a
+governance effect — so perfect structural evidence could earn a wrong production
+recommendation. Seven patches, each with proving tests. Suite green: **694 tests**.
+
+| Round-19 finding | Fix | Proof |
+|---|---|---|
+| **P0** the earned bridge pooled every completed trial per condition and always ran an independent two-proportion test, so equal-size arms testing DIFFERENT scenarios (composition shift) could earn it despite not one shared experimental unit | the bridge is computed over experimental-unit COORDINATES (scenario, seed, repeat): a composition guard requires both arms to cover the SAME scenarios, then matched_pairs uses the coordinate intersection + McNemar over the discordant pairs (b>c, conclusive, p<0.05), and independent_samples requires per-scenario balance before the interval is consulted; the receipt records comparison_design + scenario_balance + paired/discordant counts | `test_cp_bridge_policy.py::TestDesignAwareBridge` |
+| **P0/P1** retained count + byte quotas were checked only at POST /runs, but the ACTIVE→RETAINED transition happens at /finalize, so pre-opening max_runs then finalizing them all overran the retained cap by orders of magnitude; bytes were counted from input events, not the frozen trace | retained capacity is RESERVED at /finalize (evicting only acknowledged traces, else 429 with the run kept active), measured from the exact frozen-trace byte size | `test_gateway_conformity.py::TestLosslessRetention` |
+| **P1** a MISSING, malformed, or non-object acceptance.json for a LOADED publication returned None, which acceptance() re-mints as a clean acceptance/v1 impersonating the publish-time record; the single fixed-name quarantine kept only the FIRST damaged copy; the package carried no history | missing/malformed is a forensic event re-attested as a reacceptance/v1; an APPEND-ONLY acceptance-history/ (content-hash keyed) preserves every superseded record; the reproduction package carries acceptance_history and `verify` requires a reacceptance's previous_ref to RESOLVE to a record in it | `test_server_acceptance.py`, `test_package_verification.py` |
+| **P1** config_provenance was optional (empty {} passed), the export emitted a runtime hash for EVERY scenario (including one whose governed trial never completed), the key was an ambiguous "<sid>\|<cid>" string, and the hash was recompiled in build_bundle, not recorded at execution | the runner records runtime_config_hash + config_compiler_version ON the trial at execution; config_provenance reads it, keyed NESTED {scenario:{condition:hash}}; the evidence export emits hashes ONLY for executed (scenario, condition) pairs and REQUIRES complete, compiler-versioned provenance (missing key → hard error) | `test_cp_bridge_policy.py::TestMandatoryRuntimeProvenance` |
+| **P1** export_cp ran its schema + graph verification only `if traces is not None`, so a no-traces call produced a deploy config with no verification at all; the export directory was not self-contained (bridge-traces/ alone can't re-derive the bridge) | export_cp REQUIRES the complete traces (`verified:true`); export_cp_template is the honestly-named unverified path; the CLI writes a self-contained source-bundle/ + bridge-analysis.json, and `axor-lab verify-cp-export` recomputes the whole handoff from the directory and confirms it is byte-identical to cp-deploy.json | `test_cp_bridge_policy.py::TestBridgeExportPortability` |
+| **P1** two r18 real-kernel proof suites (candidate-regression, redacted fail-closed) were @skipUnless(axor_available) but not in the real-kernel CI job, so they only ever skipped | the real-kernel job runs test_regress_candidate_kernel + test_r18_hardening too, captures the run's own exit code, and asserts skipped=0 so a silent skip fails CI | `.github/workflows/ci.yml` |
+| **P2** _write_atomic spins forever on a zero-byte os.write; a retried finalize dropped the trace_ref; a fail-closed provenance_unavailable with no driving args used a "v_none" sentinel that failed trace_semantics; the condition schema called config_hash the carry-over key | zero-write raises; idempotent finalize returns the same trace_ref; the fail-closed decision emits a null driving_value_id + driving_unresolved; the schema names parametric_config_hash the carry-over key | `test_r18_hardening.py`, `test_gateway_conformity.py` |
+
+The round-19 goal — an earned bridge that separates governance from composition
+shift; retained quotas enforced at the transition that creates retained state;
+every acceptance event preserved and portable; runtime provenance mandatory and
+recorded at execution; a CP export that is self-contained and independently
+recomputable; and the optional-dependency proof suites actually run in CI — is
+closed.
+
+Still roadmap (honestly not done): the gateway remains a single-process,
+in-memory, single-tenant advisory boundary. Retention is now lossless AND
+bounded, but a bearer-token client can still hold retained slots until it acks;
+per-tenant quotas, a TTL/durable evidence spool, and owner attribution are
+infrastructure for the hosted service, marked experimental in the maturity table
+(the delivery lifecycle and the atomic retained-cap transition are the
+contract-level groundwork).
