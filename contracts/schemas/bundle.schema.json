@@ -123,8 +123,8 @@
               "type": "string"
             },
             "provenance_status": {
-              "enum": [ "recorded_at_execution", "reconstructed_legacy" ],
-              "description": "recorded_at_execution when every completed trial carried its own runtime_config_hash; reconstructed_legacy when the builder had to recompute one — an evidence-backed CP export refuses the latter (review r20)"
+              "enum": [ "recorded_at_execution", "reconstructed_incident", "reconstructed_legacy" ],
+              "description": "recorded_at_execution when every completed trial DECLARED it recorded its own runtime_config_hash at execution; reconstructed_incident when an imported incident reconstructed it at import; reconstructed_legacy otherwise — an evidence-backed CP export refuses anything but recorded_at_execution (review r20/r21)"
             },
             "runtime_config_hashes": {
               "type": "object",
@@ -197,6 +197,10 @@
           "config_compiler_version": {
             "type": "string",
             "description": "the governor-config compiler version that produced runtime_config_hash at execution"
+          },
+          "runtime_provenance": {
+            "enum": [ "recorded_at_execution", "reconstructed_incident", "reconstructed_legacy" ],
+            "description": "HOW runtime_config_hash was obtained: recorded_at_execution (the runner hashed the config AT execution), reconstructed_incident (an imported production incident reconstructed it at import), or reconstructed_legacy (hand-built / no marker). config_provenance derives the bundle status from these — recorded_at_execution only if every completed trial declares it (review r21)"
           },
           "resolved_kernel_fingerprint": {
             "type": "string",

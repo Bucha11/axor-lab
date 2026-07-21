@@ -1075,8 +1075,12 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
             "refusing to import a bundle whose verdicts don't reproduce"
         )
 
-    # a completed trial carries the runtime config it ran under, recorded from the
-    # incident's own condition + scenario inputs (review r20)
+    # a completed trial carries the runtime config it ran under, but this hash is
+    # RECONSTRUCTED at import from the incident's condition + scenario inputs — the
+    # original production trace never carried it, and this process did not observe
+    # the runtime compilation. Mark it reconstructed_incident so config_provenance
+    # reports the honest status and an evidence-backed CP export refuses it as
+    # "the exact runtime config that actually ran in production" (review r21).
     from lab_contracts import CONFIG_COMPILER_VERSION, runtime_config_hash
 
     incident_rch = runtime_config_hash(
@@ -1090,6 +1094,7 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
         "trace_ref": content_hash(trace),
         "runtime_config_hash": incident_rch,
         "config_compiler_version": CONFIG_COMPILER_VERSION,
+        "runtime_provenance": "reconstructed_incident",
     }]
     bundle = build_bundle(
         bundle_id="b_incident_" + content_hash(trace).removeprefix("sha256:")[:32],

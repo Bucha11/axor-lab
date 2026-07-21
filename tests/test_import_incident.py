@@ -66,6 +66,23 @@ class TestImportIncident(unittest.TestCase):
         self.assertEqual(replay.returncode, 0, replay.stderr)
         self.assertIn("DENY", replay.stdout)
 
+    def test_import_marks_runtime_provenance_reconstructed(self) -> None:
+        # the imported bundle RECONSTRUCTS the runtime config hash at import — the
+        # production trace never recorded it — so it must NOT masquerade as
+        # recorded_at_execution, and an evidence-backed CP export must refuse it
+        # (review r21 finding #5)
+        import json as _json
+
+        result = self._import(self.condition_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bundle = _json.loads((self.root / "bundle" / "bundle.json").read_text())
+        trial = next(t for t in bundle["trials"] if t["status"] == "completed")
+        self.assertEqual(trial["runtime_provenance"], "reconstructed_incident")
+        self.assertEqual(
+            bundle["environment"]["config_provenance"]["provenance_status"],
+            "reconstructed_incident",
+        )
+
     def test_condition_is_required(self) -> None:
         result = _cli(
             "import-incident", "--trace", str(self.trace_path),

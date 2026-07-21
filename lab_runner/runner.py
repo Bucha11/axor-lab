@@ -357,6 +357,11 @@ def _run_one(
         trial_key,
         {**base, "status": "completed", "trace_ref": content_hash(outcome.trace),
          "runtime_config_hash": rch, "config_compiler_version": CONFIG_COMPILER_VERSION,
+         # the hash above was computed by THIS process AT execution — declare it so
+         # config_provenance can distinguish a genuinely execution-recorded hash from
+         # one reconstructed post-hoc (an imported incident) or asserted by a
+         # hand-built bundle (review r21)
+         "runtime_provenance": "recorded_at_execution",
          "resolved_kernel_fingerprint": str(fingerprint)},
         outcome,
     )

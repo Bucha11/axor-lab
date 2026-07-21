@@ -40,6 +40,7 @@ def _runtime_fields(cid: str, inputs: dict) -> dict[str, object]:
             str(cond["kernel"]), cond.get("policy"), _MANIFESTS, inputs,
         ),
         "config_compiler_version": CONFIG_COMPILER_VERSION,
+        "runtime_provenance": "recorded_at_execution",
         "resolved_kernel_fingerprint": str(cond["kernel"]),
     }
 
@@ -820,32 +821,29 @@ class TestRecordedRuntimeHash(unittest.TestCase):
         self.assertEqual(prov["compiler_version"], CONFIG_COMPILER_VERSION)
         self.assertTrue(prov["runtime_config_hashes"])
 
-    def test_export_rejects_recomputed_runtime_hash_different_from_recorded(self) -> None:
-        # REBUILD with a doctored-but-content-consistent provenance (build_bundle
-        # keeps a pre-supplied config_provenance and hashes it), so the failure is
-        # the runtime-hash CHECK — not an incidental content-hash mismatch — proving
-        # the export refuses a config identity that never actually ran (review r18)
+    def test_builder_rejects_runtime_hash_different_from_recorded(self) -> None:
+        # a caller-supplied config_provenance that doctors the governed hash for the
+        # executed scenario no longer builds at all: build_bundle DERIVES provenance
+        # from the trials and refuses a pre-supplied map that disagrees, so a config
+        # identity that never actually ran cannot enter a bundle (review r21). This is
+        # the front-line defense that used to live only in export_cp.
         from lab_contracts import build_bundle
-        from lab_runner.cp_export import CPExportError, export_cp
 
         import copy
         bundle, traces = _real_slice_bundle()
         env = dict(bundle["environment"])  # type: ignore[union-attr]
         prov = copy.deepcopy(env["config_provenance"])
-        # nested {scenario: {condition: hash}} (review r19) — doctor the governed
-        # hash for the one scenario that ran
         sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
         prov["runtime_config_hashes"][sid]["governed"] = "sha256:" + "0" * 64  # doctored
         env["config_provenance"] = prov
-        doctored = build_bundle(
-            bundle_id="b_doc", created=CREATED, scenarios=bundle["scenarios"],
-            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
-            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
-            traces=traces,
-        )
-        with self.assertRaises(CPExportError) as ctx:
-            export_cp(doctored, condition_id="governed", traces=traces)
-        self.assertIn("does not match what ran", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            build_bundle(
+                bundle_id="b_doc", created=CREATED, scenarios=bundle["scenarios"],
+                conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+                environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+                traces=traces,
+            )
+        self.assertIn("does not match the provenance derived from the trials", str(ctx.exception))
 
 
 class TestMandatoryRuntimeProvenance(unittest.TestCase):
@@ -873,31 +871,37 @@ class TestMandatoryRuntimeProvenance(unittest.TestCase):
             for _cid, h in cmap.items():
                 self.assertTrue(str(h).startswith("sha256:"))
 
-    def test_cp_export_requires_config_provenance(self) -> None:
-        # an evidence-backed export (traces given) over a bundle with NO recorded
-        # provenance is refused — it cannot prove the runtime config it ships ran
+    def test_cp_export_refuses_reconstructed_legacy_provenance(self) -> None:
+        # a bundle whose completed trials never DECLARED recorded_at_execution (a
+        # hand-built / legacy bundle) derives provenance_status=reconstructed_legacy,
+        # and an evidence-backed export is refused — it cannot prove the runtime
+        # config it ships actually ran (review r21)
         from lab_contracts import build_bundle
         from lab_runner.cp_export import CPExportError, export_cp
 
         bundle, traces = _real_slice_bundle()
-        env = dict(bundle["environment"])  # type: ignore[union-attr]
-        env["config_provenance"] = {}  # present but empty — nothing recorded
-        stripped = build_bundle(
-            bundle_id="b_noprov", created=CREATED, scenarios=bundle["scenarios"],
+        trials = [{k: v for k, v in t.items() if k != "runtime_provenance"}
+                  for t in bundle["trials"]]
+        env = {k: v for k, v in bundle["environment"].items() if k != "config_provenance"}
+        legacy = build_bundle(
+            bundle_id="b_legacy", created=CREATED, scenarios=bundle["scenarios"],
             conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
-            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
-            traces=traces,
+            environment=env, trials=trials, aggregates=bundle["aggregates"], traces=traces,
+        )
+        self.assertEqual(
+            legacy["environment"]["config_provenance"]["provenance_status"],
+            "reconstructed_legacy",
         )
         with self.assertRaises(CPExportError) as ctx:
-            export_cp(stripped, condition_id="governed", traces=traces)
-        self.assertIn("config_provenance", str(ctx.exception))
+            export_cp(legacy, condition_id="governed", traces=traces)
+        self.assertIn("recorded_at_execution", str(ctx.exception))
 
-    def test_cp_export_rejects_missing_runtime_hash_key(self) -> None:
-        # provenance that OMITS the governed hash for an executed scenario is
-        # refused — every exported hash must correspond to a recorded trial (r19)
+    def test_builder_rejects_provenance_missing_an_executed_hash_key(self) -> None:
+        # a caller-supplied provenance that OMITS the governed hash for an executed
+        # scenario disagrees with the trial-derived map, so build_bundle refuses it
+        # up front (review r21)
         import copy
         from lab_contracts import build_bundle
-        from lab_runner.cp_export import CPExportError, export_cp
 
         bundle, traces = _real_slice_bundle()
         env = dict(bundle["environment"])  # type: ignore[union-attr]
@@ -905,15 +909,14 @@ class TestMandatoryRuntimeProvenance(unittest.TestCase):
         sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
         del prov["runtime_config_hashes"][sid]["governed"]  # drop the executed key
         env["config_provenance"] = prov
-        doctored = build_bundle(
-            bundle_id="b_missing", created=CREATED, scenarios=bundle["scenarios"],
-            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
-            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
-            traces=traces,
-        )
-        with self.assertRaises(CPExportError) as ctx:
-            export_cp(doctored, condition_id="governed", traces=traces)
-        self.assertIn("no recorded runtime_config_hash", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            build_bundle(
+                bundle_id="b_missing", created=CREATED, scenarios=bundle["scenarios"],
+                conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+                environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+                traces=traces,
+            )
+        self.assertIn("does not match the provenance derived from the trials", str(ctx.exception))
 
 
 class TestExecutionProvenanceEnforcement(unittest.TestCase):
@@ -963,26 +966,41 @@ class TestExecutionProvenanceEnforcement(unittest.TestCase):
             )
         self.assertIn("divergent runtime_config_hash", str(ctx.exception))
 
-    def test_evidence_export_refuses_reconstructed_provenance(self) -> None:
-        # a bundle whose provenance was reconstructed at build time (not recorded at
-        # execution) is refused an evidence-backed export (review r20)
+    def test_a_caller_cannot_forge_recorded_status_on_legacy_trials(self) -> None:
+        # trials that never declared recorded_at_execution derive reconstructed_legacy;
+        # a caller that pre-supplies a config_provenance CLAIMING recorded_at_execution
+        # is rejected by build_bundle — the status is not assertable independently of
+        # the trials (review r21)
         import copy
         from lab_contracts import build_bundle
-        from lab_runner.cp_export import CPExportError, export_cp
         bundle, traces = _real_slice_bundle()
-        env = dict(bundle["environment"])  # type: ignore[union-attr]
-        prov = copy.deepcopy(env["config_provenance"])
-        prov["provenance_status"] = "reconstructed_legacy"
-        env["config_provenance"] = prov
-        doctored = build_bundle(
-            bundle_id="b_recon", created=CREATED, scenarios=bundle["scenarios"],
-            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
-            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
-            traces=traces,
-        )
-        with self.assertRaises(CPExportError) as ctx:
-            export_cp(doctored, condition_id="governed", traces=traces)
-        self.assertIn("reconstructed", str(ctx.exception))
+        trials = [{k: v for k, v in t.items() if k != "runtime_provenance"}
+                  for t in bundle["trials"]]
+        prov = copy.deepcopy(bundle["environment"]["config_provenance"])
+        prov["provenance_status"] = "recorded_at_execution"  # a lie: trials are legacy
+        env = {**bundle["environment"], "config_provenance": prov}
+        with self.assertRaises(ValueError) as ctx:
+            build_bundle(
+                bundle_id="b_forge", created=CREATED, scenarios=bundle["scenarios"],
+                conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+                environment=env, trials=trials, aggregates=bundle["aggregates"], traces=traces,
+            )
+        self.assertIn("does not match the provenance derived from the trials", str(ctx.exception))
+
+    def test_verify_bundle_rejects_provenance_map_asserted_apart_from_trials(self) -> None:
+        # even bypassing build_bundle, a bundle whose environment.config_provenance
+        # disagrees with its own trials is rejected by verify_bundle (review r21)
+        import copy
+        from lab_contracts import verify_bundle
+        from lab_contracts.errors import BundleIntegrityError
+        bundle, traces = _real_slice_bundle()
+        prov = copy.deepcopy(bundle["environment"]["config_provenance"])
+        sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
+        prov["runtime_config_hashes"][sid]["governed"] = "sha256:" + "0" * 64
+        bundle["environment"]["config_provenance"] = prov  # mutate the dict directly
+        with self.assertRaises(BundleIntegrityError) as ctx:
+            verify_bundle(bundle, traces)
+        self.assertIn("config_provenance", str(ctx.exception))
 
 
 if __name__ == "__main__":
