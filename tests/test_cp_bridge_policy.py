@@ -152,12 +152,99 @@ class TestEvidenceDerivedBridge(unittest.TestCase):
         analysis = bridge_analysis(bundle, "governed", traces=traces)
         self.assertIsNotNone(analysis)
         self.assertEqual(analysis["kind"], "cp_bridge_analysis/v1")
-        self.assertEqual(analysis["treated"]["n"], 24)
-        self.assertEqual(analysis["baseline"]["n"], 24)
+        # a deterministic-agent bundle is a MATCHED design: the receipt carries the
+        # paired counts over the coordinate intersection, not two pooled arms (r19)
+        self.assertEqual(analysis["comparison_design"], "matched_pairs")
+        self.assertEqual(analysis["paired"]["completed_pairs"], 24)
+        self.assertEqual(analysis["paired"]["dropped_pairs"], 0)
+        self.assertEqual(analysis["paired"]["discordant"], {"b": 24, "c": 0})
         # the trial_refs are the actual completed-trial trace hashes, and the
         # receipt is content-addressable
         self.assertTrue(analysis["trial_refs"]["governed"])
         self.assertTrue(content_hash(analysis).startswith("sha256:"))
+
+
+def _two_scenario_bundle(arm_scenarios, design=None):
+    """Build a bundle where each arm's trials are assigned to the given scenarios,
+    binding ungoverned trials to VIOLATING traces and governed to CLEAN traces.
+
+    `arm_scenarios` = {"ungoverned": [scn...], "governed": [scn...]} — the scenario
+    each of that arm's 24 trials runs under. Lets a test make the two arms cover a
+    DIFFERENT mix of scenarios (composition shift) while keeping ASR 1.0 vs 0.0."""
+    base = support.banking_scenario()
+    names = sorted({n for scns in arm_scenarios.values() for n in scns})
+    scenarios = [{**base, "name": n} for n in names]
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+    for cid, scns in arm_scenarios.items():
+        pool = _VIOLATING if cid == "ungoverned" else _CLEAN
+        for i, scn in enumerate(scns):
+            trace = {**pool[i % 30], "trace_id": f"t_{cid}_{i}"}
+            ref = content_hash(trace)
+            traces[str(trace["trace_id"])] = trace
+            trials.append({
+                "trial_id": f"tr_{cid}_{i}", "scenario_id": scn,
+                "condition_id": cid, "seed": f"s{i:03d}", "repeat_index": i,
+                "status": "completed", "trace_ref": ref, "execution_order": order,
+            })
+            order += 1
+    agg_design = {"comparison_design": design} if design else {}
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned",
+                         sum(1 for t in trials if t["condition_id"] == "ungoverned"),
+                         sum(1 for t in trials if t["condition_id"] == "ungoverned"), **agg_design),
+        binary_aggregate("ASR", "governed", 0,
+                         sum(1 for t in trials if t["condition_id"] == "governed"), **agg_design),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_comp", created=CREATED, scenarios=scenarios, conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
+
+
+class TestDesignAwareBridge(unittest.TestCase):
+    def test_disjoint_scenarios_do_not_earn_despite_huge_delta(self) -> None:
+        # THE false bridge (r19): baseline runs 24 HEAVY scenarios (ASR 1.0),
+        # governed runs 24 DIFFERENT light scenarios (ASR 0.0). Equal arm sizes,
+        # maximal delta, but NOT ONE shared experimental unit — the delta is a
+        # composition shift, not a governance effect. Must NOT earn.
+        heavy = [f"scn-heavy-{i}" for i in range(24)]
+        light = [f"scn-light-{i}" for i in range(24)]
+        bundle, traces = _two_scenario_bundle({"ungoverned": heavy, "governed": light})
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_same_scenarios_paired_earns(self) -> None:
+        # the honest case: BOTH arms run the SAME 24 scenarios, ungoverned violates
+        # all, governed denies all → 24 discordant pairs in governance's favour
+        shared = [f"scn-{i}" for i in range(24)]
+        bundle, traces = _two_scenario_bundle({"ungoverned": shared, "governed": shared})
+        self.assertTrue(earned_bridge(bundle, traces=traces))
+        from lab_runner.cp_export import bridge_analysis
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertEqual(analysis["comparison_design"], "matched_pairs")
+        self.assertEqual(analysis["paired"]["completed_pairs"], 24)
+
+    def test_partial_scenario_overlap_drops_below_pairing_floor(self) -> None:
+        # arms share only a few scenarios and diverge on the rest — the scenario
+        # SETS differ, so the composition guard rejects before pairing
+        base = [f"scn-{i}" for i in range(24)]
+        governed = [f"scn-{i}" for i in range(20)] + [f"scn-extra-{i}" for i in range(4)]
+        bundle, traces = _two_scenario_bundle({"ungoverned": base, "governed": governed})
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_analysis_records_scenario_balance(self) -> None:
+        shared = [f"scn-{i}" for i in range(24)]
+        bundle, traces = _two_scenario_bundle({"ungoverned": shared, "governed": shared})
+        from lab_runner.cp_export import bridge_analysis
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        # every scenario appears once per arm — the receipt records the balance so a
+        # reader can see the arms tested the same composition
+        self.assertEqual(set(analysis["scenario_balance"]["ungoverned"]), set(shared))
+        self.assertEqual(analysis["scenario_balance"]["governed"][shared[0]], 1)
 
 
 def _real_slice_bundle():
@@ -239,6 +326,34 @@ class TestBridgeExportPortability(unittest.TestCase):
                 self.assertTrue(body.is_file())
                 self.assertEqual(content_hash(json.loads(body.read_text())), ref)
 
+    def test_verify_cp_export_recomputes_from_scratch(self) -> None:
+        # the export directory is SELF-CONTAINED: verify-cp-export recomputes the
+        # whole handoff (graph + bridge + provenance) from source-bundle/ and
+        # confirms it equals cp-deploy.json (review r19)
+        import tempfile
+        from pathlib import Path
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = Path(tmp) / "bundle"
+            write_bundle_dir(bdir, bundle, traces)
+            out = Path(tmp) / "cp"
+            self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                    "--out", str(out)]), 0)
+            # the directory carries its own source bundle + all traces
+            self.assertTrue((out / "source-bundle" / "bundle.json").is_file())
+            # recompute from scratch → matches
+            self.assertEqual(main(["verify-cp-export", str(out)]), 0)
+            # a DOCTORED deploy config no longer recomputes → fails
+            deploy = out / "cp-deploy.json"
+            cfg = json.loads(deploy.read_text())
+            cfg["config_hash"] = "sha256:" + "0" * 64
+            deploy.write_text(json.dumps(cfg))
+            self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+
 
 class TestExportVerifiesGraph(unittest.TestCase):
     def test_export_cp_calls_verify_bundle(self) -> None:
@@ -285,12 +400,14 @@ class TestRecordedRuntimeHash(unittest.TestCase):
         from lab_contracts import build_bundle
         from lab_runner.cp_export import CPExportError, export_cp
 
+        import copy
         bundle, traces = _real_slice_bundle()
         env = dict(bundle["environment"])  # type: ignore[union-attr]
-        prov = {"compiler_version": env["config_provenance"]["compiler_version"],
-                "runtime_config_hashes": dict(env["config_provenance"]["runtime_config_hashes"])}
-        gov_key = next(k for k in prov["runtime_config_hashes"] if k.endswith("|governed"))
-        prov["runtime_config_hashes"][gov_key] = "sha256:" + "0" * 64  # doctored
+        prov = copy.deepcopy(env["config_provenance"])
+        # nested {scenario: {condition: hash}} (review r19) — doctor the governed
+        # hash for the one scenario that ran
+        sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
+        prov["runtime_config_hashes"][sid]["governed"] = "sha256:" + "0" * 64  # doctored
         env["config_provenance"] = prov
         doctored = build_bundle(
             bundle_id="b_doc", created=CREATED, scenarios=bundle["scenarios"],
@@ -301,6 +418,74 @@ class TestRecordedRuntimeHash(unittest.TestCase):
         with self.assertRaises(CPExportError) as ctx:
             export_cp(doctored, condition_id="governed", traces=traces)
         self.assertIn("does not match what ran", str(ctx.exception))
+
+
+class TestMandatoryRuntimeProvenance(unittest.TestCase):
+    def test_runtime_config_hash_is_recorded_on_trial_execution(self) -> None:
+        # the runner records the concrete runtime config hash ON the completed
+        # trial, at execution — not reconstructed later (review r19)
+        result = run_experiment_suite(
+            [support.banking_scenario()], support.manifests(), support.conditions(),
+            support.kernel_registry(), repeats=2, run_id="r_prov",
+        )
+        completed = [t for t in result.trials if t["status"] == "completed"]
+        self.assertTrue(completed)
+        for trial in completed:
+            self.assertTrue(str(trial.get("runtime_config_hash", "")).startswith("sha256:"))
+            self.assertTrue(trial.get("config_compiler_version"))
+
+    def test_config_provenance_pair_key_is_unambiguous(self) -> None:
+        # provenance is nested {scenario: {condition: hash}} — no '<sid>|<cid>'
+        # string key that could collide (review r19)
+        bundle, _ = _real_slice_bundle()
+        rch = bundle["environment"]["config_provenance"]["runtime_config_hashes"]
+        self.assertIsInstance(rch, dict)
+        for _sid, cmap in rch.items():
+            self.assertIsInstance(cmap, dict)  # nested by condition, not a flat string
+            for _cid, h in cmap.items():
+                self.assertTrue(str(h).startswith("sha256:"))
+
+    def test_cp_export_requires_config_provenance(self) -> None:
+        # an evidence-backed export (traces given) over a bundle with NO recorded
+        # provenance is refused — it cannot prove the runtime config it ships ran
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _real_slice_bundle()
+        env = dict(bundle["environment"])  # type: ignore[union-attr]
+        env["config_provenance"] = {}  # present but empty — nothing recorded
+        stripped = build_bundle(
+            bundle_id="b_noprov", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+            traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(stripped, condition_id="governed", traces=traces)
+        self.assertIn("config_provenance", str(ctx.exception))
+
+    def test_cp_export_rejects_missing_runtime_hash_key(self) -> None:
+        # provenance that OMITS the governed hash for an executed scenario is
+        # refused — every exported hash must correspond to a recorded trial (r19)
+        import copy
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _real_slice_bundle()
+        env = dict(bundle["environment"])  # type: ignore[union-attr]
+        prov = copy.deepcopy(env["config_provenance"])
+        sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
+        del prov["runtime_config_hashes"][sid]["governed"]  # drop the executed key
+        env["config_provenance"] = prov
+        doctored = build_bundle(
+            bundle_id="b_missing", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+            traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(doctored, condition_id="governed", traces=traces)
+        self.assertIn("no recorded runtime_config_hash", str(ctx.exception))
 
 
 if __name__ == "__main__":

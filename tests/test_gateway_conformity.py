@@ -33,6 +33,7 @@ class _Base(unittest.TestCase):
             support.conditions()[1], support.manifests(), self.inputs,
             scenario_id="banking-exfil-01", max_runs=self.max_runs,
             max_retained=getattr(self, "max_retained", None),
+            max_retained_bytes=getattr(self, "max_retained_bytes", None),
         )
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -204,44 +205,77 @@ class TestLosslessRetention(_Base):
     max_runs = 8
 
     def _finalize(self, fetch: bool = False, ack: bool = False):
+        """Open + finalize a run; returns (run_id, secret, trace_ref, finalize_status).
+        Retention is reserved AT finalize (review r19), so the finalize itself is
+        where a full retained set surfaces as 429."""
         rid, secret = self._open()
-        _, body = self._post(f"/runs/{rid}/finalize", {}, secret)
-        ref = str(body["trace_ref"])
-        if fetch:
+        status, body = self._post(f"/runs/{rid}/finalize", {}, secret)
+        ref = str(body.get("trace_ref", ""))
+        if fetch and status == 200:
             self._get(f"/runs/{rid}/trace", secret)
-        if ack:
+        if ack and status == 200:
             self._post(f"/runs/{rid}/trace/ack", {"trace_ref": ref}, secret)
-        return rid, secret, ref
+        return rid, secret, ref, status
 
     def test_retained_cap_never_evicts_unfetched_trace(self) -> None:
         self.max_retained = 1
         self.setUp()
-        a_id, a_secret, _ = self._finalize()          # finalized, NEVER fetched
-        # a new run whose open would need to evict A must be REFUSED, not drop A
-        self.assertEqual(self._post("/runs", {})[0], 429)
+        a_id, a_secret, _, a_status = self._finalize()   # finalized, NEVER fetched
+        self.assertEqual(a_status, 200)
+        # a SECOND finalize would need to evict A to fit — refused at the finalize
+        # transition, not silently admitted (review r19). A stays intact.
+        _, _, _, b_status = self._finalize()
+        self.assertEqual(b_status, 429)
         self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)  # A intact
 
     def test_retained_cap_never_evicts_fetched_unacked_trace(self) -> None:
         self.max_retained = 1
         self.setUp()
-        a_id, a_secret, _ = self._finalize(fetch=True)  # fetched but NOT acked
-        self.assertEqual(self._post("/runs", {})[0], 429)
+        a_id, a_secret, _, a_status = self._finalize(fetch=True)  # fetched, NOT acked
+        self.assertEqual(a_status, 200)
+        _, _, _, b_status = self._finalize(fetch=True)
+        self.assertEqual(b_status, 429)
         self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)  # A intact
 
     def test_all_unacked_retained_capacity_fails_without_data_loss(self) -> None:
         self.max_retained = 2
         self.setUp()
-        a_id, a_secret, a_ref = self._finalize(fetch=True)
-        b_id, b_secret, _ = self._finalize(fetch=True)
-        # retained is full and NOTHING is acked → a new open fails closed
-        self.assertEqual(self._post("/runs", {})[0], 429)
-        # both traces survive
+        a_id, a_secret, a_ref, _ = self._finalize(fetch=True)
+        b_id, b_secret, _, _ = self._finalize(fetch=True)
+        # retained is full and NOTHING is acked → a third finalize fails closed
+        _, _, _, c_status = self._finalize(fetch=True)
+        self.assertEqual(c_status, 429)
+        # both retained traces survive
         self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
         self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 200)
-        # acking A frees a retained slot → a new open now succeeds, evicting only A
+        # acking A frees a retained slot → a new finalize now succeeds, evicting only A
         self.assertEqual(self._post(f"/runs/{a_id}/trace/ack", {"trace_ref": a_ref}, a_secret)[0], 200)
-        self.assertEqual(self._post("/runs", {})[0], 201)
+        _, _, _, d_status = self._finalize(fetch=True)
+        self.assertEqual(d_status, 200)
         self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 200)  # B still intact
+
+    def test_preopened_runs_cannot_overflow_retention_on_finalize(self) -> None:
+        # THE r19 bypass: pre-open many active runs while retained is empty, then
+        # finalize them all. Retention is capped at 2, so only 2 finalize into the
+        # retained set; the rest are refused at their finalize transition.
+        self.max_retained = 2
+        self.setUp()
+        opened = [self._open() for _ in range(6)]
+        statuses = [self._post(f"/runs/{rid}/finalize", {}, secret)[0] for rid, secret in opened]
+        self.assertEqual(sum(1 for s in statuses if s == 200), 2)
+        self.assertEqual(sum(1 for s in statuses if s == 429), 4)
+
+    def test_finalize_reserves_retained_byte_capacity(self) -> None:
+        # a byte budget too small for even one frozen trace refuses the finalize —
+        # the byte cap is enforced at the transition, measured from the ACTUAL
+        # frozen trace, not the accepted-event bytes (review r19)
+        self.max_retained = 100
+        self.max_retained_bytes = 50  # smaller than any conformant trace/v1
+        self.setUp()
+        rid, secret = self._open()
+        status, body = self._post(f"/runs/{rid}/finalize", {}, secret)
+        self.assertEqual(status, 429, body)
+        self.assertIn("bytes", body["error"])
 
 
 class TestAckBoundToBytes(_Base):
@@ -256,6 +290,14 @@ class TestAckBoundToBytes(_Base):
     def test_finalize_returns_the_trace_ref(self) -> None:
         _, _, ref = self._finalized()
         self.assertTrue(ref.startswith("sha256:"))
+
+    def test_repeated_finalize_returns_same_trace_ref(self) -> None:
+        # an idempotent retry (the first response was lost in transit) must return
+        # the SAME trace_ref, not a bare {finalized:true} the client can't ack (r19)
+        rid, secret, ref = self._finalized()
+        status, body = self._post(f"/runs/{rid}/finalize", {}, secret)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["trace_ref"], ref)
 
     def test_get_exposes_the_same_trace_ref(self) -> None:
         rid, secret, ref = self._finalized()

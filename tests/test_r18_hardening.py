@@ -76,6 +76,52 @@ class TestWriteAtomicFullWrite(unittest.TestCase):
                 _write_atomic(path, payload)
             self.assertEqual(path.read_text(), payload)
 
+    def test_zero_write_raises_instead_of_spinning(self) -> None:
+        # os.write returning 0 on a non-empty buffer must raise, not loop forever
+        import lab_server.store as store_mod
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "zero.json"
+            with mock.patch.object(store_mod.os, "write", return_value=0), \
+                 self.assertRaises(OSError):
+                _write_atomic(path, "nonempty")
+
+
+class TestProvenanceUnavailableShape(unittest.TestCase):
+    def test_null_driving_value_id_carries_unresolved_and_passes_semantics(self) -> None:
+        # a fail-closed provenance_unavailable DENY with NO driving args must emit a
+        # null driving_value_id + a typed driving_unresolved, so the assembled trace
+        # passes its own trace_semantics (the old "v_none" sentinel did not resolve
+        # in the ledger and failed validation — review r19)
+        from lab_contracts import validate_artifact
+        from lab_endpoint.gating import provenance_unavailable_decision
+
+        decision = provenance_unavailable_decision(None, ["v_r"])
+        self.assertIsNone(decision["driving_value_id"])
+        self.assertEqual(decision["driving_unresolved"], {"kind": "no_driving_args"})
+        # embed it in a minimal trace/v1 and confirm semantics accepts the null id
+        trace = {
+            "schema_version": "trace/v1", "trace_id": "t_pu",
+            "trial": {"run_id": "r", "scenario_id": "s", "condition_id": "governed",
+                      "seed": "s000", "repeat_index": 0},
+            "producer": {"mode": "instrumented_endpoint",
+                         "provenance_fidelity": "heuristic_attribution",
+                         "kernel_version": "axor-core@0.9.2", "runtime": "lab-gateway@0.1"},
+            "inputs_digest": "sha256:" + "0" * 64,
+            "events": [{"seq": 0, "node": "root", "type": "gate_decision",
+                        "call_id": "call_root_0", "decision": decision}],
+            "values": [],
+        }
+        errors = [e for e in validate_artifact(trace, "trace") if "driving_value_id" in e]
+        self.assertEqual(errors, [])
+
+    def test_redacted_driving_value_keeps_its_ledger_id(self) -> None:
+        from lab_endpoint.gating import provenance_unavailable_decision
+
+        decision = provenance_unavailable_decision("v_recipient", ["v_recipient"])
+        self.assertEqual(decision["driving_value_id"], "v_recipient")
+        self.assertNotIn("driving_unresolved", decision)
+
 
 class TestReplayNarrowException(unittest.TestCase):
     def _bundle(self) -> tuple[dict[str, object], dict[str, dict[str, object]]]:

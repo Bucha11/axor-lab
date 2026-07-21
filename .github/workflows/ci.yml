@@ -104,10 +104,33 @@ jobs:
           pip install "axor-core>=0.9"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
           python -c "from lab_runner import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
+          # capture the test run's own exit code (no pipe, so a FAILURE still
+          # fails the job) AND the output, then assert there were no skips.
+          set +e
           python -m unittest -v \
             tests.test_real_kernel \
             tests.test_endpoint_kernel_identity \
-            tests.test_replay_capability
+            tests.test_replay_capability \
+            tests.test_regress_candidate_kernel \
+            tests.test_r18_hardening > real_kernel.log 2>&1
+          rc=$?
+          set -e
+          cat real_kernel.log
+          test "$rc" -eq 0 || { echo "::error::real-kernel suites failed"; exit "$rc"; }
+          # FAIL on an unexpected skip: with axor-core installed, none of these
+          # real-kernel-gated tests may skip. A silent skip here would hide a
+          # regression behind a green job, exactly what this job exists to prevent
+          # (review r19). (The stdlib job legitimately skips them; this one must not.)
+          python - <<'PY'
+          import re, sys
+          log = open("real_kernel.log").read()
+          m = re.search(r"skipped=(\d+)", log)
+          skipped = int(m.group(1)) if m else 0
+          if skipped:
+              print(f"::error::{skipped} real-kernel test(s) skipped with axor-core installed", file=sys.stderr)
+              sys.exit(1)
+          print("no unexpected skips in the real-kernel suites")
+          PY
 
   crypto:
     name: Signing tests actually run (PyNaCl installed)

@@ -157,12 +157,31 @@ class TestServerPackageVerification(unittest.TestCase):
         tampered = json.loads(acc_file.read_text())
         tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
         acc_file.write_text(json.dumps(tampered))
-        reloaded = PublicationStore(root=root).get(pid)
+        store = PublicationStore(root=root)
+        reloaded = store.get(pid)
         self.assertEqual(reloaded.acceptance["schema_version"], "axor-lab-reacceptance/v1")
         pkg = json.loads(json.dumps(self.pkg))
         pkg["acceptance"] = reloaded.acceptance
+        pkg["acceptance_history"] = store.acceptance_history(pid)
         self.assertEqual(
             main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_OK
+        )
+
+    def test_reacceptance_without_resolvable_history_is_rejected(self) -> None:
+        # a reacceptance whose previous_ref names a superseded receipt the package
+        # does NOT carry cannot be confirmed — the verifier refuses it (review r19)
+        root = Path(self.tmp.name) / "store"
+        pid = str(self.pkg["publication"]["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        tampered = json.loads(acc_file.read_text())
+        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
+        acc_file.write_text(json.dumps(tampered))
+        reloaded = PublicationStore(root=root).get(pid)
+        pkg = json.loads(json.dumps(self.pkg))
+        pkg["acceptance"] = reloaded.acceptance
+        pkg["acceptance_history"] = []  # the named superseded receipt is missing
+        self.assertEqual(
+            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_FAILURE
         )
 
     def test_forged_reacceptance_report_is_rejected(self) -> None:
@@ -174,9 +193,11 @@ class TestServerPackageVerification(unittest.TestCase):
         tampered = json.loads(acc_file.read_text())
         tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
         acc_file.write_text(json.dumps(tampered))
-        reloaded = PublicationStore(root=root).get(pid)
+        store = PublicationStore(root=root)
+        reloaded = store.get(pid)
         pkg = json.loads(json.dumps(self.pkg))
         pkg["acceptance"] = reloaded.acceptance
+        pkg["acceptance_history"] = store.acceptance_history(pid)
         pkg["acceptance"]["semantic_report"]["replay"] = "fabricated"
         self.assertEqual(
             main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_FAILURE

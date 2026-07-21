@@ -26,7 +26,7 @@
         "trust_model": { "type": "string", "description": "the ValueProvenance backend, e.g. 'content-ledger' or a CaMeL-style backend (paper §5.6)" }
       }
     },
-    "config_hash": { "type": "string", "description": "sha256 over the normalized (kernel + policy) — the reproducibility anchor and the Control-Plane carry-over key" }
+    "config_hash": { "type": "string", "description": "sha256 over the normalized (kernel + policy) — the reproducibility anchor for THIS run. NOT the Control-Plane carry-over key: production re-parameterizes the same policy with production inputs, so the carry-over identity is parametric_config_hash (symbolic $inputs); config_hash and the per-scenario runtime_config_hash fingerprint the concrete config that ran (review r19)." }
   },
   "$comment": "Two conditions are comparable only if they differ in exactly the axis under study: comparing enforcement off vs on with the same kernel isolates governance; comparing two kernels with enforcement on isolates a kernel change. A published comparison must state which axis varied."
 }

@@ -110,8 +110,12 @@
             },
             "runtime_config_hashes": {
               "type": "object",
+              "description": "nested {scenario_id: {condition_id: runtime_config_hash}} recorded at execution; the nesting avoids the ambiguity of a '<sid>|<cid>' string key",
               "additionalProperties": {
-                "type": "string"
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -163,6 +167,14 @@
           "trace_ref": {
             "type": "string",
             "description": "content hash of the trace.schema.json for this trial"
+          },
+          "runtime_config_hash": {
+            "type": "string",
+            "description": "the CONCRETE governor-config hash this trial RAN under, recorded at execution (review r19) — a CP export proves the runtime config it recommends is the one recorded here"
+          },
+          "config_compiler_version": {
+            "type": "string",
+            "description": "the governor-config compiler version that produced runtime_config_hash at execution"
           },
           "execution_order": {
             "type": "integer",
