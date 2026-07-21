@@ -136,16 +136,27 @@ def export_cp(
     # captured per-scenario as runtime_config_hashes (review r17).
     manifests: list[dict[str, object]] = bundle["tool_manifests"]  # type: ignore[assignment]
     parametric_hash = parametric_policy_hash(kernel, policy, manifests)
-    # the per-scenario CONCRETE runtime hashes. These are RECOMPUTED here but must
-    # AGREE with what the bundle recorded at build time (environment.
-    # config_provenance): if the config compiler drifted between the run and this
-    # export, the recomputed hash is the CURRENT compilation, not the one that ran
-    # — so a mismatch is a hard error, not a silently-synthesized value (review r18).
+    # the per-scenario CONCRETE runtime hashes — ONLY for scenarios that actually
+    # RAN a completed trial under the exported (governed) condition (review r19).
+    # The old code emitted a hash for EVERY scenario in the bundle, so a scenario
+    # whose governed trial never completed still got a "what actually ran" hash for
+    # a config that never ran. These are recomputed here but must AGREE with what
+    # the bundle recorded at execution (environment.config_provenance): a mismatch
+    # or a missing record is a hard error, never a silently-synthesized value.
+    governed_id = str(governed["id"])
+    scen_by_id = {str(s["name"]): s for s in bundle.get("scenarios", [])}  # type: ignore[union-attr]
+    executed = sorted({
+        str(t.get("scenario_id"))
+        for t in bundle.get("trials", [])  # type: ignore[union-attr]
+        if t.get("status") == "completed" and str(t.get("condition_id")) == governed_id
+    })
     runtime_hashes = {
-        str(s["name"]): runtime_config_hash(kernel, policy, manifests, s.get("inputs", {}))
-        for s in bundle.get("scenarios", [])  # type: ignore[union-attr]
+        sid: runtime_config_hash(kernel, policy, manifests, scen_by_id[sid].get("inputs", {}))
+        for sid in executed if sid in scen_by_id
     }
-    _verify_recorded_runtime_hashes(bundle, str(governed["id"]), runtime_hashes)
+    _verify_recorded_runtime_hashes(
+        bundle, governed_id, runtime_hashes, require=traces is not None
+    )
     source: dict[str, object] = {
         "bundle_id": bundle.get("bundle_id"),
         "condition_id": governed["id"],
@@ -179,30 +190,52 @@ def export_cp(
 
 
 def _verify_recorded_runtime_hashes(
-    bundle: dict[str, object], condition_id: str, recomputed: dict[str, str]
+    bundle: dict[str, object], condition_id: str, recomputed: dict[str, str],
+    *, require: bool,
 ) -> None:
-    """The runtime config hashes RECOMPUTED at export time must equal the ones the
-    bundle RECORDED at build time for this condition (review r18). A difference
-    means the governor-config compiler changed between the run and the export, so
-    the export would ship a config identity that never actually ran."""
+    """Every runtime config hash the export ships must equal the one the bundle
+    RECORDED AT EXECUTION for that (scenario, condition) — a MANDATORY, complete,
+    compiler-versioned provenance for an evidence-backed export (review r19).
+
+    `require=True` (traces supplied) makes provenance MANDATORY: a bundle with no
+    config_provenance, no compiler_version, or a missing key for a scenario the
+    export ships a hash for is REFUSED — it cannot prove the recommended runtime
+    config is the one that ran. A compiler-version drift, or any per-key mismatch,
+    is a hard error. `require=False` is the legacy template path (no evidence), and
+    only checks recorded keys that happen to be present."""
     env: dict[str, object] = bundle.get("environment", {})  # type: ignore[assignment]
     prov: dict[str, object] = env.get("config_provenance", {})  # type: ignore[assignment]
-    recorded: dict[str, object] = prov.get("runtime_config_hashes", {})  # type: ignore[assignment]
-    if not recorded:
-        return  # a legacy bundle without recorded provenance — nothing to check against
+    recorded_all: dict[str, object] = prov.get("runtime_config_hashes", {})  # type: ignore[assignment]
+    if not recorded_all:
+        if require:
+            raise CPExportError(
+                "evidence-backed CP export requires environment.config_provenance recorded at "
+                "run time; this bundle has none — refusing to ship a runtime config identity "
+                "that cannot be proven to be what ran (rebuild with a runner that records it)"
+            )
+        return
     compiler = str(prov.get("compiler_version", ""))
-    if compiler and compiler != CONFIG_COMPILER_VERSION:
+    if compiler != CONFIG_COMPILER_VERSION:
         raise CPExportError(
-            f"bundle recorded config_provenance.compiler_version {compiler!r} but this build "
-            f"compiles config with {CONFIG_COMPILER_VERSION!r} — refusing to export a runtime "
-            "config identity under a different compiler than the one that ran"
+            f"config_provenance.compiler_version {compiler!r} != this build's "
+            f"{CONFIG_COMPILER_VERSION!r} — refusing to export a runtime config identity "
+            "under a different compiler than the one that ran"
         )
     for scenario_id, rhash in recomputed.items():
-        key = f"{scenario_id}|{condition_id}"
-        if key in recorded and str(recorded[key]) != rhash:
+        cond_map = recorded_all.get(scenario_id)
+        recorded = cond_map.get(condition_id) if isinstance(cond_map, dict) else None
+        if recorded is None:
+            if require:
+                raise CPExportError(
+                    f"no recorded runtime_config_hash for scenario {scenario_id!r} / condition "
+                    f"{condition_id!r} — every exported hash must correspond to a completed trial "
+                    "recorded in config_provenance (a hash for an unexecuted config is refused)"
+                )
+            continue
+        if str(recorded) != rhash:
             raise CPExportError(
-                f"runtime_config_hash for {key} recomputes to {rhash} but the bundle recorded "
-                f"{recorded[key]} at run time — the compiled config does not match what ran"
+                f"runtime_config_hash for {scenario_id!r}/{condition_id!r} recomputes to {rhash} "
+                f"but the bundle recorded {recorded} at run time — does not match what ran"
             )
 
 

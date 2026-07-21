@@ -12,7 +12,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from lab_contracts.canonical import content_hash, world_digest
+from lab_contracts.canonical import (
+    CONFIG_COMPILER_VERSION,
+    content_hash,
+    runtime_config_hash,
+    world_digest,
+)
 
 from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
 from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
@@ -330,7 +335,20 @@ def _run_one(
     except Exception as exc:  # noqa: BLE001 — a bad trial must not sink the run
         result.add_failure(trial_key, {**base, "status": "failed", "failure_reason": f"{type(exc).__name__}: {exc}"})
         return
-    result.add(trial_key, {**base, "status": "completed", "trace_ref": content_hash(outcome.trace)}, outcome)
+    # record the CONCRETE runtime config identity AT EXECUTION (review r19): the
+    # governor config this trial actually ran under, hashed by the same process
+    # that ran it. A later CP export proves the runtime config it recommends is the
+    # one recorded on the trial — not one reconstructed at export time.
+    rch = runtime_config_hash(
+        str(condition["kernel"]), condition.get("policy"),
+        list(manifests.values()), scenario.get("inputs", {}),  # type: ignore[arg-type]
+    )
+    result.add(
+        trial_key,
+        {**base, "status": "completed", "trace_ref": content_hash(outcome.trace),
+         "runtime_config_hash": rch, "config_compiler_version": CONFIG_COMPILER_VERSION},
+        outcome,
+    )
 
 
 def run_experiment(

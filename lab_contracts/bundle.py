@@ -23,28 +23,34 @@ def config_provenance(
     tool_manifests: list[dict[str, object]],
     trials: list[dict[str, object]],
 ) -> dict[str, object]:
-    """The build-time governor-config provenance (review r18): for each
-    (scenario, condition) pair that has a COMPLETED trial, the concrete
-    runtime_config_hash the SAME process compiled — so a later export can verify
-    the config it reproduces matches what actually ran, not a re-compilation under
-    a drifted compiler. Keyed ``"<scenario_id>|<condition_id>"``."""
+    """The governor-config provenance for each (scenario, condition) pair that has
+    a COMPLETED trial: the concrete runtime_config_hash — so a later export can
+    verify the config it reproduces matches what actually ran (review r18/r19).
+
+    The hash is READ from the trial where the runner RECORDED it at execution time
+    (`trial.runtime_config_hash`); only a trial that never recorded one (a legacy
+    or hand-assembled bundle) falls back to a build-time recompilation. Keyed by a
+    NESTED, unambiguous structure ``{scenario_id: {condition_id: hash}}`` — the old
+    ``"<sid>|<cid>"`` string key was ambiguous (scenario ``"a|b"``+condition ``"c"``
+    and scenario ``"a"``+condition ``"b|c"`` collided, review r19)."""
     scen_by_id = {str(s["name"]): s for s in scenarios}
     cond_by_id = {str(c["id"]): c for c in conditions}
-    hashes: dict[str, str] = {}
+    hashes: dict[str, dict[str, str]] = {}
     for trial in trials:
         if trial.get("status") != "completed":
             continue
         sid, cid = str(trial.get("scenario_id")), str(trial.get("condition_id"))
-        key = f"{sid}|{cid}"
-        if key in hashes:
+        if cid in hashes.get(sid, {}):
             continue
         scenario, condition = scen_by_id.get(sid), cond_by_id.get(cid)
         if scenario is None or condition is None:
             continue
-        hashes[key] = runtime_config_hash(
+        recorded = trial.get("runtime_config_hash")
+        rhash = str(recorded) if recorded else runtime_config_hash(
             str(condition["kernel"]), condition.get("policy"), tool_manifests,
             scenario.get("inputs", {}),  # type: ignore[arg-type]
         )
+        hashes.setdefault(sid, {})[cid] = rhash
     return {"compiler_version": CONFIG_COMPILER_VERSION, "runtime_config_hashes": hashes}
 
 

@@ -372,12 +372,14 @@ class TestRecordedRuntimeHash(unittest.TestCase):
         from lab_contracts import build_bundle
         from lab_runner.cp_export import CPExportError, export_cp
 
+        import copy
         bundle, traces = _real_slice_bundle()
         env = dict(bundle["environment"])  # type: ignore[union-attr]
-        prov = {"compiler_version": env["config_provenance"]["compiler_version"],
-                "runtime_config_hashes": dict(env["config_provenance"]["runtime_config_hashes"])}
-        gov_key = next(k for k in prov["runtime_config_hashes"] if k.endswith("|governed"))
-        prov["runtime_config_hashes"][gov_key] = "sha256:" + "0" * 64  # doctored
+        prov = copy.deepcopy(env["config_provenance"])
+        # nested {scenario: {condition: hash}} (review r19) — doctor the governed
+        # hash for the one scenario that ran
+        sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
+        prov["runtime_config_hashes"][sid]["governed"] = "sha256:" + "0" * 64  # doctored
         env["config_provenance"] = prov
         doctored = build_bundle(
             bundle_id="b_doc", created=CREATED, scenarios=bundle["scenarios"],
@@ -388,6 +390,74 @@ class TestRecordedRuntimeHash(unittest.TestCase):
         with self.assertRaises(CPExportError) as ctx:
             export_cp(doctored, condition_id="governed", traces=traces)
         self.assertIn("does not match what ran", str(ctx.exception))
+
+
+class TestMandatoryRuntimeProvenance(unittest.TestCase):
+    def test_runtime_config_hash_is_recorded_on_trial_execution(self) -> None:
+        # the runner records the concrete runtime config hash ON the completed
+        # trial, at execution — not reconstructed later (review r19)
+        result = run_experiment_suite(
+            [support.banking_scenario()], support.manifests(), support.conditions(),
+            support.kernel_registry(), repeats=2, run_id="r_prov",
+        )
+        completed = [t for t in result.trials if t["status"] == "completed"]
+        self.assertTrue(completed)
+        for trial in completed:
+            self.assertTrue(str(trial.get("runtime_config_hash", "")).startswith("sha256:"))
+            self.assertTrue(trial.get("config_compiler_version"))
+
+    def test_config_provenance_pair_key_is_unambiguous(self) -> None:
+        # provenance is nested {scenario: {condition: hash}} — no '<sid>|<cid>'
+        # string key that could collide (review r19)
+        bundle, _ = _real_slice_bundle()
+        rch = bundle["environment"]["config_provenance"]["runtime_config_hashes"]
+        self.assertIsInstance(rch, dict)
+        for _sid, cmap in rch.items():
+            self.assertIsInstance(cmap, dict)  # nested by condition, not a flat string
+            for _cid, h in cmap.items():
+                self.assertTrue(str(h).startswith("sha256:"))
+
+    def test_cp_export_requires_config_provenance(self) -> None:
+        # an evidence-backed export (traces given) over a bundle with NO recorded
+        # provenance is refused — it cannot prove the runtime config it ships ran
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _real_slice_bundle()
+        env = dict(bundle["environment"])  # type: ignore[union-attr]
+        env["config_provenance"] = {}  # present but empty — nothing recorded
+        stripped = build_bundle(
+            bundle_id="b_noprov", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+            traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(stripped, condition_id="governed", traces=traces)
+        self.assertIn("config_provenance", str(ctx.exception))
+
+    def test_cp_export_rejects_missing_runtime_hash_key(self) -> None:
+        # provenance that OMITS the governed hash for an executed scenario is
+        # refused — every exported hash must correspond to a recorded trial (r19)
+        import copy
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _real_slice_bundle()
+        env = dict(bundle["environment"])  # type: ignore[union-attr]
+        prov = copy.deepcopy(env["config_provenance"])
+        sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
+        del prov["runtime_config_hashes"][sid]["governed"]  # drop the executed key
+        env["config_provenance"] = prov
+        doctored = build_bundle(
+            bundle_id="b_missing", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+            traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(doctored, condition_id="governed", traces=traces)
+        self.assertIn("no recorded runtime_config_hash", str(ctx.exception))
 
 
 if __name__ == "__main__":
