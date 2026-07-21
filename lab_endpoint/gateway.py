@@ -233,9 +233,14 @@ def make_gateway(
             return sum(r.frozen_bytes for r in runs.values() if r.finalized)
 
         # incoming_bytes larger than the whole budget can never fit — reject up front
+        # An incoming run that can NEVER fit — larger than the whole byte budget, or
+        # retention disabled (retained_cap < 1) — must be rejected WITHOUT touching
+        # retention. Falling into the eviction loop here would delete every
+        # acknowledged trace one by one and STILL return False, destroying durable,
+        # delivered evidence to make room for a run that was never admissible
+        # (review r20 finding #8). Reject first; evict only when admission is possible.
         if incoming_bytes > retained_byte_cap or retained_cap < 1:
-            # still try to free everything acked, then re-check the count path
-            pass
+            return False
         while (
             retained_count() + 1 > retained_cap
             or retained_bytes() + incoming_bytes > retained_byte_cap
