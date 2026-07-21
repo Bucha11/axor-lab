@@ -726,12 +726,16 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
     source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
-    # the executable_config_hash is the TRUE carry-over key: it binds the kernel,
-    # policy, AND the manifests (effect classes, driving args, untrusted-field
-    # taint) the governor actually runs — the plain config_hash covers only
-    # kernel+policy and two runs with different manifests share it (review r16)
-    print(f"  executable_config_hash (carry-over key): {export.config['executable_config_hash']}")
+    # the parametric_config_hash is the carry-over key: kernel + policy + manifests
+    # (effect classes, driving args, untrusted-field taint) with allowlist $inputs
+    # left SYMBOLIC — the same parametric policy transfers, re-parameterized with
+    # production inputs. It is NOT a byte-identical runtime config: that depends on
+    # scenario inputs and is recorded per-scenario as runtime_config_hashes (r17).
+    print(f"  parametric_config_hash (carry-over key): {export.config['parametric_config_hash']}")
     print(f"  config_hash (kernel+policy anchor): {export.config['config_hash']}")
+    runtime_hashes: dict[str, object] = export.config["runtime_config_hashes"]  # type: ignore[assignment]
+    if runtime_hashes:
+        print(f"  runtime_config_hashes (per-scenario concrete config): {len(runtime_hashes)} scenario(s)")
     print(f"  regressions carried: {len(carried)}"
           + (f" (frozen trace bodies in {out}/regression-traces/)" if carried else ""))
     print(f"  production-todo (NOT reused): {out}/production-todo.md")

@@ -19,7 +19,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lab_contracts import condition_config_hash, content_hash, executable_config_hash
+from lab_contracts import (
+    condition_config_hash,
+    content_hash,
+    parametric_policy_hash,
+    runtime_config_hash,
+)
 
 _VALID_VERDICTS = frozenset({"ALLOW", "DENY"})
 
@@ -95,12 +100,18 @@ def export_cp(
     # _earned_for RAISES if the supplied traces are a partial completed set, so a
     # caller cannot earn the bridge on a cherry-picked favourable subset (r17).
     earned, analysis = _earned_for(bundle, str(governed["id"]), baseline_id, traces or {})
-    # the FULL executable-config identity — kernel + policy + the manifests whose
-    # effect classes / driving args change the governor's verdicts. This is the
-    # honest carry-over key: the plain config_hash (kernel+policy only) does not
-    # capture the manifests the governor executes over (review r15).
+    # the PARAMETRIC config identity — kernel + policy + the manifests whose effect
+    # classes / driving args / untrusted-fields change the governor's verdicts,
+    # with allowlist `$inputs` refs left SYMBOLIC. This is what actually carries
+    # over: the same parametric policy, re-parameterized with PRODUCTION inputs. It
+    # is NOT a byte-identical runtime config — that depends on the scenario inputs,
+    # captured per-scenario as runtime_config_hashes (review r17).
     manifests: list[dict[str, object]] = bundle["tool_manifests"]  # type: ignore[assignment]
-    exec_hash = executable_config_hash(kernel, policy, manifests)
+    parametric_hash = parametric_policy_hash(kernel, policy, manifests)
+    runtime_hashes = {
+        str(s["name"]): runtime_config_hash(kernel, policy, manifests, s.get("inputs", {}))
+        for s in bundle.get("scenarios", [])  # type: ignore[union-attr]
+    }
     source: dict[str, object] = {
         "bundle_id": bundle.get("bundle_id"),
         "condition_id": governed["id"],
@@ -117,7 +128,11 @@ def export_cp(
         "kernel": kernel,
         "policy": policy,
         "config_hash": recorded,  # the recorded kernel+policy fingerprint
-        "executable_config_hash": exec_hash,  # the FULL carry-over key (+ manifests)
+        # the carry-over key (symbolic $inputs); re-parameterized in production
+        "parametric_config_hash": parametric_hash,
+        # per-scenario concrete config identity (what actually ran) — NOT carried
+        # over as the production config; recorded so a reader can pin it
+        "runtime_config_hashes": runtime_hashes,
         "tool_manifests": bundle["tool_manifests"],
         "regressions": carried_pins,
         "source": source,
