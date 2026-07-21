@@ -460,6 +460,21 @@ class PublicationStore:
             bundle.get("environment", {}).get("model", {}).get("provider", "")  # type: ignore[union-attr]
         )
         agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
+        # denominator honesty (review r15): a claim over n=10 means one thing when
+        # 10/10 planned completed and another when 10/100 did. Compute per-condition
+        # planned vs completed and the overall missingness, and surface both in the
+        # claim text so an estimate is never read without its evidence quality.
+        from lab_analysis import missingness as _missingness
+
+        trials_all: list[dict[str, object]] = list(bundle.get("trials", []))  # type: ignore[arg-type]
+        planned_by_cond: dict[str, int] = {}
+        completed_by_cond: dict[str, int] = {}
+        for trial in trials_all:
+            cid = str(trial.get("condition_id"))
+            planned_by_cond[cid] = planned_by_cond.get(cid, 0) + 1
+            if trial.get("status") == "completed":
+                completed_by_cond[cid] = completed_by_cond.get(cid, 0) + 1
+        miss = _missingness(trials_all) if trials_all else None
         for aggregate in aggregates:
             interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
             # an independent-samples comparison is exploratory — never present it
@@ -482,14 +497,27 @@ class PublicationStore:
                 )
             else:
                 design_note = ""
+            cid = str(aggregate["condition_id"])
+            planned = planned_by_cond.get(cid, int(aggregate["n"]))  # type: ignore[arg-type]
+            completed = completed_by_cond.get(cid, int(aggregate["n"]))  # type: ignore[arg-type]
+            denom_note = f" ({completed}/{planned} completed)" if planned else ""
+            miss_note = ""
+            if miss is not None and miss.n_missing:
+                if miss.condition_imbalanced:
+                    miss_note = (
+                        "; missingness is condition-imbalanced — one arm lost more data than "
+                        "the other, so the comparison is weakened"
+                    )
+                else:
+                    miss_note = f"; {miss.n_missing} of {miss.n_total} planned trials excluded"
             claims.append(
                 make_claim(
                     "statistically_reproducible",
                     f"{aggregate['metric']} under {aggregate['condition_id']}: "
                     f"{float(aggregate['estimate']):.2f} "
                     f"[{float(interval['low']):.2f}, {float(interval['high']):.2f}] "
-                    f"over {aggregate['n']} trials{agent_note}, "
-                    f"server-recomputed from the traces.{design_note}",
+                    f"over {aggregate['n']} trials{denom_note}{agent_note}, "
+                    f"server-recomputed from the traces.{design_note}{miss_note}",
                     f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
                     trace_refs=trace_refs,
                     aggregate_refs=aggregate_refs,
