@@ -115,8 +115,9 @@ class TestServerServesAndAccepts(unittest.TestCase):
         self.assertEqual(status, 201, body)
         acc = body["acceptance"]
         self.assertEqual(acc["publication_id"], body["publication_id"])
-        self.assertIn("content_hashes", acc["verified"])
-        self.assertIn("replay_bit_identical", acc["verified"])
+        self.assertEqual(acc["schema_version"], "axor-lab-acceptance/v1")
+        self.assertIn("content_hashes", acc["semantic_report"]["verified"])
+        self.assertIn("replay_bit_identical", acc["semantic_report"]["verified"])
         self.pid = body["publication_id"]
 
     def test_download_carries_a_portable_receipt_that_verifies(self) -> None:

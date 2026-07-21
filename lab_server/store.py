@@ -125,6 +125,12 @@ class PublicationStore:
 
     root: Path
     known_keys: dict[str, str] = field(default_factory=dict)
+    # optional server identity + Ed25519 signing key (hex) so the acceptance
+    # receipt is a SIGNED attestation of what the server verified, not an
+    # unsigned JSON blob anyone could mint (review r15). Unset → unsigned receipt.
+    server_id: str = "lab.local"
+    server_key_id: str | None = None
+    server_signing_key: str | None = None
     _cache: dict[str, StoredPublication] = field(default_factory=dict)
     _tombstones: set[str] = field(default_factory=set)
     # STABLE evidence lineage refs that were taken down — a takedown removes the
@@ -393,6 +399,43 @@ class PublicationStore:
             and s.lineage_ref not in self._lineage_tombstones
         ]
 
+    def acceptance(self, stored: StoredPublication) -> dict[str, object]:
+        """A server ACCEPTANCE receipt (review r15): the server's SIGNED attestation
+        of what it verified before minting, portable and cryptographically checkable
+        rather than an unsigned JSON blob. It content-addresses the semantic report
+        (what the handshake checked) and is Ed25519-signed with the server key when
+        one is configured (else algorithm=unsigned). Deterministic — no wall-clock —
+        so a re-derivation on download re-produces the same signed bytes."""
+        pub = stored.publication
+        report = {
+            "replay": "bit_identical",
+            "statistics": str(pub.get("statistics_integrity") or "none"),
+            "verified": [
+                "bundle_schema", "trace_schema", "content_hashes",
+                "replay_bit_identical", "statistics_recomputed",
+            ],
+        }
+        acc: dict[str, object] = {
+            "schema_version": "axor-lab-acceptance/v1",
+            "server_id": self.server_id,
+            "publication_id": str(pub["publication_id"]),
+            "bundle_ref": str(pub.get("bundle_ref", "")),
+            "integrity": str(pub.get("integrity", "hash_verified")),
+            "semantic_report_ref": content_hash(report),
+            "semantic_report": report,
+        }
+        if self.server_signing_key:
+            from lab_contracts.signing import sign_bundle
+
+            acc["algorithm"] = "ed25519"
+            acc["key_id"] = self.server_key_id or self.server_id
+            # sign_bundle signs the canonical receipt with its own `signature`
+            # field removed — set every other field first so all are covered
+            acc["signature"] = sign_bundle(acc, self.server_signing_key)
+        else:
+            acc["algorithm"] = "unsigned"
+        return acc
+
     @staticmethod
     def _derive_id(publication: dict[str, object]) -> str:
         """Content-address the WHOLE publication body — the ONE definition shared
@@ -577,6 +620,11 @@ class PublicationStore:
                 directory / "receipt.json",
                 json.dumps({"author": stored.author, "signature": stored.signature}),
             )
+        # the server acceptance receipt — the persisted, (optionally) signed record
+        # of what the handshake verified (review r15)
+        _write_atomic(
+            directory / "acceptance.json", json.dumps(self.acceptance(stored), indent=2)
+        )
         self._persist_reproductions(stored)
 
     def _persist_reproductions(self, stored: StoredPublication) -> None:

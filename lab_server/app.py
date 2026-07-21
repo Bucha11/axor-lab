@@ -63,9 +63,16 @@ def make_server(
     write_token: str | None = None,
     admin_token: str | None = None,
     known_keys: dict[str, str] | None = None,
+    server_id: str = "lab.local",
+    server_key_id: str | None = None,
+    server_signing_key: str | None = None,
 ) -> ThreadingHTTPServer:
     """Build (do not start) an HTTP server bound to host:port."""
-    store = PublicationStore(root=store_root, known_keys=known_keys or {})
+    store = PublicationStore(
+        root=store_root, known_keys=known_keys or {},
+        server_id=server_id, server_key_id=server_key_id,
+        server_signing_key=server_signing_key,
+    )
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "axor-lab-server/0.1"
@@ -100,12 +107,18 @@ def make_server(
                     # named a directory the reader never received (review r13).
                     stored = self._readable(store.get(api_bundle.group(1)))
                     self._json(200, {
+                        # the PUBLICATION body travels too, so an offline reader can
+                        # verify the author/server actually asserted THESE claims —
+                        # not just that the bundle bytes are intact (review r15)
+                        "publication": stored.publication,
                         "bundle": stored.bundle,
                         "traces": list(stored.traces.values()),
                         # a PORTABLE verification receipt so a reader can verify
                         # the download offline (author/key_id/signature/signed_ref)
                         # without trusting this server (review r14)
                         "receipt": stored.receipt(),
+                        # the server's signed ACCEPTANCE receipt (review r15)
+                        "acceptance": store.acceptance(stored),
                     })
                     return
                 api_pub = _API_PUB_RE.match(path)
@@ -146,23 +159,15 @@ def make_server(
                         author=payload.get("author"),  # type: ignore[arg-type]
                     )
                     pid = stored.publication["publication_id"]
-                    # ACCEPTANCE receipt: the server states what it verified before
-                    # accepting the upload (schema, content hashes, replay, stat
-                    # recompute) plus the integrity it earned. The publisher keeps
-                    # this as proof the server checked the bundle, distinct from the
-                    # portable verification receipt served with the download (r14).
+                    # ACCEPTANCE receipt: the server's SIGNED attestation of what it
+                    # verified before minting (schema, content hashes, replay, stat
+                    # recompute), content-addressing the semantic report. The
+                    # publisher keeps it as portable, checkable proof the server
+                    # accepted this bundle (review r14/r15).
                     self._json(201, {
                         "publication_id": pid, "url": f"/e/{pid}",
                         "integrity": stored.publication["integrity"],
-                        "acceptance": {
-                            "publication_id": pid,
-                            "bundle_ref": stored.publication.get("bundle_ref"),
-                            "integrity": stored.publication["integrity"],
-                            "verified": [
-                                "bundle_schema", "trace_schema", "content_hashes",
-                                "replay_bit_identical", "statistics_recomputed",
-                            ],
-                        },
+                        "acceptance": store.acceptance(stored),
                     })
                     return
                 takedown = _API_TAKEDOWN_RE.match(self.path)

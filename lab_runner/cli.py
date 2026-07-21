@@ -591,6 +591,16 @@ def _publish_to_server(
     except urllib.error.URLError as exc:
         raise RunnerError(f"cannot reach server {args.server}: {exc.reason}") from exc
     print(f"published {result['publication_id']} -> {args.server.rstrip('/')}{result['url']}")
+    # SAVE the server acceptance receipt — the signed proof of what the server
+    # verified. The old CLI dropped it on the floor (review r15). Default to a
+    # sidecar file next to the bundle, or an explicit --acceptance-out.
+    acceptance = result.get("acceptance")
+    if acceptance is not None:
+        dest = getattr(args, "acceptance_out", None)
+        out_path = Path(dest) if dest else Path(f"{result['publication_id']}.acceptance.json")
+        out_path.write_text(json.dumps(acceptance, indent=2))
+        signed = acceptance.get("algorithm") == "ed25519"
+        print(f"  acceptance receipt: {out_path} ({'signed' if signed else 'unsigned'})")
     return EXIT_OK
 
 
@@ -1167,6 +1177,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument(
         "--signature-file", default=None,
         help="path to the detached bundle signature (hex) for a signed upload",
+    )
+    p_publish.add_argument(
+        "--acceptance-out", default=None,
+        help="where to save the server's acceptance receipt (default: <pid>.acceptance.json)",
     )
     p_publish.set_defaults(func=_cmd_publish)
 
