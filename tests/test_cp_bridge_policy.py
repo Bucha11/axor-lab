@@ -357,6 +357,63 @@ class TestCausalValidity(unittest.TestCase):
             earned_bridge(bundle, traces=traces)
 
 
+class TestAttestedDesign(unittest.TestCase):
+    """The comparison design is read from the run-recorded experiment_design block,
+    never from an uploader-controlled aggregate, and never defaulted to matched
+    (review r21)."""
+
+    _EARNING = ([(True, False)] * 40 + [(False, True)] * 5
+                + [(True, True)] * 80 + [(False, False)] * 75)
+
+    def test_missing_design_does_not_default_to_matched(self) -> None:
+        bundle, traces = _controlled_bundle(self._EARNING)
+        self.assertTrue(earned_bridge(bundle, traces=traces))  # earns with the block
+        # strip the attested design → the analysis method is unknown → NOT earned,
+        # never a silent default to matched_pairs
+        env = dict(bundle["environment"])
+        env.pop("experiment_design", None)
+        bundle["environment"] = env
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_matched_design_requires_deterministic_agent(self) -> None:
+        bundle, traces = _controlled_bundle(self._EARNING)
+        # a live agent cannot form real pairs: matched_pairs + agent_deterministic
+        # false is self-contradictory and rejected
+        bundle["environment"] = {
+            **bundle["environment"],
+            "experiment_design": support.experiment_design("matched_pairs", deterministic=False),
+        }
+        with self.assertRaises(CPExportError) as ctx:
+            earned_bridge(bundle, traces=traces)
+        self.assertIn("agent_deterministic", str(ctx.exception))
+
+    def test_aggregate_cannot_override_the_attested_design(self) -> None:
+        # attested design is matched_pairs (deterministic scripted); an uploaded
+        # aggregate that self-labels independent_samples must be REJECTED, not
+        # allowed to swap the analysis method
+        bundle, traces = _controlled_bundle(self._EARNING)
+        for agg in bundle["aggregates"]:
+            if agg["condition_id"] == "governed":
+                agg["comparison_design"] = "independent_samples"
+        with self.assertRaises(CPExportError) as ctx:
+            earned_bridge(bundle, traces=traces)
+        self.assertIn("disagrees with the attested", str(ctx.exception))
+
+    def test_live_bundle_cannot_self_label_matched_pairs(self) -> None:
+        # the confound fixture is a live/independent design; even with a maximal
+        # apparent delta it cannot earn a matched bridge, because the attested design
+        # is independent_samples (agent_deterministic false)
+        bundle, traces = _weighting_confound_bundle()
+        # relabel the governed aggregate matched_pairs — it disagrees with the
+        # attested independent_samples block and is rejected, not honoured
+        for agg in bundle["aggregates"]:
+            if agg["condition_id"] == "governed":
+                agg["comparison_design"] = "matched_pairs"
+        with self.assertRaises(CPExportError) as ctx:
+            earned_bridge(bundle, traces=traces)
+        self.assertIn("disagrees with the attested", str(ctx.exception))
+
+
 class TestOrderInvariance(unittest.TestCase):
     """Graph-valid evidence must never let trial ARRAY ORDER change the statistical
     truth — every per-coordinate map rejects a duplicate rather than silently
@@ -453,7 +510,10 @@ def _weighting_confound_bundle():
     ]
     bundle = build_bundle(
         bundle_id="b_conf", created=CREATED, scenarios=scenarios, conditions=conditions,
-        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        tool_manifests=list(support.manifests().values()),
+        environment={**support.environment(),
+                     "experiment_design": support.experiment_design(
+                         "independent_samples", deterministic=False)},
         trials=trials, aggregates=aggregates, traces=traces,
     )
     return bundle, traces

@@ -162,6 +162,20 @@ def kernel_registry() -> KernelRegistry:
     )
 
 
+def experiment_design(kind: str = "matched_pairs", *, deterministic: bool = True) -> dict[str, object]:
+    """A first-class comparison-design/v1 block. The reference scripted agent is
+    deterministic, so the honest design is matched_pairs; a live/independent run
+    passes kind='independent_samples', deterministic=False (review r21)."""
+    return {
+        "schema_version": "comparison-design/v1",
+        "kind": kind,
+        "unit_key": ["execution_id", "scenario_id", "condition_id", "seed", "repeat_index"],
+        "assignment": "shared_deterministic_agent_state" if kind == "matched_pairs"
+                      else "independent_per_condition",
+        "agent_deterministic": deterministic,
+    }
+
+
 def environment() -> dict[str, object]:
     return {
         "kernel_version": KERNEL_PINNED,
@@ -170,6 +184,10 @@ def environment() -> dict[str, object]:
             "id": "labref-scripted-agent",
             "inference_params": {"attack_rate": 0.6},
         },
+        # the reference agent is deterministic → the comparison design is a real
+        # matched-pairs contrast (the CP bridge reads the design from HERE, never the
+        # uploader-controlled aggregate, review r21)
+        "experiment_design": experiment_design("matched_pairs"),
     }
 
 

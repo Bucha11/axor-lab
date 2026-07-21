@@ -524,14 +524,32 @@ def _arm_coords(
 
 def _bridge_design(
     bundle: dict[str, object], condition_id: str
-) -> str:
-    """The comparison design for this treated condition's ASR aggregate —
-    matched_pairs (deterministic agent, McNemar) or independent_samples (live model,
-    two-proportion). Defaults to matched_pairs: the trials carry (scenario, seed,
-    repeat) coordinates, so the honest default is a paired contrast (review r19).
+) -> str | None:
+    """The comparison design, read from the run-recorded, content-hashed
+    `environment.experiment_design` block — NOT from an uploader-controlled
+    aggregate that could self-select matched_pairs for a live run, and NEVER a
+    silent default to matched_pairs (review r21). Returns None when no attested
+    design is present, so the bridge is simply NOT earned rather than assumed paired.
 
-    Two ASR aggregates for the SAME condition make the design array-order-dependent
-    (review r20): the read must be deterministic, so a duplicate is a hard error."""
+    A matched_pairs design REQUIRES the recorded agent behaviour to be deterministic
+    — independent per-condition draws cannot form real pairs, so McNemar would be
+    invalid. An aggregate may RECORD the design as a result, but it must AGREE with
+    the attested block; it can no longer SELECT the analysis method."""
+    env: dict[str, object] = bundle.get("environment", {})  # type: ignore[assignment]
+    design_obj = env.get("experiment_design") if isinstance(env, dict) else None
+    if not isinstance(design_obj, dict) or not design_obj.get("kind"):
+        return None
+    kind = str(design_obj["kind"])
+    if kind not in ("matched_pairs", "independent_samples"):
+        raise CPExportError(
+            f"experiment_design.kind {kind!r} is not a known comparison design"
+        )
+    if kind == "matched_pairs" and not bool(design_obj.get("agent_deterministic")):
+        raise CPExportError(
+            "experiment_design declares matched_pairs but agent_deterministic is false — a "
+            "live/nondeterministic agent draws each condition independently, so the pairs are "
+            "nominal and McNemar is invalid; reject the self-contradictory design"
+        )
     matching = [
         agg for agg in bundle.get("aggregates", [])  # type: ignore[union-attr]
         if str(agg.get("metric")) == "ASR" and str(agg.get("condition_id")) == condition_id
@@ -541,9 +559,13 @@ def _bridge_design(
             f"bundle has {len(matching)} ASR aggregates for condition {condition_id!r} — the "
             "comparison design would depend on array order; reject the ambiguous bundle"
         )
-    if matching and matching[0].get("comparison_design"):
-        return str(matching[0]["comparison_design"])
-    return "matched_pairs"
+    declared = matching[0].get("comparison_design") if matching else None
+    if declared and str(declared) != kind:
+        raise CPExportError(
+            f"aggregate comparison_design {str(declared)!r} disagrees with the attested "
+            f"experiment_design {kind!r} — the design is not uploader-selectable (review r21)"
+        )
+    return kind
 
 
 def _scenario_balance(
@@ -593,6 +615,10 @@ def _earned_for(
     if set(base_balance) != set(treated_balance):
         return False, None
     design = _bridge_design(bundle, condition_id)
+    if design is None:
+        # no ATTESTED experiment design → the analysis method is unknown, so the
+        # bridge is not earned (never a silent default to matched_pairs, review r21)
+        return False, None
     if design == "matched_pairs":
         # the PLANNED set includes failed/excluded units too (review r20)
         planned_coords = _arm_coords(bundle, baseline_id) | _arm_coords(bundle, condition_id)

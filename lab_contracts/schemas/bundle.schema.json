@@ -61,6 +61,20 @@
         "kernel_version": {
           "type": "string"
         },
+        "experiment_design": {
+          "type": "object",
+          "description": "comparison-design/v1 — the FIRST-CLASS comparison design, recorded at run time and bound to the agent's actual determinism. The CP bridge reads the analysis method from HERE, never from an uploader-controlled aggregate that could self-select matched_pairs for a live run; a matched_pairs design requires agent_deterministic=true (review r21).",
+          "required": [ "schema_version", "kind", "agent_deterministic" ],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": "comparison-design/v1" },
+            "kind": { "enum": [ "matched_pairs", "independent_samples" ] },
+            "unit_key": { "type": "array", "items": { "type": "string" } },
+            "assignment": { "type": "string" },
+            "agent_deterministic": { "type": "boolean" },
+            "agent_fingerprint": { "type": "string" }
+          }
+        },
         "model": {
           "type": "object",
           "required": [

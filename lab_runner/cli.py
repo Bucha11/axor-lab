@@ -233,7 +233,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         scenarios=list(resolved.scenarios),
         conditions=list(resolved.conditions),
         tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved, model, usage),
+        environment=_environment(resolved, model, usage, agent=agent),
         trials=result.trials,
         aggregates=aggregates,
         traces=result.traces,
@@ -1364,7 +1364,8 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
 
 
 def _environment(
-    resolved: ResolvedExperiment, model: str, usage: dict[str, object] | None = None
+    resolved: ResolvedExperiment, model: str, usage: dict[str, object] | None = None,
+    agent: object | None = None,
 ) -> dict[str, object]:
     """Record the ACTUAL agent that ran — not always 'scripted' (review §6.1).
     The bundle stays self-describing: kernel, the real model provider/id, the
@@ -1382,6 +1383,21 @@ def _environment(
     env: dict[str, object] = {
         "model": {"provider": provider, "id": model, "inference_params": inference_params},
     }
+    # the FIRST-CLASS comparison design, recorded at run time and bound to the
+    # ACTUAL agent's determinism — this, not the uploader-controlled aggregate, is
+    # what the CP bridge reads to choose matched_pairs vs independent_samples
+    # (review r21). _effective_design already refuses matched_pairs for a live agent.
+    if agent is not None:
+        design = _effective_design(resolved, agent)
+        deterministic = _agent_is_deterministic(agent)
+        env["experiment_design"] = {
+            "schema_version": "comparison-design/v1",
+            "kind": design,
+            "unit_key": ["execution_id", "scenario_id", "condition_id", "seed", "repeat_index"],
+            "assignment": "shared_deterministic_agent_state" if design == "matched_pairs"
+                          else "independent_per_condition",
+            "agent_deterministic": deterministic,
+        }
     # the global kernel_version is a convenience that only makes sense when every
     # condition shares one kernel — verify_bundle requires it to equal a condition
     # kernel. Emitting a comma-joined pseudo-value for a mixed-kernel bundle would
