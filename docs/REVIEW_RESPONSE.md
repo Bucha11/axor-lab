@@ -544,3 +544,38 @@ per-tenant quotas, a TTL/durable evidence spool, and owner attribution are
 infrastructure for the hosted service, marked experimental in the maturity table
 (the delivery lifecycle and the atomic retained-cap transition are the
 contract-level groundwork).
+
+## Twentieth review round — Causal and Execution Attestation Closure
+
+Round 19 made the earned bridge design-aware and the acceptance lifecycle
+portable. Round 20 pressed on the same seam from the other side: structurally
+valid evidence + a significant p-value + a partially balanced design is still not
+a meaningful causal production signal, and an attestation that verifies its own
+bytes is not the same as one whose forensic chain resolves. The most dangerous
+defect was again in the earned bridge — a matched design could clear McNemar's
+p<0.05 on a handful of discordant pairs while the NET absolute risk reduction was
+2%, earning a production recommendation off a statistically-real but practically
+negligible effect; and an independent design could pass with only aggregate-level
+balance while each arm's per-scenario mix inverted (pure reweighting). Five
+patches, each with proving tests. Suite green: **714 tests**.
+
+| Round-20 finding | Fix | Proof |
+|---|---|---|
+| **P0** the matched bridge earned on McNemar significance alone, so a large N with many discordant pairs but a tiny net effect ((b−c)/completed ≈ 2%) earned a production config; the independent bridge checked only aggregate arm balance, so an inverse per-scenario mix (baseline 40 hard/20 easy vs governed 20 hard/40 easy) earned on pure reweighting | matched_pairs now requires net_risk_reduction = (b−c)/completed_pairs ≥ 0.10 as a SEPARATE practical-significance gate after p<0.05; independent_samples requires EXACT per-scenario arm balance before the interval is consulted; the planned denominator counts both-failed pairs as dropped; a single ASR aggregate per condition and an explicit baseline are required (no order-dependence) | `test_cp_bridge_policy.py::TestCausalValidity` |
+| **P1** runtime provenance was recorded at execution for the runner but the schema still ADMITTED a completed trial with no runtime_config_hash (config_provenance would silently recompute one), so an export could present a reconstructed config as the measured one; divergent hashes for the same (scenario, condition) were merged | the bundle schema REQUIRES trace_ref + runtime_config_hash + config_compiler_version on every completed trial; config_provenance flags provenance_status recorded_at_execution vs reconstructed_legacy (the evidence export refuses the latter) and raises on a divergent per-(scenario, condition) hash; the resolved kernel fingerprint (incl. behaviour flags) is recorded distinct from the declared condition kernel | `test_cp_bridge_policy.py::TestExecutionProvenanceEnforcement` |
+| **P1** verify-cp-export recomputed only the recommended runtime config — proving DERIVABILITY of one artifact while ignoring the source-bundle/, regression-set/ and bridge-analysis in the tree — and had no way to attest AUTHENTICITY; a re-export into a populated dir left stale files intermixed | the export writes a signed full-file manifest (sha256 of every file); verify-cp-export runs INTEGRITY (every listed file hashes + no unlisted), AUTHENTICITY (verify the manifest signature; a signed export with no key → EXIT_UNVERIFIED) and DERIVABILITY (recompute); re-export refuses a non-empty dir unless --overwrite, which clears it first | `test_cp_bridge_policy.py::TestBridgeExportPortability` |
+| **P1** a persisted reacceptance/v1 was restored verbatim once its own signature + binding verified, but its supersedes.previous_ref was never resolved against the append-only history — so deleting or corrupting the archived predecessor left a re-attestation the server served while an offline verifier would reject the unresolvable chain | on cold load the server resolves a reacceptance's previous_ref against a hash-checked history index; a missing or tampered predecessor is a forensic broken-chain event — the record is archived and the server re-attests with a linked reacceptance whose chain now resolves (converging, not re-stamped every reload) | `test_server_acceptance.py::TestAcceptanceHistoryChainOnLoad` |
+| **P1/P2** _reserve_retained rejected an incoming run larger than the whole byte budget (or under a disabled retention) by falling through into the eviction loop, deleting every acknowledged trace before still returning False; the design-aware bridge tests fed graph-INVALID bundles that a real export_cp would reject; the crypto CI never asserted its tests ran and the real kernel floated at >=0.9 | the impossible case returns False before any eviction, so acknowledged evidence survives an un-admittable finalize; the design-aware fixtures are now graph- and schema-valid and routed through export_cp/verify_bundle; the crypto job fails on any skipped=N and axor-core is pinned to an exact version | `test_gateway_conformity.py::TestLosslessRetention`, `test_cp_bridge_policy.py::TestDesignAwareBridge`, `.github/workflows/ci.yml` |
+
+The round-20 goal — an earned bridge that gates practical significance and exact
+allocation, not just a p-value; runtime provenance the schema makes mandatory and
+the export refuses to reconstruct; a CP export whose integrity, authenticity and
+derivability are each checked over the WHOLE directory; an acceptance chain the
+server proves resolves before serving; and a retention path that never sacrifices
+acknowledged evidence for a run it cannot admit — is closed.
+
+Still roadmap (honestly not done): the earned bridge's practical-significance
+floor (0.10) and minimum effective N (20) are fixed defaults, not per-domain
+calibrated thresholds; a hosted deployment would want them configurable per
+metric with the calibration itself recorded in the receipt. The gateway's
+single-tenant, in-memory advisory nature is unchanged from round 19.
