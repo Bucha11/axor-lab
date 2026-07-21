@@ -152,12 +152,99 @@ class TestEvidenceDerivedBridge(unittest.TestCase):
         analysis = bridge_analysis(bundle, "governed", traces=traces)
         self.assertIsNotNone(analysis)
         self.assertEqual(analysis["kind"], "cp_bridge_analysis/v1")
-        self.assertEqual(analysis["treated"]["n"], 24)
-        self.assertEqual(analysis["baseline"]["n"], 24)
+        # a deterministic-agent bundle is a MATCHED design: the receipt carries the
+        # paired counts over the coordinate intersection, not two pooled arms (r19)
+        self.assertEqual(analysis["comparison_design"], "matched_pairs")
+        self.assertEqual(analysis["paired"]["completed_pairs"], 24)
+        self.assertEqual(analysis["paired"]["dropped_pairs"], 0)
+        self.assertEqual(analysis["paired"]["discordant"], {"b": 24, "c": 0})
         # the trial_refs are the actual completed-trial trace hashes, and the
         # receipt is content-addressable
         self.assertTrue(analysis["trial_refs"]["governed"])
         self.assertTrue(content_hash(analysis).startswith("sha256:"))
+
+
+def _two_scenario_bundle(arm_scenarios, design=None):
+    """Build a bundle where each arm's trials are assigned to the given scenarios,
+    binding ungoverned trials to VIOLATING traces and governed to CLEAN traces.
+
+    `arm_scenarios` = {"ungoverned": [scn...], "governed": [scn...]} — the scenario
+    each of that arm's 24 trials runs under. Lets a test make the two arms cover a
+    DIFFERENT mix of scenarios (composition shift) while keeping ASR 1.0 vs 0.0."""
+    base = support.banking_scenario()
+    names = sorted({n for scns in arm_scenarios.values() for n in scns})
+    scenarios = [{**base, "name": n} for n in names]
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+    for cid, scns in arm_scenarios.items():
+        pool = _VIOLATING if cid == "ungoverned" else _CLEAN
+        for i, scn in enumerate(scns):
+            trace = {**pool[i % 30], "trace_id": f"t_{cid}_{i}"}
+            ref = content_hash(trace)
+            traces[str(trace["trace_id"])] = trace
+            trials.append({
+                "trial_id": f"tr_{cid}_{i}", "scenario_id": scn,
+                "condition_id": cid, "seed": f"s{i:03d}", "repeat_index": i,
+                "status": "completed", "trace_ref": ref, "execution_order": order,
+            })
+            order += 1
+    agg_design = {"comparison_design": design} if design else {}
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned",
+                         sum(1 for t in trials if t["condition_id"] == "ungoverned"),
+                         sum(1 for t in trials if t["condition_id"] == "ungoverned"), **agg_design),
+        binary_aggregate("ASR", "governed", 0,
+                         sum(1 for t in trials if t["condition_id"] == "governed"), **agg_design),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_comp", created=CREATED, scenarios=scenarios, conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
+
+
+class TestDesignAwareBridge(unittest.TestCase):
+    def test_disjoint_scenarios_do_not_earn_despite_huge_delta(self) -> None:
+        # THE false bridge (r19): baseline runs 24 HEAVY scenarios (ASR 1.0),
+        # governed runs 24 DIFFERENT light scenarios (ASR 0.0). Equal arm sizes,
+        # maximal delta, but NOT ONE shared experimental unit — the delta is a
+        # composition shift, not a governance effect. Must NOT earn.
+        heavy = [f"scn-heavy-{i}" for i in range(24)]
+        light = [f"scn-light-{i}" for i in range(24)]
+        bundle, traces = _two_scenario_bundle({"ungoverned": heavy, "governed": light})
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_same_scenarios_paired_earns(self) -> None:
+        # the honest case: BOTH arms run the SAME 24 scenarios, ungoverned violates
+        # all, governed denies all → 24 discordant pairs in governance's favour
+        shared = [f"scn-{i}" for i in range(24)]
+        bundle, traces = _two_scenario_bundle({"ungoverned": shared, "governed": shared})
+        self.assertTrue(earned_bridge(bundle, traces=traces))
+        from lab_runner.cp_export import bridge_analysis
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertEqual(analysis["comparison_design"], "matched_pairs")
+        self.assertEqual(analysis["paired"]["completed_pairs"], 24)
+
+    def test_partial_scenario_overlap_drops_below_pairing_floor(self) -> None:
+        # arms share only a few scenarios and diverge on the rest — the scenario
+        # SETS differ, so the composition guard rejects before pairing
+        base = [f"scn-{i}" for i in range(24)]
+        governed = [f"scn-{i}" for i in range(20)] + [f"scn-extra-{i}" for i in range(4)]
+        bundle, traces = _two_scenario_bundle({"ungoverned": base, "governed": governed})
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_analysis_records_scenario_balance(self) -> None:
+        shared = [f"scn-{i}" for i in range(24)]
+        bundle, traces = _two_scenario_bundle({"ungoverned": shared, "governed": shared})
+        from lab_runner.cp_export import bridge_analysis
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        # every scenario appears once per arm — the receipt records the balance so a
+        # reader can see the arms tested the same composition
+        self.assertEqual(set(analysis["scenario_balance"]["ungoverned"]), set(shared))
+        self.assertEqual(analysis["scenario_balance"]["governed"][shared[0]], 1)
 
 
 def _real_slice_bundle():
