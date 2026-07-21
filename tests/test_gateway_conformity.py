@@ -32,6 +32,7 @@ class _Base(unittest.TestCase):
         self.server = make_gateway(
             support.conditions()[1], support.manifests(), self.inputs,
             scenario_id="banking-exfil-01", max_runs=self.max_runs,
+            max_retained=getattr(self, "max_retained", None),
         )
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -169,65 +170,102 @@ class TestFinalizeValidatesTheTrace(_Base):
         self.assertEqual(trace_semantics(trace), [])
 
 
-class TestRunEviction(_Base):
+class TestActiveQuota(_Base):
     max_runs = 2
 
-    def test_finalized_undelivered_trace_is_not_evicted(self) -> None:
-        # A finalized but NEVER read; B active. A third open must NOT evict A
-        # (its trace was never delivered) — losing an unread trace is the bug (r15)
+    def test_active_quota_counts_only_non_finalized_runs(self) -> None:
+        # two ACTIVE runs fill the quota; a third open is refused...
         a_id, a_secret = self._open()
         self._open()
+        self.assertEqual(self._post("/runs", {})[0], 429)
+        # ...but finalizing one frees an ACTIVE slot (its trace is retained), so a
+        # new open now succeeds without dropping any evidence (review r17)
         self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
-        status, body = self._post("/runs", {})
-        self.assertEqual(status, 429, body)
-        self.assertIn("no delivered finalized run", body["error"])
-        # A's trace is still there to be read
-        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
-
-    def test_trace_is_evicted_only_after_delivery(self) -> None:
-        a_id, a_secret = self._open()
-        b_id, b_secret = self._open()
-        # finalize, read, AND acknowledge A → now delivered, hence evictable
-        self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
-        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
-        self.assertEqual(self._post(f"/runs/{a_id}/trace/ack", {}, a_secret)[0], 200)
-        # a new open now succeeds by evicting the delivered run A
-        status, opened = self._post("/runs", {})
-        self.assertEqual(status, 201, opened)
-        # A is gone (evicted); B still lives
-        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 404)
-        self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 409)  # live, not finalized
-
-    def test_trace_is_not_delivered_until_acknowledged(self) -> None:
-        # a GET is NOT delivery: after finalize + read (but no ack) the run is
-        # still un-evictable, so a third open is refused rather than dropping an
-        # un-acknowledged trace (review r16)
-        a_id, a_secret = self._open()
-        self._open()
-        self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
-        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)  # fetched...
-        status, body = self._post("/runs", {})
-        self.assertEqual(status, 429, body)  # ...but NOT delivered, so not evicted
-        self.assertIn("no delivered finalized run", body["error"])
-        # once the client acknowledges receipt, the run becomes evictable
-        self.assertEqual(self._post(f"/runs/{a_id}/trace/ack", {}, a_secret)[0], 200)
         self.assertEqual(self._post("/runs", {})[0], 201)
+        # A's retained trace is still readable
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
+
+    def test_unacknowledged_finalized_runs_do_not_permanently_exhaust_active_quota(self) -> None:
+        # open the active quota, finalize (never ack), repeat many times — a flood
+        # of finalized-but-unacked runs must NEVER block new opens (review r17)
+        for _ in range(10):
+            rid, secret = self._open()
+            self.assertEqual(self._post(f"/runs/{rid}/finalize", {}, secret)[0], 200)
+            # the active slot is freed by finalize; the next open always succeeds
+            rid2, secret2 = self._open()
+            self.assertEqual(self._post(f"/runs/{rid2}/finalize", {}, secret2)[0], 200)
+
+
+class TestAckBoundToBytes(_Base):
+    max_runs = 8
+
+    def _finalized(self):
+        rid, secret = self._open()
+        status, body = self._post(f"/runs/{rid}/finalize", {}, secret)
+        self.assertEqual(status, 200, body)
+        return rid, secret, str(body["trace_ref"])
+
+    def test_finalize_returns_the_trace_ref(self) -> None:
+        _, _, ref = self._finalized()
+        self.assertTrue(ref.startswith("sha256:"))
+
+    def test_get_exposes_the_same_trace_ref(self) -> None:
+        rid, secret, ref = self._finalized()
+        _, trace = self._get(f"/runs/{rid}/trace", secret)
+        self.assertEqual(content_hash(trace), ref)
+
+    def test_trace_ack_before_get_is_rejected(self) -> None:
+        # acknowledging a trace the client never fetched is meaningless → 409
+        rid, secret, ref = self._finalized()
+        status, body = self._post(f"/runs/{rid}/trace/ack", {"trace_ref": ref}, secret)
+        self.assertEqual(status, 409, body)
+        self.assertIn("never fetched", body["error"])
+
+    def test_trace_ack_requires_exact_trace_ref(self) -> None:
+        rid, secret, ref = self._finalized()
+        self._get(f"/runs/{rid}/trace", secret)  # fetch first
+        status, body = self._post(
+            f"/runs/{rid}/trace/ack", {"trace_ref": "sha256:" + "0" * 64}, secret
+        )
+        self.assertEqual(status, 400, body)
+        # the correct ref succeeds
+        self.assertEqual(self._post(f"/runs/{rid}/trace/ack", {"trace_ref": ref}, secret)[0], 200)
+
+    def test_wrong_trace_ref_does_not_make_run_evictable(self) -> None:
+        # eviction prefers DELIVERED runs. With retained_cap=2: A gets a WRONG ack
+        # (must stay undelivered), B gets a CORRECT ack (delivered). A third
+        # finalized run C must evict B (the delivered one), leaving A — proving the
+        # wrong ack never marked A delivered (review r17).
+        self.max_retained = 2
+        self.setUp()  # rebuild the gateway with retained_cap=2
+        a_id, a_secret, _a_ref = self._finalized()
+        self._get(f"/runs/{a_id}/trace", a_secret)
+        self.assertEqual(
+            self._post(f"/runs/{a_id}/trace/ack", {"trace_ref": "sha256:bad"}, a_secret)[0], 400
+        )
+        b_id, b_secret, b_ref = self._finalized()
+        self._get(f"/runs/{b_id}/trace", b_secret)
+        self.assertEqual(self._post(f"/runs/{b_id}/trace/ack", {"trace_ref": b_ref}, b_secret)[0], 200)
+        # a third finalized run forces one eviction from the full retained set
+        self._finalized()
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)   # A kept (undelivered)
+        self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 404)   # B evicted (delivered)
+
+    def test_correct_ack_after_get_marks_delivered(self) -> None:
+        rid, secret, ref = self._finalized()
+        self._get(f"/runs/{rid}/trace", secret)
+        status, body = self._post(f"/runs/{rid}/trace/ack", {"trace_ref": ref}, secret)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["delivered"])
 
     def test_failed_socket_delivery_keeps_trace_retryable(self) -> None:
-        # model a delivery that never reached the client: it fetched the body but
-        # never acknowledged (a dropped connection, a crash before storing). The
-        # trace must stay retrievable and un-evicted so the fetch can be retried —
-        # the identical frozen body every time (review r16)
-        a_id, a_secret = self._open()
-        self._open()
-        self.assertEqual(self._post(f"/runs/{a_id}/finalize", {}, a_secret)[0], 200)
-        _, first = self._get(f"/runs/{a_id}/trace", a_secret)   # "lost" delivery
-        # a third open must NOT evict the un-acked A
-        self.assertEqual(self._post("/runs", {})[0], 429)
-        # retry the fetch — same run, same frozen body, byte-for-byte
-        status, second = self._get(f"/runs/{a_id}/trace", a_secret)
+        # a fetched-but-unacked trace stays retrievable, byte-for-byte
+        rid, secret, ref = self._finalized()
+        _, first = self._get(f"/runs/{rid}/trace", secret)   # "lost" delivery, no ack
+        status, second = self._get(f"/runs/{rid}/trace", secret)
         self.assertEqual(status, 200)
         self.assertEqual(content_hash(first), content_hash(second))
+        self.assertEqual(content_hash(second), ref)
 
 
 if __name__ == "__main__":

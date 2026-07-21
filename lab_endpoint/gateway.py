@@ -41,7 +41,7 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from lab_contracts import validate_artifact, world_digest
+from lab_contracts import content_hash, validate_artifact, world_digest
 from lab_runner import resolve_kernel
 from lab_runner.axor_backend import AxorKernel, gate_with_governor
 from lab_runner.kernel import Kernel, default_registry
@@ -91,6 +91,9 @@ class _Run:
     # (acknowledged) run is safe to evict for quota; a fetched-but-unacked trace
     # stays retrievable so the client can retry the fetch.
     delivered: bool = False
+    # whether the frozen trace has been FETCHED (GET) at least once — the client
+    # cannot acknowledge storing a body it never retrieved (review r17)
+    fetched: bool = False
     # the frozen trace snapshot taken at finalize — served on every GET and by the
     # ack check, so the body a client acknowledges is exactly the one it read and
     # is stable regardless of later run mutation (there is none post-finalize, but
@@ -151,6 +154,7 @@ def make_gateway(
     token: str | None = None,
     max_runs: int = 1000,
     max_events_per_run: int = 10000,
+    max_retained: int | None = None,
     trusted_runtime: bool = False,
     fixtures: dict[str, object] | None = None,
 ) -> ThreadingHTTPServer:
@@ -170,6 +174,10 @@ def make_gateway(
     import hmac
     import secrets
 
+    # active (non-finalized) runs are bounded by max_runs; RETAINED finalized
+    # runs have their OWN budget so a flood of finalized-but-unacked runs can never
+    # exhaust the ACTIVE quota and block new work (review r17)
+    retained_cap = max_retained if max_retained is not None else max(max_runs, 16)
     # resolve the kernel through the ONE shared resolver (review r17): a real
     # `axor-core@X` pin is satisfied ONLY by the exact installed build — otherwise
     # UnknownKernelError is raised HERE, at construction, rather than the gateway
@@ -253,24 +261,24 @@ def make_gateway(
                     self._json(401, {"error": "missing or invalid bearer token"})
                     return
                 with global_lock:
-                    if len(runs) >= max_runs:
-                        # evict the oldest run that is finalized AND DELIVERED — its
-                        # trace was assembled and actually read, so discarding it is
-                        # safe (LRU, dict is insertion-ordered). A finalized run
-                        # whose trace was never fetched is NOT evicted: losing it
-                        # before the client reads it is the round-15 bug. If nothing
-                        # is delivered-and-finalized, refuse (429) rather than drop
-                        # an unread trace.
-                        evicted = next(
-                            (rid for rid, r in runs.items() if r.finalized and r.delivered), None
-                        )
-                        if evicted is None:
-                            self._json(429, {
-                                "error": "run quota exceeded (no delivered finalized run to evict)"
-                            })
-                            return
-                        del runs[evicted]
-                        run_secrets.pop(evicted, None)
+                    # ACTIVE (non-finalized) runs are the scarce resource: bound
+                    # THEM against max_runs. A finalized run has left the active set
+                    # (its trace is frozen and retained), so a pile of unacked
+                    # finalized runs can no longer block a new open (review r17).
+                    active = sum(1 for r in runs.values() if not r.finalized)
+                    if active >= max_runs:
+                        self._json(429, {
+                            "error": "active run quota exceeded — finalize open runs before opening more"
+                        })
+                        return
+                    # keep the RETAINED finalized set within its own budget: evict a
+                    # DELIVERED (acknowledged) one first; only if none are acked drop
+                    # the oldest retained (its client had its chance to fetch+ack).
+                    finalized = [rid for rid, r in runs.items() if r.finalized]
+                    if len(finalized) >= retained_cap:
+                        victim = next((rid for rid in finalized if runs[rid].delivered), finalized[0])
+                        del runs[victim]
+                        run_secrets.pop(victim, None)
                     run_id = f"r_ep_{secrets.token_hex(16)}"  # unpredictable, not sequential
                     run_secret = secrets.token_hex(16)
                     runs[run_id] = _Run(run_id, condition, scenario_id, inputs, kernel,
@@ -308,7 +316,9 @@ def make_gateway(
                     # freeze the conformant body once, so every GET and the ack
                     # serve the identical bytes independent of quota/re-assembly
                     run.frozen_trace = trace
-                self._json(200, {"ok": True, "finalized": True})
+                    trace_ref = content_hash(trace)
+                # the client learns the ref it will later acknowledge (review r17)
+                self._json(200, {"ok": True, "finalized": True, "trace_ref": trace_ref})
                 return
 
             ack = _ACK_RE.match(self.path)
@@ -316,13 +326,29 @@ def make_gateway(
                 run = self._authorized_run(ack.group(1))
                 if run is None:
                     return
+                body = self._read_body()
                 with run.lock:
-                    if not run.finalized:
+                    if not run.finalized or run.frozen_trace is None:
                         self._json(409, {"error": "run not finalized; nothing to acknowledge"})
                         return
-                    # the client confirms it has STORED the trace body — only now is
-                    # the run safe to evict for quota. Delivery is client-confirmed,
-                    # never inferred from a GET that may not have arrived (review r16)
+                    # the client must have actually FETCHED the trace before it can
+                    # acknowledge storing it — an ack before any GET is meaningless
+                    # (it never received the body) and is rejected (review r17)
+                    if not run.fetched:
+                        self._json(409, {
+                            "error": "cannot acknowledge a trace that was never fetched (GET it first)"
+                        })
+                        return
+                    # the ack MUST name the exact frozen bytes: a missing or wrong
+                    # trace_ref does not confirm delivery and must NOT make the run
+                    # evictable (review r17). Delivery is bound to the content hash.
+                    expected_ref = content_hash(run.frozen_trace)
+                    if str(body.get("trace_ref")) != expected_ref:
+                        self._json(400, {
+                            "error": "trace_ref does not match the delivered trace; not acknowledged",
+                            "expected": expected_ref,
+                        })
+                        return
                     run.delivered = True
                 self._json(200, {"ok": True, "delivered": True})
                 return
@@ -483,9 +509,12 @@ def make_gateway(
                 # Delivery is only confirmed by an explicit POST /trace/ack, so a
                 # GET whose socket write fails (or a client that crashes before
                 # storing the body) leaves the trace retrievable, never evicted
-                # before the client actually has it (review r16)
+                # before the client actually has it (review r16). It DOES record
+                # that the body was fetched, so a later ack is legitimate (r17).
                 trace = run.frozen_trace if run.frozen_trace is not None else run.trace()
-            self._json(200, trace)
+                run.fetched = True
+            # the ETag is the trace_ref the client echoes back in its ack
+            self._json(200, trace, etag=content_hash(trace))
 
         def _read_body(self) -> dict[str, object]:
             raw = self.headers.get("Content-Length")
@@ -508,12 +537,15 @@ def make_gateway(
                 raise _BodyError(400, "request body must be a JSON object")
             return obj
 
-        def _json(self, status: int, obj: object) -> None:
+        def _json(self, status: int, obj: object, etag: str | None = None) -> None:
             self._sent = True
             body = json.dumps(obj).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if etag is not None:
+                # the trace_ref the client echoes back in its ack (review r17)
+                self.send_header("ETag", etag)
             self.end_headers()
             self.wfile.write(body)
 
