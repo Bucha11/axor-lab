@@ -7,8 +7,14 @@ publication claims. Execution lives in lab_runner; statistics in
 lab_analysis.
 """
 
-from .bundle import build_bundle, verify_bundle
-from .canonical import canonical_json, condition_config_hash, content_hash, world_digest
+from .bundle import build_bundle, evidence_lineage_ref, verify_bundle
+from .canonical import (
+    canonical_json,
+    condition_config_hash,
+    content_hash,
+    executable_config_hash,
+    world_digest,
+)
 from .errors import (
     BundleIntegrityError,
     ClaimTypingError,
@@ -49,9 +55,11 @@ __all__ = [
     "derive_publication_id",
     "finalize_publication_id",
     "build_bundle",
+    "evidence_lineage_ref",
     "build_publication",
     "canonical_json",
     "condition_config_hash",
+    "executable_config_hash",
     "content_hash",
     "world_digest",
     "contracts_dir",

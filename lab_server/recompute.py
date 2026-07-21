@@ -156,6 +156,25 @@ def _environment_is_deterministic(bundle: dict[str, object]) -> bool:
     return provider in _DETERMINISTIC_PROVIDERS
 
 
+def _reject_unknown_test_fields(
+    test: dict[str, object], rec: dict[str, object], key: tuple[str, str]
+) -> list[str]:
+    """The bundle schema allows arbitrary `test` properties (additionalProperties);
+    the SERVER does not (review r15). Any field the recomputed test does not
+    produce is refused, and effective_n/status (when present) must match the
+    recomputation — a fabricated interval/field can't ride along unchecked."""
+    problems: list[str] = []
+    allowed = set(rec.keys()) | {"reason"}
+    extra = sorted(set(test.keys()) - allowed)
+    if extra:
+        problems.append(f"{key}: test carries unrecognized field(s) {extra} the server does not recompute")
+    if "effective_n" in test and int(test["effective_n"]) != int(rec.get("effective_n", -2)):  # type: ignore[arg-type]
+        problems.append(f"{key}: test.effective_n {test['effective_n']} != recomputed {rec.get('effective_n')}")
+    if "status" in test and str(test["status"]) != str(rec.get("status", "")):
+        problems.append(f"{key}: test.status {test['status']!r} != recomputed {rec.get('status')!r}")
+    return problems
+
+
 def _check_test(
     test: dict[str, object], metric: str, treated_id: str, design: str,
     rows: dict[tuple[str, str, int], dict[str, dict[str, bool]]],
@@ -175,11 +194,23 @@ def _check_test(
         )
         if str(test.get("name")) != "two_proportion":
             return [f"{key}: independent_samples must use two_proportion, not {test.get('name')!r}"]
-        problems = []
+        problems = _reject_unknown_test_fields(test, rec, key)
         if abs(float(test.get("difference", 0.0)) - float(rec["difference"])) > 1e-9:  # type: ignore[arg-type]
             problems.append(f"{key}: test.difference {test.get('difference')} != {rec['difference']}")
         if abs(float(test.get("p", -1)) - float(rec["p"])) > 1e-9:  # type: ignore[arg-type]
             problems.append(f"{key}: test.p {test.get('p')} != recomputed {rec['p']}")
+        # the INTERVAL was a fabrication gap: difference+p matched but a bogus
+        # Newcombe interval rode along unchecked (review r15)
+        ui: dict[str, object] = test.get("interval", {})  # type: ignore[assignment]
+        ri: dict[str, object] = rec["interval"]  # type: ignore[assignment]
+        if (
+            str(ui.get("method")) != str(ri.get("method"))
+            or abs(float(ui.get("low", 0.0)) - float(ri["low"])) > 1e-6  # type: ignore[arg-type]
+            or abs(float(ui.get("high", 0.0)) - float(ri["high"])) > 1e-6  # type: ignore[arg-type]
+        ):
+            problems.append(f"{key}: test.interval {ui} != recomputed {ri}")
+        if str(test.get("design", "independent_samples")) != "independent_samples":
+            problems.append(f"{key}: test.design {test.get('design')!r} != independent_samples")
         return problems
     # matched pairs → McNemar
     pairs = [
@@ -189,7 +220,7 @@ def _check_test(
     rec = mcnemar_test(pairs, vs=baseline_id)
     if str(test.get("name")) != "mcnemar":
         return [f"{key}: matched_pairs must use mcnemar, not {test.get('name')!r}"]
-    problems = []
+    problems = _reject_unknown_test_fields(test, rec, key)
     if int(test.get("paired_n", -1)) != int(rec["paired_n"]):  # type: ignore[arg-type]
         problems.append(f"{key}: test.paired_n {test.get('paired_n')} != recomputed {rec['paired_n']}")
     ud: dict[str, object] = test.get("discordant", {})  # type: ignore[assignment]

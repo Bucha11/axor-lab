@@ -167,6 +167,35 @@ def condition_config_hash(kernel: str, policy: dict[str, object] | None) -> str:
     return content_hash({"kernel": kernel, "policy": policy or {}})
 
 
+def executable_config_hash(
+    kernel: str,
+    policy: dict[str, object] | None,
+    tool_manifests: list[dict[str, object]],
+) -> str:
+    """The hash of the FULL config the governor actually executes (review r15).
+
+    condition_config_hash covers only kernel + policy, but the real governor's
+    verdicts ALSO turn on the tool manifests — each sink's effect class, driving
+    args, and effect-resolution rules. Two experiments with the same kernel and
+    policy but different manifests (a different egress sink, different
+    driving_args, an untrusted-source rule) govern differently, so the plain
+    config_hash is not a sufficient carry-over identity for a production handoff.
+    This hash binds the manifests too, so a Control Plane deploy keyed on it
+    reproduces the exact executable config Lab measured."""
+    tools = sorted(
+        (
+            {
+                "id": str(m.get("id")),
+                "effect": m.get("effect", {}),
+                "args_schema": m.get("args_schema", {}),
+            }
+            for m in tool_manifests
+        ),
+        key=lambda t: t["id"],
+    )
+    return content_hash({"kernel": kernel, "policy": policy or {}, "tools": tools})
+
+
 def world_digest(inputs: dict[str, object], fixtures: dict[str, object] | None) -> str:
     """The ONE definition of a trace's `inputs_digest` — the exact world a trace
     was produced in: the scenario's declared inputs AND its tool fixtures.

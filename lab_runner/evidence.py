@@ -12,7 +12,11 @@ Three modes, per claims.md — never two, because "governed" is ambiguous:
 from __future__ import annotations
 
 from .kernel import Kernel
-from .replay import replay_trace
+from .replay import (
+    REPLAY_MALFORMED_TRACE,
+    REPLAY_REDACTED_INPUT_UNAVAILABLE,
+    replay_trace_status,
+)
 
 FIDELITY_WARNING = (
     "provenance fidelity is heuristic_attribution: lineage is best-effort, "
@@ -46,7 +50,37 @@ def build_evidence_case(
     """Render the EvidenceCase dict for one trial's trace."""
     inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
     chain = _chain(trace, scenario)
-    recomputed, _ = replay_trace(trace, governed_condition, kernel, manifests, inputs)
+    recomputed, replay_status = replay_trace_status(
+        trace, governed_condition, kernel, manifests, inputs
+    )
+    # "exactly_replayable" means the counterfactual is an EXACT deterministic
+    # function of the frozen events — it holds even when the recomputed verdict
+    # DIFFERS from the recorded one (that divergence IS the counterfactual under a
+    # different policy). It does NOT hold when the trace is malformed or when a
+    # REDACTED load-bearing input forced replay onto a hash sentinel: there the
+    # recomputed verdict turned on a value replay never actually had, so the claim
+    # is downgraded and the reason named (review r15).
+    if replay_status not in (REPLAY_MALFORMED_TRACE, REPLAY_REDACTED_INPUT_UNAVAILABLE):
+        counterfactual: dict[str, object] = {
+            "kind": "counterfactual",
+            "label": "Counterfactual: policy replay",
+            "verdicts": [str(d["verdict"]) for d in recomputed],
+            "claim_kind": "exactly_replayable",
+            "caveat": COUNTERFACTUAL_CAVEAT,
+        }
+    else:
+        counterfactual = {
+            "kind": "counterfactual",
+            "label": "Counterfactual: policy replay (NOT exactly replayable)",
+            "verdicts": [str(d["verdict"]) for d in recomputed],
+            "claim_kind": "not_exactly_replayable",
+            "replay_status": replay_status,
+            "caveat": (
+                "exact replay is unavailable for this trace "
+                f"({replay_status}); the recorded verdicts stand, but this "
+                "counterfactual is not an exact reproduction"
+            ),
+        }
     modes: dict[str, object] = {
         "observed": {
             "kind": "observed",
@@ -54,13 +88,7 @@ def build_evidence_case(
             "trace_id": str(trace["trace_id"]),
             "verdicts": _recorded_verdicts(trace),
         },
-        "counterfactual_policy_replay": {
-            "kind": "counterfactual",
-            "label": "Counterfactual: policy replay",
-            "verdicts": [str(d["verdict"]) for d in recomputed],
-            "claim_kind": "exactly_replayable",
-            "caveat": COUNTERFACTUAL_CAVEAT,
-        },
+        "counterfactual_policy_replay": counterfactual,
     }
     if governed_twin is not None:
         modes["observed_governed_twin"] = {

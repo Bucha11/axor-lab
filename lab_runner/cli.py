@@ -60,6 +60,10 @@ EXIT_FAILURE = 1
 EXIT_VALIDATION = 2
 EXIT_UNCONFIRMED = 3
 EXIT_REGRESSION_DIFFERS = 4
+# a signed receipt whose signature could NOT be checked (no key supplied, or
+# PyNaCl absent) — distinct from a clean pass (0) and from a tampered/invalid
+# receipt (1), so automation never reads "unverified" as "verified" (review r15)
+EXIT_UNVERIFIED = 5
 
 _METRIC_ASR = "ASR"
 _METRIC_UTILITY = "task_success_rate"
@@ -311,23 +315,25 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     from lab_contracts.signing import SignatureInvalid, SignatureUnavailable, verify_receipt
 
     pubkey = getattr(args, "pubkey", None)
+    expected_author = getattr(args, "author", None)
     try:
-        verify_receipt(bundle, receipt, pubkey)
+        verify_receipt(bundle, receipt, pubkey, expected_author=expected_author)
     except SignatureInvalid as exc:
         print(f"receipt: INVALID — {exc}", file=sys.stderr)
         return EXIT_FAILURE
     except SignatureUnavailable as exc:
-        # signed_ref matched (checked first), but the signature could not be
-        # verified (no key supplied / PyNaCl absent) — say so, don't claim a pass
-        print(f"receipt: signed_ref OK; signature UNVERIFIED — {exc}", file=sys.stderr)
-        return EXIT_OK
-    if receipt.get("signature"):
+        # signed_ref + structure OK, but the signature itself could NOT be checked
+        # (no key supplied / PyNaCl absent). This is NOT a pass — return a distinct
+        # nonzero code so a CI gate never treats "unverified" as "verified" (r15)
+        print(f"receipt: UNVERIFIED (integrity OK, authenticity unchecked) — {exc}", file=sys.stderr)
+        return EXIT_UNVERIFIED
+    if str(receipt.get("integrity")) == "signed":
         print(
             f"receipt: signature VERIFIED (author {receipt.get('author')!r}, "
             f"key {receipt.get('key_id')!r})"
         )
     else:
-        print(f"receipt: signed_ref OK ({receipt.get('integrity')}; no signature to verify)")
+        print(f"receipt: signed_ref OK ({receipt.get('integrity')}; hash-only, no signature)")
     return EXIT_OK
 
 
@@ -585,6 +591,16 @@ def _publish_to_server(
     except urllib.error.URLError as exc:
         raise RunnerError(f"cannot reach server {args.server}: {exc.reason}") from exc
     print(f"published {result['publication_id']} -> {args.server.rstrip('/')}{result['url']}")
+    # SAVE the server acceptance receipt — the signed proof of what the server
+    # verified. The old CLI dropped it on the floor (review r15). Default to a
+    # sidecar file next to the bundle, or an explicit --acceptance-out.
+    acceptance = result.get("acceptance")
+    if acceptance is not None:
+        dest = getattr(args, "acceptance_out", None)
+        out_path = Path(dest) if dest else Path(f"{result['publication_id']}.acceptance.json")
+        out_path.write_text(json.dumps(acceptance, indent=2))
+        signed = acceptance.get("algorithm") == "ed25519"
+        print(f"  acceptance receipt: {out_path} ({'signed' if signed else 'unsigned'})")
     return EXIT_OK
 
 
@@ -1019,6 +1035,13 @@ def _environment(
     # producer.kernel_version, bound to its own condition, stays authoritative).
     if len(kernels) == 1:
         env["kernel_version"] = kernels[0]
+    else:
+        # a mixed-kernel run omits the single global kernel_version (now optional
+        # in the schema) and records the distinct kernels explicitly, so the
+        # bundle is schema-VALID and readable rather than a write-now/read-never
+        # artifact (review r15). Each trace's producer.kernel_version stays
+        # authoritative for its own condition.
+        env["kernel_versions"] = kernels
     return env
 
 
@@ -1103,6 +1126,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument(
         "--pubkey", help="author Ed25519 public key (hex) to verify a signed receipt"
     )
+    p_verify.add_argument(
+        "--author", help="expected author id (trust anchor); the receipt's author must match it"
+    )
     p_verify.set_defaults(func=_cmd_verify)
 
     p_pin = sub.add_parser("pin", help="pin (trace, expected verdict) as a regression case")
@@ -1151,6 +1177,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument(
         "--signature-file", default=None,
         help="path to the detached bundle signature (hex) for a signed upload",
+    )
+    p_publish.add_argument(
+        "--acceptance-out", default=None,
+        help="where to save the server's acceptance receipt (default: <pid>.acceptance.json)",
     )
     p_publish.set_defaults(func=_cmd_publish)
 

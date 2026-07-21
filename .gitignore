@@ -3,3 +3,6 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# CLI publish receipts (written next to cwd by default)
+*.acceptance.json

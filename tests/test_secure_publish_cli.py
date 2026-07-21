@@ -43,6 +43,7 @@ def _args(server: str, **kw) -> argparse.Namespace:
     base = {
         "server": server, "question": "does governance stop exfil?", "license": "CC-BY-4.0",
         "visibility": "unlisted", "token_env": None, "author": None, "signature_file": None,
+        "acceptance_out": None,
     }
     base.update(kw)
     return argparse.Namespace(**base)
@@ -68,10 +69,13 @@ class TestSecurePublishCli(unittest.TestCase):
         import os
         os.environ["AXOR_LAB_TOKEN_TEST"] = "s3cret"
         self.addCleanup(lambda: os.environ.pop("AXOR_LAB_TOKEN_TEST", None))
+        acc_out = str(Path(self.tmp.name) / "acc.json")  # keep the receipt out of cwd
         rc = _publish_to_server(
-            _args(self.base, token_env="AXOR_LAB_TOKEN_TEST"), self.bundle, self.traces
+            _args(self.base, token_env="AXOR_LAB_TOKEN_TEST", acceptance_out=acc_out),
+            self.bundle, self.traces,
         )
         self.assertEqual(rc, 0)
+        self.assertTrue(Path(acc_out).is_file())  # the acceptance receipt was saved
 
     def test_missing_env_var_is_a_clean_error(self) -> None:
         from lab_runner.errors import RunnerError

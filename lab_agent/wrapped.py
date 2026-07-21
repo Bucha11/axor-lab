@@ -94,7 +94,10 @@ class WrappedModelAgent:
                 pre = self.budget.pre_spend_exceeded(usage, projected_input, self.model)
                 if pre is not None:
                     raise CostCeilingReached(pre, overshot=False)
-                max_out = self.budget.remaining_output_tokens(usage)
+                # HARD-cap the call's max_tokens: an explicit output ceiling, or —
+                # for a USD-only budget — the output the remaining USD can buy, so
+                # a single response cannot blow past the dollar ceiling (review r15)
+                max_out = self.budget.output_cap(usage, projected_input, self.model)
             action = self.backend.next_action(messages, _tool_schemas(sink_manifest), max_out)
             if action.kind == TOOL_CALL and action.tool == sink_id:
                 args = action.args or {}

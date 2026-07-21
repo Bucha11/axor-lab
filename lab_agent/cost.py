@@ -134,6 +134,33 @@ class CostBudget:
             return None
         return max(0, self.max_output_tokens - int(usage.get("output_tokens", 0)))
 
+    def output_cap(
+        self, usage: dict[str, int], projected_input_tokens: int, model: str
+    ) -> int | None:
+        """The HARD max_tokens to pass the next provider call.
+
+        An explicit output ceiling wins. Otherwise, when a USD ceiling is set, cap
+        the output at what the remaining USD can actually buy AFTER the projected
+        input is paid — so a USD-only budget is a HARD ceiling, not a 512-token
+        estimate that a 4,000-token response then blows past (review r15). None
+        only when nothing bounds output (no output ceiling AND no USD ceiling, or
+        a zero-priced model)."""
+        capped = self.remaining_output_tokens(usage)
+        if capped is not None:
+            return capped
+        if self.max_usd is None:
+            return None
+        prices = _PRICES_PER_MTOK.get(_price_key(model), _PRICES_PER_MTOK["claude-opus-4-8"])
+        out_price_per_tok = prices[1] / 1_000_000
+        if out_price_per_tok <= 0:
+            return None  # a free model — nothing to cap
+        in_after = int(usage.get("input_tokens", 0)) + max(0, projected_input_tokens)
+        spent_without_new_output = actual_usd(in_after, int(usage.get("output_tokens", 0)), model)
+        remaining_usd = self.max_usd - spent_without_new_output
+        if remaining_usd <= 0:
+            return 0
+        return int(remaining_usd / out_price_per_tok)
+
     def pre_spend_exceeded(
         self, usage: dict[str, int], projected_input_tokens: int, model: str,
         projected_output_tokens: int = _DEFAULT_OUTPUT_RESERVE_PER_CALL,

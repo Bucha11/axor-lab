@@ -23,6 +23,15 @@ REPLAY_MATCH = "match"
 REPLAY_MISMATCH = "mismatch"
 REPLAY_MALFORMED_TRACE = "malformed_trace"
 REPLAY_UNSUPPORTED_KERNEL = "unsupported_kernel"
+# a structurally-fine trace whose exact replay CANNOT be reconstructed because a
+# REDACTED sensitive value (no decision_value) is load-bearing for the decision —
+# a bound gated arg, or an untrusted source the real governor would have to
+# re-register. The live gate saw the raw value; replay only has a hash sentinel,
+# so a recomputed verdict here is not an exact reproduction and must NEVER be
+# reported as match/bit-identical (review r15).
+REPLAY_REDACTED_INPUT_UNAVAILABLE = "redacted_input_unavailable"
+
+_MISSING = object()  # sentinel: a value dict with no decision_value key at all
 
 
 @dataclass(frozen=True)
@@ -105,6 +114,10 @@ def replay_trace_status(
     recomputed: list[dict[str, object]] = []
     matched = True
     malformed = False
+    # a redacted (sensitive, no decision_value) value that is load-bearing for a
+    # decision makes exact replay impossible — the gate saw the raw value, replay
+    # only has a hash sentinel (review r15)
+    redacted_required = False
     # per-node FIFO queues of unmatched intents — a single `pending_call` breaks
     # on interleaved nodes / parallel calls / several intents before decisions
     # (review §5.1). With call_ids we pair by id; without, by node FIFO.
@@ -119,8 +132,13 @@ def replay_trace_status(
         if etype == "tool_result":
             for vid in event.get("produces_value_ids", []) or []:
                 value = values.get(str(vid), {})
-                if "untrusted_derived" in value.get("labels", []) and "decision_value" in value:
-                    registrations.append((str(event.get("tool")), value["decision_value"]))
+                if "untrusted_derived" in value.get("labels", []):
+                    if "decision_value" in value:
+                        registrations.append((str(event.get("tool")), value["decision_value"]))
+                    elif isinstance(kernel, AxorKernel):
+                        # an untrusted source the real governor would taint-register
+                        # is redacted → its taint state can't be reconstructed
+                        redacted_required = True
         elif etype == "tool_call_intent":
             pending.setdefault(node, []).append(event)
             cid = event.get("call_id")
@@ -134,6 +152,16 @@ def replay_trace_status(
                 malformed = True
                 continue
             bindings: dict[str, str] = pending_call.get("arg_bindings", {})  # type: ignore[assignment]
+            # if any BOUND value is redacted (sensitive, no decision_value), the
+            # gate's concrete inputs cannot be reconstructed — exact replay is
+            # unavailable, so do NOT recompute this decision over a hash sentinel
+            # (which the kernel can't even evaluate); flag it and move on (r15)
+            if any(
+                (values.get(str(vid)) or {}).get("decision_value", _MISSING) is _MISSING
+                for vid in bindings.values()
+            ):
+                redacted_required = True
+                continue
             args = resolve_args(bindings, values)
             if isinstance(kernel, AxorKernel):
                 driving = pending_call.get("arg_bindings", {}).get("recipient", "v_none")  # type: ignore[union-attr]
@@ -164,6 +192,11 @@ def replay_trace_status(
         malformed = True
     if malformed:
         return tuple(recomputed), REPLAY_MALFORMED_TRACE
+    # a redacted load-bearing input outranks match/mismatch: the recomputed
+    # verdict turned on a sentinel, so it is neither a confirmed reproduction nor
+    # a real divergence — it simply cannot be replayed exactly (review r15)
+    if redacted_required:
+        return tuple(recomputed), REPLAY_REDACTED_INPUT_UNAVAILABLE
     return tuple(recomputed), REPLAY_MATCH if matched else REPLAY_MISMATCH
 
 
@@ -265,11 +298,19 @@ def resolve_args(
 
 
 def _verdict_core(decision: dict[str, object]) -> dict[str, object]:
-    """The replay-comparable core: verdict + gate + driving value.
+    """The replay-comparable core: verdict + gate + driving value, PLUS the typed
+    fail-closed reason when there is no driving value.
 
-    (`reason`/`projection` prose may evolve without changing the verdict.)"""
-    return {
+    (`reason`/`projection` prose may evolve without changing the verdict.) A
+    fail-closed DENY has driving_value_id=null and a typed `driving_unresolved`
+    that the schema/semantics treat as load-bearing — so it belongs in the core,
+    or replay would call two different fail-closed reasons (no_driving_args vs
+    unresolved_argument on a specific arg) bit-identical (review r15)."""
+    core: dict[str, object] = {
         "verdict": decision["verdict"],
         "gate": decision["gate"],
         "driving_value_id": decision["driving_value_id"],
     }
+    if decision.get("driving_value_id") is None:
+        core["driving_unresolved"] = decision.get("driving_unresolved")
+    return core

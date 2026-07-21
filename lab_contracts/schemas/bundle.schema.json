@@ -54,7 +54,6 @@
     "environment": {
       "type": "object",
       "required": [
-        "kernel_version",
         "model"
       ],
       "additionalProperties": false,
@@ -93,6 +92,13 @@
         "dataset_version": {
           "type": "string",
           "description": "e.g. AgentDojo version, for imported benchmarks"
+        },
+        "kernel_versions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "the distinct condition kernels when a run mixes kernels (kernel_version is omitted then; each trace's producer.kernel_version stays authoritative)"
         }
       }
     },
@@ -141,6 +147,11 @@
           "trace_ref": {
             "type": "string",
             "description": "content hash of the trace.schema.json for this trial"
+          },
+          "execution_order": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "the 0-based order this trial was EXECUTED in (conditions are counterbalanced across blocks), so a temporal confound is auditable"
           }
         }
       }
@@ -202,8 +213,11 @@
             "additionalProperties": true
           },
           "comparison_design": {
-            "enum": ["matched_pairs", "independent_samples"],
-            "description": "matched_pairs → the treated/baseline pairs are real (deterministic agent), McNemar valid; independent_samples → live-model draws, a two-proportion comparison reported as exploratory"
+            "enum": [
+              "matched_pairs",
+              "independent_samples"
+            ],
+            "description": "matched_pairs \u2192 the treated/baseline pairs are real (deterministic agent), McNemar valid; independent_samples \u2192 live-model draws, a two-proportion comparison reported as exploratory"
           }
         }
       }
@@ -222,11 +236,11 @@
     },
     "signature": {
       "type": "string",
-      "description": "optional detached signature over content_hashes (see publication.integrity)"
+      "description": "optional detached Ed25519 signature over the WHOLE canonical bundle with its own `signature` field removed (NOT only content_hashes) \u2014 signed_ref = content_hash(bundle minus signature); a KNOWN author key upgrades integrity to `signed` (see publication.integrity)"
     },
     "canonicalization": {
       "const": "JCS/RFC8785",
-      "description": "content_hashes and any signature are computed over JCS-canonicalized (RFC 8785) serialization \u2014 the same canonicalization the control-plane protocol v0.2 uses (v2 Ch.6), so a hash is stable across serializers."
+      "description": "content_hashes AND any signature are computed over the JCS-canonicalized (RFC 8785) serialization \u2014 the same canonicalization the control-plane protocol v0.2 uses (v2 Ch.6), so a hash/signature is stable across serializers."
     },
     "packaging": {
       "type": "object",

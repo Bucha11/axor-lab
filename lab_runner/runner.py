@@ -309,6 +309,7 @@ def _run_one(
     seed: str,
     repeat_index: int,
     agent: AgentAdapter,
+    execution_order: int = 0,
 ) -> None:
     """Execute one trial, capturing a failure as a recorded status=failed trial
     instead of aborting the whole experiment (review §4.4)."""
@@ -317,6 +318,7 @@ def _run_one(
     base = {
         "trial_id": trial_key, "scenario_id": scenario_id,
         "condition_id": str(condition["id"]), "seed": seed, "repeat_index": repeat_index,
+        "execution_order": execution_order,
     }
     try:
         outcome = run_trial(scenario, manifests, condition, kernel, run_id, seed, repeat_index, agent)  # type: ignore[arg-type]
@@ -342,11 +344,13 @@ def run_experiment(
 ) -> ExperimentResult:
     agent = agent or ScriptedAgent()
     result = ExperimentResult(run_id=run_id)
+    order = 0
     for condition in conditions:
         kernel = resolve_kernel(str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry)
         for repeat_index in range(repeats):
             _run_one(result, scenario, manifests, condition, kernel, run_id,
-                     f"s{repeat_index:03d}", repeat_index, agent)
+                     f"s{repeat_index:03d}", repeat_index, agent, execution_order=order)
+            order += 1
     return result
 
 
@@ -452,23 +456,24 @@ def run_experiment_suite(
     # DID run and reports e.g. n=1/1 for a 100-trial plan stopped after one
     # (review r13). Every not-yet-run trial is recorded status=excluded with
     # failure_reason=cost_ceiling, so the denominator stays honest.
-    # BLOCK-BALANCED order (review r14): iterate scenario → repeat → condition, so
-    # each (scenario, repeat) block runs ALL its conditions back to back before the
-    # next block. A condition-major order (all baseline repeats, then all governed
-    # repeats) means a cost stop partway leaves every completed trial on ONE
-    # condition and ZERO matched pairs — the paired comparison has no data. With
-    # blocks interleaved, a stop leaves at most one block incomplete, so the
-    # partial run keeps the maximum number of complete matched pairs.
+    # BLOCK-BALANCED + COUNTERBALANCED order (review r14/r15): iterate
+    # scenario → repeat → condition, so each (scenario, repeat) block runs ALL its
+    # conditions back to back (a cost stop then leaves at most one block
+    # incomplete, keeping the maximum number of complete matched pairs). Within a
+    # block the condition order ALTERNATES every repeat (baseline→governed,
+    # governed→baseline, …) so the governance effect is not systematically
+    # confounded with position/time-in-run for a live model. The execution order
+    # is recorded on each trial so the counterbalancing is auditable.
     plan = [
         (scenario, condition, repeat_index)
         for scenario in scenarios
         for repeat_index in range(repeats)
-        for condition in conditions
+        for condition in (conditions if repeat_index % 2 == 0 else list(reversed(conditions)))
     ]
 
     def _exclude_remaining(from_index: int, reason: str) -> None:
         recorded = {str(t["trial_id"]) for t in result.trials}
-        for scenario, condition, repeat_index in plan[from_index:]:
+        for offset, (scenario, condition, repeat_index) in enumerate(plan[from_index:]):
             seed = f"s{repeat_index:03d}"
             trial_key = trial_id_for(
                 run_id, str(scenario["name"]), str(condition["id"]), seed, repeat_index
@@ -479,6 +484,7 @@ def run_experiment_suite(
                 "trial_id": trial_key, "scenario_id": str(scenario["name"]),
                 "condition_id": str(condition["id"]), "seed": seed,
                 "repeat_index": repeat_index, "status": "excluded",
+                "execution_order": from_index + offset,
                 "failure_reason": f"cost_ceiling: {reason}",
             })
 
@@ -500,7 +506,7 @@ def run_experiment_suite(
             )
         try:
             _run_one(result, scenario, manifests, condition, kernels[cid], run_id,
-                     f"s{repeat_index:03d}", repeat_index, agent)
+                     f"s{repeat_index:03d}", repeat_index, agent, execution_order=index)
         except CostCeilingReached as stop:
             # the guard fired mid-trial, BEFORE a provider call — stop the whole
             # run and exclude THIS trial plus every remaining one (review r12/r13)

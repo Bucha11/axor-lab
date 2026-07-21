@@ -94,26 +94,71 @@ def build_receipt(
     }
 
 
+_HASH_ALGORITHM = "sha256-content-hash"
+_SIGN_ALGORITHM = "ed25519"
+
+
 def verify_receipt(
     bundle: dict[str, object],
     receipt: dict[str, object],
     author_pubkey_hex: str | None = None,
+    *,
+    expected_author: str | None = None,
 ) -> None:
-    """Verify a downloaded receipt against its bundle, offline.
+    """Verify a downloaded receipt against its bundle, offline, as a STRICT state
+    machine (review r15). Integrity is NOT authenticity — the two are checked
+    separately and neither is allowed to imply the other by omission.
 
-    Always confirms the receipt's `signed_ref` matches the bundle. If the receipt
-    carries a signature, an author public key is REQUIRED and the Ed25519
-    signature must verify — a signed receipt with no key to check it against is
-    SignatureUnavailable, not a silent pass. Raises on any mismatch."""
+    1. `signed_ref` must always match the bundle bytes (integrity).
+    2. A `hash_verified` receipt must use the content-hash algorithm and carry NO
+       signature/author/key_id — a hash-only claim cannot smuggle authenticity.
+    3. A `signed` receipt MUST carry a non-empty ed25519 signature, author, and
+       key_id, and the signature MUST verify against a supplied public key. A
+       `signed` receipt with the signature stripped is rejected (not a silent
+       pass); a `signed` receipt with no key to check it against is
+       SignatureUnavailable (unverifiable), NOT success.
+
+    `expected_author` binds the caller's trust anchor: when set, the receipt's
+    author must equal it, so a signature that merely verifies against *some* key
+    is not accepted as *the* author's."""
     expected = signed_ref(bundle)
     if str(receipt.get("signed_ref")) != expected:
         raise SignatureInvalid(
             f"receipt signed_ref {receipt.get('signed_ref')!r} does not match the bundle {expected!r}"
         )
-    sig = receipt.get("signature")
-    if sig:
+    integrity = str(receipt.get("integrity", ""))
+    algorithm = str(receipt.get("algorithm", ""))
+    signature = receipt.get("signature")
+    author = receipt.get("author")
+    key_id = receipt.get("key_id")
+    if integrity == "hash_verified":
+        if algorithm != _HASH_ALGORITHM:
+            raise SignatureInvalid(
+                f"hash_verified receipt must use algorithm {_HASH_ALGORITHM!r}, got {algorithm!r}"
+            )
+        if signature or author or key_id:
+            raise SignatureInvalid(
+                "hash_verified receipt must not carry a signature/author/key_id "
+                "(integrity is not authenticity)"
+            )
+        return  # signed_ref matched; nothing to authenticate
+    if integrity == "signed":
+        if algorithm != _SIGN_ALGORITHM:
+            raise SignatureInvalid(
+                f"signed receipt must use algorithm {_SIGN_ALGORITHM!r}, got {algorithm!r}"
+            )
+        if not signature or not author or not key_id:
+            raise SignatureInvalid(
+                "signed receipt must carry a non-empty signature, author, and key_id"
+            )
+        if expected_author is not None and str(author) != str(expected_author):
+            raise SignatureInvalid(
+                f"receipt author {author!r} is not the expected trust anchor {expected_author!r}"
+            )
         if not author_pubkey_hex:
             raise SignatureUnavailable(
-                "receipt carries a signature but no author public key was supplied to verify it"
+                "signed receipt but no author public key was supplied to verify it"
             )
-        verify_bundle_signature(bundle, str(sig), author_pubkey_hex)
+        verify_bundle_signature(bundle, str(signature), author_pubkey_hex)
+        return
+    raise SignatureInvalid(f"unknown receipt integrity {integrity!r}")

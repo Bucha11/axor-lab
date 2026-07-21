@@ -20,6 +20,7 @@ from lab_contracts import (
     BundleIntegrityError,
     build_publication,
     content_hash,
+    evidence_lineage_ref,
     make_claim,
     provenance_axes,
     validate_artifact,
@@ -87,6 +88,13 @@ class StoredPublication:
     # publication.json integrity field alone (review r9)
     author: str | None = None
     signature: str | None = None
+    # the STABLE evidence lineage this publication rests on (review r15) — the
+    # takedown/read guards key on this, not on the packaging-sensitive bundle_ref
+    lineage_ref: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.lineage_ref:
+            self.lineage_ref = evidence_lineage_ref(self.bundle)
 
     def axes(self) -> dict[str, object]:
         return provenance_axes(self.publication, tuple(self.reproductions))
@@ -117,28 +125,49 @@ class PublicationStore:
 
     root: Path
     known_keys: dict[str, str] = field(default_factory=dict)
+    # optional server identity + Ed25519 signing key (hex) so the acceptance
+    # receipt is a SIGNED attestation of what the server verified, not an
+    # unsigned JSON blob anyone could mint (review r15). Unset → unsigned receipt.
+    server_id: str = "lab.local"
+    server_key_id: str | None = None
+    server_signing_key: str | None = None
     _cache: dict[str, StoredPublication] = field(default_factory=dict)
     _tombstones: set[str] = field(default_factory=set)
-    # bundle_refs (evidence lineage) that were taken down — a takedown removes the
-    # EVIDENCE, so the same bundle cannot be re-published under altered metadata
-    # (a different question/visibility mints a different publication_id, which the
-    # id-only tombstone would not catch — review r14)
-    _evidence_tombstones: set[str] = field(default_factory=set)
+    # STABLE evidence lineage refs that were taken down — a takedown removes the
+    # EVIDENCE, so the same experiment cannot be re-published under altered
+    # metadata OR repackaged bytes (review r14/r15). Keyed by evidence_lineage_ref,
+    # which is invariant to bundle_id/created/packaging — the packaging-sensitive
+    # bundle_ref was escapable by re-serialising the same evidence.
+    _lineage_tombstones: set[str] = field(default_factory=set)
     _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        for directory in sorted(self.root.glob("*/")):
+        # TWO-PASS cold load (review r15): collect EVERY tombstone (id + evidence
+        # lineage) BEFORE loading any publication, so a sibling publication of a
+        # taken-down evidence can never be admitted just because its directory
+        # sorts ahead of the tombstone's. A one-pass sorted walk could load the
+        # sibling first and then never remove it.
+        directories = sorted(self.root.glob("*/"))
+        for directory in directories:
+            try:
+                if (directory / "tombstone.json").is_file():
+                    self._tombstones.add(directory.name)
+                    tomb = json.loads((directory / "tombstone.json").read_text())
+                    if isinstance(tomb, dict):
+                        # prefer the stable lineage ref; fall back to a legacy
+                        # bundle_ref-only tombstone (round-14 records)
+                        lineage = tomb.get("evidence_lineage_ref") or tomb.get("bundle_ref")
+                        if lineage:
+                            self._lineage_tombstones.add(str(lineage))
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+        for directory in directories:
             # ISOLATE each directory: one corrupt file (truncated JSON, a
             # non-object array element, a missing key) must skip that ONE
             # publication, never crash the whole catalog on startup (review r10).
             try:
                 if (directory / "tombstone.json").is_file():
-                    self._tombstones.add(directory.name)
-                    tomb = json.loads((directory / "tombstone.json").read_text())
-                    bref = tomb.get("bundle_ref") if isinstance(tomb, dict) else None
-                    if bref:
-                        self._evidence_tombstones.add(str(bref))
                     self._load_reproductions_only(directory.name)
                 elif (directory / "publication.json").is_file():
                     self._load(directory.name)
@@ -214,17 +243,16 @@ class PublicationStore:
                     "restoring a taken-down record is an admin-only operation",
                     status=409,
                 )
-            # evidence-level takedown: the SAME bundle cannot be re-published under
-            # altered metadata (a different question/visibility mints a new id, so
-            # the id-only tombstone would miss it). takedown follows the evidence
-            # lineage, so "takedown is final" means the evidence is gone, not just
-            # one wording of it (review r14).
-            bundle_ref = str(publication.get("bundle_ref", ""))
-            if bundle_ref and bundle_ref in self._evidence_tombstones:
+            # evidence-level takedown: the SAME evidence cannot be re-published
+            # under altered metadata OR repackaged bytes. takedown follows the
+            # STABLE evidence lineage (invariant to bundle_id/created/packaging),
+            # so "takedown is final" means the evidence is gone — not just one
+            # wording of it, and not just one packaging of it (review r14/r15).
+            if stored.lineage_ref in self._lineage_tombstones:
                 raise PublishRejected(
-                    f"the evidence (bundle {bundle_ref}) was taken down and cannot be "
-                    "re-published under any metadata; restoring taken-down evidence is an "
-                    "admin-only operation",
+                    f"the evidence (lineage {stored.lineage_ref}) was taken down and cannot "
+                    "be re-published under any metadata or packaging; restoring taken-down "
+                    "evidence is an admin-only operation",
                     status=409,
                 )
             existing = self._cache.get(pid)
@@ -286,36 +314,49 @@ class PublicationStore:
             return "hash_verified"
 
     def takedown(self, publication_id: str) -> None:
-        """Remove a publication from the catalog while PRESERVING its
-        append-only attestation record (plan B4 DoD, threat-model §4). The
-        bundle/traces/publication body are removed; reproductions.json stays."""
+        """Remove a publication AND every sibling that rests on the SAME evidence
+        lineage, while PRESERVING each one's append-only attestation record (plan
+        B4 DoD, threat-model §4). The bundle/traces/publication body are removed;
+        reproductions.json stays.
+
+        takedown follows the STABLE evidence lineage (review r14/r15): the same
+        experiment published twice under different questions/visibility yields two
+        publication ids but ONE lineage — taking one down retires BOTH, and the
+        lineage tombstone blocks any future re-publish under altered metadata or
+        repackaged bytes. Removing only the exact id left the sibling public."""
         with self._lock:
-            stored = self._cache.pop(publication_id, None)
+            stored = self._cache.get(publication_id)
             if stored is None and publication_id not in self._tombstones:
                 raise NotFound(f"publication {publication_id} not found")
-            # the EVIDENCE lineage this publication rests on — takedown follows
-            # the evidence, not just the exact record, so the same bundle can't
-            # be re-published under a different question/visibility (review r14)
-            bundle_ref = (
-                str(stored.publication.get("bundle_ref", "")) if stored is not None else ""
-            )
-            directory = self._dir(publication_id)
-            for name in ("publication.json", "bundle.json"):
-                (directory / name).unlink(missing_ok=True)
-            traces_dir = directory / "traces"
-            if traces_dir.is_dir():
-                for path in traces_dir.glob("*.json"):
-                    path.unlink()
-            _write_atomic(
-                directory / "tombstone.json",
-                json.dumps({
-                    "publication_id": publication_id, "status": "taken_down",
-                    "bundle_ref": bundle_ref,
-                }),
-            )
-            self._tombstones.add(publication_id)
-            if bundle_ref:
-                self._evidence_tombstones.add(bundle_ref)
+            lineage = stored.lineage_ref if stored is not None else ""
+            # every currently-cached publication on this lineage (the target plus
+            # any sibling) is retired together — otherwise a sibling published
+            # BEFORE the takedown stays served (review r15)
+            targets = [publication_id]
+            if lineage:
+                targets = sorted(
+                    {publication_id}
+                    | {pid for pid, s in self._cache.items() if s.lineage_ref == lineage}
+                )
+            for pid in targets:
+                self._cache.pop(pid, None)
+                directory = self._dir(pid)
+                for name in ("publication.json", "bundle.json"):
+                    (directory / name).unlink(missing_ok=True)
+                traces_dir = directory / "traces"
+                if traces_dir.is_dir():
+                    for path in traces_dir.glob("*.json"):
+                        path.unlink()
+                _write_atomic(
+                    directory / "tombstone.json",
+                    json.dumps({
+                        "publication_id": pid, "status": "taken_down",
+                        "evidence_lineage_ref": lineage,
+                    }),
+                )
+                self._tombstones.add(pid)
+            if lineage:
+                self._lineage_tombstones.add(lineage)
 
     def add_attestation(self, publication_id: str, attestation: dict[str, object]) -> StoredPublication:
         errors = validate_artifact(attestation, "attestation")
@@ -335,19 +376,65 @@ class PublicationStore:
 
     def get(self, publication_id: str) -> StoredPublication:
         stored = self._cache.get(publication_id)
-        if stored is None:
+        # defense in depth (review r15): never serve a publication whose id OR
+        # whose evidence lineage was taken down, even if one somehow re-entered
+        # the cache. Reads guard on the lineage tombstone, not only the id.
+        if (
+            stored is None
+            or publication_id in self._tombstones
+            or stored.lineage_ref in self._lineage_tombstones
+        ):
             raise NotFound(f"publication {publication_id} not found")
         return stored
 
     def catalog(self) -> list[StoredPublication]:
         # ONLY public: unlisted is capability-URL-reachable but never listed,
-        # private is never served (review §7 / P0.5); a tombstoned id is never
-        # listed even if one ever re-entered the cache (defense in depth, r13)
+        # private is never served (review §7 / P0.5); a tombstoned id OR a
+        # tombstoned evidence lineage is never listed even if one ever re-entered
+        # the cache (defense in depth, r13/r15)
         return [
             s for s in self._cache.values()
             if s.publication.get("visibility") == "public"
             and str(s.publication.get("publication_id")) not in self._tombstones
+            and s.lineage_ref not in self._lineage_tombstones
         ]
+
+    def acceptance(self, stored: StoredPublication) -> dict[str, object]:
+        """A server ACCEPTANCE receipt (review r15): the server's SIGNED attestation
+        of what it verified before minting, portable and cryptographically checkable
+        rather than an unsigned JSON blob. It content-addresses the semantic report
+        (what the handshake checked) and is Ed25519-signed with the server key when
+        one is configured (else algorithm=unsigned). Deterministic — no wall-clock —
+        so a re-derivation on download re-produces the same signed bytes."""
+        pub = stored.publication
+        report = {
+            "replay": "bit_identical",
+            "statistics": str(pub.get("statistics_integrity") or "none"),
+            "verified": [
+                "bundle_schema", "trace_schema", "content_hashes",
+                "replay_bit_identical", "statistics_recomputed",
+            ],
+        }
+        acc: dict[str, object] = {
+            "schema_version": "axor-lab-acceptance/v1",
+            "server_id": self.server_id,
+            "publication_id": str(pub["publication_id"]),
+            "bundle_ref": str(pub.get("bundle_ref", "")),
+            "integrity": str(pub.get("integrity", "hash_verified")),
+            "semantic_report_ref": content_hash(report),
+            "semantic_report": report,
+        }
+        if self.server_signing_key:
+            from lab_contracts.signing import sign_bundle
+
+            acc["algorithm"] = "ed25519"
+            acc["key_id"] = self.server_key_id or self.server_id
+            # sign_bundle signs the canonical receipt with its own `signature`
+            # field removed — set every other field first so all are covered
+            acc["signature"] = sign_bundle(acc, self.server_signing_key)
+        else:
+            acc["algorithm"] = "unsigned"
+        return acc
 
     @staticmethod
     def _derive_id(publication: dict[str, object]) -> str:
@@ -416,6 +503,21 @@ class PublicationStore:
             bundle.get("environment", {}).get("model", {}).get("provider", "")  # type: ignore[union-attr]
         )
         agent_note = " (scripted agent)" if provider in ("", "scripted") else ""
+        # denominator honesty (review r15): a claim over n=10 means one thing when
+        # 10/10 planned completed and another when 10/100 did. Compute per-condition
+        # planned vs completed and the overall missingness, and surface both in the
+        # claim text so an estimate is never read without its evidence quality.
+        from lab_analysis import missingness as _missingness
+
+        trials_all: list[dict[str, object]] = list(bundle.get("trials", []))  # type: ignore[arg-type]
+        planned_by_cond: dict[str, int] = {}
+        completed_by_cond: dict[str, int] = {}
+        for trial in trials_all:
+            cid = str(trial.get("condition_id"))
+            planned_by_cond[cid] = planned_by_cond.get(cid, 0) + 1
+            if trial.get("status") == "completed":
+                completed_by_cond[cid] = completed_by_cond.get(cid, 0) + 1
+        miss = _missingness(trials_all) if trials_all else None
         for aggregate in aggregates:
             interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
             # an independent-samples comparison is exploratory — never present it
@@ -438,14 +540,27 @@ class PublicationStore:
                 )
             else:
                 design_note = ""
+            cid = str(aggregate["condition_id"])
+            planned = planned_by_cond.get(cid, int(aggregate["n"]))  # type: ignore[arg-type]
+            completed = completed_by_cond.get(cid, int(aggregate["n"]))  # type: ignore[arg-type]
+            denom_note = f" ({completed}/{planned} completed)" if planned else ""
+            miss_note = ""
+            if miss is not None and miss.n_missing:
+                if miss.condition_imbalanced:
+                    miss_note = (
+                        "; missingness is condition-imbalanced — one arm lost more data than "
+                        "the other, so the comparison is weakened"
+                    )
+                else:
+                    miss_note = f"; {miss.n_missing} of {miss.n_total} planned trials excluded"
             claims.append(
                 make_claim(
                     "statistically_reproducible",
                     f"{aggregate['metric']} under {aggregate['condition_id']}: "
                     f"{float(aggregate['estimate']):.2f} "
                     f"[{float(interval['low']):.2f}, {float(interval['high']):.2f}] "
-                    f"over {aggregate['n']} trials{agent_note}, "
-                    f"server-recomputed from the traces.{design_note}",
+                    f"over {aggregate['n']} trials{denom_note}{agent_note}, "
+                    f"server-recomputed from the traces.{design_note}{miss_note}",
                     f"agg:{aggregate['metric']}:{aggregate['condition_id']}",
                     trace_refs=trace_refs,
                     aggregate_refs=aggregate_refs,
@@ -505,6 +620,11 @@ class PublicationStore:
                 directory / "receipt.json",
                 json.dumps({"author": stored.author, "signature": stored.signature}),
             )
+        # the server acceptance receipt — the persisted, (optionally) signed record
+        # of what the handshake verified (review r15)
+        _write_atomic(
+            directory / "acceptance.json", json.dumps(self.acceptance(stored), indent=2)
+        )
         self._persist_reproductions(stored)
 
     def _persist_reproductions(self, stored: StoredPublication) -> None:
@@ -515,6 +635,11 @@ class PublicationStore:
         directory = self._dir(publication_id)
         publication = json.loads((directory / "publication.json").read_text())
         bundle = json.loads((directory / "bundle.json").read_text())
+        # never resurrect a publication whose evidence lineage was taken down —
+        # e.g. a sibling whose files survived a takedown that crashed mid-sweep
+        # (the two-pass load has already collected every lineage tombstone, r15)
+        if evidence_lineage_ref(bundle) in self._lineage_tombstones:
+            return
         traces: dict[str, dict[str, object]] = {}
         traces_dir = directory / "traces"
         if traces_dir.is_dir():

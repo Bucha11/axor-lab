@@ -85,14 +85,21 @@ def two_proportion_test(
     else:
         z = diff / se
         p_value = math.erfc(abs(z) / math.sqrt(2))  # 2 * (1 - Phi(|z|))
-    return {
+    effective_n = min(baseline_n, treated_n)
+    status, reason = _test_status(effective_n)
+    test: dict[str, object] = {
         "name": "two_proportion",
         "vs": vs,
         "difference": diff,
         "interval": {"method": "newcombe", "low": max(-1.0, low), "high": min(1.0, high)},
         "p": min(1.0, p_value),
         "design": "independent_samples",
+        "effective_n": effective_n,
+        "status": status,
     }
+    if reason:
+        test["reason"] = reason
+    return test
 
 
 def paired_bootstrap_ci(
@@ -153,7 +160,15 @@ def binary_aggregate(
     }
     if comparison_design is not None:
         aggregate["comparison_design"] = comparison_design
-    if test is not None and not is_inconclusive(aggregate):
+    # attach the test ONLY when it is powered on its OWN terms: the aggregate's
+    # marginal n clears the minimum AND the test's effective_n (paired_n for
+    # McNemar, min-arm for two_proportion) does too — so a 1-pair McNemar can't
+    # ride a large marginal n and be read as significant (review r15)
+    if (
+        test is not None
+        and not is_inconclusive(aggregate)
+        and int(test.get("effective_n", 0)) >= INCONCLUSIVE_MIN_N  # type: ignore[arg-type]
+    ):
         aggregate["test"] = test
     return aggregate
 
@@ -167,13 +182,32 @@ def mcnemar_test(pairs: Sequence[tuple[bool, bool]], vs: str) -> dict[str, objec
     runs use two_proportion_test — the pairing there is nominal, not real."""
     b = sum(1 for base, treated in pairs if base and not treated)
     c = sum(1 for base, treated in pairs if not base and treated)
-    return {
+    paired_n = len(pairs)
+    # McNemar's sample is the PAIRED n (the intersection of completed baseline and
+    # treated trials), NOT a marginal aggregate n — a paired_n of 1 riding on an
+    # n=100 aggregate is not a real comparison (review r15). The test carries its
+    # own effective_n + status so a caller never reads a marginal n as its power.
+    status, reason = _test_status(paired_n)
+    test: dict[str, object] = {
         "name": "mcnemar",
         "vs": vs,
         "discordant": {"b": b, "c": c},
-        "paired_n": len(pairs),
+        "paired_n": paired_n,
+        "effective_n": paired_n,
+        "status": status,
         "p": mcnemar_exact(b, c),
     }
+    if reason:
+        test["reason"] = reason
+    return test
+
+
+def _test_status(effective_n: int) -> tuple[str, str]:
+    """A statistical test is `inconclusive` below the minimum effective n —
+    reported on the test itself, distinct from the aggregate's marginal n."""
+    if effective_n < INCONCLUSIVE_MIN_N:
+        return "inconclusive", f"effective_n {effective_n} below minimum {INCONCLUSIVE_MIN_N}"
+    return "conclusive", ""
 
 
 def is_inconclusive(aggregate: dict[str, object]) -> bool:
