@@ -271,12 +271,24 @@ def make_gateway(
                             "error": "active run quota exceeded — finalize open runs before opening more"
                         })
                         return
-                    # keep the RETAINED finalized set within its own budget: evict a
-                    # DELIVERED (acknowledged) one first; only if none are acked drop
-                    # the oldest retained (its client had its chance to fetch+ack).
+                    # keep the RETAINED finalized set within its own budget by
+                    # evicting ONLY a DELIVERED (acknowledged) run — its client
+                    # confirmed it stored the bytes, so dropping it loses nothing.
+                    # An unfetched or fetched-but-unacked trace is NEVER evicted:
+                    # that would lose evidence the client has not received, exactly
+                    # the loss the delivery lifecycle promises against (review r18).
+                    # If retention is full and nothing is acked, FAIL CLOSED (429)
+                    # rather than drop unread evidence.
                     finalized = [rid for rid, r in runs.items() if r.finalized]
                     if len(finalized) >= retained_cap:
-                        victim = next((rid for rid in finalized if runs[rid].delivered), finalized[0])
+                        victim = next((rid for rid in finalized if runs[rid].delivered), None)
+                        if victim is None:
+                            self._json(429, {
+                                "error": "retained-trace quota exceeded and no acknowledged trace "
+                                "to evict — acknowledge (POST /trace/ack) a delivered trace first; "
+                                "unread evidence is never dropped"
+                            })
+                            return
                         del runs[victim]
                         run_secrets.pop(victim, None)
                     run_id = f"r_ep_{secrets.token_hex(16)}"  # unpredictable, not sequential

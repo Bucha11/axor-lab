@@ -185,15 +185,63 @@ class TestActiveQuota(_Base):
         # A's retained trace is still readable
         self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
 
-    def test_unacknowledged_finalized_runs_do_not_permanently_exhaust_active_quota(self) -> None:
-        # open the active quota, finalize (never ack), repeat many times — a flood
-        # of finalized-but-unacked runs must NEVER block new opens (review r17)
+    def test_acknowledged_finalized_runs_never_exhaust_quota(self) -> None:
+        # a cooperating client that ACKs each trace can finalize indefinitely: an
+        # acked run is evictable, so neither the active nor the retained budget
+        # fills. Finalizing frees the active slot (review r17), and acking makes
+        # the retained slot reclaimable (review r18) — no data loss, no blocking.
         for _ in range(10):
             rid, secret = self._open()
-            self.assertEqual(self._post(f"/runs/{rid}/finalize", {}, secret)[0], 200)
-            # the active slot is freed by finalize; the next open always succeeds
-            rid2, secret2 = self._open()
-            self.assertEqual(self._post(f"/runs/{rid2}/finalize", {}, secret2)[0], 200)
+            _, body = self._post(f"/runs/{rid}/finalize", {}, secret)
+            self._get(f"/runs/{rid}/trace", secret)
+            self.assertEqual(
+                self._post(f"/runs/{rid}/trace/ack", {"trace_ref": body["trace_ref"]}, secret)[0],
+                200,
+            )
+
+
+class TestLosslessRetention(_Base):
+    max_runs = 8
+
+    def _finalize(self, fetch: bool = False, ack: bool = False):
+        rid, secret = self._open()
+        _, body = self._post(f"/runs/{rid}/finalize", {}, secret)
+        ref = str(body["trace_ref"])
+        if fetch:
+            self._get(f"/runs/{rid}/trace", secret)
+        if ack:
+            self._post(f"/runs/{rid}/trace/ack", {"trace_ref": ref}, secret)
+        return rid, secret, ref
+
+    def test_retained_cap_never_evicts_unfetched_trace(self) -> None:
+        self.max_retained = 1
+        self.setUp()
+        a_id, a_secret, _ = self._finalize()          # finalized, NEVER fetched
+        # a new run whose open would need to evict A must be REFUSED, not drop A
+        self.assertEqual(self._post("/runs", {})[0], 429)
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)  # A intact
+
+    def test_retained_cap_never_evicts_fetched_unacked_trace(self) -> None:
+        self.max_retained = 1
+        self.setUp()
+        a_id, a_secret, _ = self._finalize(fetch=True)  # fetched but NOT acked
+        self.assertEqual(self._post("/runs", {})[0], 429)
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)  # A intact
+
+    def test_all_unacked_retained_capacity_fails_without_data_loss(self) -> None:
+        self.max_retained = 2
+        self.setUp()
+        a_id, a_secret, a_ref = self._finalize(fetch=True)
+        b_id, b_secret, _ = self._finalize(fetch=True)
+        # retained is full and NOTHING is acked → a new open fails closed
+        self.assertEqual(self._post("/runs", {})[0], 429)
+        # both traces survive
+        self.assertEqual(self._get(f"/runs/{a_id}/trace", a_secret)[0], 200)
+        self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 200)
+        # acking A frees a retained slot → a new open now succeeds, evicting only A
+        self.assertEqual(self._post(f"/runs/{a_id}/trace/ack", {"trace_ref": a_ref}, a_secret)[0], 200)
+        self.assertEqual(self._post("/runs", {})[0], 201)
+        self.assertEqual(self._get(f"/runs/{b_id}/trace", b_secret)[0], 200)  # B still intact
 
 
 class TestAckBoundToBytes(_Base):
