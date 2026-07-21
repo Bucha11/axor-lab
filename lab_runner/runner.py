@@ -323,6 +323,12 @@ def _run_one(
     base = {
         "trial_id": trial_key, "scenario_id": scenario_id,
         "condition_id": str(condition["id"]), "seed": seed, "repeat_index": repeat_index,
+        # the EXECUTION this unit belongs to (= run_id): the experimental-unit
+        # coordinate is (execution_id, scenario, condition, seed, repeat), so two
+        # trials that share a (scenario, seed, repeat) but ran in different runs are
+        # distinct units — and duplicate coordinates within one execution are a hard
+        # error rather than a last-write-wins overwrite in the statistics (review r21)
+        "execution_id": run_id,
         "execution_order": execution_order,
     }
     try:
@@ -510,6 +516,7 @@ def run_experiment_suite(
                 "trial_id": trial_key, "scenario_id": str(scenario["name"]),
                 "condition_id": str(condition["id"]), "seed": seed,
                 "repeat_index": repeat_index, "status": "excluded",
+                "execution_id": run_id,
                 "execution_order": from_index + offset,
                 "failure_reason": f"cost_ceiling: {reason}",
             })

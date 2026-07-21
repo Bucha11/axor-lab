@@ -108,6 +108,69 @@ class TestTrialTraceBinding(unittest.TestCase):
         self.assertIn("duplicate trace_id", str(ctx.exception))
 
 
+class TestExperimentalUnitUniqueness(unittest.TestCase):
+    """No two trials may share the same experimental-unit coordinate — else every
+    statistical map (bridge, hosted recompute) is last-write-wins and its truth
+    depends on trial array order (review r21)."""
+
+    def setUp(self) -> None:
+        self.trials, self.traces, self.ctx = _run()
+
+    def test_honest_run_carries_execution_id_matching_the_trace(self) -> None:
+        # the runner stamps execution_id = run_id on every trial, and it equals the
+        # trace's producer run_id — verify_bundle binds the two
+        completed = [t for t in self.trials if t.get("status") == "completed"]
+        self.assertTrue(completed)
+        for trial in completed:
+            self.assertEqual(trial["execution_id"], "r_graph")
+            trace = next(tr for tr in self.traces.values()
+                         if content_hash(tr) == trial["trace_ref"])
+            self.assertEqual(trial["execution_id"], trace["trial"]["run_id"])
+        verify_bundle(_bundle(self.trials, self.traces, self.ctx), self.traces)
+
+    def test_bundle_rejects_duplicate_full_trial_coordinate(self) -> None:
+        # two FAILED trials with the SAME (execution, scenario, condition, seed,
+        # repeat) but distinct trial_ids — no trace needed to trip the coordinate
+        # uniqueness check
+        base = {
+            "scenario_id": str(self.ctx["scenario"]["name"]), "condition_id": "governed",
+            "seed": "s000", "repeat_index": 0, "execution_id": "r_graph",
+            "status": "failed", "failure_reason": "SimulatedError: x",
+        }
+        a = {**base, "trial_id": "dup_a"}
+        b = {**base, "trial_id": "dup_b"}
+        bundle = _bundle([a, b], {}, self.ctx)
+        with self.assertRaises(BundleIntegrityError) as ctx:
+            verify_bundle(bundle, {})
+        self.assertIn("duplicate experimental-unit coordinate", str(ctx.exception))
+
+    def test_distinct_execution_id_disambiguates_the_same_coordinate(self) -> None:
+        # the SAME (scenario, condition, seed, repeat) from two DIFFERENT executions
+        # is two distinct units — allowed
+        common = {
+            "scenario_id": str(self.ctx["scenario"]["name"]), "condition_id": "governed",
+            "seed": "s000", "repeat_index": 0,
+            "status": "failed", "failure_reason": "SimulatedError: x",
+        }
+        a = {**common, "trial_id": "run1", "execution_id": "run-1"}
+        b = {**common, "trial_id": "run2", "execution_id": "run-2"}
+        verify_bundle(_bundle([a, b], {}, self.ctx), {})  # must NOT raise
+
+    def test_execution_id_must_match_the_traces_run_id(self) -> None:
+        # a completed trial that claims a fresh execution_id but cites a trace from
+        # the original run is rejected — the binding stops using a fake execution_id
+        # to dodge a duplicate-coordinate collision
+        trial = next(copy.deepcopy(t) for t in self.trials if t.get("status") == "completed")
+        trial["execution_id"] = "some-other-run"
+        trace = next(tr for tr in self.traces.values()
+                     if content_hash(tr) == trial["trace_ref"])
+        traces = {str(trace["trace_id"]): trace}
+        bundle = _bundle([trial], traces, self.ctx)
+        with self.assertRaises(BundleIntegrityError) as ctx:
+            verify_bundle(bundle, traces)
+        self.assertIn("execution_id", str(ctx.exception))
+
+
 class TestCrossReferenceIntegrity(unittest.TestCase):
     """Trial coordinates and trace tools must RESOLVE in-bundle (review r12)."""
 

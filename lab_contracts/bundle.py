@@ -275,6 +275,28 @@ def _verify_uniqueness(
         if tid in seen_traces:
             errors.append(f"duplicate trace_id {tid!r}")
         seen_traces.add(tid)
+    # No two trials may share the same EXPERIMENTAL-UNIT coordinate. trial_id is a
+    # hash over that coordinate, so a duplicate coordinate SHOULD already be a
+    # duplicate trial_id — but a hand-built bundle can give two same-coordinate
+    # trials distinct trial_ids and distinct traces, and every statistical map keys
+    # on the coordinate, so the second would silently overwrite the first's outcome
+    # (last-write-wins) and the recomputed aggregate/bridge would depend on trial
+    # array order. The coordinate is unique per execution, so reject a duplicate
+    # (execution_id, scenario, condition, seed, repeat) outright (review r21).
+    seen_coords: set[tuple[str, str, str, str, str]] = set()
+    for trial in bundle["trials"]:  # type: ignore[union-attr]
+        coord = (
+            str(trial.get("execution_id", "")), str(trial.get("scenario_id")),
+            str(trial.get("condition_id")), str(trial.get("seed")),
+            str(trial.get("repeat_index")),
+        )
+        if coord in seen_coords:
+            errors.append(
+                f"duplicate experimental-unit coordinate {coord!r} — two trials share "
+                "(execution_id, scenario, condition, seed, repeat); the statistics would "
+                "depend on trial array order"
+            )
+        seen_coords.add(coord)
 
 
 def _verify_trial_trace_graph(
@@ -305,6 +327,15 @@ def _verify_trial_trace_graph(
                     f"trial {trial.get('trial_id')}: {coord} {trial.get(coord)!r} does not match "
                     f"its trace's {trace_trial.get(coord)!r} (trace_ref {ref})"
                 )
+        # if the trial declares its execution, it must be the SAME execution the
+        # trace was produced in — so a hand-built trial cannot claim a fresh
+        # execution_id to dodge a duplicate-coordinate collision while still citing a
+        # trace from the original run (review r21)
+        if "execution_id" in trial and str(trial["execution_id"]) != str(trace_trial.get("run_id")):
+            errors.append(
+                f"trial {trial.get('trial_id')}: execution_id {trial['execution_id']!r} does not "
+                f"match its trace's producer run_id {trace_trial.get('run_id')!r} (trace_ref {ref})"
+            )
         if ref in cited:
             errors.append(
                 f"trace {ref} backs multiple trials ({cited[ref]} and {trial.get('trial_id')})"

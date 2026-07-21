@@ -157,6 +157,10 @@
           "repeat_index": {
             "type": "integer"
           },
+          "execution_id": {
+            "type": "string",
+            "description": "the run/execution this unit belongs to (= the trace's producer run_id). The experimental-unit coordinate is (execution_id, scenario_id, condition_id, seed, repeat_index); two trials sharing a (scenario, seed, repeat) but from different executions are DISTINCT units, and a duplicate full coordinate is a hard integrity error, never a last-write-wins overwrite in the statistics (review r21)"
+          },
           "status": {
             "enum": [
               "completed",

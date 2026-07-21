@@ -48,11 +48,11 @@ def _metric_field(metric: str) -> str | None:
 
 def _rows(
     bundle: dict[str, object], traces: dict[str, dict[str, object]]
-) -> dict[tuple[str, str, int], dict[str, dict[str, bool]]]:
-    """Per (scenario, seed, repeat) → {condition_id: {violation, task_success}}."""
+) -> dict[tuple[str, str, int, str], dict[str, dict[str, bool]]]:
+    """Per (scenario, seed, repeat, execution) → {condition_id: {violation, task_success}}."""
     scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
     by_hash = {content_hash(t): t for t in traces.values()}
-    rows: dict[tuple[str, str, int], dict[str, dict[str, bool]]] = {}
+    rows: dict[tuple[str, str, int, str], dict[str, dict[str, bool]]] = {}
     for trial in bundle["trials"]:  # type: ignore[union-attr]
         if trial.get("status") != "completed":
             continue
@@ -65,8 +65,19 @@ def _rows(
             "violation": bool(evaluate(scenario["violation"], trace, inputs)),  # type: ignore[arg-type]
             "task_success": bool(evaluate(scenario["task_success"], trace, inputs)),  # type: ignore[arg-type]
         }
-        key = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]))
-        rows.setdefault(key, {})[str(trial["condition_id"])] = outcome
+        key = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
+               str(trial.get("execution_id", "")))
+        cid = str(trial["condition_id"])
+        # never last-write-wins: two completed trials of the same coordinate+condition
+        # would make the recomputed aggregate depend on trial array order (review r21).
+        # A publish that reaches here has already passed verify_bundle (which rejects
+        # a duplicate coordinate), so this is a defensive invariant, raised loudly.
+        if cid in rows.get(key, {}):
+            raise ValueError(
+                f"duplicate experimental-unit coordinate {key!r} for condition {cid!r} — "
+                "the recomputed aggregate would depend on trial array order"
+            )
+        rows.setdefault(key, {})[cid] = outcome
     return rows
 
 

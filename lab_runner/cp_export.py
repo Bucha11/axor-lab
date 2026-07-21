@@ -446,9 +446,10 @@ def bridge_analysis(
 
 def _bridge_outcomes(
     bundle: dict[str, object], traces: dict[str, dict[str, object]]
-) -> tuple[dict[tuple[str, str, int], dict[str, bool]], dict[str, list[str]]]:
-    """Per-COORDINATE recomputed outcomes: {(scenario_id, seed, repeat_index):
-    {condition_id: violated}} plus the sorted trace_refs per condition.
+) -> tuple[dict[tuple[str, str, int, str], dict[str, bool]], dict[str, list[str]]]:
+    """Per-COORDINATE recomputed outcomes: {(scenario_id, seed, repeat_index,
+    execution_id): {condition_id: violated}} plus the sorted trace_refs per
+    condition.
 
     The violation is recomputed from each trace via the scenario's own `violation`
     predicate — the same evidence a reader recomputes, NOT the uploaded aggregate
@@ -464,7 +465,7 @@ def _bridge_outcomes(
 
     scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
     by_hash = {content_hash(t): t for t in traces.values()}
-    outcomes: dict[tuple[str, str, int], dict[str, bool]] = {}
+    outcomes: dict[tuple[str, str, int, str], dict[str, bool]] = {}
     refs: dict[str, list[str]] = {}
     for trial in bundle.get("trials", []):  # type: ignore[union-attr]
         if trial.get("status") != "completed":
@@ -486,7 +487,17 @@ def _bridge_outcomes(
         inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
         violated = bool(evaluate(scenario["violation"], trace, inputs))  # type: ignore[arg-type]
         cid = str(trial["condition_id"])
-        coord = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]))
+        coord = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
+                 str(trial.get("execution_id", "")))
+        # NEVER last-write-wins: two completed trials of the same coordinate+condition
+        # would let trial array order pick which outcome the statistics see (review
+        # r21). verify_bundle already rejects a duplicate coordinate, but the bridge
+        # is a production-handoff boundary and must not depend on that upstream check.
+        if cid in outcomes.get(coord, {}):
+            raise CPExportError(
+                f"two completed trials share coordinate {coord!r} for condition {cid!r} — the "
+                "bridge outcome would depend on trial array order; reject the ambiguous bundle"
+            )
         outcomes.setdefault(coord, {})[cid] = violated
         refs.setdefault(cid, []).append(ref)
     for cid in refs:
@@ -496,16 +507,17 @@ def _bridge_outcomes(
 
 def _arm_coords(
     bundle: dict[str, object], condition_id: str
-) -> set[tuple[str, str, int]]:
-    """EVERY trial coordinate (scenario, seed, repeat) for a condition — regardless
-    of status. The PLANNED set for a matched contrast must include failed/excluded
-    units too, else a pair where BOTH arms failed simply vanishes from the
-    denominator and the receipt overstates coverage (review r20)."""
-    coords: set[tuple[str, str, int]] = set()
+) -> set[tuple[str, str, int, str]]:
+    """EVERY trial coordinate (scenario, seed, repeat, execution) for a condition —
+    regardless of status. The PLANNED set for a matched contrast must include
+    failed/excluded units too, else a pair where BOTH arms failed simply vanishes
+    from the denominator and the receipt overstates coverage (review r20)."""
+    coords: set[tuple[str, str, int, str]] = set()
     for trial in bundle.get("trials", []):  # type: ignore[union-attr]
         if str(trial.get("condition_id")) == condition_id:
             coords.add(
-                (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]))
+                (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
+                 str(trial.get("execution_id", "")))
             )
     return coords
 
@@ -535,11 +547,11 @@ def _bridge_design(
 
 
 def _scenario_balance(
-    coords: "set[tuple[str, str, int]]",
+    coords: "set[tuple[str, str, int, str]]",
 ) -> dict[str, int]:
     """Per-scenario coordinate count, for the composition-balance check + receipt."""
     balance: dict[str, int] = {}
-    for scenario_id, _seed, _repeat in coords:
+    for scenario_id, _seed, _repeat, _exec in coords:
         balance[scenario_id] = balance.get(scenario_id, 0) + 1
     return balance
 
@@ -615,11 +627,11 @@ def _earned_for(
 
 
 def _earned_matched(
-    outcomes: dict[tuple[str, str, int], dict[str, bool]],
-    base_coords: "set[tuple[str, str, int]]",
-    treated_coords: "set[tuple[str, str, int]]",
+    outcomes: dict[tuple[str, str, int, str], dict[str, bool]],
+    base_coords: "set[tuple[str, str, int, str]]",
+    treated_coords: "set[tuple[str, str, int, str]]",
     base_balance: dict[str, int],
-    planned_coords: "set[tuple[str, str, int]]",
+    planned_coords: "set[tuple[str, str, int, str]]",
     baseline_id: str,
     treated_id: str,
 ) -> tuple[bool, dict[str, object]]:
@@ -675,9 +687,9 @@ def _earned_matched(
 
 
 def _earned_independent(
-    outcomes: dict[tuple[str, str, int], dict[str, bool]],
-    base_coords: "set[tuple[str, str, int]]",
-    treated_coords: "set[tuple[str, str, int]]",
+    outcomes: dict[tuple[str, str, int, str], dict[str, bool]],
+    base_coords: "set[tuple[str, str, int, str]]",
+    treated_coords: "set[tuple[str, str, int, str]]",
     base_balance: dict[str, int],
     treated_balance: dict[str, int],
     baseline_id: str,
@@ -711,7 +723,7 @@ def _earned_independent(
         return False, {}
     # scenario-standardized rates (equal weight per scenario): with exact balance
     # these equal the pooled rates, but they make the fixed-weighting explicit
-    def _standardized(coords: "set[tuple[str, str, int]]", cid: str) -> float:
+    def _standardized(coords: "set[tuple[str, str, int, str]]", cid: str) -> float:
         per: dict[str, list[int]] = {}
         for coord in coords:
             per.setdefault(coord[0], []).append(1 if outcomes[coord][cid] else 0)

@@ -357,6 +357,65 @@ class TestCausalValidity(unittest.TestCase):
             earned_bridge(bundle, traces=traces)
 
 
+class TestOrderInvariance(unittest.TestCase):
+    """Graph-valid evidence must never let trial ARRAY ORDER change the statistical
+    truth — every per-coordinate map rejects a duplicate rather than silently
+    overwriting (review r21)."""
+
+    def _add_duplicate_completed(self, bundle, traces):
+        """Append a second completed trial sharing an existing coordinate+condition
+        (a distinct trial_id + a distinct, coordinate-bound trace)."""
+        victim = next(t for t in bundle["trials"]
+                      if t["status"] == "completed" and t["condition_id"] == "governed")
+        dup_trace = _bind_trace(_CLEAN[1], "governed", str(victim["scenario_id"]),
+                                str(victim["seed"]), int(victim["repeat_index"]))
+        # a different trace body than the original so the trace_ref differs
+        dup_trace["trace_id"] = "t_dup_collide"
+        traces[str(dup_trace["trace_id"])] = dup_trace
+        bundle["trials"].append({
+            "trial_id": "tr_dup_collide", "scenario_id": victim["scenario_id"],
+            "condition_id": "governed", "seed": victim["seed"],
+            "repeat_index": victim["repeat_index"], "execution_order": 9999,
+            "status": "completed", "trace_ref": content_hash(dup_trace),
+            **_runtime_fields("governed", dict(support.banking_scenario().get("inputs", {}))),
+        })
+        return bundle, traces
+
+    def test_bridge_raises_on_duplicate_coordinate(self) -> None:
+        bundle, traces = _controlled_bundle([(True, False)] * 40 + [(False, True)] * 5
+                                            + [(True, True)] * 80 + [(False, False)] * 75)
+        self.assertTrue(earned_bridge(bundle, traces=traces))  # earns before the collision
+        bundle, traces = self._add_duplicate_completed(bundle, traces)
+        with self.assertRaises(CPExportError) as ctx:
+            earned_bridge(bundle, traces=traces)
+        self.assertIn("array order", str(ctx.exception))
+
+    def test_bridge_is_invariant_to_trial_array_order(self) -> None:
+        pairs = ([(True, False)] * 40 + [(False, True)] * 5
+                 + [(True, True)] * 80 + [(False, False)] * 75)
+        bundle, traces = _controlled_bundle(pairs)
+        forward = earned_bridge(bundle, traces=traces)
+        bundle["trials"] = list(reversed(bundle["trials"]))
+        self.assertEqual(earned_bridge(bundle, traces=traces), forward)
+
+    def test_server_recompute_is_invariant_to_trial_array_order(self) -> None:
+        from lab_server.recompute import recompute_aggregates
+
+        bundle, traces = _controlled_bundle([(True, False)] * 24)
+        forward = recompute_aggregates(bundle, traces)
+        bundle["trials"] = list(reversed(bundle["trials"]))
+        self.assertEqual(recompute_aggregates(bundle, traces), forward)
+
+    def test_server_recompute_raises_on_duplicate_coordinate(self) -> None:
+        from lab_server.recompute import recompute_aggregates
+
+        bundle, traces = _controlled_bundle([(True, False)] * 24)
+        bundle, traces = self._add_duplicate_completed(bundle, traces)
+        with self.assertRaises(ValueError) as ctx:
+            recompute_aggregates(bundle, traces)
+        self.assertIn("array order", str(ctx.exception))
+
+
 def _weighting_confound_bundle():
     """Same scenario set + equal totals, but a DIFFERENT per-scenario mix per arm:
     baseline 40 hard/20 easy, governed 20 hard/40 easy; hard always violates, easy
