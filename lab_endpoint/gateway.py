@@ -110,6 +110,12 @@ class _Run:
     # is stable regardless of later run mutation (there is none post-finalize, but
     # the snapshot makes delivery independent of re-assembly)
     frozen_trace: dict[str, object] | None = field(default=None, repr=False)
+    # the EXACT serialized byte size of the frozen trace, measured at finalize —
+    # the real retained-memory footprint, which is what the retained BYTE cap must
+    # account for (the accepted-event nbytes under-counts the assembled trace with
+    # its normalized values, gate decisions, and canonical hashes). Reserved at the
+    # finalize transition, not merely checked at the next open (review r19).
+    frozen_bytes: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
     def labels_of(self, value_id: str) -> tuple[str, ...]:
@@ -212,6 +218,37 @@ def make_gateway(
     run_secrets: dict[str, str] = {}
     global_lock = threading.Lock()  # guards run creation + the runs/secrets maps
 
+    def _reserve_retained(incoming_bytes: int) -> bool:
+        """Reserve retained COUNT + BYTE capacity for one run about to finalize.
+        Caller holds global_lock. Evicts ONLY acknowledged (DELIVERED) finalized
+        runs to make room — an unfetched or fetched-but-unacked trace is NEVER
+        dropped (lossless, review r18). Returns True if the incoming run fits after
+        eviction, False if retention is full of unread evidence (the caller then
+        keeps the run ACTIVE and 429s, rather than admitting it to a retained set
+        that is already over budget — review r19)."""
+        def retained_count() -> int:
+            return sum(1 for r in runs.values() if r.finalized)
+
+        def retained_bytes() -> int:
+            return sum(r.frozen_bytes for r in runs.values() if r.finalized)
+
+        # incoming_bytes larger than the whole budget can never fit — reject up front
+        if incoming_bytes > retained_byte_cap or retained_cap < 1:
+            # still try to free everything acked, then re-check the count path
+            pass
+        while (
+            retained_count() + 1 > retained_cap
+            or retained_bytes() + incoming_bytes > retained_byte_cap
+        ):
+            victim = next(
+                (rid for rid, r in runs.items() if r.finalized and r.delivered), None
+            )
+            if victim is None:
+                return False
+            del runs[victim]
+            run_secrets.pop(victim, None)
+        return True
+
     def gate_intent(run: _Run, tool: str, arg_bindings: dict[str, str],
                     args: dict[str, object]) -> dict[str, object]:
         """Gate an intent. `args` are the AUTHORITATIVE args assembled from the
@@ -300,35 +337,12 @@ def make_gateway(
                             "error": "active run quota exceeded — finalize open runs before opening more"
                         })
                         return
-                    # keep the RETAINED finalized set within its budget — BOTH a
-                    # count cap and a byte cap — by evicting ONLY DELIVERED
-                    # (acknowledged) runs: the client confirmed it stored those
-                    # bytes, so dropping them loses nothing. An unfetched or
-                    # fetched-but-unacked trace is NEVER evicted: that would lose
-                    # evidence the client has not received, exactly the loss the
-                    # delivery lifecycle promises against (review r18). If retention
-                    # is full (by count OR bytes) and nothing acked is left to drop,
-                    # FAIL CLOSED (429) rather than shed unread evidence.
-                    def _retained_bytes() -> int:
-                        return sum(r.nbytes for r in runs.values() if r.finalized)
-
-                    def _over_budget() -> bool:
-                        finalized = sum(1 for r in runs.values() if r.finalized)
-                        return finalized >= retained_cap or _retained_bytes() >= retained_byte_cap
-
-                    while _over_budget():
-                        victim = next(
-                            (rid for rid, r in runs.items() if r.finalized and r.delivered), None
-                        )
-                        if victim is None:
-                            self._json(429, {
-                                "error": "retained-trace quota exceeded (count or bytes) and no "
-                                "acknowledged trace to evict — acknowledge (POST /trace/ack) a "
-                                "delivered trace first; unread evidence is never dropped"
-                            })
-                            return
-                        del runs[victim]
-                        run_secrets.pop(victim, None)
+                    # RETAINED capacity is reserved at the FINALIZE transition, not
+                    # here (review r19): checking it only at open let a client
+                    # pre-open max_runs active runs and then finalize them all,
+                    # blowing past the retained cap by orders of magnitude before the
+                    # next open ever ran this check. Opening a run only consumes an
+                    # ACTIVE slot, bounded above.
                     run_id = f"r_ep_{secrets.token_hex(16)}"  # unpredictable, not sequential
                     run_secret = secrets.token_hex(16)
                     runs[run_id] = _Run(run_id, condition, scenario_id, inputs, kernel,
@@ -362,10 +376,27 @@ def make_gateway(
                             "details": errors[:10],
                         })
                         return
-                    run.finalized = True
-                    # freeze the conformant body once, so every GET and the ack
-                    # serve the identical bytes independent of quota/re-assembly
-                    run.frozen_trace = trace
+                    # RESERVE retained capacity at THIS transition (review r19): the
+                    # run is about to leave the active set and become a retained
+                    # frozen trace, so its exact serialized footprint must fit the
+                    # retained count + byte budget NOW. If it doesn't (and no acked
+                    # trace can be evicted to make room), the run stays ACTIVE and we
+                    # 429 — never admit it to a retained set already over budget.
+                    frozen_bytes = len(json.dumps(trace))
+                    with global_lock:
+                        if not _reserve_retained(frozen_bytes):
+                            self._json(429, {
+                                "error": "retained-trace quota exceeded (count or bytes) and no "
+                                "acknowledged trace to evict — acknowledge (POST /trace/ack) a "
+                                "delivered trace first; the run stays open, unread evidence is "
+                                "never dropped"
+                            })
+                            return
+                        run.finalized = True
+                        # freeze the conformant body once, so every GET and the ack
+                        # serve the identical bytes independent of quota/re-assembly
+                        run.frozen_trace = trace
+                        run.frozen_bytes = frozen_bytes
                     trace_ref = content_hash(trace)
                 # the client learns the ref it will later acknowledge (review r17)
                 self._json(200, {"ok": True, "finalized": True, "trace_ref": trace_ref})
