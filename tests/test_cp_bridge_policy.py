@@ -684,7 +684,7 @@ class TestBridgeExportPortability(unittest.TestCase):
         from pathlib import Path
 
         from lab_runner.bundle_io import write_bundle_dir
-        from lab_runner.cli import main
+        from lab_runner.cli import EXIT_UNVERIFIED, main
 
         bundle, traces = _powered_real_bundle()
         with tempfile.TemporaryDirectory() as tmp:
@@ -695,14 +695,16 @@ class TestBridgeExportPortability(unittest.TestCase):
                                     "--out", str(out)]), 0)
             # the directory carries its own source bundle + all traces
             self.assertTrue((out / "source-bundle" / "bundle.json").is_file())
-            # recompute from scratch → matches
-            self.assertEqual(main(["verify-cp-export", str(out)]), 0)
+            # an UNSIGNED export is UNVERIFIED unless --allow-unsigned is given (r21)
+            self.assertEqual(main(["verify-cp-export", str(out)]), EXIT_UNVERIFIED)
+            # recompute from scratch → matches (integrity + derivability accepted)
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 0)
             # a DOCTORED deploy config no longer recomputes → fails
             deploy = out / "cp-deploy.json"
             cfg = json.loads(deploy.read_text())
             cfg["config_hash"] = "sha256:" + "0" * 64
             deploy.write_text(json.dumps(cfg))
-            self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
 
     def test_verify_cp_export_checks_bridge_analysis_and_stale_files(self) -> None:
         import tempfile
@@ -754,7 +756,10 @@ class TestBridgeExportPortability(unittest.TestCase):
             self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
                                     "--out", str(out), "--overwrite"]), 0)
             self.assertFalse(stale.exists())
-            self.assertEqual(main(["verify-cp-export", str(out)]), 0)
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 0)
+            # the atomic swap leaves no staging/backup siblings behind
+            self.assertFalse((Path(tmp) / "cp.staging").exists())
+            self.assertFalse((Path(tmp) / "cp.old").exists())
 
     @unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl not installed")
     def test_signed_manifest_verifies_and_wrong_key_fails(self) -> None:
@@ -782,6 +787,70 @@ class TestBridgeExportPortability(unittest.TestCase):
             self.assertEqual(main(["verify-cp-export", str(out)]), EXIT_UNVERIFIED)
             # wrong key → INVALID (1)
             self.assertEqual(main(["verify-cp-export", str(out), "--pubkey", wrong]), 1)
+            # a signature verifies but a WRONG expected author is INVALID (1)
+            self.assertEqual(
+                main(["verify-cp-export", str(out), "--pubkey", pub,
+                      "--expect-author", "someone-else"]), 1)
+            self.assertEqual(
+                main(["verify-cp-export", str(out), "--pubkey", pub,
+                      "--expect-author", "acme"]), 0)
+
+    def _export(self, tmp):
+        from pathlib import Path
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        bdir = Path(tmp) / "bundle"
+        write_bundle_dir(bdir, bundle, traces)
+        out = Path(tmp) / "cp"
+        self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                "--out", str(out)]), 0)
+        return out
+
+    def test_verify_rejects_tampered_semantic_ref(self) -> None:
+        import tempfile
+
+        from lab_runner.cli import main
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._export(tmp)
+            manifest = json.loads((out / "manifest.json").read_text())
+            manifest["deploy_config_ref"] = "sha256:" + "0" * 64  # lie about the config
+            (out / "manifest.json").write_text(json.dumps(manifest))
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
+
+    def test_verify_rejects_unsafe_manifest_path(self) -> None:
+        import tempfile
+
+        from lab_runner.cli import main
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._export(tmp)
+            manifest = json.loads((out / "manifest.json").read_text())
+            manifest["files"]["../escape.json"] = manifest["files"]["cp-deploy.json"]
+            (out / "manifest.json").write_text(json.dumps(manifest))
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
+
+    def test_verify_rejects_malformed_manifest(self) -> None:
+        import tempfile
+
+        from lab_runner.cli import main
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._export(tmp)
+            (out / "manifest.json").write_text("{not json")
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
+
+    def test_injected_nested_manifest_json_is_caught(self) -> None:
+        # only the ROOT manifest.json is excluded from the integrity scan; a file
+        # named manifest.json injected into a SUBDIR is an unlisted (stale/injected)
+        # file and must be flagged, not silently ignored (review r21)
+        import tempfile
+
+        from lab_runner.cli import main
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._export(tmp)
+            (out / "source-bundle" / "manifest.json").write_text('{"sneaky": true}')
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
 
 
 class TestExportVerifiesGraph(unittest.TestCase):
