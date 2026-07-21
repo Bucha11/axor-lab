@@ -18,7 +18,7 @@ from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle
 from lab_runner import run_experiment_suite
-from lab_runner.cli import EXIT_FAILURE, EXIT_OK, EXIT_UNVERIFIED, main
+from lab_runner.cli import EXIT_FAILURE, EXIT_OK, EXIT_UNVERIFIED, EXIT_VALIDATION, main
 from lab_server.store import PublicationStore
 
 _HAS_NACL = importlib.util.find_spec("nacl") is not None
@@ -72,8 +72,19 @@ class TestServerPackageVerification(unittest.TestCase):
         p.write_text(json.dumps(pkg))
         return p
 
-    def test_intact_server_package_verifies(self) -> None:
-        self.assertEqual(main(["verify", str(self._write(self.pkg))]), EXIT_OK)
+    def test_intact_but_unsigned_server_package_is_unverified(self) -> None:
+        # the default store has no signing key → an UNSIGNED acceptance. It proves
+        # only internal self-consistency, not that a real server ran the checks, so
+        # it is UNVERIFIED (not a pass) unless the caller opts into local-dev mode
+        self.assertEqual(main(["verify", str(self._write(self.pkg))]), EXIT_UNVERIFIED)
+
+    def test_unsigned_server_acceptance_returns_unverified(self) -> None:
+        self.assertEqual(main(["verify", str(self._write(self.pkg))]), EXIT_UNVERIFIED)
+
+    def test_unsigned_server_acceptance_passes_with_allow_unsigned(self) -> None:
+        self.assertEqual(
+            main(["verify", str(self._write(self.pkg)), "--allow-unsigned-server"]), EXIT_OK
+        )
 
     def test_stripping_receipt_from_server_package_fails(self) -> None:
         pkg = dict(self.pkg)
@@ -103,11 +114,30 @@ class TestServerPackageVerification(unittest.TestCase):
         pkg["publication"]["publication_id"] = "e_deadbeefdeadbeefdeadbeefdeadbeef"
         self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_FAILURE)
 
-    def test_bare_bundle_package_still_passes_without_proofs(self) -> None:
-        # a minimal {bundle, traces} package (no schema_version/publication/
-        # acceptance) is NOT a server package — no proofs required
+    def test_verify_json_requires_versioned_envelope_by_default(self) -> None:
+        # a bare {bundle, traces} JSON has no versioned envelope; by default it is
+        # REFUSED so a server package cannot be downgraded to bare silently
         pkg = {"bundle": self.bundle, "traces": list(self.traces.values())}
-        self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_OK)
+        self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_VALIDATION)
+
+    def test_bare_package_requires_explicit_allow_bare(self) -> None:
+        pkg = {"bundle": self.bundle, "traces": list(self.traces.values())}
+        # without the flag → refused; with it → integrity+replay only, passes
+        self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_VALIDATION)
+        self.assertEqual(main(["verify", str(self._write(pkg)), "--allow-bare"]), EXIT_OK)
+
+    def test_stripping_all_server_package_markers_does_not_downgrade_to_bare(self) -> None:
+        # strip the envelope AND every proof at once — the classic downgrade. With
+        # no versioned schema_version, the file is refused (not read as honest bare)
+        pkg = {"bundle": self.pkg["bundle"], "traces": self.pkg["traces"]}
+        self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_VALIDATION)
+
+    def test_acceptance_integrity_must_match_publication_integrity(self) -> None:
+        pkg = json.loads(json.dumps(self.pkg))
+        # the publication is hash_verified; an acceptance claiming `signed` over it
+        # is a mismatched record and must fail (even though nothing else changed)
+        pkg["acceptance"]["integrity"] = "signed"
+        self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_FAILURE)
 
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")

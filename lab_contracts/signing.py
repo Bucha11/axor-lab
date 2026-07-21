@@ -190,6 +190,16 @@ def verify_acceptance(
         raise SignatureInvalid("acceptance.publication_id does not match the publication")
     if str(acceptance.get("bundle_ref")) != str(publication.get("bundle_ref")):
         raise SignatureInvalid("acceptance.bundle_ref does not match the publication")
+    # the acceptance's integrity claim must match the publication's — an acceptance
+    # attesting `signed` over a `hash_verified` publication (or vice versa) is a
+    # mismatched record and must not pass (review r17)
+    pub_integrity = str(publication.get("integrity", "hash_verified"))
+    acc_integrity = str(acceptance.get("integrity", pub_integrity))
+    if acc_integrity != pub_integrity:
+        raise SignatureInvalid(
+            f"acceptance.integrity {acc_integrity!r} does not match publication.integrity "
+            f"{pub_integrity!r}"
+        )
     report = acceptance.get("semantic_report")
     if not isinstance(report, dict) or str(acceptance.get("semantic_report_ref")) != content_hash(report):
         raise SignatureInvalid("acceptance.semantic_report_ref does not match the semantic_report")

@@ -310,22 +310,40 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         return EXIT_FAILURE
     print(f"replay: bit-identical over {len(report.decisions)} trace(s)")
 
-    data = _package_data(path)
-    receipt = data.get("receipt") if data else None
-    # a SERVER reproduction package (bears the package schema, or carries a
-    # publication/acceptance) MUST present every proof object — a bundle directory
-    # or a bare {bundle,traces} package legitimately has none
-    is_server_package = bool(data) and (
-        str(data.get("schema_version")) == _REPRODUCTION_PACKAGE_SCHEMA
-        or "publication" in data or "acceptance" in data
-    )
-    if not isinstance(receipt, dict):
-        if is_server_package:
-            print("receipt: MISSING from a server package (stripped?) — refusing to pass",
-                  file=sys.stderr)
-            return EXIT_FAILURE
+    # A bundle DIRECTORY is a local artifact that never carried server proofs — it
+    # verifies as bundle-integrity + replay only, and cannot be "downgraded".
+    if path.is_dir():
         print("receipt: none (a bundle directory carries no portable receipt)")
         return EXIT_OK
+
+    data = _package_data(path)
+    # A downloaded `.json` MUST be a VERSIONED reproduction envelope. Detection can
+    # no longer key on the PRESENCE of a publication/acceptance/receipt: an
+    # attacker downgrades a server package to a bare {bundle,traces} by stripping
+    # the envelope AND every proof at once, and autodetection then reads it as an
+    # honest bare package and exits 0. The envelope schema_version is the one
+    # marker whose ABSENCE is meaningful — a bare file without --allow-bare is
+    # refused, so a stripped server package cannot masquerade as bare (review r17).
+    has_envelope = bool(data) and str(data.get("schema_version")) == _REPRODUCTION_PACKAGE_SCHEMA
+    if not has_envelope:
+        if not getattr(args, "allow_bare", False):
+            print(
+                f"package: NOT a versioned reproduction envelope (missing schema_version "
+                f"{_REPRODUCTION_PACKAGE_SCHEMA!r}). A server package cannot be silently "
+                "downgraded to a bare bundle — pass --allow-bare to verify a local "
+                "bundle+traces file as bare (integrity + replay only, no server proofs).",
+                file=sys.stderr,
+            )
+            return EXIT_VALIDATION
+        print("package: bare (bundle+traces only, --allow-bare) — no server proofs to check")
+        return EXIT_OK
+
+    assert data is not None
+    receipt = data.get("receipt")
+    if not isinstance(receipt, dict):
+        print("receipt: MISSING from a server package (stripped?) — refusing to pass",
+              file=sys.stderr)
+        return EXIT_FAILURE
 
     from lab_contracts.publication import verify_publication_binding
     from lab_contracts.signing import (
@@ -350,36 +368,49 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         kind = "signature VERIFIED" if str(receipt.get("integrity")) == "signed" else "signed_ref OK (hash-only)"
         print(f"receipt: {kind}")
 
-    if is_server_package:
-        publication = data.get("publication")
-        acceptance = data.get("acceptance")
-        if not isinstance(publication, dict) or not isinstance(acceptance, dict):
-            print("package: MISSING publication or acceptance (server package) — refusing to pass",
-                  file=sys.stderr)
-            return EXIT_FAILURE
-        # 2) publication binds to the bundle and its own id
-        problems = verify_publication_binding(publication, bundle)
-        if problems:
-            print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
-            return EXIT_FAILURE
-        print("publication: bound (id + bundle_ref + claims)")
-        # 3) server acceptance binds + (optionally) verifies
-        try:
-            verify_acceptance(
-                acceptance, publication,
-                server_pubkey_hex=getattr(args, "server_pubkey", None),
-                expected_server=getattr(args, "server", None),
-                expected_key_id=getattr(args, "server_key_id", None),
-            )
-        except SignatureInvalid as exc:
-            print(f"acceptance: INVALID — {exc}", file=sys.stderr)
-            return EXIT_FAILURE
-        except SignatureUnavailable as exc:
-            print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
-            unverified = True
+    publication = data.get("publication")
+    acceptance = data.get("acceptance")
+    if not isinstance(publication, dict) or not isinstance(acceptance, dict):
+        print("package: MISSING publication or acceptance (server package) — refusing to pass",
+              file=sys.stderr)
+        return EXIT_FAILURE
+    # 2) publication binds to the bundle and its own id
+    problems = verify_publication_binding(publication, bundle)
+    if problems:
+        print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
+        return EXIT_FAILURE
+    print("publication: bound (id + bundle_ref + claims)")
+    # 3) server acceptance binds + (optionally) verifies. verify_acceptance now
+    # also requires acceptance.integrity == publication.integrity.
+    try:
+        verify_acceptance(
+            acceptance, publication,
+            server_pubkey_hex=getattr(args, "server_pubkey", None),
+            expected_server=getattr(args, "server", None),
+            expected_key_id=getattr(args, "server_key_id", None),
+        )
+    except SignatureInvalid as exc:
+        print(f"acceptance: INVALID — {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    except SignatureUnavailable as exc:
+        print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
+        unverified = True
+    else:
+        if str(acceptance.get("algorithm")) == "ed25519":
+            print("acceptance: signature VERIFIED")
+        elif getattr(args, "allow_unsigned_server", False):
+            print("acceptance: unsigned (accepted via --allow-unsigned-server; local dev only)")
         else:
-            signed = str(acceptance.get("algorithm")) == "ed25519"
-            print(f"acceptance: {'signature VERIFIED' if signed else 'bound (unsigned)'}")
+            # an UNSIGNED acceptance proves only internal self-consistency, NOT that
+            # a specific Axor Lab server ran the checks — anyone can mint one. It is
+            # not an authenticated server verification, so it is UNVERIFIED (r17).
+            print(
+                "acceptance: UNVERIFIED — unsigned server acceptance is not an authenticated "
+                "verification (pass --server-pubkey to check a signed one, or "
+                "--allow-unsigned-server for local development)",
+                file=sys.stderr,
+            )
+            unverified = True
 
     return EXIT_UNVERIFIED if unverified else EXIT_OK
 
@@ -1202,6 +1233,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_verify.add_argument(
         "--server-key-id", help="expected server key_id (trust anchor) for the acceptance receipt"
+    )
+    p_verify.add_argument(
+        "--allow-bare", action="store_true",
+        help="verify a bare {bundle,traces} JSON (no versioned envelope) as integrity+replay only; "
+             "without this a non-envelope JSON is refused so a server package cannot be downgraded",
+    )
+    p_verify.add_argument(
+        "--allow-unsigned-server", action="store_true",
+        help="accept an UNSIGNED server acceptance as passing (local dev only); by default an "
+             "unsigned acceptance is UNVERIFIED because it is not an authenticated server verification",
     )
     p_verify.set_defaults(func=_cmd_verify)
 
