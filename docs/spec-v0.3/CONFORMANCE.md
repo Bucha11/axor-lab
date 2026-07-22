@@ -76,13 +76,21 @@ the store; a runtime can only claim/drive its own jobs. Durability, per-tenant
 scoping, SSE streaming, and bundle assembly from the collected traces are the
 extension points — the connection possibility is open, the implementation is small.
 
+**Phase 3 — acceptance machinery collapsed** (`lab_server/store.py`,
+`lab_runner/cli.py`, `lab_contracts/signing.py`): `lab_server` acceptance is now
+just *publication + bundle hash + optional signature + reproduction records*. The
+`reacceptance/v1` schema, `acceptance-history/` chain, tombstone-chain resolution
+and quarantine/re-root logic are removed (v0.3 defers them). `_load_acceptance`
+restores a persisted `axor-lab-acceptance/v1` verbatim (never re-minted under a
+rotated key; an opaque record whose key we no longer hold is preserved untouched);
+a *damaged* persisted acceptance is discarded and a fresh `acceptance/v1` is minted
+from the current bundle on load. `verify_reacceptance` and the CLI's reacceptance
+branch are gone; the download package no longer carries `acceptance_history`. Basic
+single-hop lineage takedown (`_write_lineage_tombstone`) is retained as a Lab
+feature — it is not part of the removed acceptance-chain machinery.
+
 ## Pending
 
-- **Phase 3 — collapse the acceptance machinery.** Reduce `lab_server` acceptance
-  to *publication + bundle hash + optional signature + reproduction records*; remove
-  the `reacceptance/v1`, `acceptance-history/`, tombstone-chain and quarantine/re-root
-  logic (v0.3 defers it). Left for an explicit go-ahead — it reverts the r16–r21
-  acceptance hardening.
 - **Full lifecycle/domain re-model** and the UI-facing endpoints
   (`/scenarios/validate`, `/experiments/plan`, `SSE /runs/{id}/events`,
   `/runs/{id}/results → bundle.aggregates`): the runtime-jobs core is in place; the

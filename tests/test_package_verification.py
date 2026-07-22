@@ -146,11 +146,12 @@ class TestServerPackageVerification(unittest.TestCase):
         pkg["receipt"]["integrity"] = "signed"
         self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_FAILURE)
 
-    def test_package_with_reacceptance_still_verifies(self) -> None:
-        # a package whose acceptance is a REACCEPTANCE/v1 (the server found its
-        # persisted acceptance damaged and re-attested) must verify with the same
-        # rigour as an acceptance/v1 — the verifier accepts the linked
-        # re-attestation, it does not choke on the schema (review r18)
+    def test_damaged_persisted_acceptance_is_reminted_and_verifies(self) -> None:
+        # v0.3 collapses the reacceptance/history machinery: when a persisted
+        # acceptance is found DAMAGED (its semantic_report no longer binds), the
+        # store discards it and mints a FRESH acceptance/v1 from the current bundle
+        # on load — no reacceptance/v1, no history chain. The freshly minted
+        # acceptance binds correctly and verifies.
         root = Path(self.tmp.name) / "store"
         pid = str(self.pkg["publication"]["publication_id"])
         acc_file = root / pid / "acceptance.json"
@@ -159,48 +160,13 @@ class TestServerPackageVerification(unittest.TestCase):
         acc_file.write_text(json.dumps(tampered))
         store = PublicationStore(root=root)
         reloaded = store.get(pid)
-        self.assertEqual(reloaded.acceptance["schema_version"], "axor-lab-reacceptance/v1")
+        acc = store.acceptance(reloaded)
+        self.assertEqual(acc["schema_version"], "axor-lab-acceptance/v1")
+        self.assertNotIn("FABRICATED_CHECK", acc["semantic_report"]["verified"])
         pkg = json.loads(json.dumps(self.pkg))
-        pkg["acceptance"] = reloaded.acceptance
-        pkg["acceptance_history"] = store.acceptance_history(pid)
+        pkg["acceptance"] = acc
         self.assertEqual(
             main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_OK
-        )
-
-    def test_reacceptance_without_resolvable_history_is_rejected(self) -> None:
-        # a reacceptance whose previous_ref names a superseded receipt the package
-        # does NOT carry cannot be confirmed — the verifier refuses it (review r19)
-        root = Path(self.tmp.name) / "store"
-        pid = str(self.pkg["publication"]["publication_id"])
-        acc_file = root / pid / "acceptance.json"
-        tampered = json.loads(acc_file.read_text())
-        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
-        acc_file.write_text(json.dumps(tampered))
-        reloaded = PublicationStore(root=root).get(pid)
-        pkg = json.loads(json.dumps(self.pkg))
-        pkg["acceptance"] = reloaded.acceptance
-        pkg["acceptance_history"] = []  # the named superseded receipt is missing
-        self.assertEqual(
-            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_FAILURE
-        )
-
-    def test_forged_reacceptance_report_is_rejected(self) -> None:
-        # a reacceptance whose semantic_report_ref no longer binds its report must
-        # be refused, exactly like a forged acceptance (review r18)
-        root = Path(self.tmp.name) / "store"
-        pid = str(self.pkg["publication"]["publication_id"])
-        acc_file = root / pid / "acceptance.json"
-        tampered = json.loads(acc_file.read_text())
-        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
-        acc_file.write_text(json.dumps(tampered))
-        store = PublicationStore(root=root)
-        reloaded = store.get(pid)
-        pkg = json.loads(json.dumps(self.pkg))
-        pkg["acceptance"] = reloaded.acceptance
-        pkg["acceptance_history"] = store.acceptance_history(pid)
-        pkg["acceptance"]["semantic_report"]["replay"] = "fabricated"
-        self.assertEqual(
-            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_FAILURE
         )
 
 
