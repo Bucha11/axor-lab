@@ -129,12 +129,16 @@ class StoredPublication:
     # Re-deriving it would re-sign with whatever key the server holds NOW, silently
     # replacing the historical attestation (and its key_id) when the key rotates.
     acceptance: dict[str, object] | None = None
-    # set when a PERSISTED acceptance was found structurally-an-acceptance/v1 but
-    # FAILED verification under a known key (damaged or forged): the server does
-    # NOT silently mint a fresh clean receipt over it (that would erase the fact of
-    # tampering, review v0.3-acceptance). The publication is degraded/hidden and an
-    # operator must explicitly re-verify / re-publish.
-    acceptance_invalid: bool = False
+    # the health of the PERSISTED acceptance on a cold load (review v0.3-acceptance):
+    #   "ok"        — restored (or an opaque historical record we can't re-verify)
+    #   "missing"   — a published publication with no acceptance.json on disk
+    #   "malformed" — unreadable / non-object / wrong-schema acceptance
+    #   "invalid"   — an acceptance/v1 that FAILED verification (damaged or forged)
+    # Anything but "ok" is degraded: the server does NOT mint a fresh clean receipt
+    # over it (that would erase the loss/tampering); the publication is hidden and an
+    # operator must explicitly re-verify / re-publish. A fresh publish never goes
+    # through the loader, so a degraded status only ever means a damaged stored one.
+    acceptance_status: str = "ok"
     # the STABLE evidence lineage this publication rests on (review r15) — the
     # takedown/read guards key on this, not on the packaging-sensitive bundle_ref
     lineage_ref: str = ""
@@ -142,6 +146,12 @@ class StoredPublication:
     def __post_init__(self) -> None:
         if not self.lineage_ref:
             self.lineage_ref = evidence_lineage_ref(self.bundle)
+
+    @property
+    def acceptance_invalid(self) -> bool:
+        """True when the persisted acceptance is not healthy (missing/malformed/
+        invalid) — the publication is degraded and must not be served as sound."""
+        return self.acceptance_status != "ok"
 
     def axes(self) -> dict[str, object]:
         return provenance_axes(self.publication, tuple(self.reproductions))
@@ -521,19 +531,21 @@ class PublicationStore:
         mints one here; the mint is deterministic so it reproduces identical bytes
         under the same key.
 
-        A publication whose PERSISTED acceptance was found damaged/forged does NOT
-        get a fresh clean receipt minted here (review v0.3-acceptance): it returns a
-        degraded `acceptance_status=invalid` record so no surface can present it as a
-        healthy attestation. An operator re-verifies / re-publishes to clear it."""
+        A publication whose PERSISTED acceptance is not healthy (missing/malformed/
+        invalid) does NOT get a fresh clean receipt minted here (review
+        v0.3-acceptance): it returns a distinct STATUS envelope — not an
+        `axor-lab-acceptance/v1` object it doesn't satisfy — so no surface can present
+        it as a healthy attestation. An operator re-verifies / re-publishes to clear
+        it."""
         if stored.acceptance_invalid:
             pub = stored.publication
             return {
-                "schema_version": "axor-lab-acceptance/v1",
+                "schema_version": "axor-lab-acceptance-status/v1",
                 "server_id": self.server_id,
                 "publication_id": str(pub["publication_id"]),
-                "acceptance_status": "invalid",
-                "reason": "persisted acceptance failed verification (damaged or forged); "
-                          "re-verify / re-publish to re-issue",
+                "acceptance_status": stored.acceptance_status,
+                "reason": f"persisted acceptance is {stored.acceptance_status} "
+                          "(damaged, lost, or forged); re-verify / re-publish to re-issue",
             }
         if stored.acceptance is not None:
             return stored.acceptance
@@ -862,12 +874,12 @@ class PublicationStore:
             except ValueError:
                 raw = ()
         reproductions = list(rebuild_reproduction_log(raw, self.known_keys, publication_id))
-        acceptance, acceptance_invalid = self._load_acceptance(directory, publication, bundle)
+        acceptance, acceptance_status = self._load_acceptance(directory, publication, bundle)
         self._cache[publication_id] = StoredPublication(
             publication=publication, bundle=bundle, traces=traces, reproductions=reproductions,
             author=author if integrity == "signed" else None,
             signature=signature if integrity == "signed" else None,
-            acceptance=acceptance, acceptance_invalid=acceptance_invalid,
+            acceptance=acceptance, acceptance_status=acceptance_status,
         )
 
     def _server_keyring(self) -> dict[str, str]:
@@ -888,34 +900,31 @@ class PublicationStore:
         directory: Path,
         publication: dict[str, object],
         bundle: dict[str, object],
-    ) -> tuple[dict[str, object] | None, bool]:
-        """Restore the persisted acceptance receipt verbatim (v0.3).
+    ) -> tuple[dict[str, object] | None, str]:
+        """Restore the persisted acceptance receipt (v0.3). Returns
+        `(acceptance_or_None, status)` where status ∈ ok|missing|malformed|invalid.
 
-        Returns `(acceptance_or_None, invalid)`. v0.3 keeps *publication + bundle
-        hash + optional signature + reproduction records*; the r18-r21 reacceptance /
-        acceptance-history / quarantine chains are deferred (architecture-boundary.md).
-        So the loader is simple:
-          - a persisted `axor-lab-acceptance/v1` that BINDS to this publication is
-            restored as-is — never re-minted, so a signed historical receipt keeps
-            its key_id across a server key rotation (review r16);
-          - a SIGNED receipt whose key we hold is signature-checked; one whose key we
-            no longer hold is kept as an opaque historical record;
-          - a receipt that IS an acceptance/v1 but FAILS verification under a known
-            key (damaged/forged) returns `(None, invalid=True)` — the server does NOT
-            mint a fresh clean receipt over it (that would erase the tampering,
-            review v0.3-acceptance); the publication is degraded/hidden until an
-            operator re-verifies;
-          - a truly ABSENT / malformed / wrong-schema receipt returns `(None, False)`
-            and acceptance() deterministically mints a fresh one (a normal publish)."""
+        This runs ONLY on a cold load of an already-persisted publication — a fresh
+        publish mints + persists its acceptance in `publish()` and never reaches
+        here. So a stored publication whose acceptance is absent/unreadable/damaged
+        is a DAMAGED record, not a fresh one: it is flagged (not silently re-minted).
+          - a persisted `axor-lab-acceptance/v1` that BINDS is restored as-is —
+            never re-minted, so a signed historical receipt keeps its key_id across a
+            server key rotation (review r16) → status ok;
+          - a SIGNED receipt whose key we no longer hold is kept as an opaque
+            historical record → status ok;
+          - absent file → missing; unreadable/non-object/wrong-schema → malformed;
+            an acceptance/v1 that FAILS verification under a known key → invalid.
+            All three degrade the publication (review v0.3-acceptance)."""
         path = directory / "acceptance.json"
         if not path.is_file():
-            return None, False
+            return None, "missing"
         try:
             acc = json.loads(path.read_text())
         except ValueError:
-            return None, False
+            return None, "malformed"
         if not isinstance(acc, dict) or str(acc.get("schema_version", "")) != "axor-lab-acceptance/v1":
-            return None, False
+            return None, "malformed"
         from lab_contracts.signing import (
             SignatureInvalid,
             SignatureUnavailable,
@@ -927,14 +936,10 @@ class PublicationStore:
         try:
             verify_acceptance(acc, publication, server_pubkey_hex=pubkey)
         except SignatureUnavailable:
-            # signed & bound, but we hold no key for it -> opaque historical record,
-            # preserved with its original key_id/signature (never re-issued)
-            return acc, False
+            return acc, "ok"  # signed & bound, key not held → opaque historical record
         except SignatureInvalid:
-            # it CLAIMED to be this publication's acceptance/v1 but does not verify:
-            # damaged or forged. Flag it invalid instead of quietly re-minting.
-            return None, True
-        return acc, False
+            return None, "invalid"  # damaged or forged — flag, never re-mint
+        return acc, "ok"
 
 
     def _load_reproductions_only(self, publication_id: str) -> None:

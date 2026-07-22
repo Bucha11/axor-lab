@@ -70,6 +70,7 @@ _RUNTIME_JOBS_RE = re.compile(r"^/runtime/jobs$")
 _CLAIM_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/claim$")
 _EVENTS_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/events$")
 _TRIAL_DONE_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/complete$")
+_RETRY_REQ_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/retry-request$")
 _RUN_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)$")
 _RUN_RESULTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/results$")
 _RUN_EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
@@ -191,6 +192,9 @@ class _Job:
     state: str = "waiting_for_runtime"
     trials: dict[str, _Trial] = field(default_factory=dict)
     estimate: dict[str, object] = field(default_factory=dict)
+    retry_requests: dict[str, str] = field(default_factory=dict)  # trial_id -> reason
+    aggregates: list[dict[str, object]] = field(default_factory=list)  # Lab-computed
+    analysis: dict[str, object] | None = None  # the analyzing-phase result
 
 
 class RuntimeJobStore:
@@ -209,6 +213,7 @@ class RuntimeJobStore:
         self.registry: RuntimeRegistry = registry or InMemoryRuntimeRegistry()
         self.trace_store: TraceStore = trace_store or LabTraceStore()
         self._jobs: dict[str, _Job] = {}
+        self._plans: dict[str, list[dict[str, object]]] = {}  # plan_ref -> immutable units
         self._n = 0
 
     def _next(self, prefix: str) -> str:
@@ -229,35 +234,62 @@ class RuntimeJobStore:
         return self.registry.runtime_for_key(ingest_key)
 
     # -- control surface --------------------------------------------------
-    def create_run(self, runtime_ref: str, experiment: dict[str, object],
-                   planned: list[object] | None = None, *,
+    def create_plan(self, experiment: dict[str, object]) -> dict[str, object]:
+        """Server-owned plan: expand an experiment into immutable TrialUnits and
+        store them under a `plan_ref` (review v0.3-plan-binding). `POST /runs` takes
+        the `plan_ref` (or the same experiment) — never a client-supplied list of
+        trial ids — so a run's plan is always Lab's, not the caller's."""
+        planned = plan_experiment(experiment)  # fail-closed on a bad matrix
+        with self._lock:
+            plan_ref = self._next("plan")
+            self._plans[plan_ref] = [dict(u) for u in planned["units"]]  # type: ignore[index]
+            return {"plan_ref": plan_ref, **planned}
+
+    def create_run(self, runtime_ref: str, experiment: dict[str, object] | None = None, *,
+                   plan_ref: str | None = None,
                    require_confirmation: bool = False,
                    estimate: dict[str, object] | None = None) -> dict[str, object]:
         with self._lock:
             if not self.registry.exists(runtime_ref):
                 raise RuntimeJobsError(404, f"unknown runtime_ref {runtime_ref!r}")
+            # the plan is ALWAYS server-owned: resolve a stored plan_ref, or build
+            # units inline from the experiment. There is no client-supplied trial-id
+            # list, and units carry the full coordinate (review v0.3-plan-binding).
+            if plan_ref is not None:
+                unit_src = self._plans.get(plan_ref)
+                if unit_src is None:
+                    raise RuntimeJobsError(404, f"unknown plan_ref {plan_ref!r}")
+            elif experiment is not None:
+                unit_src = plan_experiment(experiment)["units"]  # type: ignore[assignment]
+            else:
+                raise RuntimeJobsError(400, "a run needs a plan_ref or an experiment")
             job_id = self._next("run")
-            plan_src = planned if planned is not None else experiment.get("planned_trials", [])
-            plan_ids: list[str] = []
+            # the run stamps its own run_id into every unit's coordinate; a completed
+            # trace's `trial` block must later equal this exactly
             units: dict[str, dict[str, object]] = {}
-            for entry in (plan_src or []):
-                if isinstance(entry, dict):
-                    # a planned TrialUnit: {trial_id, trial: {coordinate}}
-                    tid = str(entry.get("trial_id"))
-                    unit = entry.get("trial")
-                    if isinstance(unit, dict):
-                        units[tid] = unit
-                else:
-                    tid = str(entry)
+            plan_ids: list[str] = []
+            for u in unit_src:
+                tid = str(u["trial_id"])
+                if tid in units:
+                    raise RuntimeJobsError(400, f"duplicate trial_id in plan: {tid!r}")
+                units[tid] = {
+                    "run_id": job_id,
+                    "scenario_id": u["scenario_id"],
+                    "condition_id": u["condition_id"],
+                    "seed": u["seed"],
+                    "repeat_index": u["repeat_index"],
+                }
                 plan_ids.append(tid)
             # `awaiting_confirmation` sits before run start (ui-backend-contract §4).
             state = "awaiting_confirmation" if require_confirmation else "waiting_for_runtime"
             self._jobs[job_id] = _Job(
-                job_id=job_id, runtime_ref=runtime_ref, assignment=dict(experiment),
+                job_id=job_id, runtime_ref=runtime_ref,
+                assignment=dict(experiment or {}),
                 planned=tuple(plan_ids), units=units, state=state,
                 estimate=dict(estimate or {}),
             )
-            return {"run_id": job_id, "state": state, "estimate": dict(estimate or {})}
+            return {"run_id": job_id, "state": state,
+                    "planned_trials": plan_ids, "estimate": dict(estimate or {})}
 
     def confirm_run(self, job_id: str) -> dict[str, object]:
         """Confirm an `awaiting_confirmation` run (the operator accepted the
@@ -301,11 +333,16 @@ class RuntimeJobStore:
                 for t in job.trials.values()
             ],
             # the accepted trace of each trial's active attempt (resolved from the
-            # TraceStore); aggregates are RECOMPUTED by Lab from these at
-            # bundle/publish time — never uploaded
-            "traces": [self.trace_store.get(t.active.trace_ref)
-                       for t in job.trials.values()
-                       if t.attempts and t.active.trace_ref is not None],
+            # TraceStore); a ref the store no longer resolves is dropped, never
+            # served as a null (review v0.3-tracestore)
+            "traces": [tr for tr in (
+                self.trace_store.get(t.active.trace_ref)
+                for t in job.trials.values()
+                if t.attempts and t.active.trace_ref is not None) if tr is not None],
+            # Lab-COMPUTED aggregates (the analyzing phase), never runtime-supplied.
+            # Empty until the run reaches analyzing/completed.
+            "aggregates": list(job.aggregates),
+            "analysis": job.analysis,
         }
 
     # -- runtime-facing surface ------------------------------------------
@@ -322,8 +359,11 @@ class RuntimeJobStore:
             if job.state != "waiting_for_runtime":
                 raise RuntimeJobsError(409, f"run {job_id!r} is not claimable (state {job.state})")
             job.state = "running"
+            # hand the runtime the assigned units (with run_id-stamped coordinates)
+            # so it stamps each trace's `trial` block to match — binding is exact
             return {"run_id": job_id, "assignment": job.assignment,
-                    "planned_trials": list(job.planned)}
+                    "planned_trials": list(job.planned),
+                    "units": [{"trial_id": t, **job.units[t]} for t in job.planned]}
 
     def append_events(self, job_id: str, trial_id: str, runtime_ref: str,
                       events: list[dict[str, object]],
@@ -354,15 +394,34 @@ class RuntimeJobStore:
                        failure: dict[str, object] | None = None) -> dict[str, object]:
         with self._lock:
             job = self._require_owned(job_id, runtime_ref)
-            self._reject_terminal(job)
+            # a terminal run refuses NEW ingest, but an idempotent re-delivery of an
+            # already-accepted completion (a lost HTTP response) must still succeed —
+            # so only block a brand-new / still-running trial here, and let a
+            # finished trial fall through to the idempotency check below.
+            existing = job.trials.get(trial_id)
+            if job.state in _TERMINAL and (existing is None or existing.status == "running"):
+                raise RuntimeJobsError(409, f"run is {job.state} (terminal); no further ingest")
             trial = self._trial(job, trial_id)
             att = trial.active
-            if att.status in ("completed", "failed"):
-                # immutable: re-completing a finished attempt is refused, not a
-                # silent destructive replace (review v0.3-2). Retry is explicit.
-                raise RuntimeJobsError(409, f"trial {trial_id!r} attempt already {att.status}; "
-                                            "POST .../retry to open a new attempt")
             new_status = status if status in ("completed", "failed") else "completed"
+            from lab_contracts import content_hash
+            incoming_ref = (content_hash(trace)
+                            if new_status == "completed" and isinstance(trace, dict) else None)
+            if att.status in ("completed", "failed"):
+                # IDEMPOTENT completion (review v0.3-idempotency): the SAME terminal
+                # result re-delivered (a lost HTTP response, a network retry) returns
+                # the prior success — it is not a mutation. Only a DIFFERENT
+                # status/trace/failure is an illegal replace (409); a genuine re-run
+                # is an explicit control-owned retry.
+                same = att.status == new_status and (
+                    (new_status == "completed" and incoming_ref == att.trace_ref)
+                    or (new_status == "failed" and failure == att.failure))
+                if same:
+                    return {"trial_id": trial_id, "status": att.status,
+                            "run_state": job.state, "attempt": att.attempt_id,
+                            "trace_ref": att.trace_ref, "idempotent": True}
+                raise RuntimeJobsError(409, f"trial {trial_id!r} attempt already {att.status} "
+                                            "with a different result; retry to open a new attempt")
             if new_status == "completed":
                 # a completed trial MUST carry a conformant trace bound to its unit
                 errors = _validate_trace(trace)
@@ -371,12 +430,9 @@ class RuntimeJobStore:
                         422, "trace is not a conformant trace/v1: " + "; ".join(errors[:5]))
                 assert isinstance(trace, dict)
                 self._bind_unit(trial, trace)
-                from lab_contracts import content_hash
-                # the accepted trace goes to the TraceStore (Lab's own fabric, or a
-                # shared one if injected); the attempt keeps only its ref
-                ref = content_hash(trace)
-                self.trace_store.put(ref, trace)
-                att.trace_ref = ref
+                # the TraceStore owns addressing: it hashes + stores immutably and
+                # returns the ref (Lab's own fabric, or a shared one if injected)
+                att.trace_ref = self.trace_store.put(trace)
             else:  # failed
                 if not isinstance(failure, dict) or not failure:
                     raise RuntimeJobsError(422, "a failed trial requires typed failure details")
@@ -386,12 +442,17 @@ class RuntimeJobStore:
             return {"trial_id": trial_id, "status": att.status, "run_state": job.state,
                     "attempt": att.attempt_id, "trace_ref": att.trace_ref}
 
-    def retry_trial(self, job_id: str, trial_id: str, runtime_ref: str) -> dict[str, object]:
+    def retry_trial(self, job_id: str, trial_id: str) -> dict[str, object]:
         """Open a fresh TrialAttempt that SUPERSEDES the trial's prior one, keeping
-        the prior attempt in the audit history (review v0.3-history). The run
-        returns to `running`; any earlier finalization is invalidated."""
+        the prior attempt in the audit history (review v0.3-history).
+
+        This is a CONTROL action (review v0.3-retry): the runtime cannot restart its
+        own experiments, invalidate shown Results, or run up model costs without Lab
+        deciding. The runtime may only *request* a retry (`request_retry`); Lab (an
+        operator / a retry policy) grants it here. The run returns to `running` and
+        any earlier finalization is invalidated."""
         with self._lock:
-            job = self._require_owned(job_id, runtime_ref)
+            job = self._job(job_id)
             if job.state == "cancelled":
                 raise RuntimeJobsError(409, "run is cancelled")
             trial = job.trials.get(trial_id)
@@ -400,9 +461,22 @@ class RuntimeJobStore:
             prior = trial.active
             att = _Attempt(attempt_id=self._next("att"), supersedes=prior.attempt_id)
             trial.attempts.append(att)
+            job.retry_requests.pop(trial_id, None)
             job.state = "running"
             return {"trial_id": trial_id, "attempt": att.attempt_id,
                     "supersedes": prior.attempt_id, "run_state": job.state}
+
+    def request_retry(self, job_id: str, trial_id: str, runtime_ref: str,
+                      reason: str = "") -> dict[str, object]:
+        """A runtime signals it would re-run a trial (e.g. a transient failure). This
+        only RECORDS the request — it does not change run state; Lab decides whether
+        to grant it via `retry_trial` (review v0.3-retry)."""
+        with self._lock:
+            job = self._require_owned(job_id, runtime_ref)
+            if trial_id not in job.trials:
+                raise RuntimeJobsError(404, f"trial {trial_id!r} has no attempt")
+            job.retry_requests[trial_id] = str(reason)
+            return {"trial_id": trial_id, "retry_requested": True}
 
     # -- internals --------------------------------------------------------
     def _job(self, job_id: str) -> _Job:
@@ -443,15 +517,67 @@ class RuntimeJobStore:
 
     def _maybe_finish(self, job: _Job) -> None:
         if not job.planned:
-            # no explicit plan: a completed trial moves the run to analyzing (the
-            # runtime signals overall completion out of band in this simple form)
             job.state = "analyzing"
             return
         statuses = {tid: (job.trials[tid].status if tid in job.trials else "pending")
                     for tid in job.planned}
-        if all(s in ("completed", "failed") for s in statuses.values()):
-            # every planned trial has a terminal attempt → the run is done
-            job.state = "failed" if any(s == "failed" for s in statuses.values()) else "completed"
+        if not all(s in ("completed", "failed") for s in statuses.values()):
+            return
+        # every planned trial has a terminal attempt → run the analyzing phase:
+        # Lab BUILDS Results from the collected traces (review v0.3-results). The
+        # runtime only supplied traces; Lab recomputes every aggregate itself, so
+        # `/results` serves Lab-computed numbers, never anything the runtime asserted.
+        job.state = "analyzing"
+        self._analyze(job)
+        job.state = "failed" if any(s == "failed" for s in statuses.values()) else "completed"
+
+    def _analyze(self, job: _Job) -> None:
+        """Recompute outcomes + aggregates from the accepted traces (review
+        v0.3-results). Lab evaluates each scenario's `violation` predicate against
+        the trace it collected — it does not trust any runtime-supplied summary. When
+        the run carries the scenario definitions, this yields real ASR aggregates per
+        condition; otherwise it records what it could and why."""
+        try:
+            from lab_analysis import binary_aggregate
+            from lab_runner.predicates import evaluate
+        except ImportError:  # pragma: no cover
+            job.analysis = {"aggregates": [], "note": "analysis engine unavailable"}
+            return
+        scenarios = {
+            str(s.get("name") or s.get("scenario_id")): s
+            for s in job.assignment.get("scenarios", [])  # type: ignore[union-attr]
+            if isinstance(s, dict)
+        }
+        per_condition: dict[str, list[bool]] = {}
+        analyzed = 0
+        missing_defs = False
+        for trial in job.trials.values():
+            att = trial.active
+            if att.status != "completed" or not att.trace_ref or trial.unit is None:
+                continue
+            trace = self.trace_store.get(att.trace_ref)
+            if trace is None:
+                continue
+            scen = scenarios.get(str(trial.unit["scenario_id"]))
+            if scen is None or not isinstance(scen.get("violation"), dict):
+                missing_defs = True
+                continue
+            try:
+                outcome = bool(evaluate(scen["violation"], trace, scen.get("inputs", {})))
+            except (KeyError, TypeError, ValueError):
+                continue
+            per_condition.setdefault(str(trial.unit["condition_id"]), []).append(outcome)
+            analyzed += 1
+        aggregates = [
+            binary_aggregate("ASR", cond, sum(1 for v in vals if v), len(vals))
+            for cond, vals in sorted(per_condition.items())
+        ]
+        job.aggregates = aggregates
+        job.analysis = {
+            "aggregates": aggregates, "metric": "ASR", "trials_analyzed": analyzed,
+            "note": "scenario definitions not carried by the run; ASR not computed"
+                    if missing_defs and not aggregates else "",
+        }
 
 
 def plan_experiment(experiment: dict[str, object]) -> dict[str, object]:
@@ -480,16 +606,27 @@ def plan_experiment(experiment: dict[str, object]) -> dict[str, object]:
         raise RuntimeJobsError(400, f"repeats is not an integer: {raw_repeats!r}") from exc
     if repeats < 1:
         raise RuntimeJobsError(400, f"repeats must be >= 1, got {repeats}")
-    trials = [
-        f"{scenario}:{condition}:{i}"
+    # server-owned, immutable TrialUnits — the client never hands Lab a trial id
+    # (review v0.3-plan-binding). Each unit carries the full experimental coordinate
+    # (minus run_id, which the run stamps at create_run) so a completed trace can be
+    # bound EXACTLY to the unit it claims to be.
+    units = [
+        {
+            "trial_id": f"{scenario}:{condition}:{i}",
+            "scenario_id": scenario,
+            "condition_id": condition,
+            "seed": f"s{i:03d}",
+            "repeat_index": i,
+        }
         for scenario in scenarios
         for condition in condition_ids
         for i in range(repeats)
     ]
     return {
-        "trials": trials,
+        "trials": [u["trial_id"] for u in units],
+        "units": units,
         "estimate": {
-            "trials": len(trials),
+            "trials": len(units),
             "scenarios": len(scenarios),
             "conditions": len(condition_ids),
             "repeats": repeats,
@@ -656,19 +793,24 @@ def make_runtime_server(
                     experiment = body.get("experiment")
                     if not isinstance(experiment, dict):
                         raise RuntimeJobsError(400, "plan requires {experiment}")
-                    self._send(200, plan_experiment(experiment))
+                    # server-owned plan → returns a plan_ref /runs can consume
+                    self._send(200, jobs.create_plan(experiment))
                     return
                 if self.path == "/runs":
                     self._require_control()
                     body = self._read_json()
                     experiment = body.get("experiment")
+                    plan_ref = body.get("plan_ref")
                     runtime_ref = body.get("runtime_ref")
-                    if not isinstance(experiment, dict) or not isinstance(runtime_ref, str):
-                        raise RuntimeJobsError(400, "runs require {runtime_ref, experiment}")
+                    if not isinstance(runtime_ref, str):
+                        raise RuntimeJobsError(400, "runs require a runtime_ref")
+                    if not isinstance(plan_ref, str) and not isinstance(experiment, dict):
+                        raise RuntimeJobsError(400, "runs require a plan_ref or an experiment")
                     estimate = body.get("estimate")
                     self._send(201, jobs.create_run(
-                        runtime_ref, experiment,
-                        planned=body.get("planned_trials"),  # type: ignore[arg-type]
+                        runtime_ref,
+                        experiment if isinstance(experiment, dict) else None,
+                        plan_ref=plan_ref if isinstance(plan_ref, str) else None,
                         require_confirmation=bool(body.get("require_confirmation", False)),
                         estimate=estimate if isinstance(estimate, dict) else None,
                     ))
@@ -680,8 +822,16 @@ def make_runtime_server(
                     return
                 m = _RUN_RETRY_RE.match(self.path)
                 if m:
+                    # retry is a CONTROL action — the runtime cannot restart itself
+                    self._require_control()
+                    self._send(200, jobs.retry_trial(m.group(1), m.group(2)))
+                    return
+                m = _RETRY_REQ_RE.match(self.path)
+                if m:
                     ref = self._runtime_ref()
-                    self._send(200, jobs.retry_trial(m.group(1), m.group(2), ref))
+                    body = self._read_json()
+                    self._send(200, jobs.request_retry(
+                        m.group(1), m.group(2), ref, reason=str(body.get("reason", ""))))
                     return
                 m = _CLAIM_RE.match(self.path)
                 if m:

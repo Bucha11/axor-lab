@@ -143,12 +143,18 @@ integrated deployment injects CP-backed implementations of the SAME ports. The
 domain (experiment assignment, run lifecycle, trace validation, immutable attempts,
 Results, EvidenceCase) never knows which is wired.
 
-  Port (Lab-owned)     Standalone impl (this repo)     Integrated impl (optional)
-  RuntimeRegistry      InMemoryRuntimeRegistry         ControlPlaneRuntimeRegistry
-  TraceStore           LabTraceStore                   ControlPlane/shared trace fabric
-  TraceIngest          RuntimeJobStore (strict)        CP telemetry ingest front
-  ArtifactStore        PublicationStore                shared artifact store
-  PromotionBackend     cp_export (portable package)    shared-ref promotion
+  Port (Lab-owned)     Standalone impl (this repo)     Status
+  RuntimeRegistry      InMemoryRuntimeRegistry         WIRED (injected, swap-proved)
+  TraceStore           LabTraceStore                   WIRED (injected, swap-proved)
+  TraceIngest          RuntimeJobStore (strict)        declared — adapter pending
+  ArtifactStore        PublicationStore                declared — adapter pending
+  PromotionBackend     cp_export (portable package)    declared — adapter pending
+
+Honest status (review v0.3-ports): only `RuntimeRegistry` and `TraceStore` are real
+seams today — injected into `RuntimeJobStore`, swap-proved by tests. The other three
+are declared contracts naming the target shape; the standalone code that plays each
+role does not yet expose exactly that interface, so a thin conforming adapter is
+still pending. Documented so the boundary is explicit, not because the swap works.
 
 `RuntimeJobStore(registry=…, trace_store=…)` takes both providers by injection and
 defaults to Lab's standalone ones — a fully working, CP-free deployment. `RuntimeRef`
@@ -164,6 +170,35 @@ Both promotion directions are first-class, not competing: standalone Lab →
 portable verified package (`cp_export`) → CP import; integrated Lab → shared
 artifact refs → promote. `cp_export` stays as the standalone `PromotionBackend`.
 
+**Standalone experiment→Results vertical slice closed** (review v0.3 blockers 1–4,
+`lab_server/runtime_jobs.py`): the connected-runtime path is now product-complete on
+its own, not just a strict-ingest prototype.
+
+- **Server-owned plan + mandatory binding (P0-1).** `plan_experiment` emits immutable
+  `TrialUnit`s with the full coordinate; `POST /experiments/plan` stores them under a
+  `plan_ref`. `POST /runs` takes a `plan_ref` (or the experiment) — never a
+  client-supplied trial-id list — stamps the run's own `run_id` into each unit, and
+  rejects a duplicate trial_id. `claim` hands the runtime the stamped coordinates;
+  `complete` requires the trace's `trial` block to equal the assigned unit EXACTLY.
+  Binding now holds on the ordinary path, not only an optional special case.
+- **Lab builds Results (P0-2).** When every planned trial is terminal the run passes
+  through `analyzing`: Lab evaluates each scenario's `violation` predicate against the
+  traces it collected and computes ASR aggregates ITSELF, then completes.
+  `GET /runs/{id}/results` serves those Lab-computed aggregates — the runtime supplies
+  traces, never numbers. (The upload-aggregate endpoint stays gone.)
+- **Idempotent completion (P1-3).** Re-delivering the SAME terminal result (a lost
+  HTTP response) returns the prior success with `idempotent: true`, even on a terminal
+  run; only a DIFFERENT status/trace is a 409. A genuine re-run is an explicit retry.
+- **Control-owned retry (P1-4).** `retry_trial` is a control action (the `/runs/…/retry`
+  route requires the control token); a runtime can only `request_retry`
+  (`/runtime/jobs/…/retry-request`, advisory, no state change). A runtime can no longer
+  restart its own experiments, invalidate shown Results, or run up model cost.
+- **Provider + acceptance hardening.** `LabTraceStore` owns addressing (`put(trace)→ref`,
+  immutable byte copies, integrity error on a colliding ref); `/results` never serves a
+  null trace; a missing/malformed/invalid persisted acceptance is flagged with a
+  distinct `acceptance-status/v1` envelope and blocked on direct routes, not just the
+  catalog.
+
 ## Pending
 
 - **CP-backed provider implementations** (review v0.3-3, cross-repo, OPTIONAL): a
@@ -171,9 +206,18 @@ artifact refs → promote. `cp_export` stays as the standalone `PromotionBackend
   `PromotionBackend` in `axor-control-plane`, injected into Lab for integrated
   deployments. The ports are ready; this is an integration capability, not a
   precondition for Lab.
+- **Conforming adapters for the three declared ports** (review v0.3-ports): thin
+  `TraceIngest` / `ArtifactStore` / `PromotionBackend` adapters over `RuntimeJobStore`
+  / `PublicationStore` / `cp_export`, so those seams are swappable in fact, not only
+  declared.
 - **Persistent standalone providers**: `LabTraceStore` / registry are in-memory; a
   durable on-disk implementation (still Lab-owned, still CP-free) for a long-running
   standalone Lab.
+- **Move provider I/O out of the run lock** (review v0.3-lock, P2): `registry` /
+  `trace_store` calls run under the store's lock — fine for in-memory standalone, but
+  a CP-backed HTTP/DB provider would block all runs during network I/O; lift external
+  I/O out of the critical section (or move to an async application service) before CP
+  integration.
 - **Runtime leases + cancellation** (review v0.3-lease): `lease_expires_at` /
   heartbeat / reclaim / `runtime disconnected` on the `RuntimeRegistry` port, so a
   dropped runtime mid-run is a first-class failure case (lifecycle.md names it).

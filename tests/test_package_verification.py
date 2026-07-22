@@ -161,9 +161,27 @@ class TestServerPackageVerification(unittest.TestCase):
         store = PublicationStore(root=root)
         reloaded = store.get(pid)
         self.assertTrue(reloaded.acceptance_invalid)
+        self.assertEqual(reloaded.acceptance_status, "invalid")
         acc = store.acceptance(reloaded)
         self.assertEqual(acc["acceptance_status"], "invalid")
+        # a distinct status envelope, NOT an acceptance/v1 it doesn't satisfy
+        self.assertEqual(acc["schema_version"], "axor-lab-acceptance-status/v1")
         self.assertNotIn(reloaded, store.catalog())  # degraded → not listed
+
+    def test_missing_or_malformed_persisted_acceptance_is_flagged_not_reminted(self) -> None:
+        # a published publication whose acceptance.json is deleted / corrupted on
+        # disk is a DAMAGED record, not a fresh publish — it is flagged, not silently
+        # re-minted (review v0.3-acceptance)
+        root = Path(self.tmp.name) / "store"
+        pid = str(self.pkg["publication"]["publication_id"])
+        acc_file = root / pid / "acceptance.json"
+        acc_file.unlink()  # the receipt is gone
+        missing = PublicationStore(root=root).get(pid)
+        self.assertEqual(missing.acceptance_status, "missing")
+        self.assertTrue(missing.acceptance_invalid)
+        acc_file.write_text("{ this is not json")  # corrupt it instead
+        malformed = PublicationStore(root=root).get(pid)
+        self.assertEqual(malformed.acceptance_status, "malformed")
 
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")
