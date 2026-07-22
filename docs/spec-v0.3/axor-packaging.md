@@ -4,9 +4,9 @@ Canonical for tier names, prices, included modules, usage metrics, bundles, host
 
 ---
 
-## 0. The frame: one ladder, two modules — not two products
+## 0. The frame: two products, one commercial relationship
 
-Private Lab and Control Plane are **two modules under one Axor account and one commercial ladder**. Control Plane is a **production add-on to a Lab workspace**, not a separate customer journey. One organization, one entitlement model, one renewal — two modules, two price components. (We do **not** promise a literal single invoice: enterprise procurement may still cut a separate order form. "One ladder," not "one bill.")
+**Technically, Control Plane and Axor Lab are two separate products** — separate backends, URLs, APIs, credentials (`agent-connection.md`). **Commercially**, one org can hold both under one billing relationship and one commercial ladder, with **token-exchange** for UX (log in once to the org, each product still issues its own scoped runtime token). This is NOT one backend with module flags: there is no `modules: {control_plane, lab}`, no module discovery, no shared connection token. One org and one ladder on the billing side; two products, two tokens on the technical side. Enterprise procurement may cut one order form or two — commercial convenience, not a merged server.
 
 ```
 Community  →  Team Workspace  →  Security Workspace  →  + Production Governance add-on  →  Enterprise Platform
@@ -42,22 +42,18 @@ Usage-metering and offline licensing don't mix: an air-gapped install can't phon
 
 **Self-hosted:** `annual flat/banded license + organizational features + runner/node ceiling + support`. **Unlimited local execution within the purchased tier** — we do not technically count self-hosted trials; scope is bounded by contract and node ceiling, not telemetry.
 
-## 4. The entitlement — one license, both modules
+## 4. The entitlement — one org account, per-product entitlement
 
-The same Ed25519-signed, offline-verifiable license file as `cp-monetization.md` §4 carries the whole ladder. Modules are flags, not separate licenses:
+One commercial org account spans both products, but entitlement is expressed **per product**, not as module flags on one backend. Each product verifies its own Ed25519-signed, offline-verifiable license (Control Plane's per `cp-monetization.md` §4; Lab's its own). The org account ties them for billing and login; token-exchange issues each product's scoped runtime token.
 
 ```json
-{
-  "organization": "acme",
-  "workspace_tier": "security",
-  "modules": { "private_lab": true, "control_plane": true },
-  "governed_node_ceiling": 20,
-  "self_hosted_runner": true,
-  "expires_at": "..."
-}
+// org-level account (billing/login) — NOT a runtime module switch
+{ "organization": "acme", "commercial_tier": "security",
+  "entitled_products": ["control_plane", "private_lab"],
+  "self_hosted_runner": true, "expires_at": "..." }
 ```
 
-Expiry degrades to read-only EE; it never disables safety features (Line 1). Hosted trial allowance is enforced in billing, not in this file — so the same license works air-gapped.
+`entitled_products` is a **billing** statement (what the org has bought), consumed by the account/login layer — it is never a runtime `modules` flag and never merges the two backends. The login → token-exchange → per-product scoped-token flow is specified in `agent-connection.md` (Identity & token-exchange): one login, each product's token minted only if entitled — no free ride across products. Solo/Community uses a personal account (or no account for local runs). Each product still runs, deploys, and is credentialed separately. Expiry degrades to read-only EE; never disables safety (Line 1). Hosted trial allowance lives in billing, so a product's own license works air-gapped.
 
 ## 5. A concrete bundle (so $30k isn't a random number)
 
@@ -74,7 +70,7 @@ Axor Security Platform — $30,000/year
   Additional governed nodes: $75 / node / month
 ```
 
-This is the Enterprise Platform floor, itemized. Node overage is the expansion lever inside the same contract.
+This is the Enterprise Platform floor, itemized — two products billed under one contract, still deployed and credentialed separately. Node overage is the expansion lever inside the same contract.
 
 ## 6. The pilot — tight scope, bounded credit
 
@@ -101,7 +97,7 @@ Public Lab is not a P&L line — it is CAC reduction and credibility.
 ## 8. Upgrade rules
 
 - Community → Team → Security is self-serve, card, prorated, same account.
-- Production Governance is an **add-on toggle** on a Team/Security workspace, not a migration — the workspace, scenarios, policies, and manifests carry over unchanged (per `control-plane-handoff.md`: reuse policy + manifest, add production bindings).
+- Production Governance is a **separate product** the org adds under the same billing account (not a backend toggle). Scenarios/policies/manifests are *promoted* Lab→CP server-side via the promotion port (`control-plane-handoff.md`), reusing the config and adding production bindings — no re-integration, but a distinct deployment and credential.
 - Enterprise Platform is contracted; it wraps a Security Workspace rather than replacing it.
 - A pilot converts into any annual tier; credit applies per §6.
 

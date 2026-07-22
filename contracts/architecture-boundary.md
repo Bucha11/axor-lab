@@ -6,34 +6,35 @@
 
 ## The one rule
 
+**Control Plane and Axor Lab are two separate products** — separate repos, separate backends, separate URLs, separate APIs, separate credentials. They run independently; either works with the other absent. What is shared is the **local** layer and the **trace schema**, never a backend.
+
 ```
-Agent / Axor Runtime (adapter)
-        │  executes the agent locally
-        │  applies governance locally
-        │  sends traces/events outward (outbound-only)
-        ▼
-   Shared Axor trace fabric   ← one trace stack, defined in axor-core
-        │
-   ┌────┴─────┐
-   ▼          ▼
-Control Plane   Axor Lab
-operation       experiments
-live topology   statistics
-interventions   EvidenceCase
-notifications   replay / regression / publication
+                        one agent
+                            │
+              one framework / generic adapter
+                            │
+                   one local axor-core        ← executes agent + applies governance LOCALLY
+                            │
+            ┌───────────────┴───────────────┐   two independent outbound clients
+            ▼                               ▼
+      PlaneClient                    LabRuntimeClient
+   axcp_… → control.useaxor.net    axlab_… → lab.useaxor.net
+            │                               │
+     Control Plane backend            Axor Lab backend
+   desired state, live operation    jobs, trials, traces, Results,
+   telemetry, topology              EvidenceCase, replay, publication
+   (its own store)                  (its own registry + trace store)
 ```
 
-The adapter opens the connection and pushes traces. **No Axor backend — CP or Lab — connects to, executes, or proxies the agent.** Lab does not need its own proxy.
+**Shared:** one local axor-core, one agent adapter, one runtime process, and the **trace/event + tool-manifest schemas** (defined in axor-core). **Not shared:** backends, URLs, APIs, credentials, trace stores, runtime registries, job queues. **No Axor backend — CP or Lab — connects to, executes, or proxies the agent** (both are outbound-only; the adapter runs the agent locally). There is **no shared "trace fabric" backend** — each product ingests and stores its own traces; only the *schema* is common. There are **no module flags** and no combined bootstrap: a runtime registers with each product separately, using that product's own protocol and token.
 
-**Lab is a self-contained product — it runs fully without Control Plane.** Lab consumes an Axor trace fabric **through a provider interface**; it does not depend on CP infrastructure. In a **standalone** deployment Lab *supplies* that fabric (its own runtime registry + trace store); in an **integrated** deployment it *may share* the Control Plane fabric by injecting CP-backed providers of the same ports. So: a user connects an agent **once per deployment** — not necessarily through Control Plane. When CP and Lab share a deployment, connecting once means both modules see the runtime and neither re-registers it; that is an optimization of the integrated deployment, not a precondition for Lab. The retired anti-pattern (named aloud in the old ui-backend-contract): "climb the same onboarding shape twice." One runtime connection, two viewing modules.
-
-The ports Lab owns (standalone impls in-repo, CP-backed impls optional): **RuntimeRegistry, TraceIngest, TraceStore, ArtifactStore, PromotionBackend** (`lab_server/providers.py`). The experiment/Results/EvidenceCase domain never knows which implementation is wired.
+The earlier draft's "one trace stack / connect once / both modules see it / module flags" is retired — that collapsed two products into one backend. Correct model: two products, shared local layer + schema, two clients.
 
 ## Schema ownership — one source of truth per schema
 
 | Schema | Owner | Why |
 |---|---|---|
-| **trace / event** | **axor-core** (shared) | one portable JSONL artifact for runtime, storage, replay; CP and Lab both import it. Never three copies. |
+| **trace / event** | **axor-core** (shared) | one portable JSONL *schema*; each product ingests into its OWN store. Shared schema, not shared store. Never three schema copies. |
 | **tool-manifest** | **axor-core** (shared) | the runtime detects/declares tools; Lab consumes, doesn't own |
 | **kernel policy / config identity** | **axor-core** (shared) | the thing a `condition` references |
 | scenario, predicate, experiment, condition, bundle, publication | **Lab-owned** | the experiment/evidence layer proper |
@@ -47,18 +48,18 @@ The ports Lab owns (standalone impls in-repo, CP-backed impls optional): **Runti
 
 TypeScript types generate from the shared schemas; Lab does not redefine them.
 
-## Connection model (replaces the demo→proxy→full ladder)
+## Lab's connection model (Lab-side only)
 
-Not four product rungs — one runtime connection with fidelity variants, plus non-runtime sources:
+How an agent's traces reach **Lab** (Control Plane has its own, separate connection via PlaneClient — not Lab's concern):
 
 | Mode | What happens |
 |---|---|
 | **Demo** | Axor-hosted template, no agent — zero-setup |
-| **Connected runtime** | an existing Axor runtime receives an experiment assignment and pushes traces (proxy vs full were just fidelity of this) |
-| **Trace import** | analyze a production incident or someone's published run |
+| **Connected runtime** | a runtime registers with Lab (own `axlab_` token, Lab Runtime Registry), polls Lab jobs, runs the trial locally, uploads events + trace |
+| **Trace import** | analyze a production incident or a published run |
 | **Offline runner** | CI, air-gapped, private code |
 
-"Connect runtime" issues a **scoped ingest/job key** through Lab's `RuntimeRegistry` port. In a standalone deployment that is Lab's own registry; in an integrated deployment it is the same Axor adapter that also serves Control Plane, so existing CP users just **select** an already-connected runtime — no second integration. Black-box endpoint eval is removed entirely.
+"Connect runtime" registers with **Lab** using Lab's own Runtime Registry and issues an `axlab_` runtime token. It does **not** reuse a Control Plane connection. In *integrated* deployments Lab can **import a runtime reference from Control Plane** (server-side provider) and map ids, but it still issues its own Lab credential and owns its own jobs — see agent-connection.md. Black-box endpoint eval is removed entirely.
 
 ## Execution contract (Lab assigns, runtime executes)
 
@@ -79,7 +80,7 @@ Enforcement, tool dispatch, provenance construction all happen in the runtime (p
 - **Black-box endpoint evaluation** — no provenance, no governance, no EvidenceCase; pulls Lab onto generic-eval turf (LangSmith/Braintrust) off Axor's territory. Deleted.
 - **Arbitrary cloud code upload + Lab-owned sandbox** — enterprise/later, not core. Connected runtime covers most cases without moving code. Core keeps only hosted curated templates + safe simulated tools.
 - **Second trace schema** — deleted; trace lives in axor-core.
-- **Lab-specific entitlement subsystem** — entitlement is platform-level (`workspace_tier`, `private_lab`, `control_plane`, `self_hosted_runner`), per `axor-packaging.md`.
+- **Module-flag entitlement** (`modules: {private_lab, control_plane}`) — removed. Entitlement is **per product**; a single commercial org may hold both and get token-exchange for UX, but there is no single backend with module flags. See `axor-packaging.md` (commercial: one org/billing) and agent-connection.md (technical: two products, two tokens).
 - **Complex attestation / reacceptance / tombstone chains** — deferred; v1 keeps publication + bundle hash + optional signature + reproduction records.
 
 ## Deferred (in vision, not in v1)

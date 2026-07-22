@@ -10,7 +10,7 @@
 
 ## 1. How your agent reaches Lab — the shared runtime connection
 
-**Lab is the experiment & evidence layer over Axor runtime traces (see `contracts/architecture-boundary.md` — read first).** Lab does not connect to, execute, or proxy your agent: the Axor runtime adapter (the same one that serves Control Plane) runs the agent locally and pushes traces outward; Lab hands out experiment assignments and reads the resulting traces. You connect a runtime **once** — both modules see it.
+**Lab is the experiment & evidence layer over Axor runtime traces (see `contracts/architecture-boundary.md` and `contracts/agent-connection.md` — read first).** Lab and Control Plane are **two separate products**; Lab does not connect to, execute, or proxy your agent. A runtime registers with **Lab** (its own `axlab_` token + Lab Runtime Registry — a separate outbound connection from CP's PlaneClient), runs the agent locally, and pushes traces to Lab. Lab hands out assignments and reads results.
 
 | Mode | What happens | Source |
 |---|---|---|
@@ -19,7 +19,7 @@
 | **Trace import** | analyze a production incident or a published run | import |
 | **Offline runner** | CI / air-gapped / private code — run beside the agent, upload only the bundle | offline_runner |
 
-"Connect runtime" issues a scoped ingest/job key for the shared adapter; existing Control Plane users just **select** an already-connected runtime — no second integration. There is no Lab gateway, no MCP proxy owned by Lab, and no black-box endpoint evaluation (all removed: Lab must not dispatch tools, hold tool credentials, or be a synchronous enforcement boundary — that is runtime territory).
+"Connect runtime" registers with Lab and issues an `axlab_` runtime token. In *integrated* deployments Lab can **import a runtime reference from Control Plane** (server-side provider) and map ids, but it still issues its own Lab credential and owns its own jobs — the two products keep separate backends, URLs, and tokens (`agent-connection.md`). There is no Lab gateway, no MCP proxy owned by Lab, and no black-box endpoint evaluation (Lab must not dispatch tools, hold tool credentials, or be a synchronous enforcement boundary — runtime territory).
 
 Privacy is the default: the runtime executes locally and sends observations, never raw bodies; the offline runner keeps code and execution on your machine and uploads only the signed bundle.
 
@@ -59,7 +59,7 @@ The funnel's job: a researcher who just watched governance contain an attack on 
 - **Trigger — earned, not nagged.** The upgrade path surfaces only after a real result: an experiment where governance changed the outcome on the researcher's own agent (a contained breach, a fabricated→honest flip). Not a banner on arrival; a footer on a result that already impressed them.
 - **What carries over.** The wrapped agent and the emitted config are the *same artifacts* the Control Plane consumes — the Lab wrap IS a Control Plane deployment minus the live topology. "Run this governed agent in production" reuses the config the researcher already built; nothing is re-done.
 - **The one honest difference stated plainly.** Lab is measurement (does governance help, on scenarios); Control Plane is operation (govern a live agent, with the plane, topology, notifications). The bridge says exactly that — "you've measured it here; run it for real there" — and links the config across, not a fresh setup.
-- **Direction is one-way by default.** Lab → CP is the funnel. CP → Lab exists too (a CP user can push a production agent into Lab to experiment safely off-prod), but that's a convenience, not the funnel; it reuses the same connected runtime, pointed at a CP-registered agent — no re-integration.
+- **Direction is one-way by default.** Lab → CP is the funnel. CP → Lab exists too (a CP user can push a production agent into Lab to experiment safely off-prod), but that's a convenience, not the funnel; Lab imports the CP runtime reference (server-side provider) and issues its own Lab credential — separate connection, no shared backend.
 - **Free/paid line (canonical: `axor-packaging.md`).** Public Lab and local individual workflows stay free; private organizational Lab features follow the workspace tier (Team/Security); Control Plane is a production add-on on the same ladder — a module activated on the existing workspace, not a separate journey, with policy and manifest carried over unchanged. A *public* Lab run stays free and reproducible forever; a *private* org workspace is paid.
 
 ## 7. Export, catalog, out-of-scope (unchanged)

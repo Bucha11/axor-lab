@@ -1,9 +1,48 @@
-# Spec v0.3 conformance — status
+# Spec conformance — status
 
-The v0.3 spec is a deliberate **re-scoping** of Axor Lab down to the experiment /
-evidence layer over Axor runtime traces (`contracts/architecture-boundary.md`, READ
-FIRST). This file tracks how the repo is brought into line, phase by phase, so the
-migration stays reviewable instead of one destructive sweep.
+The spec re-scopes Axor Lab to the experiment / evidence layer over Axor runtime
+traces (`contracts/architecture-boundary.md`, READ FIRST). This file tracks how the
+repo is brought into line, phase by phase, so the migration stays reviewable instead
+of one destructive sweep.
+
+## v0.4 — two separate products (latest spec)
+
+The latest spec sharpens the boundary: **Control Plane and Axor Lab are two separate
+products** — separate repos, backends, URLs, APIs, credentials, and **stores**. What
+is shared is only the **local** axor-core + agent adapter and the **trace/event +
+tool-manifest schemas** — never a backend. This *retires* the earlier "shared trace
+fabric / integrated deployment injects CP-backed providers of the same ports"
+framing. Adopted (commit "v0.4 two-products"):
+
+- **Docs**: `contracts/architecture-boundary.md` (two-products rule), the new
+  `contracts/agent-connection.md` (canonical connection topology: `PlaneClient`
+  `axcp_`→control.useaxor.net vs `LabRuntimeClient` `axlab_`→lab.useaxor.net;
+  identity/token-exchange; integrated = server-side ports only), plus the updated
+  `control-plane-handoff` / `domain-model` / `ui-backend-contract` / `validate.py`
+  and the business docs + mocks.
+- **`lab_server/providers.py` reframed**: the data ports (`RuntimeRegistry`,
+  `TraceStore`, `TraceIngest`, `ArtifactStore`) are **Lab's own**, swappable only for
+  another Lab-owned backend (in-memory ↔ durable) — never CP-backed, no shared trace
+  fabric. The ONLY CP-facing seams are three new *optional, server-side* integration
+  ports: `ControlPlaneRuntimeProvider` (import a CP runtime reference),
+  `ControlPlanePromotionBackend` (promote Lab→CP), `ControlPlaneIdentityProvider`
+  (optional org SSO). Standalone Lab wires none of them. `RuntimeJobStore` docstrings
+  updated: it issues its own `axlab_` token; not shared with CP.
+- **New `lab_client/` package** (the concrete connection layer the spec introduces):
+  the `AgentAdapter` protocol (`describe`/`run`/`reset` + `AgentDescription` /
+  `AgentInput` / `AgentRunResult` / `ExecutionContext`), and the Lab-owned
+  `LabRuntimeClient` + `run_job_loop` — the outbound runtime client (poll → claim →
+  run each trial locally through the adapter → upload trace), stdlib-only, with the
+  `axlab_` token. Proved end-to-end by test: a custom `AgentAdapter` drives a real
+  Lab server, Lab binds the uploaded trace to the assigned unit and builds Results —
+  no Control Plane involved.
+
+**Schema interpretation (unchanged):** the new spec's Lab-owned schemas are an
+older/silent snapshot (shorter descriptions; `experiment.comparison_design` absent)
+— adopting them verbatim would regress the r18–r21 statistics-soundness fields the
+removal list never names, so the repo keeps its correctness supersets as documented
+Lab extensions; only formatting differs. The shared `trace`/`tool-manifest` schemas
+are byte-equivalent (whitespace only).
 
 ## Interpretation (how "hold to the new spec" is applied)
 

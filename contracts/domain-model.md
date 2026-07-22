@@ -5,7 +5,7 @@ The canonical entities. Trace/event, tool-manifest, and kernel policy/config ide
 The canonical entities. Every schema, API, and UI label uses these names and no synonyms. (Terminology for run modes is fixed separately: ungoverned / governed / compare; never undefended/bare in Lab UI — "undefended" survives only as the AgentDojo condition term.)
 
 ```
-RuntimeRef           a connected execution environment (the Axor adapter that runs the agent + pushes traces)
+RuntimeRef           a Lab-registered runtime (own axlab_ credential); may carry external_refs.control_plane_runtime_id (identity mapping, not one shared record) — see agent-connection.md
 AgentRef             a logical agent identity — may run in several runtimes, change models over time
 TraceSource          where a Run's traces come from: runtime | import | demo | offline_runner
 AgentSnapshot        the fingerprint/model/version/config actually used in ONE Run

@@ -2,15 +2,15 @@
 
 The earned bridge, made precise. Retires "nothing is re-done."
 
-## The shape: promote, not export
+## The shape: promote via a server-side port, not export, not a shared store
 
-Lab and Control Plane share one workspace and one artifact store (architecture-boundary.md). So the handoff is **not** export-package → verify → import. It is:
+Lab and Control Plane are **separate products with separate stores** (agent-connection.md). Promotion is **not** export-package → verify → import, and **not** a shared workspace either. It is a Lab-side `ControlPlanePromotionBackend` port that pushes/references a Lab artifact into CP, cross-server:
 
 ```
-experiment result  →  Promote policy to production  →  add bindings / credentials / topology
+Lab experiment result → Promote (server-side, via ControlPlanePromotionBackend) → CP config + bindings/credentials/topology
 ```
 
-The policy, tool manifests, and regressions already live in the shared workspace as artifact refs; "promote" is a reference between them plus the production-only additions below.
+The Lab policy/manifests/regressions live in **Lab**; promote hands CP the config to create a production configuration from, plus the production-only additions below. Cross-links (Lab EvidenceCase ↔ CP runtime) go through the same server-side integration and the runtime identity mapping, not a merged store.
 
 ## What carries over (reused, identical)
 - The **validated policy** (`condition.policy` + `config_hash`) — the exact governance config the researcher measured.

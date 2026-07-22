@@ -1,9 +1,9 @@
 """Runtime-jobs API — the connected-runtime execution contract (spec v0.3).
 
 architecture-boundary.md: **Lab assigns, the runtime executes.** Lab never
-connects to, executes, or proxies an agent. A user connects an Axor runtime
-adapter ONCE (the same one that serves Control Plane); it pulls experiment
-assignments, runs them locally, and pushes back kernel events + finished traces.
+connects to, executes, or proxies an agent. A runtime registers with **Lab**
+(its own `axlab_` token + Lab Runtime Registry), polls Lab jobs, runs each trial
+locally, and pushes back kernel events + finished traces (agent-connection.md).
 
 This is the deliberately SIMPLE first implementation of that contract: a single
 process, in-memory job store, stdlib `http.server`. It establishes the surface
@@ -18,13 +18,15 @@ content-addressed `trace_ref`); a re-run is an explicit new `TrialAttempt` that
 supersedes the prior one without destroying it. Event batches are idempotent so a
 network retry cannot duplicate a ledger.
 
-Lab is a self-contained product: it runs standalone with NO Control Plane. The
-runtime + its ingest key live behind a `RuntimeRegistry` PORT (providers.py) that
-Lab owns; the accepted traces live behind a `TraceStore` port. Standalone Lab
-supplies both (`InMemoryRuntimeRegistry`, `LabTraceStore`); an integrated deployment
-injects CP-backed implementations of the SAME ports so a CP user's already-connected
-runtime is the one Lab assigns to, and Lab/CP read one shared trace fabric. The job
-store's domain never knows which implementation is wired (review v0.3-3).
+Lab is a self-contained product: it runs standalone with NO Control Plane
+(agent-connection.md). The runtime + its `axlab_` ingest key live behind a
+`RuntimeRegistry` PORT (providers.py) that **Lab owns**; the accepted traces live
+behind Lab's own `TraceStore`. Both are backed by Lab's implementations
+(`InMemoryRuntimeRegistry`, `LabTraceStore`); a durable deployment swaps them for
+another Lab-owned backend. Control Plane and Lab are **two separate products** with
+separate stores — there is no shared trace fabric and no CP-backed registry; an
+integrated deployment may only *import* a CP runtime reference server-side while Lab
+still issues its own `axlab_` token and owns its jobs.
 
 Control surface (Lab operator / UI):
 
@@ -89,16 +91,15 @@ class RuntimeJobsError(Exception):
 
 
 class InMemoryRuntimeRegistry:
-    """The STANDALONE `RuntimeRegistry` (review v0.3-3): Lab's own in-process runtime
-    registry, owning `RuntimeRef` + credentials + status.
+    """Lab's own in-process `RuntimeRegistry`, owning `RuntimeRef` + credentials +
+    status and issuing the `axlab_` runtime token at connect.
 
     Lab is a self-contained product — with this registry it registers runtimes,
-    assigns runs and collects traces with NO Control Plane. It implements the
-    `RuntimeRegistry` port (providers.py); an integrated deployment injects a
-    CP-backed implementation of the same port so a CP user's already-connected
-    runtime is the one Lab assigns to (connect once per deployment, not necessarily
-    through CP). Lab's job store only *selects* a registered `runtime_ref` — it does
-    not reach into whichever registry is wired."""
+    assigns runs and collects traces with NO Control Plane, issuing its own `axlab_`
+    runtime token. It implements the `RuntimeRegistry` port (providers.py). Control
+    Plane and Lab are two separate products with separate registries; an integrated
+    deployment may only *import* a CP runtime reference server-side while Lab still
+    issues its own credential and owns its jobs (agent-connection.md)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -206,10 +207,10 @@ class RuntimeJobStore:
     def __init__(self, registry: RuntimeRegistry | None = None,
                  trace_store: TraceStore | None = None) -> None:
         self._lock = threading.Lock()
-        # the RuntimeRegistry owns runtimes + credentials; Lab only selects one
-        # (review v0.3-3). Both providers are injectable so an integrated deployment
-        # can swap Lab's standalone implementations for CP-backed ones — the domain
-        # below never knows which is wired.
+        # Lab's OWN runtime registry + trace store (agent-connection.md): Lab owns
+        # runtimes/credentials and ingests into its own store. Both are injectable
+        # only to swap for another Lab-owned backend (in-memory <-> durable) — never
+        # a CP store; there is no shared trace fabric.
         self.registry: RuntimeRegistry = registry or InMemoryRuntimeRegistry()
         self.trace_store: TraceStore = trace_store or LabTraceStore()
         self._jobs: dict[str, _Job] = {}
@@ -220,10 +221,9 @@ class RuntimeJobStore:
         self._n += 1
         return f"{prefix}_{self._n:04d}_{secrets.token_hex(6)}"
 
-    # -- runtime selection (delegates to the shared platform registry) ----
-    # These are thin passthroughs — the registry, not Lab, owns the runtime and its
-    # ingest key. A production deployment injects a CP-backed registry and connects
-    # runtimes there; Lab assigns runs to whatever runtime_ref the registry knows.
+    # -- runtime selection (delegates to Lab's own runtime registry) ----
+    # Thin passthroughs to the Lab-owned RuntimeRegistry, which issues the axlab_
+    # ingest key at connect. Not shared with Control Plane.
     def connect_runtime(self, model: str = "", agent_ref: str | None = None) -> dict[str, object]:
         return self.registry.connect(model=model, agent_ref=agent_ref)
 
@@ -647,10 +647,10 @@ def make_runtime_server(
     surface (runtime registration + run assignment); the runtime-facing endpoints
     are gated by the per-runtime ingest_key the registry issues at connect.
 
-    `registry` / `trace_store` inject the provider implementations (review v0.3-3):
-    omitted, the store gets Lab's standalone `InMemoryRuntimeRegistry` + `LabTraceStore`
-    (a fully working, CP-free deployment); an integrated deployment injects CP-backed
-    implementations of the same ports."""
+    `registry` / `trace_store` inject Lab-owned provider implementations: omitted,
+    the store gets `InMemoryRuntimeRegistry` + `LabTraceStore` (a fully working,
+    CP-free deployment); a durable deployment injects another Lab-owned backend. They
+    are never CP-backed — CP and Lab are separate products (agent-connection.md)."""
     jobs = store or RuntimeJobStore(registry=registry, trace_store=trace_store)
 
     class Handler(BaseHTTPRequestHandler):
