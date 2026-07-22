@@ -1,22 +1,22 @@
 # Axor Lab — Run Lifecycle (v1)
 
-The state machine branches by backend; a local run does not "provision a sandbox." Terminal states are explicit.
-
-## Plans by backend
+Four lifecycles by trace source (architecture-boundary.md). Lab assigns and reads; the runtime executes. Terminal states explicit.
 
 ```
-local:            validating → waiting_for_runner → running_local → uploading_artifacts → analyzing → completed
-lab_template:     validating → queued → provisioning → running → analyzing → completed
-trace_replay:     validating → replaying → analyzing → completed
-instrumented_ep:  validating → connecting → running_remote → analyzing → completed
+demo:               validating → queued → running → analyzing → completed
+connected_runtime:  validating → waiting_for_runtime → running → receiving_traces → analyzing → completed
+trace_import:       validating → importing → replaying → analyzing → completed
+offline_runner:     validating → waiting_for_upload → analyzing → completed
 ```
 
-Terminal (all plans): `completed | failed | cancelled`, then optionally `published`.
+Terminal (all): `completed | failed | cancelled`, then optionally `published`.
+
+`ready / awaiting_confirmation` sits between `validating` and run start, carrying the cost/trial estimate the user confirms.
 
 ## Rules
-- **Validation is pre-run**: schema check, tool bindings resolve, predicates type-check, `$inputs` resolve, cost/trial estimate shown, privacy stated. A scenario that can't execute never reaches `queued`.
-- **Cancel** keeps completed trials; nothing already run is lost.
-- **Retry** can target only the failed subset (e.g. rate-limited trials), not the whole run.
-- **Failure is specific and staged**: unknown-tool predicate (validating), missing key (provisioning/connecting), model timeout/429 (running — partial kept), agent crash (running), malformed trace (analyzing — excluded+flagged).
-- **Partial results are NOT automatically valid**: if failures are non-random, the aggregate is flagged potentially-biased and shows denominator + missing count (statistics.md §5). The UI never silently computes over survivors.
-- **Idempotency**: a retried trial with the same (scenario,condition,seed,repeat) replaces, never duplicates.
+- **Validation is pre-run**: schema check, predicates type-check, `$inputs` resolve, estimate shown, privacy stated. A scenario that can't execute never starts.
+- **Lab never executes the agent.** In `connected_runtime`, `running` means the runtime claimed the assignment and is executing locally; `receiving_traces` means Lab is ingesting its events. Lab's own states are assignment + ingestion + analysis, never tool dispatch.
+- **Cancel** keeps completed trials. **Retry** targets only the failed subset.
+- **Failure is staged**: unknown-tool predicate (validating), no runtime available (waiting_for_runtime), runtime dropped mid-run (running), malformed/incomplete trace (analyzing — excluded + flagged).
+- **Partial results are not automatically valid**: if failures are non-random, the aggregate is flagged potentially-biased with denominator + missing count (statistics.md §5).
+- **Idempotency via TrialAttempt**: a retried trial is a new attempt that *supersedes* the failed one (audit history preserved), never a silent duplicate or a destructive replace.

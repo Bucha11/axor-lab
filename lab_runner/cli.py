@@ -351,7 +351,6 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         SignatureInvalid,
         SignatureUnavailable,
         verify_acceptance,
-        verify_reacceptance,
         verify_receipt,
     )
 
@@ -406,15 +405,13 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         unverified = True
-    # 3) server acceptance binds + (optionally) verifies. verify_acceptance now
-    # also requires acceptance.integrity == publication.integrity. A server that
-    # found its persisted acceptance damaged re-attests with a distinct, linked
-    # `reacceptance/v1` event (review r18) — verify it with the same rigour, and
-    # tell the reader an original attestation was superseded.
-    is_reacceptance = str(acceptance.get("schema_version", "")) == "axor-lab-reacceptance/v1"
-    verify_acc = verify_reacceptance if is_reacceptance else verify_acceptance
+    # 3) server acceptance binds + (optionally) verifies. verify_acceptance also
+    # requires acceptance.integrity == publication.integrity. v0.3 keeps a single
+    # acceptance/v1 form: a server that finds its persisted acceptance damaged
+    # simply re-mints a fresh acceptance/v1 from the current bundle on load, so
+    # there is no reacceptance/history chain to resolve here.
     try:
-        verify_acc(
+        verify_acceptance(
             acceptance, publication,
             server_pubkey_hex=getattr(args, "server_pubkey", None),
             expected_server=getattr(args, "server", None),
@@ -427,35 +424,6 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
         unverified = True
     else:
-        if is_reacceptance:
-            supersedes = acceptance.get("supersedes")
-            prev_ref = supersedes.get("previous_ref") if isinstance(supersedes, dict) else "?"
-            # the previous_ref must resolve to an actual archived record in the
-            # package's acceptance_history (review r19): otherwise the reacceptance
-            # only proves the server signed SOME string, not that it supersedes a
-            # real damaged receipt. A package that omits the history it names fails.
-            from lab_contracts import content_hash
-
-            history = data.get("acceptance_history")
-            history = history if isinstance(history, list) else []
-            resolved = any(
-                isinstance(entry, dict)
-                and content_hash(entry.get("record")) == prev_ref
-                and str(entry.get("ref")) == prev_ref
-                for entry in history
-            )
-            if not resolved:
-                print(
-                    f"acceptance: INVALID — reacceptance previous_ref {prev_ref} does not "
-                    "resolve to any record in acceptance_history (superseded receipt missing)",
-                    file=sys.stderr,
-                )
-                return EXIT_FAILURE
-            print(
-                f"acceptance: RE-ATTESTATION (reacceptance/v1) — supersedes a superseded "
-                f"receipt resolved in history (previous_ref={prev_ref}) at "
-                f"{acceptance.get('reaccepted_at')}",
-            )
         if str(acceptance.get("algorithm")) == "ed25519":
             print("acceptance: signature VERIFIED")
         elif getattr(args, "allow_unsigned_server", False):

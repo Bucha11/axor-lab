@@ -146,11 +146,12 @@ class TestServerPackageVerification(unittest.TestCase):
         pkg["receipt"]["integrity"] = "signed"
         self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_FAILURE)
 
-    def test_package_with_reacceptance_still_verifies(self) -> None:
-        # a package whose acceptance is a REACCEPTANCE/v1 (the server found its
-        # persisted acceptance damaged and re-attested) must verify with the same
-        # rigour as an acceptance/v1 — the verifier accepts the linked
-        # re-attestation, it does not choke on the schema (review r18)
+    def test_damaged_persisted_acceptance_is_flagged_invalid_not_reminted(self) -> None:
+        # v0.3 collapses the reacceptance/history machinery, but a DAMAGED persisted
+        # acceptance (its semantic_report no longer binds) is NOT silently replaced
+        # with a fresh clean receipt — that would erase the tampering. The store
+        # flags it invalid, hides it from the catalog, and serves a degraded
+        # acceptance_status=invalid record until an operator re-verifies.
         root = Path(self.tmp.name) / "store"
         pid = str(self.pkg["publication"]["publication_id"])
         acc_file = root / pid / "acceptance.json"
@@ -159,49 +160,10 @@ class TestServerPackageVerification(unittest.TestCase):
         acc_file.write_text(json.dumps(tampered))
         store = PublicationStore(root=root)
         reloaded = store.get(pid)
-        self.assertEqual(reloaded.acceptance["schema_version"], "axor-lab-reacceptance/v1")
-        pkg = json.loads(json.dumps(self.pkg))
-        pkg["acceptance"] = reloaded.acceptance
-        pkg["acceptance_history"] = store.acceptance_history(pid)
-        self.assertEqual(
-            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_OK
-        )
-
-    def test_reacceptance_without_resolvable_history_is_rejected(self) -> None:
-        # a reacceptance whose previous_ref names a superseded receipt the package
-        # does NOT carry cannot be confirmed — the verifier refuses it (review r19)
-        root = Path(self.tmp.name) / "store"
-        pid = str(self.pkg["publication"]["publication_id"])
-        acc_file = root / pid / "acceptance.json"
-        tampered = json.loads(acc_file.read_text())
-        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
-        acc_file.write_text(json.dumps(tampered))
-        reloaded = PublicationStore(root=root).get(pid)
-        pkg = json.loads(json.dumps(self.pkg))
-        pkg["acceptance"] = reloaded.acceptance
-        pkg["acceptance_history"] = []  # the named superseded receipt is missing
-        self.assertEqual(
-            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_FAILURE
-        )
-
-    def test_forged_reacceptance_report_is_rejected(self) -> None:
-        # a reacceptance whose semantic_report_ref no longer binds its report must
-        # be refused, exactly like a forged acceptance (review r18)
-        root = Path(self.tmp.name) / "store"
-        pid = str(self.pkg["publication"]["publication_id"])
-        acc_file = root / pid / "acceptance.json"
-        tampered = json.loads(acc_file.read_text())
-        tampered["semantic_report"]["verified"].append("FABRICATED_CHECK")
-        acc_file.write_text(json.dumps(tampered))
-        store = PublicationStore(root=root)
-        reloaded = store.get(pid)
-        pkg = json.loads(json.dumps(self.pkg))
-        pkg["acceptance"] = reloaded.acceptance
-        pkg["acceptance_history"] = store.acceptance_history(pid)
-        pkg["acceptance"]["semantic_report"]["replay"] = "fabricated"
-        self.assertEqual(
-            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_FAILURE
-        )
+        self.assertTrue(reloaded.acceptance_invalid)
+        acc = store.acceptance(reloaded)
+        self.assertEqual(acc["acceptance_status"], "invalid")
+        self.assertNotIn(reloaded, store.catalog())  # degraded → not listed
 
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")

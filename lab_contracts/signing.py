@@ -189,35 +189,6 @@ def verify_acceptance(
     )
 
 
-def verify_reacceptance(
-    reacceptance: dict[str, object],
-    publication: dict[str, object],
-    *,
-    server_pubkey_hex: str | None = None,
-    expected_server: str | None = None,
-    expected_key_id: str | None = None,
-) -> None:
-    """Verify a REACCEPTANCE event (review r18).
-
-    A reacceptance/v1 is minted when a persisted acceptance is found DAMAGED or
-    FORGED under a known key on load: rather than silently re-minting a clean
-    acceptance/v1 (which would impersonate the original publish-time attestation),
-    the server preserves the damaged original and records a distinct, timestamped
-    re-attestation that LINKS to it. It is bound and signed exactly like an
-    acceptance, and additionally MUST carry a `reaccepted_at` timestamp and a
-    `supersedes` block naming the invalid previous receipt it replaces."""
-    _verify_acceptance_record(
-        reacceptance, publication, "axor-lab-reacceptance/v1",
-        server_pubkey_hex=server_pubkey_hex,
-        expected_server=expected_server, expected_key_id=expected_key_id,
-    )
-    if not str(reacceptance.get("reaccepted_at", "")):
-        raise SignatureInvalid("reacceptance must carry a reaccepted_at timestamp")
-    supersedes = reacceptance.get("supersedes")
-    if not isinstance(supersedes, dict) or not str(supersedes.get("previous_ref", "")):
-        raise SignatureInvalid("reacceptance must link to the invalid previous receipt")
-
-
 def _verify_acceptance_record(
     acceptance: dict[str, object],
     publication: dict[str, object],

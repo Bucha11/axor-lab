@@ -129,6 +129,12 @@ class StoredPublication:
     # Re-deriving it would re-sign with whatever key the server holds NOW, silently
     # replacing the historical attestation (and its key_id) when the key rotates.
     acceptance: dict[str, object] | None = None
+    # set when a PERSISTED acceptance was found structurally-an-acceptance/v1 but
+    # FAILED verification under a known key (damaged or forged): the server does
+    # NOT silently mint a fresh clean receipt over it (that would erase the fact of
+    # tampering, review v0.3-acceptance). The publication is degraded/hidden and an
+    # operator must explicitly re-verify / re-publish.
+    acceptance_invalid: bool = False
     # the STABLE evidence lineage this publication rests on (review r15) — the
     # takedown/read guards key on this, not on the packaging-sensitive bundle_ref
     lineage_ref: str = ""
@@ -495,6 +501,7 @@ class PublicationStore:
         return [
             s for s in self._cache.values()
             if s.publication.get("visibility") == "public"
+            and not s.acceptance_invalid  # a broken attestation is degraded, not listed
             and str(s.publication.get("publication_id")) not in self._tombstones
             and s.lineage_ref not in self._lineage_tombstones
         ]
@@ -512,7 +519,22 @@ class PublicationStore:
         holds NOW, silently swapping the historical attestation (and its key_id) on
         key rotation (review r16). Only a fresh publish (no restored acceptance)
         mints one here; the mint is deterministic so it reproduces identical bytes
-        under the same key."""
+        under the same key.
+
+        A publication whose PERSISTED acceptance was found damaged/forged does NOT
+        get a fresh clean receipt minted here (review v0.3-acceptance): it returns a
+        degraded `acceptance_status=invalid` record so no surface can present it as a
+        healthy attestation. An operator re-verifies / re-publishes to clear it."""
+        if stored.acceptance_invalid:
+            pub = stored.publication
+            return {
+                "schema_version": "axor-lab-acceptance/v1",
+                "server_id": self.server_id,
+                "publication_id": str(pub["publication_id"]),
+                "acceptance_status": "invalid",
+                "reason": "persisted acceptance failed verification (damaged or forged); "
+                          "re-verify / re-publish to re-issue",
+            }
         if stored.acceptance is not None:
             return stored.acceptance
         pub = stored.publication
@@ -544,7 +566,7 @@ class PublicationStore:
         }
 
     def _sign_record(self, rec: dict[str, object]) -> dict[str, object]:
-        """Ed25519-sign a receipt (acceptance or reacceptance) with the server key
+        """Ed25519-sign an acceptance receipt with the server key
         when one is configured; else mark it algorithm=unsigned."""
         if self.server_signing_key:
             from lab_contracts.signing import sign_bundle
@@ -557,39 +579,6 @@ class PublicationStore:
         else:
             rec["algorithm"] = "unsigned"
         return rec
-
-    def _reaccept(
-        self,
-        pub: dict[str, object],
-        bundle: dict[str, object],
-        previous: dict[str, object],
-        reason: str = "persisted acceptance failed verification on load",
-    ) -> dict[str, object]:
-        """Mint a REACCEPTANCE event (review r18) after the persisted acceptance was
-        found DAMAGED/FORGED under a known key. This is NOT a silent re-mint: it is
-        a distinct, timestamped `reacceptance/v1` record that preserves and LINKS to
-        the invalid previous receipt (by content hash + its claimed key_id), so the
-        history shows an original attestation failed and the server re-attested —
-        rather than a clean acceptance/v1 impersonating the publish-time record."""
-        report = self._semantic_report(pub, bundle)
-        rec: dict[str, object] = {
-            "schema_version": "axor-lab-reacceptance/v1",
-            "server_id": self.server_id,
-            "publication_id": str(pub["publication_id"]),
-            "bundle_ref": str(pub.get("bundle_ref", "")),
-            "integrity": str(pub.get("integrity", "hash_verified")),
-            "semantic_report_ref": content_hash(report),
-            "semantic_report": report,
-            "reaccepted_at": self.clock(),
-            "supersedes": {
-                "reason": reason,
-                "previous_ref": content_hash(previous),
-                "previous_key_id": previous.get("key_id"),
-                "previous_algorithm": previous.get("algorithm"),
-                "previous_schema_version": previous.get("schema_version"),
-            },
-        }
-        return self._sign_record(rec)
 
     @staticmethod
     def _derive_id(publication: dict[str, object]) -> str:
@@ -873,12 +862,12 @@ class PublicationStore:
             except ValueError:
                 raw = ()
         reproductions = list(rebuild_reproduction_log(raw, self.known_keys, publication_id))
-        acceptance = self._load_acceptance(directory, publication, bundle)
+        acceptance, acceptance_invalid = self._load_acceptance(directory, publication, bundle)
         self._cache[publication_id] = StoredPublication(
             publication=publication, bundle=bundle, traces=traces, reproductions=reproductions,
             author=author if integrity == "signed" else None,
             signature=signature if integrity == "signed" else None,
-            acceptance=acceptance,
+            acceptance=acceptance, acceptance_invalid=acceptance_invalid,
         )
 
     def _server_keyring(self) -> dict[str, str]:
@@ -899,278 +888,54 @@ class PublicationStore:
         directory: Path,
         publication: dict[str, object],
         bundle: dict[str, object],
-    ) -> dict[str, object] | None:
-        """Restore the persisted acceptance receipt, verified against the
-        publication AND the server keyring (review r16/r17/r18).
+    ) -> tuple[dict[str, object] | None, bool]:
+        """Restore the persisted acceptance receipt verbatim (v0.3).
 
-        Binding is always re-confirmed (publication_id, bundle_ref,
-        semantic_report_ref). For a SIGNED acceptance the signature is checked
-        against a HISTORICAL keyring, not blindly trusted:
-          - key_id KNOWN to the keyring → the signature MUST verify; a forged
-            receipt (recomputed report hash + bogus signature) is DAMAGED;
-          - key_id UNKNOWN (the signing key rotated out and was not retained) → the
-            ORIGINAL is kept as an opaque UNVERIFIED historical record — preserved,
-            NEVER re-issued under the current key (that would forge a fresh
-            attestation), and surfaced as unverifiable to a reader lacking the key.
-        An unsigned acceptance is restored as-is (Patch 2 makes the verifier treat
-        it as unverified, not an authenticated pass).
-
-        A DAMAGED/FORGED record under a known key is NOT silently dropped-then-
-        reminted as a clean acceptance/v1 (review r18): that would erase the fact
-        the on-disk attestation failed and impersonate the publish-time record.
-        Instead the invalid bytes are ARCHIVED to the append-only acceptance history
-        and a distinct, timestamped `reacceptance/v1` event — linking to the
-        archived original — is minted, persisted, and served. A previously-minted
-        reacceptance/v1 on disk is itself verified and restored verbatim so the
-        re-attestation is stable across reloads.
-
-        This method NEVER returns None for a publication being LOADED from disk: a
-        MISSING, malformed, or non-object acceptance file is itself a forensic event
-        for an already-persisted publication, so it is recorded and re-attested with
-        a `reacceptance/v1` — never left as None, which acceptance() would misread as
-        a fresh publication and mint a clean acceptance/v1 indistinguishable from the
-        publish-time record (review r19)."""
+        Returns `(acceptance_or_None, invalid)`. v0.3 keeps *publication + bundle
+        hash + optional signature + reproduction records*; the r18-r21 reacceptance /
+        acceptance-history / quarantine chains are deferred (architecture-boundary.md).
+        So the loader is simple:
+          - a persisted `axor-lab-acceptance/v1` that BINDS to this publication is
+            restored as-is — never re-minted, so a signed historical receipt keeps
+            its key_id across a server key rotation (review r16);
+          - a SIGNED receipt whose key we hold is signature-checked; one whose key we
+            no longer hold is kept as an opaque historical record;
+          - a receipt that IS an acceptance/v1 but FAILS verification under a known
+            key (damaged/forged) returns `(None, invalid=True)` — the server does NOT
+            mint a fresh clean receipt over it (that would erase the tampering,
+            review v0.3-acceptance); the publication is degraded/hidden until an
+            operator re-verifies;
+          - a truly ABSENT / malformed / wrong-schema receipt returns `(None, False)`
+            and acceptance() deterministically mints a fresh one (a normal publish)."""
         path = directory / "acceptance.json"
         if not path.is_file():
-            return self._reaccept_forensic(
-                directory, publication, bundle,
-                {"status": "missing", "reason": "acceptance record absent on load",
-                 "path": "acceptance.json"},
-            )
-        raw = path.read_text()
+            return None, False
         try:
-            acc = json.loads(raw)
+            acc = json.loads(path.read_text())
         except ValueError:
-            return self._reaccept_forensic(
-                directory, publication, bundle,
-                {"status": "malformed", "reason": "acceptance.json is not valid JSON",
-                 "raw_ref": content_hash(raw)},
-            )
-        if not isinstance(acc, dict):
-            return self._reaccept_forensic(
-                directory, publication, bundle,
-                {"status": "not_an_object", "reason": "acceptance.json is not a JSON object",
-                 "raw_ref": content_hash(acc)},
-            )
+            return None, False
+        if not isinstance(acc, dict) or str(acc.get("schema_version", "")) != "axor-lab-acceptance/v1":
+            return None, False
         from lab_contracts.signing import (
             SignatureInvalid,
             SignatureUnavailable,
             verify_acceptance,
-            verify_reacceptance,
         )
 
         keyring = self._server_keyring()
         pubkey = keyring.get(str(acc.get("key_id"))) if str(acc.get("algorithm")) == "ed25519" else None
-        is_reacceptance = str(acc.get("schema_version", "")) == "axor-lab-reacceptance/v1"
-        verify = verify_reacceptance if is_reacceptance else verify_acceptance
         try:
-            # with a pubkey we fully verify the signature; without one (unknown
-            # historical key, or unsigned) we still enforce the binding checks
-            verify(acc, publication, server_pubkey_hex=pubkey)
+            verify_acceptance(acc, publication, server_pubkey_hex=pubkey)
         except SignatureUnavailable:
-            # signed & bound, but we hold no key for it → keep as opaque historical.
-            # An unknown key gates only the SIGNATURE step: the STRUCTURE and the
-            # history CHAIN are server-side facts independent of the key, so a
-            # reacceptance must STILL be well-formed and resolvable to root before it
-            # is served — otherwise an unsigned-to-us record could smuggle a missing
-            # timestamp, absent supersedes, or a broken ancestry (review r21).
-            if is_reacceptance and not (
-                self._reacceptance_structural_ok(acc) and self._chain_resolves(directory, acc)
-            ):
-                return self._reaccept_broken_chain(
-                    directory, publication, bundle, acc,
-                    reason="unknown-key reacceptance failed structural or history-chain validation",
-                )
-            return acc
+            # signed & bound, but we hold no key for it -> opaque historical record,
+            # preserved with its original key_id/signature (never re-issued)
+            return acc, False
         except SignatureInvalid:
-            # binding mismatch, integrity mismatch, OR a bad signature under a KNOWN
-            # key (a forgery/damage). Preserve the damaged original and re-attest
-            # with a distinct, linked reacceptance — never a silent clean re-mint.
-            return self._quarantine_and_reaccept(directory, publication, bundle, acc)
-        if is_reacceptance and not self._chain_resolves(directory, acc):
-            # signature + binding are fine, but the forensic ancestry this
-            # reacceptance CLAIMS does not resolve to a root through the append-only
-            # acceptance-history (a missing/corrupt link at any depth). An offline
-            # verifier reconstructing the full chain would REJECT it, and the server
-            # must never serve what that verifier rejects. Re-root the live chain at a
-            # forensic marker so the re-attestation resolves fully on the next load
-            # rather than walking back into the broken link (review r20/r21).
-            return self._reaccept_broken_chain(
-                directory, publication, bundle, acc,
-                reason="persisted reacceptance previous_ref did not resolve in "
-                       "the append-only acceptance-history",
-            )
-        return acc
+            # it CLAIMED to be this publication's acceptance/v1 but does not verify:
+            # damaged or forged. Flag it invalid instead of quietly re-minting.
+            return None, True
+        return acc, False
 
-    @staticmethod
-    def _reacceptance_structural_ok(acc: dict[str, object]) -> bool:
-        """A reacceptance/v1 must carry a timestamp and link to a predecessor — the
-        same structural invariants verify_reacceptance enforces, checkable without a
-        signing key (review r21)."""
-        supersedes = acc.get("supersedes")
-        return bool(str(acc.get("reaccepted_at", ""))) and (
-            isinstance(supersedes, dict) and bool(str(supersedes.get("previous_ref", "")))
-        )
-
-    def _history_dir(self, directory: Path) -> Path:
-        return directory / "acceptance-history"
-
-    def _history_index(self, directory: Path) -> dict[str, dict[str, object]]:
-        """{content_hash: record} of every archived acceptance-history record whose
-        bytes STILL hash to the ref they are filed under. A tampered archive file
-        (its recomputed hash no longer equals its filename) is not indexed, so a
-        `previous_ref` pointing at it will not resolve — a corrupted history entry
-        breaks the chain exactly as a missing one does (review r20)."""
-        index: dict[str, dict[str, object]] = {}
-        hdir = self._history_dir(directory)
-        if hdir.is_dir():
-            for pathname in sorted(hdir.glob("*.json")):
-                try:
-                    record = json.loads(pathname.read_text())
-                except (OSError, ValueError):
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                ref = content_hash(record)
-                if ref.removeprefix("sha256:") == pathname.stem:
-                    index[ref] = record
-        return index
-
-    def _chain_resolves(self, directory: Path, acc: dict[str, object], *, max_depth: int = 64) -> bool:
-        """Walk the WHOLE supersedes ancestry to a ROOT (review r21).
-
-        A reacceptance/v1 names its predecessor by supersedes.previous_ref. r20
-        confirmed only the IMMEDIATE hop resolved — but the archived predecessor can
-        itself be a reacceptance whose OWN previous_ref no longer resolves, so a
-        deeper break went unnoticed and an offline verifier reconstructing the full
-        chain would still reject it. Follow every link through the hash-checked
-        history index until reaching a ROOT (an acceptance/v1 or a forensic marker
-        with no predecessor). Every hop must resolve to a stored, hash-matching
-        record; a missing/corrupt link, a cycle, or an over-deep chain fails."""
-        index = self._history_index(directory)
-        seen: set[str] = set()
-        node = acc
-        depth = 0
-        while True:
-            supersedes = node.get("supersedes")
-            if not isinstance(supersedes, dict) or not str(supersedes.get("previous_ref", "")):
-                return True  # a root: no predecessor to resolve
-            ref = str(supersedes["previous_ref"])
-            if ref in seen or depth >= max_depth:
-                return False  # a cycle, or an implausibly deep chain
-            seen.add(ref)
-            depth += 1
-            prev = index.get(ref)
-            if prev is None:
-                return False  # a broken link — the predecessor is missing or corrupt
-            node = prev
-
-    def _archive_superseded(self, directory: Path, record: dict[str, object]) -> str:
-        """Append a superseded/forensic record to the APPEND-ONLY acceptance history,
-        keyed by its own content hash, and return that ref. Idempotent: an identical
-        record already archived is not rewritten, but no record is ever overwritten
-        or lost — every previous_ref in the reacceptance chain resolves to a stored
-        object (review r19)."""
-        ref = content_hash(record)
-        name = ref.removeprefix("sha256:")
-        target = self._history_dir(directory) / f"{name}.json"
-        if not target.exists():
-            _write_atomic(target, json.dumps(record, indent=2))
-        return ref
-
-    def acceptance_history(self, publication_id: str) -> list[dict[str, object]]:
-        """Every superseded acceptance/forensic record for a publication, sorted by
-        ref — the full chain a reader needs to resolve each reacceptance's
-        previous_ref back to actual stored bytes (review r19).
-
-        Only HASH-VALID entries are returned: a record whose recomputed content hash
-        no longer equals the ref it is filed under is corrupt and is OMITTED, so a
-        reproduction package can never carry a garbage history entry a reader would
-        trust or that would falsely appear to satisfy a previous_ref (review r21)."""
-        history: list[dict[str, object]] = []
-        hdir = self._history_dir(self._dir(publication_id))
-        if hdir.is_dir():
-            for pathname in sorted(hdir.glob("*.json")):
-                try:
-                    record = json.loads(pathname.read_text())
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                ref = content_hash(record)
-                if ref.removeprefix("sha256:") != pathname.stem:
-                    continue  # tampered/corrupt archive entry — omit it
-                history.append({"ref": ref, "record": record})
-        return history
-
-    def _reaccept_broken_chain(
-        self,
-        directory: Path,
-        publication: dict[str, object],
-        bundle: dict[str, object],
-        invalid: dict[str, object],
-        reason: str,
-    ) -> dict[str, object]:
-        """Re-attest over a reacceptance whose ANCESTRY is broken (a missing/corrupt
-        link at some depth, or an unknown-key record that fails structural/chain
-        validation). Unlike _quarantine_and_reaccept — which points the new receipt at
-        `invalid` and so keeps walking back into the broken link — this RE-ROOTS the
-        live chain at a forensic marker with NO predecessor. The new reacceptance's
-        ancestry is therefore new → marker (root), which resolves fully on the next
-        load, so the repair CONVERGES instead of re-minting every reload (review r21).
-        `invalid` is still archived, so the damaged record is preserved for audit."""
-        self._archive_superseded(directory, invalid)
-        supersedes = invalid.get("supersedes")
-        unresolved = str(supersedes.get("previous_ref", "")) if isinstance(supersedes, dict) else ""
-        marker = {
-            "schema_version": "axor-lab-acceptance-forensic/v1",
-            "status": "broken_chain",
-            "reason": reason,
-            "broken_record_ref": content_hash(invalid),
-            "unresolved_ref": unresolved,
-        }
-        self._archive_superseded(directory, marker)
-        reacceptance = self._reaccept(publication, bundle, marker, reason=reason)
-        _write_atomic(directory / "acceptance.json", json.dumps(reacceptance, indent=2))
-        return reacceptance
-
-    def _quarantine_and_reaccept(
-        self,
-        directory: Path,
-        publication: dict[str, object],
-        bundle: dict[str, object],
-        invalid: dict[str, object],
-        reason: str = "persisted acceptance failed verification on load",
-    ) -> dict[str, object]:
-        """Archive the damaged acceptance to the append-only history and mint+persist
-        a linked reacceptance/v1 event (review r18/r19). Repeated corruption keeps
-        EVERY superseded record — the previous_ref chain stays resolvable.
-
-        Because `invalid` is archived here BEFORE the new receipt is minted, the new
-        reacceptance's own previous_ref (= content_hash(invalid)) resolves on the very
-        next load: a broken-chain re-attestation therefore CONVERGES rather than being
-        re-minted on every reload (review r20)."""
-        self._archive_superseded(directory, invalid)
-        reacceptance = self._reaccept(publication, bundle, invalid, reason=reason)
-        _write_atomic(directory / "acceptance.json", json.dumps(reacceptance, indent=2))
-        return reacceptance
-
-    def _reaccept_forensic(
-        self,
-        directory: Path,
-        publication: dict[str, object],
-        bundle: dict[str, object],
-        forensic: dict[str, object],
-    ) -> dict[str, object]:
-        """A MISSING/malformed/non-object acceptance for a loaded publication: record
-        a forensic marker in the append-only history and re-attest with a
-        reacceptance/v1 linking to it — never leave it None (which would mint a clean
-        acceptance/v1 masquerading as the publish-time record, review r19)."""
-        marker = {"schema_version": "axor-lab-acceptance-forensic/v1", **forensic}
-        self._archive_superseded(directory, marker)
-        reacceptance = self._reaccept(publication, bundle, marker)
-        _write_atomic(directory / "acceptance.json", json.dumps(reacceptance, indent=2))
-        return reacceptance
 
     def _load_reproductions_only(self, publication_id: str) -> None:
         """A taken-down publication keeps only its attestation record."""

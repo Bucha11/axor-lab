@@ -1,10 +1,15 @@
 # Axor Lab — Domain Model (v1)
 
+The canonical entities. Trace/event, tool-manifest, and kernel policy/config identity are **axor-core-shared** (one source of truth for the whole platform); scenario, predicate, experiment, condition, bundle, publication are **Lab-owned**. See architecture-boundary.md.
+
 The canonical entities. Every schema, API, and UI label uses these names and no synonyms. (Terminology for run modes is fixed separately: ungoverned / governed / compare; never undefended/bare in Lab UI — "undefended" survives only as the AgentDojo condition term.)
 
 ```
-AgentArtifact        a brought agent: wrapped_code | instrumented_endpoint | traces
-  └ ToolManifest[]   the tools it can call (args/result schema, effect, untrusted fields, simulation/reset)
+RuntimeRef           a connected execution environment (the Axor adapter that runs the agent + pushes traces)
+AgentRef             a logical agent identity — may run in several runtimes, change models over time
+TraceSource          where a Run's traces come from: runtime | import | demo | offline_runner
+AgentSnapshot        the fingerprint/model/version/config actually used in ONE Run
+  └ ToolManifest[]   (axor-core-shared) the tools it can call — Lab consumes, does not own
 
 ScenarioVersion      an executable world + criterion (task, inputs, tools, fixtures, injection, predicates)
 BenchVersion         an ordered set of ScenarioVersions + report config

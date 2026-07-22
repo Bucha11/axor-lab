@@ -24,10 +24,6 @@ packages = [
     "lab_adapters",
     "lab_server",
     "lab_agent",
-    "lab_entitlement",
-    "lab_endpoint",
-    "lab_sandbox",
-    "lab_games",
 ]
 
 # ship the contract schemas as package data so an installed wheel is

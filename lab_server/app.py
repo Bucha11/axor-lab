@@ -122,16 +122,11 @@ def make_server(
                         # the download offline (author/key_id/signature/signed_ref)
                         # without trusting this server (review r14)
                         "receipt": stored.receipt(),
-                        # the server's signed ACCEPTANCE receipt (review r15)
+                        # the server's signed ACCEPTANCE receipt (review r15). v0.3
+                        # keeps publication + bundle hash + optional signature +
+                        # reproduction records; the reacceptance/history chains are
+                        # deferred, so there is no acceptance_history to carry.
                         "acceptance": store.acceptance(stored),
-                        # the append-only acceptance HISTORY (review r19): when the
-                        # served acceptance is a reacceptance/v1, its supersedes
-                        # chain resolves to these stored records, so an offline
-                        # reader can confirm the previous_ref names a real damaged
-                        # receipt — not an unverifiable string
-                        "acceptance_history": store.acceptance_history(
-                            str(stored.publication["publication_id"])
-                        ),
                     })
                     return
                 api_pub = _API_PUB_RE.match(path)
