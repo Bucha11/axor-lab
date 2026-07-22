@@ -109,8 +109,53 @@ supersedes the prior attempt and bumps `attempt`/`superseded`. The SSE endpoint 
 a snapshot stream today; a long-lived push stream and per-tenant scoping remain the
 extension points.
 
+**Trust-boundary restoration** (review v0.3-2 — reverses a regression the runtime
+surface introduced; `lab_server/runtime_jobs.py`, `store.py`):
+
+- **No trust in uploaded aggregates.** The `POST /runs/{id}/aggregates` endpoint is
+  gone; `/runs/{id}/results` no longer carries uploaded numbers. Lab computes every
+  aggregate from the collected traces at bundle/publish time (`store.publish`
+  already recomputes) — a runtime cannot hand Lab a result to render.
+- **Strict trace ingestion.** A trial only reaches `completed` with a schema- **and**
+  semantics-conformant `trace/v1` (`validate_artifact` + `trace_semantics`), bound to
+  the assigned `TrialUnit` when the plan named one; the attempt is frozen with its
+  content-addressed `trace_ref`. Only a *planned* trial id may be driven (fail-closed).
+  A `failed` trial needs typed failure details.
+- **Immutable attempts + audit history.** A finished attempt cannot be re-completed
+  or streamed into; a re-run is an explicit `POST /runs/{id}/trials/{id}/retry` that
+  opens a superseding `TrialAttempt` and **keeps the prior attempt** in the history
+  (no destructive replace). Terminal run states (`completed`/`failed`/`cancelled`)
+  reject further ingest.
+- **Idempotent event batches.** An `Idempotency-Key`/`batch_id` makes a re-delivered
+  event batch a no-op, so a network retry cannot duplicate a ledger.
+- **Fail-closed planner.** `plan_experiment` rejects an empty scenario/condition
+  matrix or `repeats < 1` instead of inventing plausible identifiers.
+- **Damaged acceptance is flagged, not re-minted.** A persisted acceptance that fails
+  verification under a known key is marked `acceptance_status=invalid` and hidden
+  from the catalog; the server no longer silently mints a fresh clean receipt over
+  the tampering. An operator re-verifies / re-publishes to clear it.
+
+Still deferred to the platform layer (need shared Axor infrastructure, not a
+Lab-local contour): the **shared runtime registry / trace ingest** (Lab currently
+owns `/runtimes/connect` in-process — it must become a thin platform API so a CP
+user selects an already-connected runtime), runtime **leases / heartbeat / reclaim**,
+and **promote-via-refs** (a `POST /promotions` over shared artifact refs rather than
+the offline `cp_export` package). These are called out explicitly in the review and
+tracked below.
+
 ## Pending
 
+- **Shared runtime registry + trace ingest at the platform level** (review v0.3-1):
+  extract `RuntimeRef` / credentials / status / manifests / telemetry out of the
+  Lab process into shared Axor platform/CP infrastructure; Lab keeps only
+  `/experiments`, `/runs`, `/runs/{id}/confirm`, `/runs/{id}/results` and *selects* a
+  runtime. Needs the CP-side service to point at.
+- **Runtime leases + cancellation** (review v0.3-lease): `lease_expires_at` /
+  heartbeat / reclaim / `runtime disconnected`, so a dropped runtime mid-run is a
+  first-class failure case (lifecycle.md already names it).
+- **Promote, not export** (review v0.3-promote): a hosted `POST /promotions`
+  referencing shared `policy_ref` / `regression_refs`; `lab_runner/cp_export.py`
+  stays as the offline/self-hosted portability tool, not the SaaS path.
 - **Full lifecycle/domain re-model**: the four lifecycles (demo / connected_runtime
   / trace_import / offline_runner) are documented in `lifecycle.md`; the store drives
   the `connected_runtime` path end-to-end, and the other three plus durable,

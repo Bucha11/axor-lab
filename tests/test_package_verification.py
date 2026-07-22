@@ -146,12 +146,12 @@ class TestServerPackageVerification(unittest.TestCase):
         pkg["receipt"]["integrity"] = "signed"
         self.assertEqual(main(["verify", str(self._write(pkg))]), EXIT_FAILURE)
 
-    def test_damaged_persisted_acceptance_is_reminted_and_verifies(self) -> None:
-        # v0.3 collapses the reacceptance/history machinery: when a persisted
-        # acceptance is found DAMAGED (its semantic_report no longer binds), the
-        # store discards it and mints a FRESH acceptance/v1 from the current bundle
-        # on load — no reacceptance/v1, no history chain. The freshly minted
-        # acceptance binds correctly and verifies.
+    def test_damaged_persisted_acceptance_is_flagged_invalid_not_reminted(self) -> None:
+        # v0.3 collapses the reacceptance/history machinery, but a DAMAGED persisted
+        # acceptance (its semantic_report no longer binds) is NOT silently replaced
+        # with a fresh clean receipt — that would erase the tampering. The store
+        # flags it invalid, hides it from the catalog, and serves a degraded
+        # acceptance_status=invalid record until an operator re-verifies.
         root = Path(self.tmp.name) / "store"
         pid = str(self.pkg["publication"]["publication_id"])
         acc_file = root / pid / "acceptance.json"
@@ -160,14 +160,10 @@ class TestServerPackageVerification(unittest.TestCase):
         acc_file.write_text(json.dumps(tampered))
         store = PublicationStore(root=root)
         reloaded = store.get(pid)
+        self.assertTrue(reloaded.acceptance_invalid)
         acc = store.acceptance(reloaded)
-        self.assertEqual(acc["schema_version"], "axor-lab-acceptance/v1")
-        self.assertNotIn("FABRICATED_CHECK", acc["semantic_report"]["verified"])
-        pkg = json.loads(json.dumps(self.pkg))
-        pkg["acceptance"] = acc
-        self.assertEqual(
-            main(["verify", str(self._write(pkg)), "--allow-unsigned-server"]), EXIT_OK
-        )
+        self.assertEqual(acc["acceptance_status"], "invalid")
+        self.assertNotIn(reloaded, store.catalog())  # degraded → not listed
 
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")

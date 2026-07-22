@@ -17,6 +17,22 @@ from http.server import ThreadingHTTPServer
 
 from lab_server import RuntimeJobStore, make_runtime_server, plan_experiment
 
+_TRACE_CACHE: list[dict] = []
+
+
+def conformant_trace() -> dict:
+    """A real, schema- and semantics-conformant trace/v1 (Lab now rejects any
+    non-conformant object on trial complete). Produced once by the runner."""
+    if not _TRACE_CACHE:
+        from tests import support
+        from lab_runner import run_experiment_suite
+        result = run_experiment_suite(
+            [support.banking_scenario()], support.manifests(), support.conditions(),
+            support.kernel_registry(), repeats=1, run_id="rt_fixture",
+        )
+        _TRACE_CACHE.extend(result.traces.values())
+    return json.loads(json.dumps(_TRACE_CACHE[0]))  # a fresh deep copy per call
+
 
 class _Base(unittest.TestCase):
     control_token: str | None = "ctl"
@@ -77,25 +93,56 @@ class TestRuntimeJobsFlow(_Base):
         self.assertEqual(status, 200, claim)
         self.assertEqual(claim["assignment"]["id"], "exp1")
 
-        # 4) the runtime streams the trial's kernel events, then completes it with a trace
+        # 4) the runtime streams the trial's kernel events, then completes it with a
+        # CONFORMANT trace/v1 (a non-conformant object is rejected — see below)
         status, ev = self._req(
             "POST", f"/runtime/jobs/{run_id}/trials/t0/events",
             {"events": [{"seq": 0, "type": "tool_call_intent"}]}, token=ingest_key)
         self.assertEqual(status, 200, ev)
         status, done = self._req(
             "POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
-            {"trace": {"schema_version": "trace/v1", "trial": {"trial_id": "t0"}}},
-            token=ingest_key)
+            {"trace": conformant_trace()}, token=ingest_key)
         self.assertEqual(status, 200, done)
+        self.assertTrue(done["trace_ref"])  # the attempt is frozen with its trace_ref
         # the plan had exactly one trial → the run is now completed
         self.assertEqual(done["run_state"], "completed")
 
-        # 5) Lab reads the collected results
+        # 5) Lab reads the collected results — trace history, NO uploaded aggregates
         status, results = self._req("GET", f"/runs/{run_id}/results", token="ctl")
         self.assertEqual(status, 200)
         self.assertEqual(results["state"], "completed")
         self.assertEqual(len(results["traces"]), 1)
         self.assertEqual(results["trials"][0]["status"], "completed")
+        self.assertNotIn("aggregates", results)  # Lab computes aggregates, not the runtime
+
+    def test_completing_with_a_nonconformant_trace_is_refused(self) -> None:
+        _, conn = self._req("POST", "/runtimes/connect", {}, token="ctl")
+        _, run = self._req("POST", "/runs", {
+            "runtime_ref": conn["runtime_ref"], "experiment": {"id": "e"},
+            "planned_trials": ["t0"],
+        }, token="ctl")
+        rid, key = run["run_id"], conn["ingest_key"]
+        self._req("POST", f"/runtime/jobs/{rid}/claim", {}, token=key)
+        # a runtime's summary object is NOT a trace — completion is refused (422)
+        status, out = self._req("POST", f"/runtime/jobs/{rid}/trials/t0/complete",
+                                {"trace": {"schema_version": "trace/v1", "trial": {}}}, token=key)
+        self.assertEqual(status, 422, out)
+        # and the run did NOT advance to completed on the strength of a fake trace
+        _, results = self._req("GET", f"/runs/{rid}/results", token="ctl")
+        self.assertNotEqual(results["state"], "completed")
+
+    def test_unplanned_trial_is_rejected(self) -> None:
+        _, conn = self._req("POST", "/runtimes/connect", {}, token="ctl")
+        _, run = self._req("POST", "/runs", {
+            "runtime_ref": conn["runtime_ref"], "experiment": {"id": "e"},
+            "planned_trials": ["t0"],
+        }, token="ctl")
+        rid, key = run["run_id"], conn["ingest_key"]
+        self._req("POST", f"/runtime/jobs/{rid}/claim", {}, token=key)
+        # a trial id outside the plan cannot be driven (fail-closed)
+        status, _ = self._req("POST", f"/runtime/jobs/{rid}/trials/rogue/events",
+                              {"events": []}, token=key)
+        self.assertEqual(status, 404)
 
     def test_runtime_endpoints_require_a_valid_ingest_key(self) -> None:
         self.assertEqual(self._req("GET", "/runtime/jobs")[0], 401)  # no key
@@ -194,7 +241,7 @@ class TestUiFacingSurface(_Base):
         _, listing2 = self._req("GET", "/runtime/jobs", token=conn["ingest_key"])
         self.assertEqual([j["job_id"] for j in listing2["jobs"]], [run_id])
 
-    def test_results_carry_aggregates_and_events_sse(self) -> None:
+    def test_results_have_no_uploaded_aggregates_and_stream_sse(self) -> None:
         conn = self._connect()
         _, run = self._req("POST", "/runs", {
             "runtime_ref": conn["runtime_ref"], "experiment": {"id": "e"},
@@ -203,15 +250,14 @@ class TestUiFacingSurface(_Base):
         run_id = run["run_id"]
         self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=conn["ingest_key"])
         self._req("POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
-                  {"trace": {"schema_version": "trace/v1", "trial": {"trial_id": "t0"}}},
-                  token=conn["ingest_key"])
-        # attach runner-computed aggregates (Lab renders, does not compute them)
-        aggs = [{"metric": "ASR", "condition": "gov", "successes": 1, "n": 4}]
-        status, out = self._req("POST", f"/runs/{run_id}/aggregates",
-                                {"aggregates": aggs}, token="ctl")
-        self.assertEqual(status, 200, out)
+                  {"trace": conformant_trace()}, token=conn["ingest_key"])
+        # there is NO endpoint to upload a result aggregate — Lab computes them from
+        # traces at bundle/publish time; results carry trace history, not numbers
+        self.assertEqual(self._req("POST", f"/runs/{run_id}/aggregates",
+                                   {"aggregates": []}, token="ctl")[0], 404)
         _, results = self._req("GET", f"/runs/{run_id}/results", token="ctl")
-        self.assertEqual(results["aggregates"], aggs)
+        self.assertNotIn("aggregates", results)
+        self.assertEqual(len(results["traces"]), 1)
         # the SSE events endpoint streams state + trial progress frames
         status, ctype, text = self._raw("GET", f"/runs/{run_id}/events", token="ctl")
         self.assertEqual(status, 200)
@@ -228,7 +274,7 @@ class TestUiFacingSurface(_Base):
         }, token="ctl")
         run_id = run["run_id"]
         self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=conn["ingest_key"])
-        trace = {"schema_version": "trace/v1", "trial": {"trial_id": "t0"}}
+        trace = conformant_trace()
         self._req("POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
                   {"trace": trace}, token=conn["ingest_key"])
         status, got = self._req("GET", f"/runs/{run_id}/trials/t0/trace", token="ctl")
@@ -246,48 +292,113 @@ class TestStoreDirect(unittest.TestCase):
         conn = store.connect_runtime(model="x")
         run = store.create_run(conn["runtime_ref"], {"id": "e"})
         store.claim(run["run_id"], conn["runtime_ref"])
-        out = store.complete_trial(run["run_id"], "t0", conn["runtime_ref"], {"schema_version": "trace/v1"})
+        out = store.complete_trial(run["run_id"], "t0", conn["runtime_ref"], conformant_trace())
         self.assertEqual(out["run_state"], "analyzing")
 
-    def test_trial_attempt_supersede_idempotency(self) -> None:
-        # re-completing a trial with the SAME trace is idempotent; a DIFFERENT
-        # trace supersedes the prior attempt (a retry), bumping attempt/superseded.
+    def test_finished_attempt_is_immutable_retry_supersedes_keeping_history(self) -> None:
+        # a completed attempt is IMMUTABLE: re-completing or streaming into it is
+        # refused. A retry opens a NEW attempt that supersedes the prior one, and
+        # the prior attempt stays in the audit history (not destroyed).
         store = RuntimeJobStore()
         conn = store.connect_runtime(model="x")
         run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
         rid, ref = run["run_id"], conn["runtime_ref"]
         store.claim(rid, ref)
-        first = store.complete_trial(rid, "t0", ref, {"trace": 1})
-        self.assertEqual((first["attempt"], first["superseded"]), (1, 0))
-        # identical re-delivery → idempotent, no supersede
-        dup = store.complete_trial(rid, "t0", ref, {"trace": 1})
-        self.assertTrue(dup["idempotent"])
-        self.assertEqual((dup["attempt"], dup["superseded"]), (1, 0))
-        # a different trace → supersede
-        redo = store.complete_trial(rid, "t0", ref, {"trace": 2})
-        self.assertEqual((redo["attempt"], redo["superseded"]), (2, 1))
+        t1, t2 = conformant_trace(), conformant_trace()
+        t2["values"] = list(t2.get("values", []))  # a distinct object identity
+        first = store.complete_trial(rid, "t0", ref, t1)
+        first_att = first["attempt"]
+        # re-completing the finished attempt is refused (immutable)
+        with self.assertRaises(Exception) as ctx:
+            store.complete_trial(rid, "t0", ref, t2)
+        self.assertEqual(getattr(ctx.exception, "status", None), 409)
+        # streaming into the finished attempt is likewise refused
+        with self.assertRaises(Exception):
+            store.append_events(rid, "t0", ref, [{"seq": 0}])
+        # an explicit retry opens a superseding attempt; run returns to running
+        redo = store.retry_trial(rid, "t0", ref)
+        self.assertEqual(redo["supersedes"], first_att)
+        self.assertEqual(redo["run_state"], "running")
+        store.complete_trial(rid, "t0", ref, t2)
         results = store.results(rid)
-        self.assertEqual(results["trials"][0]["attempt"], 2)
-        self.assertEqual(results["trials"][0]["superseded"], 1)
-        # only the latest trace is retained
-        self.assertEqual(results["traces"], [{"trace": 2}])
+        attempts = results["trials"][0]["attempts"]
+        self.assertEqual(len(attempts), 2)                 # BOTH attempts retained
+        self.assertEqual(attempts[0]["attempt_id"], first_att)
+        self.assertEqual(attempts[1]["supersedes"], first_att)
+        self.assertEqual(len(results["traces"]), 1)        # the active accepted trace
 
-    def test_streaming_events_after_complete_starts_new_attempt(self) -> None:
+    def test_event_batches_are_idempotent(self) -> None:
+        # a re-delivered batch (same batch_id) does not duplicate the ledger
         store = RuntimeJobStore()
         conn = store.connect_runtime(model="x")
         run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
         rid, ref = run["run_id"], conn["runtime_ref"]
         store.claim(rid, ref)
-        store.complete_trial(rid, "t0", ref, {"trace": 1})
-        # a runtime re-runs the unit: streaming events resets it to a new attempt
-        out = store.append_events(rid, "t0", ref, [{"seq": 0}])
-        self.assertEqual(out["attempt"], 2)
-        self.assertEqual(store.results(rid)["trials"][0]["status"], "pending")
+        a = store.append_events(rid, "t0", ref, [{"seq": 0}, {"seq": 1}], batch_id="b1")
+        self.assertEqual(a["events"], 2)
+        b = store.append_events(rid, "t0", ref, [{"seq": 0}, {"seq": 1}], batch_id="b1")
+        self.assertTrue(b["idempotent"])
+        self.assertEqual(b["events"], 2)  # not 4 — the retry was a no-op
+
+    def test_terminal_run_rejects_further_ingest(self) -> None:
+        store = RuntimeJobStore()
+        conn = store.connect_runtime(model="x")
+        run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
+        rid, ref = run["run_id"], conn["runtime_ref"]
+        store.claim(rid, ref)
+        store.complete_trial(rid, "t0", ref, conformant_trace())
+        self.assertEqual(store.results(rid)["state"], "completed")  # terminal
+        with self.assertRaises(Exception) as ctx:
+            store.append_events(rid, "t0", ref, [{"seq": 0}])
+        self.assertEqual(getattr(ctx.exception, "status", None), 409)
+
+    def test_failed_trial_requires_typed_failure(self) -> None:
+        store = RuntimeJobStore()
+        conn = store.connect_runtime(model="x")
+        run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
+        rid, ref = run["run_id"], conn["runtime_ref"]
+        store.claim(rid, ref)
+        with self.assertRaises(Exception):  # no failure details
+            store.complete_trial(rid, "t0", ref, None, status="failed")
+        out = store.complete_trial(rid, "t0", ref, None, status="failed",
+                                   failure={"kind": "timeout", "detail": "no response"})
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(store.results(rid)["state"], "failed")
+
+    def test_trace_unit_binding_is_enforced(self) -> None:
+        # when the plan names a TrialUnit coordinate, the uploaded trace's trial
+        # block must match it — a trace for a different unit is rejected
+        store = RuntimeJobStore()
+        conn = store.connect_runtime(model="x")
+        trace = conformant_trace()
+        unit = trace["trial"]
+        run = store.create_run(conn["runtime_ref"], {"id": "e"},
+                               planned=[{"trial_id": "u0", "trial": unit}])
+        rid, ref = run["run_id"], conn["runtime_ref"]
+        store.claim(rid, ref)
+        wrong = conformant_trace()
+        wrong["trial"] = {**unit, "seed": "s999"}  # a different unit
+        with self.assertRaises(Exception) as ctx:
+            store.complete_trial(rid, "u0", ref, wrong)
+        self.assertEqual(getattr(ctx.exception, "status", None), 422)
+        # the matching trace is accepted
+        out = store.complete_trial(rid, "u0", ref, conformant_trace())
+        self.assertEqual(out["status"], "completed")
 
     def test_plan_experiment_is_deterministic(self) -> None:
         exp = {"scenario_ids": ["a"], "conditions": ["gov", "ungov"], "repeats": 2}
         self.assertEqual(plan_experiment(exp), plan_experiment(exp))
         self.assertEqual(plan_experiment(exp)["estimate"]["trials"], 4)
+
+    def test_plan_experiment_fails_closed_on_bad_matrix(self) -> None:
+        # no convenience-defaulting: a malformed experiment is rejected, not turned
+        # into a plausible plan of fictional units
+        for bad in ({"conditions": ["gov"]},               # no scenarios
+                    {"scenario_ids": ["a"]},               # no conditions
+                    {"scenario_ids": ["a"], "conditions": ["gov"], "repeats": 0}):
+            with self.assertRaises(Exception) as ctx:
+                plan_experiment(bad)
+            self.assertEqual(getattr(ctx.exception, "status", None), 400)
 
 
 if __name__ == "__main__":
