@@ -1,6 +1,6 @@
 # Axor Lab — Runner Protocol (v1)
 
-How the local runner talks to the Lab web app. The MVP runner is **local-only**: the researcher's machine executes the agent and tools; Lab receives artifacts, never runs untrusted code. This is why the lifecycle branches by backend (see lifecycle.md).
+How the offline/local runner talks to the Lab web app. **This is the offline / CI / air-gapped / enterprise path, NOT the primary onboarding** (that is hosted UI → demo → connected runtime; see architecture-boundary.md and mvp-contract.md). Here the researcher's machine executes the agent and tools; Lab receives artifacts, never runs anything. The runtime executes; Lab assigns and ingests.
 
 ## Local runner flow
 

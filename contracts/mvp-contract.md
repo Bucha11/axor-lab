@@ -10,23 +10,26 @@ Cloud arbitrary-code execution · generic endpoint governance · instrumented-en
 
 ## MVP Contract (what v1 must have to exist, and nothing more)
 
-The vertical slice, productized. Twelve items:
+Hosted-first — the user sees the product before installing anything (installing-then-seeing is the wrong funnel). Thirteen items:
 
-1. **Local runner** — executes on the researcher's machine (`axor lab run`); Lab server never runs untrusted code in v1.
-2. **Curated AgentDojo adapter** — one imported benchmark, materialized as `scenario/v1` objects.
-3. **Minimal typed scenario DSL** — the `predicate/v1` subset actually needed: `event_match` + `matcher_map` + `equal/not_equal/in/provenance_is` + `$inputs`. Boolean composition (`all/any/not/sequence`) is defined in the schema but MAY be post-MVP in the *authoring UI*; the runner supports it. (This resolves the First/Then contradiction: an authored benchmark in v1 needs at least this typed subset, so it is in First, not deferred.)
-4. **Simulated tools + fixtures** — every tool runs through a simulator by default; `side_effecting` tools never fire for real without explicit opt-in. Attack benchmarks cannot create incidents.
-5. **Canonical trace/event format with provenance** — `trace/v1`, produced by the wrapped local runtime with `explicit_flow_tracked` lineage.
-6. **Ungoverned live run** — observe-only (enforcement off), the plain baseline.
-7. **Governed live run** — enforcement on.
-8. **Decision replay** — `axor lab replay`, exact over frozen traces.
-9. **EvidenceCase** — the three-mode view over one trial's trace.
-10. **Private bundle upload** — `bundle/v1`, hash-verified.
-11. **Public/unlisted publication** — `publication/v1`, immutable, with the exact/statistical claim split.
-12. **Regression pinning** — pin (trace, expected verdict); surface changes.
+1. **Hosted Lab UI** — browser, no install to start.
+2. **Zero-setup demo** — Axor-hosted template: open → pick experiment → Run → Results → EvidenceCase, no agent.
+3. **Shared workspace / auth** — one account, platform-level entitlement (not a Lab-specific system).
+4. **Connected runtime selector** — connect once via the shared Axor adapter, or select an already-connected runtime; no second integration.
+5. **Trace import** — reproduce a production incident or a published run.
+6. **Experiment builder** — scenarios × conditions × repeats, binding a `runtime_ref`.
+7. **Assignment execution beside the agent** — the runtime claims the job and runs locally (Lab assigns, never executes).
+8. **Trace ingestion with provenance** — the shared `trace/v1` fabric.
+9. **Results + honest statistics** — Wilson/bootstrap/McNemar, rendered from stored aggregates.
+10. **EvidenceCase** — the three-mode view over a trial's trace.
+11. **Replay + regression pinning** — exact verdict replay; pin (trace, expected verdict).
+12. **Simple bundle / publication** — `bundle/v1` + immutable `publication/v1`.
+13. **Promote policy to Control Plane** — create a production configuration from an experiment result (a ref between shared artifacts, not an export/import).
+
+**Local runner stays — but as offline / CI / enterprise / open-research reproduction, NOT the onboarding path.**
 
 ### Explicitly NOT in the MVP
-Arbitrary cloud code · generic endpoint governance · multi-agent game builder · arbitrary topology · population scale · Lab-paid inference. Each is in the Vision; none blocks a useful first Lab.
+Lab gateway / MCP proxy owned by Lab · black-box endpoint eval · arbitrary cloud-code sandbox · multi-agent games · population scale · complex attestation chains · a separate entitlement system · any duplicate trace format. Each is either removed outright (architecture-boundary.md) or deferred to Vision; none blocks a useful first Lab.
 
 ## The First/Then/Later sequence (within the Vision, after MVP ships)
 

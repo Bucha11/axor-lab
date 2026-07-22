@@ -1,68 +1,70 @@
 # Spec v0.3 conformance — status
 
-This directory carries the **new v0.3 spec bundle** (`spec-lab.md`, `formats/`,
-`mocks/`, and the business docs) plus the new contract docs that landed in
-`contracts/` (`architecture-boundary.md`, `ui-backend-contract.md`) and the
-`contracts/schemas/_shared_from_axor_core/` reference schemas.
+The v0.3 spec is a deliberate **re-scoping** of Axor Lab down to the experiment /
+evidence layer over Axor runtime traces (`contracts/architecture-boundary.md`, READ
+FIRST). This file tracks how the repo is brought into line, phase by phase, so the
+migration stays reviewable instead of one destructive sweep.
 
-The v0.3 spec is a deliberate **re-scoping** of Axor Lab, not an additive tuning.
-It is captured here so the repo documents the target while the migration proceeds
-in controlled, reviewable steps rather than one destructive sweep.
+## Interpretation (how "hold to the new spec" is applied)
 
-## Done (non-destructive, additive) — this pass
+The spec changes two different kinds of thing, handled differently:
 
-- New contract docs copied in: `contracts/architecture-boundary.md` (READ FIRST),
-  `contracts/ui-backend-contract.md`.
-- Spec narrative + authoring + business docs under `docs/spec-v0.3/`:
-  `spec-lab.md`, `formats/bench-format.md`, `axor-packaging.md`,
-  `cp-monetization.md`, `lab-economics.md`, `outreach-targets.md`, and the UI
-  reference `mocks/*.jsx`.
-- `contracts/schemas/_shared_from_axor_core/{trace,tool-manifest}.schema.json` —
-  the axor-core-owned baselines, as **reference** (not yet the loaded schemas).
-- `condition.schema.json` gains the thin-wrapper fields `kernel_ref`, `policy_ref`,
-  `runtime_config_hash` (optional; the inline `kernel`/`policy` still validate), and
-  the `$comment` records the thin-wrapper direction. Both schema copies stay
-  byte-identical (packaging parity), the slice examples validate, and the full test
-  suite stays green.
+1. **Explicit structural direction** — the subsystems `architecture-boundary.md`
+   names as *removed / deferred*, the schema-ownership split, the thin-wrapper
+   `condition`, the contract-doc rewrites. These are adopted literally.
 
-## Pending (architectural / destructive) — needs a deliberate go-ahead
+2. **Field-level schema deltas where the spec is merely an older/silent snapshot**
+   — the spec's Lab-owned schemas predate the r18–r21 correctness fields
+   (`execution_id`, `config_provenance`, `experiment_design`, `comparison_design`,
+   `runtime_provenance`, `resolved_kernel_fingerprint`, `statistics_integrity`, …).
+   The `architecture-boundary.md` removal list does **not** name any of them, and
+   dropping them would silently regress the earned-bridge soundness the repo just
+   built. Because the spec's ownership table makes `bundle/condition/experiment/
+   publication` **Lab-owned**, Lab legitimately keeps these as an **extension layer**
+   on top of the spec baseline. `trace`/`tool-manifest` are axor-core-owned; the
+   repo keeps its richer, replay-load-bearing versions as the de-facto axor-core
+   baseline (the spec's `_shared_from_axor_core/` copies are stubs and dropping the
+   `call_id` / `decision_value` / event discriminators they omit would break replay,
+   gating, and EvidenceCase — all explicitly *in* scope).
 
-Per `architecture-boundary.md`, v0.3 removes scope the repo currently implements and
-hardened over rounds 16–21. These are **not** in this pass because each deletes
-green, hardened code and reverts real correctness guarantees:
+If the intent is instead to strip those fields to the spec's exact schemas, that is
+a clean, separate follow-up — say so and it happens.
 
-1. **Retire the Lab gateway.** `endpoint-protocol.md` is retired; `lab_endpoint/`
-   (the synchronous `/runs` gateway, `run_secret`, `authoritative_args`,
-   `/trace/ack`, retention/eviction) is out. Replace with the runtime-pull
-   assignment API: `GET /runtime/jobs`, `/claim`, `/trials/{id}/events`,
-   `/complete` — Lab assigns, the runtime executes.
-2. **Drop the Lab-owned sandbox** (`lab_sandbox/`) and **multi-agent games**
-   (`lab_games/`) — enterprise/later and deferred, respectively.
-3. **Collapse the entitlement subsystem** (`lab_entitlement/`) into platform-level
-   tiers (`workspace_tier`/`private_lab`/`control_plane`/`self_hosted_runner`, per
-   `axor-packaging.md`).
-4. **Defer the attestation / reacceptance / acceptance-history / tombstone chains**
-   in `lab_server` down to "publication + bundle hash + optional signature +
-   reproduction records" (v0.3 §"Removed / Deferred").
-5. **Shared-schema ownership.** trace + tool-manifest are owned by axor-core; make
-   `_shared_from_axor_core/` the loaded baseline (the second Lab trace schema is
-   deleted). This collides with the repo's trace hardening (`call_id`,
-   `decision_value`, event `allOf` discriminators, `driving_value_id: null` for a
-   fail-closed DENY) — those must be re-expressed as an explicit Lab extension or
-   dropped.
-6. **Reconcile the r18–r21 bundle/experiment/publication fields** the v0.3
-   `additionalProperties:false` schemas would invalidate (`experiment_design`,
-   `config_provenance`, `execution_id`, `runtime_provenance`,
-   `resolved_kernel_fingerprint`, the completed-trial `allOf`, `comparison_design`,
-   `statistics_integrity`, …): keep as a Lab extension layer, or drop to match the
-   spec verbatim. This is a product decision, not a mechanical merge — the v0.3
-   `config_hash` = "CP carry-over key" wording also reverts the r19
-   `parametric_config_hash` distinction.
-7. **Lifecycle / domain re-model.** `AgentArtifact` → `RuntimeRef` / `AgentRef` /
-   `TraceSource` / `AgentSnapshot`; backend-branched plans → the four trace-source
-   lifecycles (`demo` / `connected_runtime` / `trace_import` / `offline_runner`)
-   with `TrialAttempt` supersede-idempotency and a `ready/awaiting_confirmation`
-   state.
+## Done
 
-Each pending item is a self-contained, reviewable change; several delete or rewrite
-test suites. They should land as their own commits after their scope is confirmed.
+**Phase 1 — subsystems retired** (commit "v0.3 Phase 1"):
+`lab_endpoint` (gateway/MCP proxy), `lab_sandbox`, `lab_games`, `lab_entitlement`
+and their 12 test suites deleted; dropped from pyproject + the CI ruff/real-kernel/
+crypto jobs; `contracts/endpoint-protocol.md` retired.
+
+**Additive conformance** (commit "spec v0.3: additive conformance"):
+`condition` gains thin-wrapper `kernel_ref` / `policy_ref` / `runtime_config_hash`;
+`contracts/architecture-boundary.md` + `ui-backend-contract.md` +
+`_shared_from_axor_core/` reference schemas + the `docs/spec-v0.3/` narrative,
+authoring, business and mock docs.
+
+**Phase 4 (docs) — contract docs adopted** (this commit):
+`control-plane-handoff.md`, `domain-model.md`, `lifecycle.md`, `mvp-contract.md`,
+`runner-protocol.md` replaced with the v0.3 versions (all 11 shared contract docs
+now match the spec byte-for-byte). These describe the target — the runtime-jobs
+pull API and the `RuntimeRef`/`TraceSource`/`connected_runtime` lifecycle — which
+the code does not yet implement (see Pending).
+
+**Schema conformance decision (Phase 2):** resolved per the Interpretation above —
+Lab-owned schemas kept as supersets with the thin-wrapper fields added; the r18–r21
+correctness fields retained as Lab extensions; trace/tool-manifest kept rich. No
+`kernel_version`-required change (it conflicts with the repo's mixed-kernel bundles,
+which legitimately omit the single global kernel_version).
+
+## Pending
+
+- **Phase 3 — collapse the acceptance machinery.** Reduce `lab_server` acceptance
+  to *publication + bundle hash + optional signature + reproduction records*; remove
+  the `reacceptance/v1`, `acceptance-history/`, tombstone-chain and quarantine/re-root
+  logic (v0.3 defers it).
+- **Runtime-jobs execution API.** Build `GET /runtime/jobs`, `/claim`,
+  `/trials/{id}/events`, `/complete` (Lab assigns, runtime executes). Not yet
+  implemented; the local runner remains the offline/CI path.
+- **Lifecycle/domain code re-model.** `RuntimeRef` / `AgentRef` / `TraceSource` /
+  `AgentSnapshot`; the four trace-source lifecycles; `TrialAttempt` supersede-
+  idempotency and the `ready/awaiting_confirmation` state.
