@@ -16,8 +16,9 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 from lab_server import (
+    InMemoryRuntimeRegistry,
+    LabTraceStore,
     RuntimeJobStore,
-    RuntimeRegistry,
     make_runtime_server,
     plan_experiment,
 )
@@ -391,10 +392,11 @@ class TestStoreDirect(unittest.TestCase):
         self.assertEqual(out["status"], "completed")
 
     def test_shared_registry_lets_one_runtime_serve_two_job_stores(self) -> None:
-        # the runtime + its credential live in a SHARED registry, not inside a Lab
-        # job store (review v0.3-1). A runtime connected once is selectable by any
-        # store sharing the registry — the runtime is not re-registered per store.
-        registry = RuntimeRegistry()
+        # the runtime + its credential live behind the RuntimeRegistry PORT, not
+        # inside a Lab job store. A registry shared across stores lets a runtime
+        # connected once be selectable by any store — this is what makes a CP-backed
+        # registry (an integrated deployment) selectable the same way (review v0.3-3).
+        registry = InMemoryRuntimeRegistry()
         conn = registry.connect(model="scripted")
         ref, key = conn["runtime_ref"], conn["ingest_key"]
 
@@ -410,6 +412,32 @@ class TestStoreDirect(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             other.create_run(ref, {"id": "e"})
         self.assertEqual(getattr(ctx.exception, "status", None), 404)
+
+    def test_injected_trace_store_receives_accepted_traces(self) -> None:
+        # the domain does not know which TraceStore is wired: an injected custom
+        # store receives every accepted trace, and results/trial_trace resolve
+        # through it (review v0.3-3 — TraceStore is a swappable port).
+        class RecordingStore(LabTraceStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.puts: list[str] = []
+
+            def put(self, trace_ref: str, trace: dict) -> None:
+                self.puts.append(trace_ref)
+                super().put(trace_ref, trace)
+
+        ts = RecordingStore()
+        store = RuntimeJobStore(trace_store=ts)
+        conn = store.connect_runtime(model="x")
+        run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
+        rid, ref = run["run_id"], conn["runtime_ref"]
+        store.claim(rid, ref)
+        out = store.complete_trial(rid, "t0", ref, conformant_trace())
+        # the accepted trace landed in the injected store, keyed by its trace_ref
+        self.assertEqual(ts.puts, [out["trace_ref"]])
+        self.assertIsNotNone(ts.get(out["trace_ref"]))
+        # results resolve the trace body through the store, not the attempt
+        self.assertEqual(len(store.results(rid)["traces"]), 1)
 
     def test_plan_experiment_is_deterministic(self) -> None:
         exp = {"scenario_ids": ["a"], "conditions": ["gov", "ungov"], "repeats": 2}

@@ -18,15 +18,18 @@ content-addressed `trace_ref`); a re-run is an explicit new `TrialAttempt` that
 supersedes the prior one without destroying it. Event batches are idempotent so a
 network retry cannot duplicate a ledger.
 
-The runtime + its ingest key live in a SHARED `RuntimeRegistry` (the platform
-component), not in Lab (review v0.3-1): Lab's job store only *selects* an
-already-registered `runtime_ref`. The registry is injectable so one instance can be
-shared with Control Plane; `/runtimes/connect` is a thin passthrough to it.
+Lab is a self-contained product: it runs standalone with NO Control Plane. The
+runtime + its ingest key live behind a `RuntimeRegistry` PORT (providers.py) that
+Lab owns; the accepted traces live behind a `TraceStore` port. Standalone Lab
+supplies both (`InMemoryRuntimeRegistry`, `LabTraceStore`); an integrated deployment
+injects CP-backed implementations of the SAME ports so a CP user's already-connected
+runtime is the one Lab assigns to, and Lab/CP read one shared trace fabric. The job
+store's domain never knows which implementation is wired (review v0.3-3).
 
 Control surface (Lab operator / UI):
 
-  POST /runtimes/connect     platform-registry passthrough -> { runtime_ref, ingest_key }
-  GET  /runtimes             list connected runtimes (from the shared registry)
+  POST /runtimes/connect     register a runtime (via the RuntimeRegistry port)
+  GET  /runtimes             list connected runtimes
   POST /scenarios/validate   validate a scenario -> { ok, errors[] }
   POST /experiments/plan     expand an experiment -> { trials, estimate }   (fail-closed)
   POST /runs                 assign an experiment to a runtime -> { run_id, state }
@@ -58,6 +61,8 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .providers import LabTraceStore, RuntimeRegistry, TraceStore
+
 _MAX_BODY = 8 * 1024 * 1024
 _TERMINAL = ("completed", "failed", "cancelled")
 
@@ -82,18 +87,17 @@ class RuntimeJobsError(Exception):
         self.message = message
 
 
-class RuntimeRegistry:
-    """The SHARED runtime registry — the platform component that owns `RuntimeRef`,
-    credentials (ingest keys), status and (later) manifests/telemetry.
+class InMemoryRuntimeRegistry:
+    """The STANDALONE `RuntimeRegistry` (review v0.3-3): Lab's own in-process runtime
+    registry, owning `RuntimeRef` + credentials + status.
 
-    Lab does NOT own this (review v0.3-1). architecture-boundary.md: *one Axor
-    adapter, one connection; CP and Lab see the SAME runtime; an existing CP user
-    just selects it.* So the registry is a distinct, injectable component — a single
-    instance can be shared by a Lab job store and (eventually) the Control Plane, and
-    a production deployment injects a CP-backed implementation. Lab's job store only
-    *selects* an already-registered runtime by `runtime_ref`; it never mints or holds
-    the credential itself. `connect()` here is the thin platform-registry op (used by
-    local/dev and by whatever front-door the platform exposes), not a Lab concept."""
+    Lab is a self-contained product — with this registry it registers runtimes,
+    assigns runs and collects traces with NO Control Plane. It implements the
+    `RuntimeRegistry` port (providers.py); an integrated deployment injects a
+    CP-backed implementation of the same port so a CP user's already-connected
+    runtime is the one Lab assigns to (connect once per deployment, not necessarily
+    through CP). Lab's job store only *selects* a registered `runtime_ref` — it does
+    not reach into whichever registry is wired."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -146,7 +150,8 @@ class _Attempt:
     attempt_id: str
     status: str = "running"  # running | completed | failed
     events: list[dict[str, object]] = field(default_factory=list)
-    trace: dict[str, object] | None = None
+    # the accepted trace lives in the TraceStore; the attempt keeps only its
+    # content-addressed ref (review v0.3-3 — TraceStore owns trace bodies)
     trace_ref: str | None = None
     failure: dict[str, object] | None = None
     supersedes: str | None = None
@@ -157,7 +162,7 @@ class _Attempt:
             "attempt_id": self.attempt_id, "status": self.status,
             "events": len(self.events), "trace_ref": self.trace_ref,
             "failure": self.failure, "supersedes": self.supersedes,
-            "has_trace": self.trace is not None,
+            "has_trace": self.trace_ref is not None,
         }
 
 
@@ -194,11 +199,15 @@ class RuntimeJobStore:
     uploading a CONFORMANT trace. A job reaches `completed` once every planned
     trial has an accepted terminal attempt."""
 
-    def __init__(self, registry: RuntimeRegistry | None = None) -> None:
+    def __init__(self, registry: RuntimeRegistry | None = None,
+                 trace_store: TraceStore | None = None) -> None:
         self._lock = threading.Lock()
-        # the SHARED registry owns runtimes + credentials; Lab only selects one
-        # (review v0.3-1). Injected so a single registry can be shared with CP.
-        self.registry = registry or RuntimeRegistry()
+        # the RuntimeRegistry owns runtimes + credentials; Lab only selects one
+        # (review v0.3-3). Both providers are injectable so an integrated deployment
+        # can swap Lab's standalone implementations for CP-backed ones — the domain
+        # below never knows which is wired.
+        self.registry: RuntimeRegistry = registry or InMemoryRuntimeRegistry()
+        self.trace_store: TraceStore = trace_store or LabTraceStore()
         self._jobs: dict[str, _Job] = {}
         self._n = 0
 
@@ -269,7 +278,8 @@ class RuntimeJobStore:
         with self._lock:
             job = self._job(job_id)
             trial = job.trials.get(trial_id)
-            trace = trial.active.trace if trial and trial.attempts else None
+            ref = trial.active.trace_ref if trial and trial.attempts else None
+            trace = self.trace_store.get(ref) if ref else None
             if trace is None:
                 raise RuntimeJobsError(404, f"no accepted trace for trial {trial_id!r}")
             return trace
@@ -290,10 +300,12 @@ class RuntimeJobStore:
                  "attempts": [a.record() for a in t.attempts]}
                 for t in job.trials.values()
             ],
-            # the accepted trace of each trial's active attempt; aggregates are
-            # RECOMPUTED by Lab from these at bundle/publish time — never uploaded
-            "traces": [t.active.trace for t in job.trials.values()
-                       if t.attempts and t.active.trace is not None],
+            # the accepted trace of each trial's active attempt (resolved from the
+            # TraceStore); aggregates are RECOMPUTED by Lab from these at
+            # bundle/publish time — never uploaded
+            "traces": [self.trace_store.get(t.active.trace_ref)
+                       for t in job.trials.values()
+                       if t.attempts and t.active.trace_ref is not None],
         }
 
     # -- runtime-facing surface ------------------------------------------
@@ -360,8 +372,11 @@ class RuntimeJobStore:
                 assert isinstance(trace, dict)
                 self._bind_unit(trial, trace)
                 from lab_contracts import content_hash
-                att.trace = trace
-                att.trace_ref = content_hash(trace)
+                # the accepted trace goes to the TraceStore (Lab's own fabric, or a
+                # shared one if injected); the attempt keeps only its ref
+                ref = content_hash(trace)
+                self.trace_store.put(ref, trace)
+                att.trace_ref = ref
             else:  # failed
                 if not isinstance(failure, dict) or not failure:
                     raise RuntimeJobsError(422, "a failed trial requires typed failure details")
@@ -489,15 +504,17 @@ def make_runtime_server(
     control_token: str | None = None,
     store: RuntimeJobStore | None = None,
     registry: RuntimeRegistry | None = None,
+    trace_store: TraceStore | None = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs server. `control_token`, if set, gates the control
     surface (runtime registration + run assignment); the runtime-facing endpoints
     are gated by the per-runtime ingest_key the registry issues at connect.
 
-    `registry` injects the SHARED runtime registry (review v0.3-1) so one registry
-    instance can back both this Lab server and the Control Plane; omitted, the store
-    gets a private in-process registry (dev/local)."""
-    jobs = store or RuntimeJobStore(registry=registry)
+    `registry` / `trace_store` inject the provider implementations (review v0.3-3):
+    omitted, the store gets Lab's standalone `InMemoryRuntimeRegistry` + `LabTraceStore`
+    (a fully working, CP-free deployment); an integrated deployment injects CP-backed
+    implementations of the same ports."""
+    jobs = store or RuntimeJobStore(registry=registry, trace_store=trace_store)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:  # quiet

@@ -135,36 +135,51 @@ surface introduced; `lab_server/runtime_jobs.py`, `store.py`):
   from the catalog; the server no longer silently mints a fresh clean receipt over
   the tampering. An operator re-verifies / re-publishes to clear it.
 
-**Runtime registry seam extracted** (review v0.3-1, `lab_server/runtime_jobs.py`):
-`RuntimeRef` + credentials (ingest keys) + status now live in a distinct, injectable
-`RuntimeRegistry` — the *shared platform component* — not inside the Lab job store.
-`RuntimeJobStore(registry=…)` takes the registry by injection, so one registry
-instance backs a Lab store and (once wired) the Control Plane; Lab only *selects* an
-already-registered `runtime_ref` and never mints or holds the credential. A runtime
-connected once against a shared registry is selectable by any store sharing it
-(proved by test). `/runtimes/connect` is now a thin passthrough to the registry, not
-a Lab-owned concept. What remains is the CROSS-REPO wiring: a CP-backed
-`RuntimeRegistry` implementation (and shared trace ingest) in `axor-control-plane` —
-the seam is ready for it.
+**Provider ports — Lab owns the seam, standalone-first** (review v0.3-3,
+`lab_server/providers.py`): the earlier framing ("move the registry/ingest to CP")
+was wrong — Axor Lab is a self-contained product that must run fully **without**
+Control Plane. So Lab *owns the ports* and ships standalone implementations; an
+integrated deployment injects CP-backed implementations of the SAME ports. The
+domain (experiment assignment, run lifecycle, trace validation, immutable attempts,
+Results, EvidenceCase) never knows which is wired.
 
-Still deferred to the platform layer (need shared Axor infrastructure / the other
-repo): the **CP-backed registry + shared trace ingest** implementation, runtime
-**leases / heartbeat / reclaim**, and **promote-via-refs** (a `POST /promotions` over
-shared artifact refs rather than the offline `cp_export` package). Tracked below.
+  Port (Lab-owned)     Standalone impl (this repo)     Integrated impl (optional)
+  RuntimeRegistry      InMemoryRuntimeRegistry         ControlPlaneRuntimeRegistry
+  TraceStore           LabTraceStore                   ControlPlane/shared trace fabric
+  TraceIngest          RuntimeJobStore (strict)        CP telemetry ingest front
+  ArtifactStore        PublicationStore                shared artifact store
+  PromotionBackend     cp_export (portable package)    shared-ref promotion
+
+`RuntimeJobStore(registry=…, trace_store=…)` takes both providers by injection and
+defaults to Lab's standalone ones — a fully working, CP-free deployment. `RuntimeRef`
++ credentials live behind the `RuntimeRegistry` port; accepted trace bodies live in
+the `TraceStore` (the attempt keeps only a content-addressed `trace_ref`). Both are
+proved swappable by test (a shared registry serving two stores; an injected custom
+`TraceStore` receiving every accepted trace). `architecture-boundary.md` is corrected
+to the provider-interface framing: *Lab consumes an Axor trace fabric through a
+provider interface; standalone Lab supplies it, integrated Lab may share the CP
+fabric; a user connects an agent once per deployment, not necessarily through CP.*
+
+Both promotion directions are first-class, not competing: standalone Lab →
+portable verified package (`cp_export`) → CP import; integrated Lab → shared
+artifact refs → promote. `cp_export` stays as the standalone `PromotionBackend`.
 
 ## Pending
 
-- **CP-backed runtime registry + shared trace ingest** (review v0.3-1, cross-repo):
-  the in-repo `RuntimeRegistry` seam is in place; implement a Control-Plane-backed
-  registry (and shared telemetry ingest) in `axor-control-plane` and inject it, so a
-  CP user's already-connected runtime is the one Lab assigns to. Lab keeps only
-  `/experiments`, `/runs`, `/runs/{id}/confirm`, `/runs/{id}/results` and selects.
+- **CP-backed provider implementations** (review v0.3-3, cross-repo, OPTIONAL): a
+  `ControlPlaneRuntimeRegistry` + shared trace-fabric `TraceStore` + shared-ref
+  `PromotionBackend` in `axor-control-plane`, injected into Lab for integrated
+  deployments. The ports are ready; this is an integration capability, not a
+  precondition for Lab.
+- **Persistent standalone providers**: `LabTraceStore` / registry are in-memory; a
+  durable on-disk implementation (still Lab-owned, still CP-free) for a long-running
+  standalone Lab.
 - **Runtime leases + cancellation** (review v0.3-lease): `lease_expires_at` /
-  heartbeat / reclaim / `runtime disconnected`, so a dropped runtime mid-run is a
-  first-class failure case (lifecycle.md already names it).
-- **Promote, not export** (review v0.3-promote): a hosted `POST /promotions`
-  referencing shared `policy_ref` / `regression_refs`; `lab_runner/cp_export.py`
-  stays as the offline/self-hosted portability tool, not the SaaS path.
+  heartbeat / reclaim / `runtime disconnected` on the `RuntimeRegistry` port, so a
+  dropped runtime mid-run is a first-class failure case (lifecycle.md names it).
+- **Shared-ref promotion** (review v0.3-promote): an integrated `PromotionBackend`
+  that promotes by shared `policy_ref` / `regression_refs`; the standalone
+  `cp_export` portable package stays as the CP-free path (both are first-class).
 - **Full lifecycle/domain re-model**: the four lifecycles (demo / connected_runtime
   / trace_import / offline_runner) are documented in `lifecycle.md`; the store drives
   the `connected_runtime` path end-to-end, and the other three plus durable,

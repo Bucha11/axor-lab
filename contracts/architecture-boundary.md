@@ -23,7 +23,11 @@ interventions   EvidenceCase
 notifications   replay / regression / publication
 ```
 
-The adapter opens the connection and pushes traces. **No Axor backend — CP or Lab — connects to, executes, or proxies the agent.** Lab does not need its own proxy; it reads the same fabric CP reads. A user connects an agent **once**; both modules see it. The retired anti-pattern (named aloud in the old ui-backend-contract): "climb the same onboarding shape twice." One runtime connection, two viewing modules.
+The adapter opens the connection and pushes traces. **No Axor backend — CP or Lab — connects to, executes, or proxies the agent.** Lab does not need its own proxy.
+
+**Lab is a self-contained product — it runs fully without Control Plane.** Lab consumes an Axor trace fabric **through a provider interface**; it does not depend on CP infrastructure. In a **standalone** deployment Lab *supplies* that fabric (its own runtime registry + trace store); in an **integrated** deployment it *may share* the Control Plane fabric by injecting CP-backed providers of the same ports. So: a user connects an agent **once per deployment** — not necessarily through Control Plane. When CP and Lab share a deployment, connecting once means both modules see the runtime and neither re-registers it; that is an optimization of the integrated deployment, not a precondition for Lab. The retired anti-pattern (named aloud in the old ui-backend-contract): "climb the same onboarding shape twice." One runtime connection, two viewing modules.
+
+The ports Lab owns (standalone impls in-repo, CP-backed impls optional): **RuntimeRegistry, TraceIngest, TraceStore, ArtifactStore, PromotionBackend** (`lab_server/providers.py`). The experiment/Results/EvidenceCase domain never knows which implementation is wired.
 
 ## Schema ownership — one source of truth per schema
 
@@ -54,7 +58,7 @@ Not four product rungs — one runtime connection with fidelity variants, plus n
 | **Trace import** | analyze a production incident or someone's published run |
 | **Offline runner** | CI, air-gapped, private code |
 
-"Connect runtime" issues a **scoped ingest/job key for the same Axor adapter** that later serves Control Plane. Existing CP users just **select** an already-connected runtime. No second integration. Black-box endpoint eval is removed entirely.
+"Connect runtime" issues a **scoped ingest/job key** through Lab's `RuntimeRegistry` port. In a standalone deployment that is Lab's own registry; in an integrated deployment it is the same Axor adapter that also serves Control Plane, so existing CP users just **select** an already-connected runtime — no second integration. Black-box endpoint eval is removed entirely.
 
 ## Execution contract (Lab assigns, runtime executes)
 
