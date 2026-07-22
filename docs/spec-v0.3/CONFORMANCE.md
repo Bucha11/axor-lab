@@ -89,10 +89,29 @@ branch are gone; the download package no longer carries `acceptance_history`. Ba
 single-hop lineage takedown (`_write_lineage_tombstone`) is retained as a Lab
 feature — it is not part of the removed acceptance-chain machinery.
 
+**Runtime-connection surface extended** (`lab_server/runtime_jobs.py`): the
+UI-facing control endpoints from `ui-backend-contract.md` §2 now exist over the
+same store —
+
+  POST /scenarios/validate   -> { ok, errors[] }   (lab_contracts.validate_scenario)
+  POST /experiments/plan     -> { trials, estimate }  (deterministic unit expansion)
+  POST /runs/{id}/confirm    awaiting_confirmation -> waiting_for_runtime
+  POST /runs/{id}/aggregates attach bundle.aggregates + finalize the run
+  GET  /runs/{id}/events     text/event-stream (state + trial-progress frames)
+  GET  /runs/{id}/results    now carries `aggregates` (RENDERED, never recomputed)
+  GET  /runs/{id}/trials/{trial_id}/trace   the completed trial's trace
+
+`create_run` supports the `awaiting_confirmation`/`ready` gate (carrying the
+estimate the operator confirms before a runtime ever sees the job), and a
+`TrialAttempt` is now supersede-idempotent: re-completing a trial with the same
+trace is a no-op, a different trace (or streaming events into a finished trial)
+supersedes the prior attempt and bumps `attempt`/`superseded`. The SSE endpoint is
+a snapshot stream today; a long-lived push stream and per-tenant scoping remain the
+extension points.
+
 ## Pending
 
-- **Full lifecycle/domain re-model** and the UI-facing endpoints
-  (`/scenarios/validate`, `/experiments/plan`, `SSE /runs/{id}/events`,
-  `/runs/{id}/results → bundle.aggregates`): the runtime-jobs core is in place; the
-  richer surface + `TrialAttempt` supersede-idempotency + `ready/awaiting_confirmation`
-  are the next extensions.
+- **Full lifecycle/domain re-model**: the four lifecycles (demo / connected_runtime
+  / trace_import / offline_runner) are documented in `lifecycle.md`; the store drives
+  the `connected_runtime` path end-to-end, and the other three plus durable,
+  per-tenant persistence are the remaining extensions.

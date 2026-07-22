@@ -15,9 +15,15 @@ Control surface (Lab operator / UI):
 
   POST /runtimes/connect     register a runtime  -> { runtime_ref, ingest_key }
   GET  /runtimes             list connected runtimes
+  POST /scenarios/validate   validate a scenario -> { ok, errors[] }
+  POST /experiments/plan     expand an experiment -> { trials, estimate }
   POST /runs                 assign an experiment to a runtime -> { run_id, state }
+  POST /runs/{id}/confirm    confirm an awaiting_confirmation run -> { state }
+  POST /runs/{id}/aggregates attach bundle.aggregates + finalize -> { state }
   GET  /runs/{id}            -> { state }  (a lifecycle state)
-  GET  /runs/{id}/results    -> { trials: [...] }  (collected so far)
+  GET  /runs/{id}/events     -> text/event-stream (state + trial progress)
+  GET  /runs/{id}/results    -> { trials, traces, aggregates }  (collected so far)
+  GET  /runs/{id}/trials/{trial_id}/trace  -> the completed trial's trace
 
 Runtime-facing (Bearer <ingest_key>; the runtime pulls and pushes):
 
@@ -47,6 +53,10 @@ _EVENTS_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]
 _TRIAL_DONE_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/complete$")
 _RUN_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)$")
 _RUN_RESULTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/results$")
+_RUN_EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
+_RUN_CONFIRM_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/confirm$")
+_RUN_AGG_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/aggregates$")
+_RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/trace$")
 
 
 class RuntimeJobsError(Exception):
@@ -64,6 +74,8 @@ class _Trial:
     events: list[dict[str, object]] = field(default_factory=list)
     trace: dict[str, object] | None = None
     status: str = "pending"  # pending | completed | failed
+    attempt: int = 1     # the current TrialAttempt ordinal (retries supersede)
+    superseded: int = 0  # how many prior attempts this trial superseded
 
 
 @dataclass
@@ -74,6 +86,8 @@ class _Job:
     planned: tuple[str, ...]
     state: str = "waiting_for_runtime"
     trials: dict[str, _Trial] = field(default_factory=dict)
+    estimate: dict[str, object] = field(default_factory=dict)
+    aggregates: list[dict[str, object]] = field(default_factory=list)
 
 
 class RuntimeJobStore:
@@ -115,15 +129,51 @@ class RuntimeJobStore:
             return self._by_key.get(ingest_key)
 
     def create_run(self, runtime_ref: str, experiment: dict[str, object],
-                   planned: list[str] | None = None) -> dict[str, object]:
+                   planned: list[str] | None = None, *,
+                   require_confirmation: bool = False,
+                   estimate: dict[str, object] | None = None) -> dict[str, object]:
         with self._lock:
             if runtime_ref not in self._runtimes:
                 raise RuntimeJobsError(404, f"unknown runtime_ref {runtime_ref!r}")
             job_id = self._next("run")
             plan = tuple(str(t) for t in (planned or experiment.get("planned_trials", []) or []))
-            self._jobs[job_id] = _Job(job_id=job_id, runtime_ref=runtime_ref,
-                                      assignment=dict(experiment), planned=plan)
-            return {"run_id": job_id, "state": "waiting_for_runtime"}
+            # `awaiting_confirmation` sits before run start (ui-backend-contract §4):
+            # the run holds the plan + estimate the operator confirms before it is
+            # ever offered to a runtime. Default stays waiting_for_runtime so the
+            # unconfirmed simple flow is unchanged.
+            state = "awaiting_confirmation" if require_confirmation else "waiting_for_runtime"
+            self._jobs[job_id] = _Job(
+                job_id=job_id, runtime_ref=runtime_ref, assignment=dict(experiment),
+                planned=plan, state=state, estimate=dict(estimate or {}),
+            )
+            return {"run_id": job_id, "state": state, "estimate": dict(estimate or {})}
+
+    def confirm_run(self, job_id: str) -> dict[str, object]:
+        """Confirm an `awaiting_confirmation` run (the operator accepted the
+        estimate) → it becomes claimable (`waiting_for_runtime`)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise RuntimeJobsError(404, f"unknown run {job_id!r}")
+            if job.state != "awaiting_confirmation":
+                raise RuntimeJobsError(409, f"run {job_id!r} is not awaiting confirmation "
+                                            f"(state {job.state})")
+            job.state = "waiting_for_runtime"
+            return {"run_id": job_id, "state": job.state}
+
+    def attach_aggregates(self, job_id: str,
+                          aggregates: list[dict[str, object]]) -> dict[str, object]:
+        """Attach the runner-computed `bundle.aggregates` and finalize the run.
+        Lab RENDERS aggregates (ui-backend-contract §3), it does not compute them —
+        the runner/analysis assembles them and posts them here."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise RuntimeJobsError(404, f"unknown run {job_id!r}")
+            job.aggregates = list(aggregates)
+            if job.state in ("running", "receiving_traces", "analyzing"):
+                job.state = "completed"
+            return {"run_id": job_id, "state": job.state, "aggregates": len(job.aggregates)}
 
     def run_state(self, job_id: str) -> str:
         with self._lock:
@@ -132,21 +182,38 @@ class RuntimeJobStore:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             return job.state
 
+    def trial_trace(self, job_id: str, trial_id: str) -> dict[str, object]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise RuntimeJobsError(404, f"unknown run {job_id!r}")
+            trial = job.trials.get(trial_id)
+            if trial is None or trial.trace is None:
+                raise RuntimeJobsError(404, f"no trace for trial {trial_id!r}")
+            return trial.trace
+
+    def _results_locked(self, job: _Job) -> dict[str, object]:
+        return {
+            "run_id": job.job_id, "state": job.state,
+            "planned_trials": list(job.planned),
+            "estimate": dict(job.estimate),
+            "trials": [
+                {"trial_id": t.trial_id, "status": t.status, "attempt": t.attempt,
+                 "superseded": t.superseded, "events": len(t.events),
+                 "has_trace": t.trace is not None}
+                for t in job.trials.values()
+            ],
+            "traces": [t.trace for t in job.trials.values() if t.trace is not None],
+            # `bundle.aggregates` — RENDERED by the UI, never recomputed there
+            "aggregates": list(job.aggregates),
+        }
+
     def results(self, job_id: str) -> dict[str, object]:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
-            return {
-                "run_id": job_id, "state": job.state,
-                "planned_trials": list(job.planned),
-                "trials": [
-                    {"trial_id": t.trial_id, "status": t.status,
-                     "events": len(t.events), "has_trace": t.trace is not None}
-                    for t in job.trials.values()
-                ],
-                "traces": [t.trace for t in job.trials.values() if t.trace is not None],
-            }
+            return self._results_locked(job)
 
     # -- runtime-facing surface ------------------------------------------
     def list_jobs(self, runtime_ref: str) -> list[dict[str, object]]:
@@ -171,21 +238,41 @@ class RuntimeJobStore:
             job = self._require_owned(job_id, runtime_ref)
             trial = job.trials.setdefault(trial_id, _Trial(trial_id=trial_id))
             if trial.status != "pending":
-                raise RuntimeJobsError(409, f"trial {trial_id!r} already {trial.status}")
+                # streaming events into an already-finished trial starts a fresh
+                # TrialAttempt: a runtime re-ran the unit (a retry). The prior
+                # attempt is superseded — not a 409 conflict (ui-backend-contract
+                # TrialAttempt supersede-idempotency).
+                trial.attempt += 1
+                trial.superseded += 1
+                trial.status = "pending"
+                trial.events = []
+                trial.trace = None
             trial.events.extend(events)
             if job.state == "running":
                 job.state = "receiving_traces"
-            return {"trial_id": trial_id, "events": len(trial.events)}
+            return {"trial_id": trial_id, "events": len(trial.events), "attempt": trial.attempt}
 
     def complete_trial(self, job_id: str, trial_id: str, runtime_ref: str,
                        trace: dict[str, object] | None, status: str = "completed") -> dict[str, object]:
         with self._lock:
             job = self._require_owned(job_id, runtime_ref)
             trial = job.trials.setdefault(trial_id, _Trial(trial_id=trial_id))
+            new_status = status if status in ("completed", "failed") else "completed"
+            if trial.status in ("completed", "failed"):
+                # re-completing an already-finished trial. Identical (status,trace)
+                # is IDEMPOTENT — a duplicate delivery, not a change. A DIFFERENT
+                # trace SUPERSEDES the prior attempt (the runtime re-ran the unit).
+                if trial.status == new_status and trial.trace == trace:
+                    return {"trial_id": trial_id, "status": trial.status,
+                            "run_state": job.state, "attempt": trial.attempt,
+                            "superseded": trial.superseded, "idempotent": True}
+                trial.attempt += 1
+                trial.superseded += 1
             trial.trace = trace
-            trial.status = status if status in ("completed", "failed") else "completed"
+            trial.status = new_status
             self._maybe_finish(job)
-            return {"trial_id": trial_id, "status": trial.status, "run_state": job.state}
+            return {"trial_id": trial_id, "status": trial.status, "run_state": job.state,
+                    "attempt": trial.attempt, "superseded": trial.superseded}
 
     # -- internals --------------------------------------------------------
     def _require_owned(self, job_id: str, runtime_ref: str) -> _Job:
@@ -205,6 +292,44 @@ class RuntimeJobStore:
         done = {tid for tid, t in job.trials.items() if t.status in ("completed", "failed")}
         if set(job.planned) <= done:
             job.state = "completed"
+
+
+def plan_experiment(experiment: dict[str, object]) -> dict[str, object]:
+    """Expand an `experiment/v1` into its planned trial units + a rough estimate
+    (ui-backend-contract `/experiments/plan` → `{trials, estimate}`). A trial unit
+    is one (scenario × condition × repeat); the plan is deterministic so the same
+    experiment always yields the same trial ids. This is a PLAN, not execution —
+    the runtime later runs each unit and pushes its trace."""
+    scenarios = [str(s) for s in (experiment.get("scenario_ids") or []) if s]
+    conditions = experiment.get("condition_ids") or experiment.get("conditions") or []
+    condition_ids = [
+        str(c.get("condition_id") if isinstance(c, dict) else c)
+        for c in conditions if c
+    ]
+    try:
+        repeats = int(experiment.get("repeats", 1) or 1)
+    except (TypeError, ValueError):
+        repeats = 1
+    repeats = max(repeats, 1)
+    if not scenarios:
+        scenarios = ["scenario"]
+    if not condition_ids:
+        condition_ids = ["condition"]
+    trials = [
+        f"{scenario}:{condition}:{i}"
+        for scenario in scenarios
+        for condition in condition_ids
+        for i in range(repeats)
+    ]
+    return {
+        "trials": trials,
+        "estimate": {
+            "trials": len(trials),
+            "scenarios": len(scenarios),
+            "conditions": len(condition_ids),
+            "repeats": repeats,
+        },
+    }
 
 
 def make_runtime_server(
@@ -227,6 +352,21 @@ def make_runtime_server(
             body = json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_sse(self, frames: list[tuple[str, dict[str, object]]]) -> None:
+            # a snapshot event-stream: emit the run's current lifecycle state +
+            # trial progress as text/event-stream frames, then close. A long-lived
+            # push stream is the extension point; the frame format is already SSE
+            # so a browser EventSource reads it unchanged.
+            body = "".join(
+                f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in frames
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -276,6 +416,21 @@ def make_runtime_server(
                     self._require_control()
                     self._send(200, jobs.results(m.group(1)))
                     return
+                m = _RUN_TRACE_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    self._send(200, jobs.trial_trace(m.group(1), m.group(2)))
+                    return
+                m = _RUN_EVENTS_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    res = jobs.results(m.group(1))  # raises 404 for unknown run
+                    self._send_sse([
+                        ("state", {"run_id": res["run_id"], "state": res["state"]}),
+                        ("trials", {"trials": res["trials"],
+                                    "planned_trials": res["planned_trials"]}),
+                    ])
+                    return
                 m = _RUN_RE.match(self.path)
                 if m:
                     self._require_control()
@@ -297,6 +452,31 @@ def make_runtime_server(
                         agent_ref=body.get("agent_ref"),  # type: ignore[arg-type]
                     ))
                     return
+                if self.path == "/scenarios/validate":
+                    self._require_control()
+                    body = self._read_json()
+                    scenario = body.get("scenario")
+                    manifests = body.get("manifests") or {}
+                    if not isinstance(scenario, dict) or not isinstance(manifests, dict):
+                        raise RuntimeJobsError(400, "validate requires {scenario, manifests}")
+                    from lab_contracts import ScenarioValidationError, validate_scenario
+                    try:
+                        validate_scenario(scenario, manifests)  # type: ignore[arg-type]
+                    except ScenarioValidationError as exc:
+                        self._send(200, {"ok": False, "errors": list(exc.errors)})
+                    except (KeyError, TypeError, ValueError) as exc:
+                        self._send(200, {"ok": False, "errors": [f"malformed scenario: {exc}"]})
+                    else:
+                        self._send(200, {"ok": True, "errors": []})
+                    return
+                if self.path == "/experiments/plan":
+                    self._require_control()
+                    body = self._read_json()
+                    experiment = body.get("experiment")
+                    if not isinstance(experiment, dict):
+                        raise RuntimeJobsError(400, "plan requires {experiment}")
+                    self._send(200, plan_experiment(experiment))
+                    return
                 if self.path == "/runs":
                     self._require_control()
                     body = self._read_json()
@@ -304,10 +484,27 @@ def make_runtime_server(
                     runtime_ref = body.get("runtime_ref")
                     if not isinstance(experiment, dict) or not isinstance(runtime_ref, str):
                         raise RuntimeJobsError(400, "runs require {runtime_ref, experiment}")
+                    estimate = body.get("estimate")
                     self._send(201, jobs.create_run(
                         runtime_ref, experiment,
                         planned=body.get("planned_trials"),  # type: ignore[arg-type]
+                        require_confirmation=bool(body.get("require_confirmation", False)),
+                        estimate=estimate if isinstance(estimate, dict) else None,
                     ))
+                    return
+                m = _RUN_CONFIRM_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    self._send(200, jobs.confirm_run(m.group(1)))
+                    return
+                m = _RUN_AGG_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    body = self._read_json()
+                    aggregates = body.get("aggregates", [])
+                    if not isinstance(aggregates, list):
+                        raise RuntimeJobsError(400, "aggregates must be a list")
+                    self._send(200, jobs.attach_aggregates(m.group(1), aggregates))
                     return
                 m = _CLAIM_RE.match(self.path)
                 if m:
