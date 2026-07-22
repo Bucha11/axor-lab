@@ -56,15 +56,35 @@ correctness fields retained as Lab extensions; trace/tool-manifest kept rich. No
 `kernel_version`-required change (it conflicts with the repo's mixed-kernel bundles,
 which legitimately omit the single global kernel_version).
 
+**Runtime-jobs execution API — simple implementation** (`lab_server/runtime_jobs.py`):
+the connected-runtime contract "Lab assigns, the runtime executes" exists now, kept
+deliberately simple (in-memory, single process, stdlib):
+
+  POST /runtimes/connect  -> { runtime_ref, ingest_key }   (scoped per-runtime key)
+  GET  /runtimes                                            (control)
+  POST /runs              -> { run_id, state }              (assign an experiment)
+  GET  /runs/{id}         -> { state }                       (a lifecycle state)
+  GET  /runs/{id}/results -> collected trials + pushed traces
+  GET  /runtime/jobs                                   (runtime polls; ingest_key)
+  POST /runtime/jobs/{id}/claim                         (claim -> the assignment)
+  POST /runtime/jobs/{id}/trials/{trial_id}/events      (stream kernel events)
+  POST /runtime/jobs/{id}/trials/{trial_id}/complete    (finalize a trial + trace)
+
+The `connected_runtime` lifecycle
+(`waiting_for_runtime → running → receiving_traces → … → completed`) is driven by
+the store; a runtime can only claim/drive its own jobs. Durability, per-tenant
+scoping, SSE streaming, and bundle assembly from the collected traces are the
+extension points — the connection possibility is open, the implementation is small.
+
 ## Pending
 
 - **Phase 3 — collapse the acceptance machinery.** Reduce `lab_server` acceptance
   to *publication + bundle hash + optional signature + reproduction records*; remove
   the `reacceptance/v1`, `acceptance-history/`, tombstone-chain and quarantine/re-root
-  logic (v0.3 defers it).
-- **Runtime-jobs execution API.** Build `GET /runtime/jobs`, `/claim`,
-  `/trials/{id}/events`, `/complete` (Lab assigns, runtime executes). Not yet
-  implemented; the local runner remains the offline/CI path.
-- **Lifecycle/domain code re-model.** `RuntimeRef` / `AgentRef` / `TraceSource` /
-  `AgentSnapshot`; the four trace-source lifecycles; `TrialAttempt` supersede-
-  idempotency and the `ready/awaiting_confirmation` state.
+  logic (v0.3 defers it). Left for an explicit go-ahead — it reverts the r16–r21
+  acceptance hardening.
+- **Full lifecycle/domain re-model** and the UI-facing endpoints
+  (`/scenarios/validate`, `/experiments/plan`, `SSE /runs/{id}/events`,
+  `/runs/{id}/results → bundle.aggregates`): the runtime-jobs core is in place; the
+  richer surface + `TrialAttempt` supersede-idempotency + `ready/awaiting_confirmation`
+  are the next extensions.
