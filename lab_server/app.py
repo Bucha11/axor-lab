@@ -212,9 +212,14 @@ def make_server(
         def _readable(self, stored: object) -> object:
             """A private publication is never served on ANY read route — not the
             HTML page, the JSON API, or an EvidenceCase URL (review r7: private
-            must mean private everywhere, not just on the main page)."""
+            must mean private everywhere, not just on the main page). A publication
+            whose persisted acceptance is degraded (missing/malformed/invalid) is
+            likewise not served on a direct URL, not just hidden from the catalog —
+            a known URL must not keep serving a damaged record (review v0.3-acceptance)."""
             if stored.publication.get("visibility") == "private":  # type: ignore[attr-defined]
                 raise NotFound("no such publication")
+            if getattr(stored, "acceptance_invalid", False):
+                raise NotFound("publication is degraded (acceptance not verified)")
             return stored
 
         def _require(self, expected: str | None) -> None:

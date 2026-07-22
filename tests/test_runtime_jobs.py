@@ -1,9 +1,10 @@
 """Runtime-jobs API — the connected-runtime execution contract (spec v0.3).
 
 Lab assigns, the runtime executes: a runtime connects (gets an ingest_key), Lab
-assigns an experiment as a job, the runtime claims it, streams a trial's kernel
-events, and completes the trial by uploading its trace. Lab never executes the
-agent — it only hands out assignments and collects the pushed traces.
+assigns a SERVER-OWNED plan as a job, the runtime claims it, streams a trial's
+kernel events, and completes each trial by uploading a CONFORMANT trace bound to
+its assigned TrialUnit. Lab never executes the agent, never trusts a runtime's
+summary — it collects traces and BUILDS Results (aggregates) itself.
 """
 
 from __future__ import annotations
@@ -24,11 +25,11 @@ from lab_server import (
 )
 
 _TRACE_CACHE: list[dict] = []
+# a minimal server-plannable experiment: one scenario × one condition × one repeat
+EXP = {"scenario_ids": ["s1"], "conditions": ["c1"], "repeats": 1}
 
 
-def conformant_trace() -> dict:
-    """A real, schema- and semantics-conformant trace/v1 (Lab now rejects any
-    non-conformant object on trial complete). Produced once by the runner."""
+def _fixture_trace() -> dict:
     if not _TRACE_CACHE:
         from tests import support
         from lab_runner import run_experiment_suite
@@ -37,7 +38,21 @@ def conformant_trace() -> dict:
             support.kernel_registry(), repeats=1, run_id="rt_fixture",
         )
         _TRACE_CACHE.extend(result.traces.values())
-    return json.loads(json.dumps(_TRACE_CACHE[0]))  # a fresh deep copy per call
+    return json.loads(json.dumps(_TRACE_CACHE[0]))
+
+
+def trace_for(coordinate: dict) -> dict:
+    """A real, schema- and semantics-conformant trace/v1 whose `trial` block is the
+    assigned unit coordinate (a runtime stamps the assignment it claimed)."""
+    t = _fixture_trace()
+    t["trial"] = {k: v for k, v in coordinate.items() if k != "trial_id"}
+    return t
+
+
+def unit(run_id: str, scenario: str = "s1", condition: str = "c1", i: int = 0) -> dict:
+    """The coordinate the server deterministically assigns for EXP's trial."""
+    return {"run_id": run_id, "scenario_id": scenario, "condition_id": condition,
+            "seed": f"s{i:03d}", "repeat_index": i}
 
 
 class _Base(unittest.TestCase):
@@ -65,7 +80,6 @@ class _Base(unittest.TestCase):
             return e.code, json.loads(e.read())
 
     def _raw(self, method: str, path: str, token=None):
-        """Fetch a non-JSON response (e.g. SSE) — returns (status, content_type, text)."""
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -73,85 +87,88 @@ class _Base(unittest.TestCase):
         with urllib.request.urlopen(req) as r:
             return r.status, r.headers.get("Content-Type"), r.read().decode()
 
+    def _run(self, experiment=None):
+        """connect a runtime + create a run; returns (conn, run, trial_id)."""
+        _, conn = self._req("POST", "/runtimes/connect", {"model": "scripted"}, token="ctl")
+        _, run = self._req("POST", "/runs", {
+            "runtime_ref": conn["runtime_ref"], "experiment": experiment or EXP,
+        }, token="ctl")
+        return conn, run, run["planned_trials"][0]
+
 
 class TestRuntimeJobsFlow(_Base):
     def test_connect_assign_claim_stream_complete(self) -> None:
-        # 1) a runtime connects and gets a scoped ingest_key
-        status, conn = self._req("POST", "/runtimes/connect", {"model": "scripted"}, token="ctl")
-        self.assertEqual(status, 201, conn)
+        _, conn = self._req("POST", "/runtimes/connect", {"model": "scripted"}, token="ctl")
         runtime_ref, ingest_key = conn["runtime_ref"], conn["ingest_key"]
-        self.assertTrue(runtime_ref and ingest_key)
 
-        # 2) Lab assigns an experiment to that runtime — one planned trial
-        experiment = {"id": "exp1", "scenario_ids": ["banking-exfil-01"]}
+        # Lab assigns a SERVER-OWNED plan (the client sends no trial ids)
         status, run = self._req("POST", "/runs", {
-            "runtime_ref": runtime_ref, "experiment": experiment, "planned_trials": ["t0"],
+            "runtime_ref": runtime_ref, "experiment": EXP,
         }, token="ctl")
         self.assertEqual(status, 201, run)
-        run_id = run["run_id"]
+        run_id, tid = run["run_id"], run["planned_trials"][0]
         self.assertEqual(run["state"], "waiting_for_runtime")
 
-        # 3) the runtime polls, sees the job, and claims it (with its ingest_key)
+        # the runtime polls, sees the job, claims it, and receives the assigned units
         status, listing = self._req("GET", "/runtime/jobs", token=ingest_key)
-        self.assertEqual(status, 200)
         self.assertEqual([j["job_id"] for j in listing["jobs"]], [run_id])
         status, claim = self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=ingest_key)
         self.assertEqual(status, 200, claim)
-        self.assertEqual(claim["assignment"]["id"], "exp1")
+        coord = claim["units"][0]
+        self.assertEqual(coord["run_id"], run_id)  # the run stamped its own run_id
 
-        # 4) the runtime streams the trial's kernel events, then completes it with a
-        # CONFORMANT trace/v1 (a non-conformant object is rejected — see below)
-        status, ev = self._req(
-            "POST", f"/runtime/jobs/{run_id}/trials/t0/events",
-            {"events": [{"seq": 0, "type": "tool_call_intent"}]}, token=ingest_key)
-        self.assertEqual(status, 200, ev)
+        # streams events, then completes the trial with a trace bound to the unit
+        self._req("POST", f"/runtime/jobs/{run_id}/trials/{tid}/events",
+                  {"events": [{"seq": 0}]}, token=ingest_key)
         status, done = self._req(
-            "POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
-            {"trace": conformant_trace()}, token=ingest_key)
+            "POST", f"/runtime/jobs/{run_id}/trials/{tid}/complete",
+            {"trace": trace_for(coord)}, token=ingest_key)
         self.assertEqual(status, 200, done)
-        self.assertTrue(done["trace_ref"])  # the attempt is frozen with its trace_ref
-        # the plan had exactly one trial → the run is now completed
+        self.assertTrue(done["trace_ref"])
         self.assertEqual(done["run_state"], "completed")
 
-        # 5) Lab reads the collected results — trace history, NO uploaded aggregates
+        # Lab reads Results — trace history + LAB-COMPUTED aggregates (empty here:
+        # EXP carries no scenario defs, so ASR is not computed — but the key exists
+        # and the numbers are never runtime-supplied)
         status, results = self._req("GET", f"/runs/{run_id}/results", token="ctl")
-        self.assertEqual(status, 200)
         self.assertEqual(results["state"], "completed")
         self.assertEqual(len(results["traces"]), 1)
         self.assertEqual(results["trials"][0]["status"], "completed")
-        self.assertNotIn("aggregates", results)  # Lab computes aggregates, not the runtime
+        self.assertIn("aggregates", results)
+        self.assertEqual(self._req("POST", f"/runs/{run_id}/aggregates",
+                                   {"aggregates": []}, token="ctl")[0], 404)  # no upload path
 
     def test_completing_with_a_nonconformant_trace_is_refused(self) -> None:
-        _, conn = self._req("POST", "/runtimes/connect", {}, token="ctl")
-        _, run = self._req("POST", "/runs", {
-            "runtime_ref": conn["runtime_ref"], "experiment": {"id": "e"},
-            "planned_trials": ["t0"],
-        }, token="ctl")
+        conn, run, tid = self._run()
         rid, key = run["run_id"], conn["ingest_key"]
         self._req("POST", f"/runtime/jobs/{rid}/claim", {}, token=key)
-        # a runtime's summary object is NOT a trace — completion is refused (422)
-        status, out = self._req("POST", f"/runtime/jobs/{rid}/trials/t0/complete",
+        status, out = self._req("POST", f"/runtime/jobs/{rid}/trials/{tid}/complete",
                                 {"trace": {"schema_version": "trace/v1", "trial": {}}}, token=key)
         self.assertEqual(status, 422, out)
-        # and the run did NOT advance to completed on the strength of a fake trace
         _, results = self._req("GET", f"/runs/{rid}/results", token="ctl")
         self.assertNotEqual(results["state"], "completed")
 
+    def test_trace_for_the_wrong_unit_is_refused_on_the_main_flow(self) -> None:
+        # the ordinary browser path (server plan → run → complete) binds too: a
+        # schema-valid trace for a DIFFERENT coordinate is rejected (review v0.3-bind)
+        conn, run, tid = self._run()
+        rid, key = run["run_id"], conn["ingest_key"]
+        _, claim = self._req("POST", f"/runtime/jobs/{rid}/claim", {}, token=key)
+        wrong = trace_for({**claim["units"][0], "seed": "s999"})
+        status, _ = self._req("POST", f"/runtime/jobs/{rid}/trials/{tid}/complete",
+                              {"trace": wrong}, token=key)
+        self.assertEqual(status, 422)
+
     def test_unplanned_trial_is_rejected(self) -> None:
-        _, conn = self._req("POST", "/runtimes/connect", {}, token="ctl")
-        _, run = self._req("POST", "/runs", {
-            "runtime_ref": conn["runtime_ref"], "experiment": {"id": "e"},
-            "planned_trials": ["t0"],
-        }, token="ctl")
+        conn, run, _ = self._run()
         rid, key = run["run_id"], conn["ingest_key"]
         self._req("POST", f"/runtime/jobs/{rid}/claim", {}, token=key)
-        # a trial id outside the plan cannot be driven (fail-closed)
         status, _ = self._req("POST", f"/runtime/jobs/{rid}/trials/rogue/events",
                               {"events": []}, token=key)
         self.assertEqual(status, 404)
 
     def test_runtime_endpoints_require_a_valid_ingest_key(self) -> None:
-        self.assertEqual(self._req("GET", "/runtime/jobs")[0], 401)  # no key
+        self.assertEqual(self._req("GET", "/runtime/jobs")[0], 401)
         self.assertEqual(self._req("GET", "/runtime/jobs", token="bogus")[0], 401)
 
     def test_control_surface_requires_the_control_token(self) -> None:
@@ -162,9 +179,8 @@ class TestRuntimeJobsFlow(_Base):
         _, a = self._req("POST", "/runtimes/connect", {"model": "a"}, token="ctl")
         _, b = self._req("POST", "/runtimes/connect", {"model": "b"}, token="ctl")
         _, run = self._req("POST", "/runs", {
-            "runtime_ref": a["runtime_ref"], "experiment": {"id": "e"}, "planned_trials": ["t0"],
+            "runtime_ref": a["runtime_ref"], "experiment": EXP,
         }, token="ctl")
-        # runtime B does not see A's job, and cannot claim it
         _, listing = self._req("GET", "/runtime/jobs", token=b["ingest_key"])
         self.assertEqual(listing["jobs"], [])
         status, _ = self._req("POST", f"/runtime/jobs/{run['run_id']}/claim", {},
@@ -172,271 +188,264 @@ class TestRuntimeJobsFlow(_Base):
         self.assertEqual(status, 403)
 
     def test_double_claim_is_rejected(self) -> None:
-        _, c = self._req("POST", "/runtimes/connect", {}, token="ctl")
-        _, run = self._req("POST", "/runs", {
-            "runtime_ref": c["runtime_ref"], "experiment": {"id": "e"}, "planned_trials": ["t0"],
-        }, token="ctl")
-        self.assertEqual(self._req("POST", f"/runtime/jobs/{run['run_id']}/claim", {},
-                                   token=c["ingest_key"])[0], 200)
-        self.assertEqual(self._req("POST", f"/runtime/jobs/{run['run_id']}/claim", {},
-                                   token=c["ingest_key"])[0], 409)
+        conn, run, _ = self._run()
+        rid, key = run["run_id"], conn["ingest_key"]
+        self.assertEqual(self._req("POST", f"/runtime/jobs/{rid}/claim", {}, token=key)[0], 200)
+        self.assertEqual(self._req("POST", f"/runtime/jobs/{rid}/claim", {}, token=key)[0], 409)
 
     def test_malformed_body_is_a_clean_400(self) -> None:
         _, c = self._req("POST", "/runtimes/connect", {}, token="ctl")
-        # a non-object experiment is a 400, never a 500
         status, _ = self._req("POST", "/runs",
                               {"runtime_ref": c["runtime_ref"], "experiment": "nope"}, token="ctl")
         self.assertEqual(status, 400)
 
+    def test_retry_is_control_only_runtime_can_only_request(self) -> None:
+        # a completed trial: the runtime CANNOT reopen it (control-only retry), it
+        # may only record a retry request; the control token grants the retry.
+        conn, run, tid = self._run()
+        rid, key = run["run_id"], conn["ingest_key"]
+        _, claim = self._req("POST", f"/runtime/jobs/{rid}/claim", {}, token=key)
+        self._req("POST", f"/runtime/jobs/{rid}/trials/{tid}/complete",
+                  {"trace": trace_for(claim["units"][0])}, token=key)
+        # runtime retry with its ingest key → 401 (control-only)
+        self.assertEqual(self._req("POST", f"/runs/{rid}/trials/{tid}/retry", {}, token=key)[0], 401)
+        # runtime may only REQUEST a retry (advisory, no state change)
+        status, rr = self._req("POST", f"/runtime/jobs/{rid}/trials/{tid}/retry-request",
+                               {"reason": "flaky"}, token=key)
+        self.assertEqual(status, 200, rr)
+        self.assertTrue(rr["retry_requested"])
+        self.assertEqual(self._req("GET", f"/runs/{rid}", token="ctl")[1]["state"], "completed")
+        # the control token grants the retry → a new attempt, run back to running
+        status, granted = self._req("POST", f"/runs/{rid}/trials/{tid}/retry", {}, token="ctl")
+        self.assertEqual(status, 200, granted)
+        self.assertEqual(granted["run_state"], "running")
+
 
 class TestUiFacingSurface(_Base):
-    def _connect(self):
-        _, conn = self._req("POST", "/runtimes/connect", {"model": "scripted"}, token="ctl")
-        return conn
-
-    def test_experiments_plan_expands_trials_and_estimate(self) -> None:
+    def test_experiments_plan_is_server_owned_with_a_plan_ref(self) -> None:
         status, plan = self._req("POST", "/experiments/plan", {"experiment": {
             "scenario_ids": ["s1", "s2"],
             "conditions": [{"condition_id": "gov"}, {"condition_id": "ungov"}],
             "repeats": 3,
         }}, token="ctl")
         self.assertEqual(status, 200, plan)
+        self.assertTrue(plan["plan_ref"])
         self.assertEqual(plan["estimate"]["trials"], 12)
-        self.assertEqual(len(plan["trials"]), 12)
+        self.assertEqual(len(plan["units"]), 12)
         self.assertIn("s1:gov:0", plan["trials"])
-        # requires the control token
+        # a run consumes the plan_ref (not a client trial list)
+        _, conn = self._req("POST", "/runtimes/connect", {}, token="ctl")
+        status, run = self._req("POST", "/runs", {
+            "runtime_ref": conn["runtime_ref"], "plan_ref": plan["plan_ref"],
+        }, token="ctl")
+        self.assertEqual(status, 201, run)
+        self.assertEqual(len(run["planned_trials"]), 12)
         self.assertEqual(self._req("POST", "/experiments/plan", {"experiment": {}})[0], 401)
 
     def test_scenarios_validate_reports_errors(self) -> None:
-        # a well-formed scenario validates ok; a broken one returns ok:false + errors
         from tests import support
-        good = support.banking_scenario()
-        manifests = support.manifests()
+        good, manifests = support.banking_scenario(), support.manifests()
         status, out = self._req("POST", "/scenarios/validate",
                                 {"scenario": good, "manifests": manifests}, token="ctl")
         self.assertEqual(status, 200, out)
         self.assertTrue(out["ok"], out)
-
         broken = support.banking_scenario()
-        broken["violation"]["tool"] = "nonexistent_tool"  # not a declared tool_id
+        broken["violation"]["tool"] = "nonexistent_tool"
         _, bad = self._req("POST", "/scenarios/validate",
                            {"scenario": broken, "manifests": manifests}, token="ctl")
         self.assertFalse(bad["ok"])
         self.assertTrue(bad["errors"])
 
     def test_awaiting_confirmation_gate_then_confirm(self) -> None:
-        conn = self._connect()
+        _, conn = self._req("POST", "/runtimes/connect", {}, token="ctl")
         _, run = self._req("POST", "/runs", {
-            "runtime_ref": conn["runtime_ref"], "experiment": {"id": "e"},
-            "planned_trials": ["t0"], "require_confirmation": True,
-            "estimate": {"trials": 1},
+            "runtime_ref": conn["runtime_ref"], "experiment": EXP,
+            "require_confirmation": True, "estimate": {"trials": 1},
         }, token="ctl")
         self.assertEqual(run["state"], "awaiting_confirmation")
-        self.assertEqual(run["estimate"], {"trials": 1})
         run_id = run["run_id"]
-        # an unconfirmed run is NOT offered to the runtime yet
         _, listing = self._req("GET", "/runtime/jobs", token=conn["ingest_key"])
         self.assertEqual(listing["jobs"], [])
-        # claiming before confirmation is refused (not claimable)
         self.assertEqual(self._req("POST", f"/runtime/jobs/{run_id}/claim", {},
                                    token=conn["ingest_key"])[0], 409)
-        # confirm → becomes claimable
         status, conf = self._req("POST", f"/runs/{run_id}/confirm", {}, token="ctl")
-        self.assertEqual(status, 200, conf)
         self.assertEqual(conf["state"], "waiting_for_runtime")
         _, listing2 = self._req("GET", "/runtime/jobs", token=conn["ingest_key"])
         self.assertEqual([j["job_id"] for j in listing2["jobs"]], [run_id])
 
-    def test_results_have_no_uploaded_aggregates_and_stream_sse(self) -> None:
-        conn = self._connect()
-        _, run = self._req("POST", "/runs", {
-            "runtime_ref": conn["runtime_ref"], "experiment": {"id": "e"},
-            "planned_trials": ["t0"],
-        }, token="ctl")
-        run_id = run["run_id"]
-        self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=conn["ingest_key"])
-        self._req("POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
-                  {"trace": conformant_trace()}, token=conn["ingest_key"])
-        # there is NO endpoint to upload a result aggregate — Lab computes them from
-        # traces at bundle/publish time; results carry trace history, not numbers
-        self.assertEqual(self._req("POST", f"/runs/{run_id}/aggregates",
-                                   {"aggregates": []}, token="ctl")[0], 404)
-        _, results = self._req("GET", f"/runs/{run_id}/results", token="ctl")
-        self.assertNotIn("aggregates", results)
-        self.assertEqual(len(results["traces"]), 1)
-        # the SSE events endpoint streams state + trial progress frames
+    def test_results_stream_sse(self) -> None:
+        conn, run, tid = self._run()
+        run_id, key = run["run_id"], conn["ingest_key"]
+        _, claim = self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=key)
+        self._req("POST", f"/runtime/jobs/{run_id}/trials/{tid}/complete",
+                  {"trace": trace_for(claim["units"][0])}, token=key)
         status, ctype, text = self._raw("GET", f"/runs/{run_id}/events", token="ctl")
         self.assertEqual(status, 200)
         self.assertTrue(ctype.startswith("text/event-stream"))
         self.assertIn("event: state", text)
         self.assertIn("event: trials", text)
-        self.assertIn(run_id, text)
 
     def test_trial_trace_fetch(self) -> None:
-        conn = self._connect()
-        _, run = self._req("POST", "/runs", {
-            "runtime_ref": conn["runtime_ref"], "experiment": {"id": "e"},
-            "planned_trials": ["t0"],
-        }, token="ctl")
-        run_id = run["run_id"]
-        self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=conn["ingest_key"])
-        trace = conformant_trace()
-        self._req("POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
-                  {"trace": trace}, token=conn["ingest_key"])
-        status, got = self._req("GET", f"/runs/{run_id}/trials/t0/trace", token="ctl")
+        conn, run, tid = self._run()
+        run_id, key = run["run_id"], conn["ingest_key"]
+        _, claim = self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=key)
+        trace = trace_for(claim["units"][0])
+        self._req("POST", f"/runtime/jobs/{run_id}/trials/{tid}/complete",
+                  {"trace": trace}, token=key)
+        status, got = self._req("GET", f"/runs/{run_id}/trials/{tid}/trace", token="ctl")
         self.assertEqual(status, 200, got)
         self.assertEqual(got, trace)
-        # a trace for an unknown trial is a clean 404
         self.assertEqual(self._req("GET", f"/runs/{run_id}/trials/nope/trace", token="ctl")[0], 404)
 
 
 class TestStoreDirect(unittest.TestCase):
-    def test_unplanned_job_goes_to_analyzing_on_trial_complete(self) -> None:
-        # with no planned-trial set, a completed trial moves the run to analyzing
-        # (the runtime signals overall completion out of band in this simple form)
-        store = RuntimeJobStore()
+    def _started(self, store, experiment=None):
         conn = store.connect_runtime(model="x")
-        run = store.create_run(conn["runtime_ref"], {"id": "e"})
-        store.claim(run["run_id"], conn["runtime_ref"])
-        out = store.complete_trial(run["run_id"], "t0", conn["runtime_ref"], conformant_trace())
-        self.assertEqual(out["run_state"], "analyzing")
+        run = store.create_run(conn["runtime_ref"], experiment or EXP)
+        rid, ref = run["run_id"], conn["runtime_ref"]
+        store.claim(rid, ref)
+        return rid, ref, run["planned_trials"][0]
 
     def test_finished_attempt_is_immutable_retry_supersedes_keeping_history(self) -> None:
-        # a completed attempt is IMMUTABLE: re-completing or streaming into it is
-        # refused. A retry opens a NEW attempt that supersedes the prior one, and
-        # the prior attempt stays in the audit history (not destroyed).
         store = RuntimeJobStore()
-        conn = store.connect_runtime(model="x")
-        run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
-        rid, ref = run["run_id"], conn["runtime_ref"]
-        store.claim(rid, ref)
-        t1, t2 = conformant_trace(), conformant_trace()
-        t2["values"] = list(t2.get("values", []))  # a distinct object identity
-        first = store.complete_trial(rid, "t0", ref, t1)
+        rid, ref, tid = self._started(store)
+        first = store.complete_trial(rid, tid, ref, trace_for(unit(rid)))
         first_att = first["attempt"]
-        # re-completing the finished attempt is refused (immutable)
+        # a DIFFERENT result (here: a failed status) re-completing the finished
+        # attempt is refused — it is a mutation, not an idempotent re-delivery
         with self.assertRaises(Exception) as ctx:
-            store.complete_trial(rid, "t0", ref, t2)
+            store.complete_trial(rid, tid, ref, None, status="failed", failure={"kind": "x"})
         self.assertEqual(getattr(ctx.exception, "status", None), 409)
-        # streaming into the finished attempt is likewise refused
-        with self.assertRaises(Exception):
-            store.append_events(rid, "t0", ref, [{"seq": 0}])
-        # an explicit retry opens a superseding attempt; run returns to running
-        redo = store.retry_trial(rid, "t0", ref)
+        # retry is CONTROL-owned (no runtime_ref) → new superseding attempt
+        redo = store.retry_trial(rid, tid)
         self.assertEqual(redo["supersedes"], first_att)
         self.assertEqual(redo["run_state"], "running")
-        store.complete_trial(rid, "t0", ref, t2)
-        results = store.results(rid)
-        attempts = results["trials"][0]["attempts"]
-        self.assertEqual(len(attempts), 2)                 # BOTH attempts retained
+        # streaming into the fresh (running) attempt is now allowed
+        store.append_events(rid, tid, ref, [{"seq": 0}])
+        store.complete_trial(rid, tid, ref, trace_for(unit(rid)))
+        attempts = store.results(rid)["trials"][0]["attempts"]
+        self.assertEqual(len(attempts), 2)
         self.assertEqual(attempts[0]["attempt_id"], first_att)
         self.assertEqual(attempts[1]["supersedes"], first_att)
-        self.assertEqual(len(results["traces"]), 1)        # the active accepted trace
+
+    def test_completion_is_idempotent(self) -> None:
+        # a re-delivered identical completion (a lost HTTP response) returns the
+        # prior success — not a 409, not a mutation (review v0.3-idempotency)
+        store = RuntimeJobStore()
+        rid, ref, tid = self._started(store)
+        tr = trace_for(unit(rid))
+        first = store.complete_trial(rid, tid, ref, tr)
+        again = store.complete_trial(rid, tid, ref, tr)
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(again["trace_ref"], first["trace_ref"])
+        self.assertEqual(len(store.results(rid)["trials"][0]["attempts"]), 1)
+
+    def test_retry_is_control_owned(self) -> None:
+        store = RuntimeJobStore()
+        rid, ref, tid = self._started(store)
+        store.complete_trial(rid, tid, ref, trace_for(unit(rid)))
+        # a runtime can only REQUEST (advisory); it cannot reopen the run
+        req = store.request_retry(rid, tid, ref, reason="flaky")
+        self.assertTrue(req["retry_requested"])
+        self.assertEqual(store.results(rid)["state"], "completed")
+        # control grants → new attempt, run back to running
+        store.retry_trial(rid, tid)
+        self.assertEqual(store.results(rid)["state"], "running")
 
     def test_event_batches_are_idempotent(self) -> None:
-        # a re-delivered batch (same batch_id) does not duplicate the ledger
         store = RuntimeJobStore()
-        conn = store.connect_runtime(model="x")
-        run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
-        rid, ref = run["run_id"], conn["runtime_ref"]
-        store.claim(rid, ref)
-        a = store.append_events(rid, "t0", ref, [{"seq": 0}, {"seq": 1}], batch_id="b1")
+        rid, ref, tid = self._started(store)
+        a = store.append_events(rid, tid, ref, [{"seq": 0}, {"seq": 1}], batch_id="b1")
         self.assertEqual(a["events"], 2)
-        b = store.append_events(rid, "t0", ref, [{"seq": 0}, {"seq": 1}], batch_id="b1")
+        b = store.append_events(rid, tid, ref, [{"seq": 0}, {"seq": 1}], batch_id="b1")
         self.assertTrue(b["idempotent"])
-        self.assertEqual(b["events"], 2)  # not 4 — the retry was a no-op
+        self.assertEqual(b["events"], 2)
 
     def test_terminal_run_rejects_further_ingest(self) -> None:
         store = RuntimeJobStore()
-        conn = store.connect_runtime(model="x")
-        run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
-        rid, ref = run["run_id"], conn["runtime_ref"]
-        store.claim(rid, ref)
-        store.complete_trial(rid, "t0", ref, conformant_trace())
-        self.assertEqual(store.results(rid)["state"], "completed")  # terminal
+        rid, ref, tid = self._started(store)
+        store.complete_trial(rid, tid, ref, trace_for(unit(rid)))
+        self.assertEqual(store.results(rid)["state"], "completed")
         with self.assertRaises(Exception) as ctx:
-            store.append_events(rid, "t0", ref, [{"seq": 0}])
+            store.append_events(rid, tid, ref, [{"seq": 0}])
         self.assertEqual(getattr(ctx.exception, "status", None), 409)
 
     def test_failed_trial_requires_typed_failure(self) -> None:
         store = RuntimeJobStore()
-        conn = store.connect_runtime(model="x")
-        run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
-        rid, ref = run["run_id"], conn["runtime_ref"]
-        store.claim(rid, ref)
-        with self.assertRaises(Exception):  # no failure details
-            store.complete_trial(rid, "t0", ref, None, status="failed")
-        out = store.complete_trial(rid, "t0", ref, None, status="failed",
-                                   failure={"kind": "timeout", "detail": "no response"})
+        rid, ref, tid = self._started(store)
+        with self.assertRaises(Exception):
+            store.complete_trial(rid, tid, ref, None, status="failed")
+        out = store.complete_trial(rid, tid, ref, None, status="failed",
+                                   failure={"kind": "timeout"})
         self.assertEqual(out["status"], "failed")
         self.assertEqual(store.results(rid)["state"], "failed")
 
-    def test_trace_unit_binding_is_enforced(self) -> None:
-        # when the plan names a TrialUnit coordinate, the uploaded trace's trial
-        # block must match it — a trace for a different unit is rejected
+    def test_duplicate_trial_ids_in_a_plan_are_rejected(self) -> None:
+        # the plan is server-owned; a plan that (somehow) carries a duplicate unit is
+        # rejected rather than letting one silently overwrite the other
         store = RuntimeJobStore()
-        conn = store.connect_runtime(model="x")
-        trace = conformant_trace()
-        unit = trace["trial"]
-        run = store.create_run(conn["runtime_ref"], {"id": "e"},
-                               planned=[{"trial_id": "u0", "trial": unit}])
-        rid, ref = run["run_id"], conn["runtime_ref"]
-        store.claim(rid, ref)
-        wrong = conformant_trace()
-        wrong["trial"] = {**unit, "seed": "s999"}  # a different unit
+        conn = store.connect_runtime()
+        dup_plan = store._plans  # noqa: SLF001 — construct a bad plan directly
+        ref_id = "plan_dup"
+        dup_plan[ref_id] = [
+            {"trial_id": "x", "scenario_id": "s", "condition_id": "c", "seed": "s000", "repeat_index": 0},
+            {"trial_id": "x", "scenario_id": "s", "condition_id": "c", "seed": "s000", "repeat_index": 0},
+        ]
         with self.assertRaises(Exception) as ctx:
-            store.complete_trial(rid, "u0", ref, wrong)
-        self.assertEqual(getattr(ctx.exception, "status", None), 422)
-        # the matching trace is accepted
-        out = store.complete_trial(rid, "u0", ref, conformant_trace())
-        self.assertEqual(out["status"], "completed")
+            store.create_run(conn["runtime_ref"], plan_ref=ref_id)
+        self.assertEqual(getattr(ctx.exception, "status", None), 400)
+
+    def test_lab_computes_aggregates_from_traces(self) -> None:
+        # the analyzing phase: Lab evaluates each scenario's violation predicate on
+        # the collected traces and builds ASR aggregates ITSELF (review v0.3-results)
+        from tests import support
+        scen = support.banking_scenario()  # name: banking-exfil-01
+        experiment = {"scenario_ids": ["banking-exfil-01"], "conditions": ["ungoverned"],
+                      "repeats": 1, "scenarios": [scen]}
+        store = RuntimeJobStore()
+        rid, ref, tid = self._started(store, experiment)
+        coord = unit(rid, scenario="banking-exfil-01", condition="ungoverned")
+        store.complete_trial(rid, tid, ref, trace_for(coord))
+        res = store.results(rid)
+        self.assertEqual(res["state"], "completed")
+        self.assertEqual(len(res["aggregates"]), 1)
+        self.assertEqual(res["aggregates"][0]["condition_id"], "ungoverned")
+        self.assertEqual(res["aggregates"][0]["n"], 1)
+        self.assertEqual(res["analysis"]["trials_analyzed"], 1)
 
     def test_shared_registry_lets_one_runtime_serve_two_job_stores(self) -> None:
-        # the runtime + its credential live behind the RuntimeRegistry PORT, not
-        # inside a Lab job store. A registry shared across stores lets a runtime
-        # connected once be selectable by any store — this is what makes a CP-backed
-        # registry (an integrated deployment) selectable the same way (review v0.3-3).
         registry = InMemoryRuntimeRegistry()
         conn = registry.connect(model="scripted")
         ref, key = conn["runtime_ref"], conn["ingest_key"]
-
-        store_a = RuntimeJobStore(registry=registry)
-        store_b = RuntimeJobStore(registry=registry)
-        # both stores resolve the same credential and can assign to the same runtime
+        store_a, store_b = RuntimeJobStore(registry=registry), RuntimeJobStore(registry=registry)
         self.assertEqual(store_a.runtime_for_key(key), ref)
         self.assertEqual(store_b.runtime_for_key(key), ref)
-        run = store_b.create_run(ref, {"id": "e"}, planned=["t0"])
+        run = store_b.create_run(ref, EXP)
         self.assertEqual(run["state"], "waiting_for_runtime")
-        # a store that does NOT share the registry does not know the runtime
         other = RuntimeJobStore()
         with self.assertRaises(Exception) as ctx:
-            other.create_run(ref, {"id": "e"})
+            other.create_run(ref, EXP)
         self.assertEqual(getattr(ctx.exception, "status", None), 404)
 
-    def test_injected_trace_store_receives_accepted_traces(self) -> None:
+    def test_injected_trace_store_owns_addressing(self) -> None:
         # the domain does not know which TraceStore is wired: an injected custom
-        # store receives every accepted trace, and results/trial_trace resolve
-        # through it (review v0.3-3 — TraceStore is a swappable port).
+        # store receives + addresses every accepted trace (review v0.3-tracestore)
         class RecordingStore(LabTraceStore):
             def __init__(self) -> None:
                 super().__init__()
-                self.puts: list[str] = []
+                self.refs: list[str] = []
 
-            def put(self, trace_ref: str, trace: dict) -> None:
-                self.puts.append(trace_ref)
-                super().put(trace_ref, trace)
+            def put(self, trace: dict) -> str:
+                ref = super().put(trace)
+                self.refs.append(ref)
+                return ref
 
         ts = RecordingStore()
         store = RuntimeJobStore(trace_store=ts)
-        conn = store.connect_runtime(model="x")
-        run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
-        rid, ref = run["run_id"], conn["runtime_ref"]
-        store.claim(rid, ref)
-        out = store.complete_trial(rid, "t0", ref, conformant_trace())
-        # the accepted trace landed in the injected store, keyed by its trace_ref
-        self.assertEqual(ts.puts, [out["trace_ref"]])
+        rid, ref, tid = self._started(store)
+        out = store.complete_trial(rid, tid, ref, trace_for(unit(rid)))
+        self.assertEqual(ts.refs, [out["trace_ref"]])
         self.assertIsNotNone(ts.get(out["trace_ref"]))
-        # results resolve the trace body through the store, not the attempt
         self.assertEqual(len(store.results(rid)["traces"]), 1)
 
     def test_plan_experiment_is_deterministic(self) -> None:
@@ -445,14 +454,29 @@ class TestStoreDirect(unittest.TestCase):
         self.assertEqual(plan_experiment(exp)["estimate"]["trials"], 4)
 
     def test_plan_experiment_fails_closed_on_bad_matrix(self) -> None:
-        # no convenience-defaulting: a malformed experiment is rejected, not turned
-        # into a plausible plan of fictional units
-        for bad in ({"conditions": ["gov"]},               # no scenarios
-                    {"scenario_ids": ["a"]},               # no conditions
+        for bad in ({"conditions": ["gov"]}, {"scenario_ids": ["a"]},
                     {"scenario_ids": ["a"], "conditions": ["gov"], "repeats": 0}):
             with self.assertRaises(Exception) as ctx:
                 plan_experiment(bad)
             self.assertEqual(getattr(ctx.exception, "status", None), 400)
+
+
+class TestTraceStore(unittest.TestCase):
+    def test_labtracestore_owns_hash_and_immutability(self) -> None:
+        from lab_server.providers import TraceStoreIntegrityError
+        ts = LabTraceStore()
+        trace = trace_for(unit("run_x"))
+        ref = ts.put(trace)
+        self.assertTrue(ref)
+        # a returned trace is a fresh copy — mutating it does not corrupt the store
+        got = ts.get(ref)
+        got["trial"]["seed"] = "TAMPERED"
+        self.assertNotEqual(ts.get(ref)["trial"]["seed"], "TAMPERED")
+        # same bytes → idempotent (same ref); a different body cannot collide the ref
+        self.assertEqual(ts.put(trace_for(unit("run_x"))), ref)
+        ts._by_ref[ref] = json.dumps({"different": True})  # force a collision  # noqa: SLF001
+        with self.assertRaises(TraceStoreIntegrityError):
+            ts.put(trace_for(unit("run_x")))
 
 
 if __name__ == "__main__":
