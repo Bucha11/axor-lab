@@ -11,6 +11,7 @@ from .errors import NotFound, PublishRejected, ServerError
 from .runtime_jobs import (
     RuntimeJobsError,
     RuntimeJobStore,
+    RuntimeRegistry,
     make_runtime_server,
     plan_experiment,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "PublishRejected",
     "RuntimeJobStore",
     "RuntimeJobsError",
+    "RuntimeRegistry",
     "ServerError",
     "StoredPublication",
     "Unauthorized",

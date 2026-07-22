@@ -18,10 +18,15 @@ content-addressed `trace_ref`); a re-run is an explicit new `TrialAttempt` that
 supersedes the prior one without destroying it. Event batches are idempotent so a
 network retry cannot duplicate a ledger.
 
+The runtime + its ingest key live in a SHARED `RuntimeRegistry` (the platform
+component), not in Lab (review v0.3-1): Lab's job store only *selects* an
+already-registered `runtime_ref`. The registry is injectable so one instance can be
+shared with Control Plane; `/runtimes/connect` is a thin passthrough to it.
+
 Control surface (Lab operator / UI):
 
-  POST /runtimes/connect     register a runtime  -> { runtime_ref, ingest_key }
-  GET  /runtimes             list connected runtimes
+  POST /runtimes/connect     platform-registry passthrough -> { runtime_ref, ingest_key }
+  GET  /runtimes             list connected runtimes (from the shared registry)
   POST /scenarios/validate   validate a scenario -> { ok, errors[] }
   POST /experiments/plan     expand an experiment -> { trials, estimate }   (fail-closed)
   POST /runs                 assign an experiment to a runtime -> { run_id, state }
@@ -75,6 +80,51 @@ class RuntimeJobsError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+class RuntimeRegistry:
+    """The SHARED runtime registry — the platform component that owns `RuntimeRef`,
+    credentials (ingest keys), status and (later) manifests/telemetry.
+
+    Lab does NOT own this (review v0.3-1). architecture-boundary.md: *one Axor
+    adapter, one connection; CP and Lab see the SAME runtime; an existing CP user
+    just selects it.* So the registry is a distinct, injectable component — a single
+    instance can be shared by a Lab job store and (eventually) the Control Plane, and
+    a production deployment injects a CP-backed implementation. Lab's job store only
+    *selects* an already-registered runtime by `runtime_ref`; it never mints or holds
+    the credential itself. `connect()` here is the thin platform-registry op (used by
+    local/dev and by whatever front-door the platform exposes), not a Lab concept."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._runtimes: dict[str, dict[str, object]] = {}  # runtime_ref -> {..., ingest_key}
+        self._by_key: dict[str, str] = {}                  # ingest_key -> runtime_ref
+        self._n = 0
+
+    def connect(self, model: str = "", agent_ref: str | None = None) -> dict[str, object]:
+        with self._lock:
+            self._n += 1
+            runtime_ref = f"rt_{self._n:04d}_{secrets.token_hex(6)}"
+            ingest_key = secrets.token_hex(24)
+            self._runtimes[runtime_ref] = {
+                "runtime_ref": runtime_ref, "agent_ref": agent_ref,
+                "model": model, "status": "connected", "ingest_key": ingest_key,
+            }
+            self._by_key[ingest_key] = runtime_ref
+            return {"runtime_ref": runtime_ref, "ingest_key": ingest_key}
+
+    def list(self) -> list[dict[str, object]]:
+        with self._lock:
+            return [{k: v for k, v in r.items() if k != "ingest_key"}
+                    for r in self._runtimes.values()]
+
+    def exists(self, runtime_ref: str) -> bool:
+        with self._lock:
+            return runtime_ref in self._runtimes
+
+    def runtime_for_key(self, ingest_key: str) -> str | None:
+        with self._lock:
+            return self._by_key.get(ingest_key)
 
 
 def _validate_trace(trace: object) -> list[str]:
@@ -144,10 +194,11 @@ class RuntimeJobStore:
     uploading a CONFORMANT trace. A job reaches `completed` once every planned
     trial has an accepted terminal attempt."""
 
-    def __init__(self) -> None:
+    def __init__(self, registry: RuntimeRegistry | None = None) -> None:
         self._lock = threading.Lock()
-        self._runtimes: dict[str, dict[str, object]] = {}  # runtime_ref -> {..., ingest_key}
-        self._by_key: dict[str, str] = {}                  # ingest_key -> runtime_ref
+        # the SHARED registry owns runtimes + credentials; Lab only selects one
+        # (review v0.3-1). Injected so a single registry can be shared with CP.
+        self.registry = registry or RuntimeRegistry()
         self._jobs: dict[str, _Job] = {}
         self._n = 0
 
@@ -155,33 +206,26 @@ class RuntimeJobStore:
         self._n += 1
         return f"{prefix}_{self._n:04d}_{secrets.token_hex(6)}"
 
-    # -- control surface --------------------------------------------------
+    # -- runtime selection (delegates to the shared platform registry) ----
+    # These are thin passthroughs — the registry, not Lab, owns the runtime and its
+    # ingest key. A production deployment injects a CP-backed registry and connects
+    # runtimes there; Lab assigns runs to whatever runtime_ref the registry knows.
     def connect_runtime(self, model: str = "", agent_ref: str | None = None) -> dict[str, object]:
-        with self._lock:
-            runtime_ref = self._next("rt")
-            ingest_key = secrets.token_hex(24)
-            self._runtimes[runtime_ref] = {
-                "runtime_ref": runtime_ref, "agent_ref": agent_ref,
-                "model": model, "status": "connected", "ingest_key": ingest_key,
-            }
-            self._by_key[ingest_key] = runtime_ref
-            return {"runtime_ref": runtime_ref, "ingest_key": ingest_key}
+        return self.registry.connect(model=model, agent_ref=agent_ref)
 
     def list_runtimes(self) -> list[dict[str, object]]:
-        with self._lock:
-            return [{k: v for k, v in r.items() if k != "ingest_key"}
-                    for r in self._runtimes.values()]
+        return self.registry.list()
 
     def runtime_for_key(self, ingest_key: str) -> str | None:
-        with self._lock:
-            return self._by_key.get(ingest_key)
+        return self.registry.runtime_for_key(ingest_key)
 
+    # -- control surface --------------------------------------------------
     def create_run(self, runtime_ref: str, experiment: dict[str, object],
                    planned: list[object] | None = None, *,
                    require_confirmation: bool = False,
                    estimate: dict[str, object] | None = None) -> dict[str, object]:
         with self._lock:
-            if runtime_ref not in self._runtimes:
+            if not self.registry.exists(runtime_ref):
                 raise RuntimeJobsError(404, f"unknown runtime_ref {runtime_ref!r}")
             job_id = self._next("run")
             plan_src = planned if planned is not None else experiment.get("planned_trials", [])
@@ -444,11 +488,16 @@ def make_runtime_server(
     *,
     control_token: str | None = None,
     store: RuntimeJobStore | None = None,
+    registry: RuntimeRegistry | None = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs server. `control_token`, if set, gates the control
     surface (runtime registration + run assignment); the runtime-facing endpoints
-    are gated by the per-runtime ingest_key issued at connect."""
-    jobs = store or RuntimeJobStore()
+    are gated by the per-runtime ingest_key the registry issues at connect.
+
+    `registry` injects the SHARED runtime registry (review v0.3-1) so one registry
+    instance can back both this Lab server and the Control Plane; omitted, the store
+    gets a private in-process registry (dev/local)."""
+    jobs = store or RuntimeJobStore(registry=registry)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:  # quiet

@@ -15,7 +15,12 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from lab_server import RuntimeJobStore, make_runtime_server, plan_experiment
+from lab_server import (
+    RuntimeJobStore,
+    RuntimeRegistry,
+    make_runtime_server,
+    plan_experiment,
+)
 
 _TRACE_CACHE: list[dict] = []
 
@@ -384,6 +389,27 @@ class TestStoreDirect(unittest.TestCase):
         # the matching trace is accepted
         out = store.complete_trial(rid, "u0", ref, conformant_trace())
         self.assertEqual(out["status"], "completed")
+
+    def test_shared_registry_lets_one_runtime_serve_two_job_stores(self) -> None:
+        # the runtime + its credential live in a SHARED registry, not inside a Lab
+        # job store (review v0.3-1). A runtime connected once is selectable by any
+        # store sharing the registry — the runtime is not re-registered per store.
+        registry = RuntimeRegistry()
+        conn = registry.connect(model="scripted")
+        ref, key = conn["runtime_ref"], conn["ingest_key"]
+
+        store_a = RuntimeJobStore(registry=registry)
+        store_b = RuntimeJobStore(registry=registry)
+        # both stores resolve the same credential and can assign to the same runtime
+        self.assertEqual(store_a.runtime_for_key(key), ref)
+        self.assertEqual(store_b.runtime_for_key(key), ref)
+        run = store_b.create_run(ref, {"id": "e"}, planned=["t0"])
+        self.assertEqual(run["state"], "waiting_for_runtime")
+        # a store that does NOT share the registry does not know the runtime
+        other = RuntimeJobStore()
+        with self.assertRaises(Exception) as ctx:
+            other.create_run(ref, {"id": "e"})
+        self.assertEqual(getattr(ctx.exception, "status", None), 404)
 
     def test_plan_experiment_is_deterministic(self) -> None:
         exp = {"scenario_ids": ["a"], "conditions": ["gov", "ungov"], "repeats": 2}

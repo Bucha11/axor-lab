@@ -135,21 +135,30 @@ surface introduced; `lab_server/runtime_jobs.py`, `store.py`):
   from the catalog; the server no longer silently mints a fresh clean receipt over
   the tampering. An operator re-verifies / re-publishes to clear it.
 
-Still deferred to the platform layer (need shared Axor infrastructure, not a
-Lab-local contour): the **shared runtime registry / trace ingest** (Lab currently
-owns `/runtimes/connect` in-process — it must become a thin platform API so a CP
-user selects an already-connected runtime), runtime **leases / heartbeat / reclaim**,
-and **promote-via-refs** (a `POST /promotions` over shared artifact refs rather than
-the offline `cp_export` package). These are called out explicitly in the review and
-tracked below.
+**Runtime registry seam extracted** (review v0.3-1, `lab_server/runtime_jobs.py`):
+`RuntimeRef` + credentials (ingest keys) + status now live in a distinct, injectable
+`RuntimeRegistry` — the *shared platform component* — not inside the Lab job store.
+`RuntimeJobStore(registry=…)` takes the registry by injection, so one registry
+instance backs a Lab store and (once wired) the Control Plane; Lab only *selects* an
+already-registered `runtime_ref` and never mints or holds the credential. A runtime
+connected once against a shared registry is selectable by any store sharing it
+(proved by test). `/runtimes/connect` is now a thin passthrough to the registry, not
+a Lab-owned concept. What remains is the CROSS-REPO wiring: a CP-backed
+`RuntimeRegistry` implementation (and shared trace ingest) in `axor-control-plane` —
+the seam is ready for it.
+
+Still deferred to the platform layer (need shared Axor infrastructure / the other
+repo): the **CP-backed registry + shared trace ingest** implementation, runtime
+**leases / heartbeat / reclaim**, and **promote-via-refs** (a `POST /promotions` over
+shared artifact refs rather than the offline `cp_export` package). Tracked below.
 
 ## Pending
 
-- **Shared runtime registry + trace ingest at the platform level** (review v0.3-1):
-  extract `RuntimeRef` / credentials / status / manifests / telemetry out of the
-  Lab process into shared Axor platform/CP infrastructure; Lab keeps only
-  `/experiments`, `/runs`, `/runs/{id}/confirm`, `/runs/{id}/results` and *selects* a
-  runtime. Needs the CP-side service to point at.
+- **CP-backed runtime registry + shared trace ingest** (review v0.3-1, cross-repo):
+  the in-repo `RuntimeRegistry` seam is in place; implement a Control-Plane-backed
+  registry (and shared telemetry ingest) in `axor-control-plane` and inject it, so a
+  CP user's already-connected runtime is the one Lab assigns to. Lab keeps only
+  `/experiments`, `/runs`, `/runs/{id}/confirm`, `/runs/{id}/results` and selects.
 - **Runtime leases + cancellation** (review v0.3-lease): `lease_expires_at` /
   heartbeat / reclaim / `runtime disconnected`, so a dropped runtime mid-run is a
   first-class failure case (lifecycle.md already names it).
