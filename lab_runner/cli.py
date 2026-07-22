@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -233,7 +234,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         scenarios=list(resolved.scenarios),
         conditions=list(resolved.conditions),
         tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved, model, usage),
+        environment=_environment(resolved, model, usage, agent=agent),
         trials=result.trials,
         aggregates=aggregates,
         traces=result.traces,
@@ -350,7 +351,6 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         SignatureInvalid,
         SignatureUnavailable,
         verify_acceptance,
-        verify_reacceptance,
         verify_receipt,
     )
 
@@ -405,15 +405,13 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         unverified = True
-    # 3) server acceptance binds + (optionally) verifies. verify_acceptance now
-    # also requires acceptance.integrity == publication.integrity. A server that
-    # found its persisted acceptance damaged re-attests with a distinct, linked
-    # `reacceptance/v1` event (review r18) — verify it with the same rigour, and
-    # tell the reader an original attestation was superseded.
-    is_reacceptance = str(acceptance.get("schema_version", "")) == "axor-lab-reacceptance/v1"
-    verify_acc = verify_reacceptance if is_reacceptance else verify_acceptance
+    # 3) server acceptance binds + (optionally) verifies. verify_acceptance also
+    # requires acceptance.integrity == publication.integrity. v0.3 keeps a single
+    # acceptance/v1 form: a server that finds its persisted acceptance damaged
+    # simply re-mints a fresh acceptance/v1 from the current bundle on load, so
+    # there is no reacceptance/history chain to resolve here.
     try:
-        verify_acc(
+        verify_acceptance(
             acceptance, publication,
             server_pubkey_hex=getattr(args, "server_pubkey", None),
             expected_server=getattr(args, "server", None),
@@ -426,35 +424,6 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
         unverified = True
     else:
-        if is_reacceptance:
-            supersedes = acceptance.get("supersedes")
-            prev_ref = supersedes.get("previous_ref") if isinstance(supersedes, dict) else "?"
-            # the previous_ref must resolve to an actual archived record in the
-            # package's acceptance_history (review r19): otherwise the reacceptance
-            # only proves the server signed SOME string, not that it supersedes a
-            # real damaged receipt. A package that omits the history it names fails.
-            from lab_contracts import content_hash
-
-            history = data.get("acceptance_history")
-            history = history if isinstance(history, list) else []
-            resolved = any(
-                isinstance(entry, dict)
-                and content_hash(entry.get("record")) == prev_ref
-                and str(entry.get("ref")) == prev_ref
-                for entry in history
-            )
-            if not resolved:
-                print(
-                    f"acceptance: INVALID — reacceptance previous_ref {prev_ref} does not "
-                    "resolve to any record in acceptance_history (superseded receipt missing)",
-                    file=sys.stderr,
-                )
-                return EXIT_FAILURE
-            print(
-                f"acceptance: RE-ATTESTATION (reacceptance/v1) — supersedes a superseded "
-                f"receipt resolved in history (previous_ref={prev_ref}) at "
-                f"{acceptance.get('reaccepted_at')}",
-            )
         if str(acceptance.get("algorithm")) == "ed25519":
             print("acceptance: signature VERIFIED")
         elif getattr(args, "allow_unsigned_server", False):
@@ -769,15 +738,20 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
         raise RunnerError(str(exc)) from exc
     import shutil
 
-    out = Path(args.out)
+    final = Path(args.out)
     # a re-export must NOT leave stale files behind (review r20): an earlier export
     # with an earned bridge, or extra regression traces, would linger and the
     # manifest verifier would flag them — or worse, a reader would trust them. A
     # non-empty directory requires --overwrite, and --overwrite REPLACES it wholly.
-    if out.exists() and any(out.iterdir()):
-        if not getattr(args, "overwrite", False):
-            raise RunnerError(f"{out} is not empty; pass --overwrite to replace it")
-        shutil.rmtree(out)
+    if final.exists() and any(final.iterdir()) and not getattr(args, "overwrite", False):
+        raise RunnerError(f"{final} is not empty; pass --overwrite to replace it")
+    # build the WHOLE export in a staging directory, then swap it into place
+    # atomically (review r21): a crash mid-write no longer leaves the previous valid
+    # signed handoff destroyed AND the new one half-written with a missing manifest.
+    staging = final.with_name(final.name + ".staging")
+    if staging.exists():
+        shutil.rmtree(staging)
+    out = staging
     out.mkdir(parents=True, exist_ok=True)
     (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
     (out / "production-todo.md").write_text(export.production_todo)
@@ -837,6 +811,21 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
         manifest["author"] = args.author
         manifest["signature"] = sign_bundle(manifest, args.sign_key)
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    # ATOMIC SWAP: the staging tree is complete (manifest last), so replace the
+    # previous export in one move — old to a backup, staging to final, then drop the
+    # backup. A crash leaves either the intact old export or the intact new one,
+    # never a half-written directory with a missing/partial manifest (review r21).
+    if final.exists():
+        backup = final.with_name(final.name + ".old")
+        if backup.exists():
+            shutil.rmtree(backup)
+        os.replace(final, backup)
+        os.replace(staging, final)
+        shutil.rmtree(backup)
+    else:
+        final.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, final)
+    out = final
     print(f"exported CP deploy config -> {out}/cp-deploy.json")
     print(f"  manifest: {len(manifest['files'])} files"
           + (" (signed)" if manifest.get("signature") else " (unsigned — derivability + integrity only)"))
@@ -872,8 +861,12 @@ def _cp_export_manifest(out: Path, config: dict[str, object]) -> dict[str, objec
     import hashlib
 
     files: dict[str, str] = {}
+    root_manifest = out / "manifest.json"
     for path in sorted(out.rglob("*")):
-        if path.is_file() and path.name != "manifest.json":
+        # exclude ONLY the ROOT manifest.json — a NESTED file that happens to be
+        # named manifest.json (e.g. source-bundle/manifest.json) IS bound, so a
+        # "full-file" manifest is actually full (review r21)
+        if path.is_file() and path != root_manifest and not path.is_symlink():
             rel = str(path.relative_to(out)).replace("\\", "/")
             files[rel] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     src: dict[str, object] = config.get("source", {})  # type: ignore[assignment]
@@ -887,6 +880,50 @@ def _cp_export_manifest(out: Path, config: dict[str, object]) -> dict[str, objec
         "bridge_analysis_ref": src.get("bridge_analysis_ref"),
         "files": files,
     }
+
+
+def _safe_export_path(directory: Path, rel: str) -> Path | None:
+    """Resolve a manifest-listed relative path, confined to `directory`. Returns
+    None for an absolute path, a `..` escape, or one that resolves (through a
+    symlink) outside the export tree — the manifest is untrusted until verified,
+    so a listed path must never read outside the directory (review r21)."""
+    if not rel or rel.startswith("/") or "\\" in rel:
+        return None
+    parts = rel.split("/")
+    if any(p in ("", "..", ".") for p in parts):
+        return None
+    candidate = directory / rel
+    if candidate.is_symlink():
+        return None
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(directory.resolve())
+    except (ValueError, OSError):
+        return None
+    return candidate
+
+
+def _verify_manifest_semantic_refs(
+    manifest: dict[str, object], shipped: dict[str, object], files: dict[str, str]
+) -> str | None:
+    """Confirm each SEMANTIC ref the manifest names actually matches its artifact
+    (review r21). A signed manifest whose deploy_config_ref / source_bundle_ref /
+    regression_set_ref / bridge_analysis_ref point at the wrong bytes would verify
+    its own signature and recompute a config while MISDESCRIBING what it bundles.
+    Returns a problem string, or None when every ref matches."""
+    if str(manifest.get("deploy_config_ref")) != content_hash(shipped):
+        return "manifest deploy_config_ref does not match cp-deploy.json"
+    src: dict[str, object] = shipped.get("source", {})  # type: ignore[assignment]
+    if str(manifest.get("regression_set_ref")) != content_hash(shipped.get("regressions", [])):
+        return "manifest regression_set_ref does not match the shipped regressions"
+    want_bundle = files.get("source-bundle/bundle.json")
+    if want_bundle is not None and str(manifest.get("source_bundle_ref")) != str(want_bundle):
+        return "manifest source_bundle_ref does not match source-bundle/bundle.json"
+    # the bridge analysis ref must agree BOTH with the deploy config's own ref and,
+    # when a bridge-analysis.json is shipped, with that file's content
+    if str(manifest.get("bridge_analysis_ref") or "") != str(src.get("bridge_analysis_ref") or ""):
+        return "manifest bridge_analysis_ref does not match the deploy config's bridge_analysis_ref"
+    return None
 
 
 def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
@@ -916,24 +953,40 @@ def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
             f"{directory} has no manifest.json — this export predates full-file verification; "
             "re-export with a current axor-lab so it carries its own manifest"
         )
-    manifest: dict[str, object] = json.loads(manifest_path.read_text())
+    # a malformed manifest is an INTEGRITY failure, never a traceback (review r21)
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except ValueError as exc:
+        print(f"cp-export: INVALID — manifest.json is not valid JSON: {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
+        print("cp-export: INVALID — manifest.json is not an object with a files map",
+              file=sys.stderr)
+        return EXIT_FAILURE
     unverified = False
     # 1) INTEGRITY — every listed file's hash matches, and nothing unlisted exists
     import hashlib
 
-    files: dict[str, str] = manifest.get("files", {})  # type: ignore[assignment]
+    root_manifest = directory / "manifest.json"
+    files: dict[str, str] = manifest["files"]  # type: ignore[assignment]
     for rel, want in files.items():
-        path = directory / rel
-        if not path.is_file():
+        # the manifest is UNTRUSTED until verified: a path with `..`, an absolute
+        # path, or a symlink could read/traverse outside the export tree. Confine
+        # every listed path to the directory before touching it (review r21).
+        safe = _safe_export_path(directory, str(rel))
+        if safe is None:
+            print(f"cp-export: INVALID — manifest lists an unsafe path {rel!r}", file=sys.stderr)
+            return EXIT_FAILURE
+        if not safe.is_file():
             print(f"cp-export: INVALID — manifest names a missing file {rel!r}", file=sys.stderr)
             return EXIT_FAILURE
-        got = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        got = "sha256:" + hashlib.sha256(safe.read_bytes()).hexdigest()
         if got != str(want):
             print(f"cp-export: INVALID — {rel} does not match its manifest hash", file=sys.stderr)
             return EXIT_FAILURE
     on_disk = {
         str(p.relative_to(directory)).replace("\\", "/")
-        for p in directory.rglob("*") if p.is_file() and p.name != "manifest.json"
+        for p in directory.rglob("*") if p.is_file() and p != root_manifest
     }
     extra = sorted(on_disk - set(files))
     if extra:
@@ -941,7 +994,18 @@ def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return EXIT_FAILURE
     print(f"cp-export: manifest INTEGRITY OK ({len(files)} files, no stale/unlisted)")
-    # 2) AUTHENTICITY — verify the signature when present
+    # 1b) SEMANTIC REFS — the manifest NAMES the deploy config, source bundle,
+    # regression set and bridge analysis by content hash; recompute each and confirm
+    # it matches BEFORE trusting them. A signature over the manifest proves nothing
+    # if a ref inside it points at the wrong artifact (review r21).
+    shipped: dict[str, object] = json.loads(deploy_path.read_text())
+    ref_problem = _verify_manifest_semantic_refs(manifest, shipped, files)
+    if ref_problem is not None:
+        print(f"cp-export: INVALID — {ref_problem}", file=sys.stderr)
+        return EXIT_FAILURE
+    print("cp-export: manifest semantic refs OK (deploy/source/regression/bridge)")
+    # 2) AUTHENTICITY — verify the signature when present; an UNSIGNED export is
+    # UNVERIFIED, not a clean pass (parity with the reproduction package, review r21)
     if manifest.get("signature"):
         from lab_contracts.signing import (
             SignatureInvalid,
@@ -949,6 +1013,11 @@ def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
             verify_bundle_signature,
         )
 
+        expect_author = getattr(args, "expect_author", None)
+        if expect_author and str(manifest.get("author")) != str(expect_author):
+            print(f"cp-export: INVALID — manifest author {manifest.get('author')!r} is not the "
+                  f"expected {expect_author!r}", file=sys.stderr)
+            return EXIT_FAILURE
         pubkey = getattr(args, "pubkey", None)
         if not pubkey:
             print("cp-export: UNVERIFIED — signed manifest but no --pubkey to check it",
@@ -966,10 +1035,14 @@ def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
                 unverified = True
             else:
                 print(f"cp-export: signature VERIFIED (author {manifest.get('author')!r})")
+    elif getattr(args, "allow_unsigned", False):
+        print("cp-export: unsigned manifest — integrity + derivability only "
+              "(accepted via --allow-unsigned)")
     else:
-        print("cp-export: unsigned manifest — integrity + derivability only, NOT authenticity")
+        print("cp-export: UNVERIFIED — unsigned manifest carries no authenticity; pass a signed "
+              "export, or --allow-unsigned to accept integrity + derivability only", file=sys.stderr)
+        unverified = True
     # 3) DERIVABILITY — recompute the deploy config from the embedded evidence
-    shipped: dict[str, object] = json.loads(deploy_path.read_text())
     source_dir = directory / "source-bundle"
     if not (source_dir / "bundle.json").is_file():
         raise RunnerError(f"{directory} has no source-bundle/ — cannot recompute the handoff")
@@ -1075,8 +1148,12 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
             "refusing to import a bundle whose verdicts don't reproduce"
         )
 
-    # a completed trial carries the runtime config it ran under, recorded from the
-    # incident's own condition + scenario inputs (review r20)
+    # a completed trial carries the runtime config it ran under, but this hash is
+    # RECONSTRUCTED at import from the incident's condition + scenario inputs — the
+    # original production trace never carried it, and this process did not observe
+    # the runtime compilation. Mark it reconstructed_incident so config_provenance
+    # reports the honest status and an evidence-backed CP export refuses it as
+    # "the exact runtime config that actually ran in production" (review r21).
     from lab_contracts import CONFIG_COMPILER_VERSION, runtime_config_hash
 
     incident_rch = runtime_config_hash(
@@ -1090,6 +1167,7 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
         "trace_ref": content_hash(trace),
         "runtime_config_hash": incident_rch,
         "config_compiler_version": CONFIG_COMPILER_VERSION,
+        "runtime_provenance": "reconstructed_incident",
     }]
     bundle = build_bundle(
         bundle_id="b_incident_" + content_hash(trace).removeprefix("sha256:")[:32],
@@ -1364,7 +1442,8 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
 
 
 def _environment(
-    resolved: ResolvedExperiment, model: str, usage: dict[str, object] | None = None
+    resolved: ResolvedExperiment, model: str, usage: dict[str, object] | None = None,
+    agent: object | None = None,
 ) -> dict[str, object]:
     """Record the ACTUAL agent that ran — not always 'scripted' (review §6.1).
     The bundle stays self-describing: kernel, the real model provider/id, the
@@ -1382,6 +1461,21 @@ def _environment(
     env: dict[str, object] = {
         "model": {"provider": provider, "id": model, "inference_params": inference_params},
     }
+    # the FIRST-CLASS comparison design, recorded at run time and bound to the
+    # ACTUAL agent's determinism — this, not the uploader-controlled aggregate, is
+    # what the CP bridge reads to choose matched_pairs vs independent_samples
+    # (review r21). _effective_design already refuses matched_pairs for a live agent.
+    if agent is not None:
+        design = _effective_design(resolved, agent)
+        deterministic = _agent_is_deterministic(agent)
+        env["experiment_design"] = {
+            "schema_version": "comparison-design/v1",
+            "kind": design,
+            "unit_key": ["execution_id", "scenario_id", "condition_id", "seed", "repeat_index"],
+            "assignment": "shared_deterministic_agent_state" if design == "matched_pairs"
+                          else "independent_per_condition",
+            "agent_deterministic": deterministic,
+        }
     # the global kernel_version is a convenience that only makes sense when every
     # condition shares one kernel — verify_bundle requires it to equal a condition
     # kernel. Emitting a comma-joined pseudo-value for a mixed-kernel bundle would
@@ -1584,6 +1678,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify_cp.add_argument("dir", help="a CP export directory produced by export-cp")
     p_verify_cp.add_argument("--pubkey", default=None,
                              help="Ed25519 public key (hex) to verify a signed manifest")
+    p_verify_cp.add_argument("--expect-author", dest="expect_author", default=None,
+                             help="trust anchor: the signed manifest's author must equal this")
+    p_verify_cp.add_argument("--allow-unsigned", dest="allow_unsigned", action="store_true",
+                             help="accept an UNSIGNED export as integrity+derivability only "
+                                  "(default: unsigned exits UNVERIFIED)")
     p_verify_cp.set_defaults(func=_cmd_verify_cp_export)
 
     p_incident = sub.add_parser(

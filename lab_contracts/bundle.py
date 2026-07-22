@@ -36,7 +36,14 @@ def config_provenance(
     scen_by_id = {str(s["name"]): s for s in scenarios}
     cond_by_id = {str(c["id"]): c for c in conditions}
     hashes: dict[str, dict[str, str]] = {}
-    all_recorded = True  # every completed trial carried a runtime hash it recorded
+    # the STATUS is derived only from what the trials themselves declare — never a
+    # value a caller can assert independently of them (review r21). recorded_at_execution
+    # requires EVERY completed trial to declare `runtime_provenance = recorded_at_execution`
+    # (which the trusted runner emits when it hashes the config AT execution). A trial
+    # that reconstructed its hash post-hoc (an imported incident) or omitted the marker
+    # (a legacy/hand-built bundle) weakens the whole bundle to a reconstructed status,
+    # which an evidence-backed CP export refuses.
+    statuses: set[str] = set()
     for trial in trials:
         if trial.get("status") != "completed":
             continue
@@ -45,17 +52,27 @@ def config_provenance(
         if scenario is None or condition is None:
             continue
         recorded = trial.get("runtime_config_hash")
-        if recorded:
+        marker = str(trial.get("runtime_provenance", ""))
+        if recorded and marker == "recorded_at_execution":
             rhash = str(recorded)
+            statuses.add("recorded_at_execution")
+        elif recorded and marker == "reconstructed_incident":
+            # an imported production incident: the hash was RECONSTRUCTED at import,
+            # not recorded when the trace was produced (review r21)
+            rhash = str(recorded)
+            statuses.add("reconstructed_incident")
+        elif recorded:
+            # a completed trial carrying a hash with no (or an unknown) provenance
+            # marker cannot PROVE it was recorded at execution — treat it as legacy
+            rhash = str(recorded)
+            statuses.add("reconstructed_legacy")
         else:
-            # a completed trial that never RECORDED its runtime config at execution:
-            # reconstruct it at build time, but mark the whole provenance as
-            # reconstructed so an evidence export can refuse it (review r20)
-            all_recorded = False
+            # no hash at all: reconstruct it at build time, reconstructed_legacy
             rhash = runtime_config_hash(
                 str(condition["kernel"]), condition.get("policy"), tool_manifests,
                 scenario.get("inputs", {}),  # type: ignore[arg-type]
             )
+            statuses.add("reconstructed_legacy")
         prior = hashes.get(sid, {}).get(cid)
         if prior is not None and prior != rhash:
             # two completed trials of the SAME (scenario, condition) ran under
@@ -67,9 +84,18 @@ def config_provenance(
                 "completed trials of the same scenario/condition must share one runtime config"
             )
         hashes.setdefault(sid, {})[cid] = rhash
+    # recorded_at_execution ONLY if every completed trial declared it; any weaker
+    # marker (or a mix) demotes the whole bundle. An incident-reconstructed bundle
+    # reports reconstructed_incident so a reader sees WHY it is not execution-recorded.
+    if statuses == {"recorded_at_execution"}:
+        status = "recorded_at_execution"
+    elif statuses and statuses <= {"reconstructed_incident"}:
+        status = "reconstructed_incident"
+    else:
+        status = "reconstructed_legacy"
     return {
         "compiler_version": CONFIG_COMPILER_VERSION,
-        "provenance_status": "recorded_at_execution" if all_recorded else "reconstructed_legacy",
+        "provenance_status": status,
         "runtime_config_hashes": hashes,
     }
 
@@ -87,17 +113,20 @@ def build_bundle(
     packaging: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Assemble a bundle/v1 dict; `created` is caller-supplied (determinism)."""
-    # record the build-time runtime-config provenance INTO the environment (the
-    # same process that ran the trials compiles these), unless the caller already
-    # supplied it — so an export can later prove the config it reproduces is the
-    # one that ran, not a re-compilation (review r18)
-    if "config_provenance" not in environment:
-        environment = {
-            **environment,
-            "config_provenance": config_provenance(
-                scenarios, conditions, tool_manifests, trials
-            ),
-        }
+    # The runtime-config provenance is ALWAYS derived from the trials — never taken
+    # on trust from the caller (review r21). A pre-supplied config_provenance is only
+    # ACCEPTED if it exactly equals the derivation; a mismatch (e.g. a hand-built map
+    # claiming recorded_at_execution while the trials say otherwise, or naming a hash
+    # the trials never carried) is rejected rather than trusted.
+    derived = config_provenance(scenarios, conditions, tool_manifests, trials)
+    supplied = environment.get("config_provenance")
+    if supplied is not None and supplied != derived:
+        raise ValueError(
+            "environment.config_provenance does not match the provenance derived from the "
+            "trials; it is not caller-assertable — omit it and let build_bundle derive it, "
+            "or make it exactly equal the trial-derived provenance"
+        )
+    environment = {**environment, "config_provenance": derived}
     hashes: dict[str, str] = {}
     for scenario in scenarios:
         hashes[f"scenario:{scenario['name']}"] = content_hash(scenario)
@@ -207,8 +236,36 @@ def verify_bundle(bundle: dict[str, object], traces: dict[str, dict[str, object]
     _verify_cross_references(bundle, traces, errors)
     _verify_trial_trace_graph(bundle, traces, errors)
     _verify_trace_metadata(bundle, traces, errors)
+    _verify_config_provenance(bundle, errors)
     if errors:
         raise BundleIntegrityError("; ".join(errors))
+
+
+def _verify_config_provenance(bundle: dict[str, object], errors: list[str]) -> None:
+    """environment.config_provenance must EQUAL the provenance derived from the
+    bundle's own trials (review r21). The graph verifier hashed the environment as
+    one blob, so a config_provenance whose runtime_config_hashes or provenance_status
+    disagree with the trial-level runtime_config_hash fields still hashed fine — a
+    recorded_at_execution status asserted over trials that never recorded one, or a
+    map naming a hash no trial carried, would pass unnoticed. Re-derive and compare,
+    so the map cannot be asserted independently of the trials it describes."""
+    env: dict[str, object] = bundle.get("environment", {})  # type: ignore[assignment]
+    supplied = env.get("config_provenance")
+    if supplied is None:
+        return
+    try:
+        derived = config_provenance(
+            bundle.get("scenarios", []), bundle.get("conditions", []),  # type: ignore[arg-type]
+            bundle.get("tool_manifests", []), bundle.get("trials", []),  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        errors.append(f"config_provenance is inconsistent with the trials: {exc}")
+        return
+    if supplied != derived:
+        errors.append(
+            "environment.config_provenance does not match the provenance derived from the "
+            "trials (runtime hashes / status asserted independently of the trial fields)"
+        )
 
 
 def _verify_cross_references(
@@ -275,6 +332,28 @@ def _verify_uniqueness(
         if tid in seen_traces:
             errors.append(f"duplicate trace_id {tid!r}")
         seen_traces.add(tid)
+    # No two trials may share the same EXPERIMENTAL-UNIT coordinate. trial_id is a
+    # hash over that coordinate, so a duplicate coordinate SHOULD already be a
+    # duplicate trial_id — but a hand-built bundle can give two same-coordinate
+    # trials distinct trial_ids and distinct traces, and every statistical map keys
+    # on the coordinate, so the second would silently overwrite the first's outcome
+    # (last-write-wins) and the recomputed aggregate/bridge would depend on trial
+    # array order. The coordinate is unique per execution, so reject a duplicate
+    # (execution_id, scenario, condition, seed, repeat) outright (review r21).
+    seen_coords: set[tuple[str, str, str, str, str]] = set()
+    for trial in bundle["trials"]:  # type: ignore[union-attr]
+        coord = (
+            str(trial.get("execution_id", "")), str(trial.get("scenario_id")),
+            str(trial.get("condition_id")), str(trial.get("seed")),
+            str(trial.get("repeat_index")),
+        )
+        if coord in seen_coords:
+            errors.append(
+                f"duplicate experimental-unit coordinate {coord!r} — two trials share "
+                "(execution_id, scenario, condition, seed, repeat); the statistics would "
+                "depend on trial array order"
+            )
+        seen_coords.add(coord)
 
 
 def _verify_trial_trace_graph(
@@ -305,6 +384,15 @@ def _verify_trial_trace_graph(
                     f"trial {trial.get('trial_id')}: {coord} {trial.get(coord)!r} does not match "
                     f"its trace's {trace_trial.get(coord)!r} (trace_ref {ref})"
                 )
+        # if the trial declares its execution, it must be the SAME execution the
+        # trace was produced in — so a hand-built trial cannot claim a fresh
+        # execution_id to dodge a duplicate-coordinate collision while still citing a
+        # trace from the original run (review r21)
+        if "execution_id" in trial and str(trial["execution_id"]) != str(trace_trial.get("run_id")):
+            errors.append(
+                f"trial {trial.get('trial_id')}: execution_id {trial['execution_id']!r} does not "
+                f"match its trace's producer run_id {trace_trial.get('run_id')!r} (trace_ref {ref})"
+            )
         if ref in cited:
             errors.append(
                 f"trace {ref} backs multiple trials ({cited[ref]} and {trial.get('trial_id')})"

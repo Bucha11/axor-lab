@@ -323,6 +323,12 @@ def _run_one(
     base = {
         "trial_id": trial_key, "scenario_id": scenario_id,
         "condition_id": str(condition["id"]), "seed": seed, "repeat_index": repeat_index,
+        # the EXECUTION this unit belongs to (= run_id): the experimental-unit
+        # coordinate is (execution_id, scenario, condition, seed, repeat), so two
+        # trials that share a (scenario, seed, repeat) but ran in different runs are
+        # distinct units — and duplicate coordinates within one execution are a hard
+        # error rather than a last-write-wins overwrite in the statistics (review r21)
+        "execution_id": run_id,
         "execution_order": execution_order,
     }
     try:
@@ -351,6 +357,11 @@ def _run_one(
         trial_key,
         {**base, "status": "completed", "trace_ref": content_hash(outcome.trace),
          "runtime_config_hash": rch, "config_compiler_version": CONFIG_COMPILER_VERSION,
+         # the hash above was computed by THIS process AT execution — declare it so
+         # config_provenance can distinguish a genuinely execution-recorded hash from
+         # one reconstructed post-hoc (an imported incident) or asserted by a
+         # hand-built bundle (review r21)
+         "runtime_provenance": "recorded_at_execution",
          "resolved_kernel_fingerprint": str(fingerprint)},
         outcome,
     )
@@ -510,6 +521,7 @@ def run_experiment_suite(
                 "trial_id": trial_key, "scenario_id": str(scenario["name"]),
                 "condition_id": str(condition["id"]), "seed": seed,
                 "repeat_index": repeat_index, "status": "excluded",
+                "execution_id": run_id,
                 "execution_order": from_index + offset,
                 "failure_reason": f"cost_ceiling: {reason}",
             })

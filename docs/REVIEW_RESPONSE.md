@@ -579,3 +579,39 @@ floor (0.10) and minimum effective N (20) are fixed defaults, not per-domain
 calibrated thresholds; a hosted deployment would want them configurable per
 metric with the calibration itself recorded in the receipt. The gateway's
 single-tenant, in-memory advisory nature is unchanged from round 19.
+
+## Twenty-first review round — Unit and Attestation Closure
+
+Round 20 gated the causal bridge on practical significance and made execution
+provenance schema-mandatory. Round 21 pressed one level lower: a field named
+recorded_at_execution is not proof of an execution boundary, an experimental
+coordinate existing is not the same as it being unique, and a manifest being signed
+is not the same as its refs being verified. The most dangerous defect was that two
+DIFFERENT observations could carry the SAME statistical coordinate and the last one
+in the trials array became "the truth" — graph-valid, content-addressed evidence
+whose recomputed aggregate, earned bridge and production recommendation flipped on a
+simple array reordering. Six patches, each with proving tests. Suite green: **738 tests**.
+
+| Round-21 finding | Fix | Proof |
+|---|---|---|
+| **P0** verify_bundle rejected duplicate ids but NOT two completed trials sharing the same experimental-unit coordinate; every statistical map keyed on that coordinate with last-write-wins, so trial ARRAY ORDER changed the recomputed aggregate / earned bridge / production recommendation | the coordinate carries an execution_id (= run_id) the runner stamps on every trial; verify_bundle rejects a duplicate (execution, scenario, condition, seed, repeat) and binds a completed trial's execution_id to its trace's run_id; the CP bridge and hosted recompute RAISE on a duplicate coordinate instead of overwriting | `test_bundle_graph_integrity.py::TestExperimentalUnitUniqueness`, `test_cp_bridge_policy.py::TestOrderInvariance` |
+| **P0** the comparison design was read from an uploader-controlled aggregate and defaulted to matched_pairs, so a live run could self-label matched (invalid McNemar) or omit the field to default to a paired analysis | the design is a first-class, run-recorded, content-hashed `environment.experiment_design` block bound to the agent's actual determinism; the bridge reads it from there, never defaults to matched, requires agent_deterministic for a matched design, and requires any aggregate comparison_design to AGREE with the attested block | `test_cp_bridge_policy.py::TestAttestedDesign` |
+| **P0/P1** a pre-supplied config_provenance was trusted verbatim (verify_bundle hashed the environment blob but never bound the map to the trial fields), and import-incident labelled its post-hoc reconstruction recorded_at_execution | each completed trial declares runtime_provenance (recorded_at_execution / reconstructed_incident / reconstructed_legacy); config_provenance derives the status from the trials; build_bundle recomputes and rejects a mismatching pre-supplied map; verify_bundle re-derives and rejects a map asserted apart from the trials; import-incident marks reconstructed_incident; the resolved kernel fingerprint is required, consistency-checked and carried by the CP handoff, which refuses a behaviour-modified backend | `test_cp_bridge_policy.py::{TestExecutionProvenanceEnforcement,TestMandatoryRuntimeProvenance}`, `test_import_incident.py` |
+| **P1** the CP export package trusted more than it verified: an unsigned export exited 0, the manifest's semantic refs were never recomputed, a nested manifest.json was neither bound nor flagged, manifest paths were joined unchecked, and --overwrite was rmtree-then-write | unsigned → EXIT_UNVERIFIED (unless --allow-unsigned); every semantic ref (deploy/source/regression/bridge) is recomputed before the signature is trusted; only the ROOT manifest is excluded and symlinks are skipped; every listed path is confined to the export tree; a malformed manifest is a clean failure; --expect-author binds identity; the export is built in staging and swapped in atomically | `test_cp_bridge_policy.py::TestBridgeExportPortability` |
+| **P1** the acceptance chain was verified only ONE hop, so a deep (grandparent) break went unnoticed; and an unknown-key reacceptance was served opaque before its structure and chain were checked | _chain_resolves WALKS the whole ancestry to a root with cycle/depth guards; a broken chain is repaired by RE-ROOTING at a forensic marker so it converges; an unknown key gates only the signature step — structure and history are still validated; acceptance_history omits hash-invalid entries | `test_server_acceptance.py::TestAcceptanceHistoryChainOnLoad` |
+| **P1** the independent bridge checked only COMPLETED per-scenario balance, blind to a condition-correlated dropout (equal completed counts while one arm selectively lost half a scenario's planned samples); the matched effect was an unnamed complete-case estimand | the independent bridge now also requires equal PLANNED allocation and equal missing (failed+excluded) per scenario across arms; both receipts NAME the estimand and carry a per-scenario missingness matrix for each arm | `test_cp_bridge_policy.py::TestMissingnessAwareBridge` |
+
+The round-21 goal — every experimental unit globally unique so no analysis is
+last-write-wins; the comparison design attested to the run, not selected by the
+uploader; provenance always derived from the trials and honestly labelled;
+the CP package a strict signed/verified state machine with safe paths and atomic
+writes; the acceptance ancestry verified recursively to a root; and the causal
+bridge aware of planned allocation and missingness, not just completed counts — is closed.
+
+Still roadmap (honestly not done): execution and design attestation remain
+runner-RECORDED, not cryptographically signed by the runner — a hand-built bundle
+can still assert them at the same trust tier, which a signed per-trial runner
+receipt (with the agent-behaviour ref) would close; that signing is the natural
+next milestone. The bridge's complete-case estimand is now named and its
+missingness exposed, but a worst-case / sensitivity bound over the dropped units is
+not yet computed. The gateway's single-tenant, in-memory advisory nature is unchanged.

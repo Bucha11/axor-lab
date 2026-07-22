@@ -167,6 +167,7 @@ def export_cp(
         for sid in executed if sid in scen_by_id
     }
     _verify_recorded_runtime_hashes(bundle, governed_id, runtime_hashes, require=True)
+    fingerprint = _resolved_kernel_fingerprint(bundle, governed_id, kernel)
     source: dict[str, object] = {
         "bundle_id": bundle.get("bundle_id"),
         "condition_id": governed["id"],
@@ -186,6 +187,10 @@ def export_cp(
         "kernel": kernel,
         "policy": policy,
         "config_hash": recorded,  # the recorded kernel+policy fingerprint
+        # the ACTUAL resolved kernel behaviour identity the evidence was measured on
+        # (incl. behaviour-changing flags) — carried into the handoff so a reader sees
+        # the deployed `kernel` reproduces the behaviour that earned the bridge (r21)
+        "resolved_kernel_fingerprint": fingerprint,
         # the carry-over key (symbolic $inputs); re-parameterized in production
         "parametric_config_hash": parametric_hash,
         # per-scenario concrete config identity (what actually ran) — NOT carried
@@ -249,6 +254,50 @@ def export_cp_template(
         },
     }
     return CPExport(config=config, production_todo=_render_todo(), earned_bridge=False)
+
+
+def _resolved_kernel_fingerprint(
+    bundle: dict[str, object], condition_id: str, declared_kernel: str
+) -> str:
+    """The ACTUAL resolved-kernel behaviour identity the treated condition ran under,
+    MANDATORY and consistent for an evidence-backed handoff (review r21).
+
+    The runtime_config_hash is computed from the DECLARED kernel string, so evidence
+    measured on a behaviour-modified backend (e.g. taint_floor OFF under a governed
+    label) could otherwise hand off a config recommending the plain declared kernel
+    — deploying a different behaviour than the one that earned the bridge. Every
+    completed trial of the treated condition must carry resolved_kernel_fingerprint,
+    they must AGREE, and the fingerprint must equal the declared kernel: a divergence
+    means the deployed `kernel` would not reproduce the measured behaviour, so the
+    export is refused rather than shipped with a misleading identity."""
+    prints = {
+        str(t.get("resolved_kernel_fingerprint"))
+        for t in bundle.get("trials", [])  # type: ignore[union-attr]
+        if t.get("status") == "completed" and str(t.get("condition_id")) == condition_id
+        and t.get("resolved_kernel_fingerprint")
+    }
+    completed = [
+        t for t in bundle.get("trials", [])  # type: ignore[union-attr]
+        if t.get("status") == "completed" and str(t.get("condition_id")) == condition_id
+    ]
+    if not completed:
+        raise CPExportError(
+            f"condition {condition_id!r} has no completed trial to prove its resolved kernel"
+        )
+    if len(prints) != 1:
+        raise CPExportError(
+            f"condition {condition_id!r} completed trials do not carry ONE resolved_kernel_"
+            f"fingerprint ({sorted(prints)}) — an evidence-backed export cannot prove the "
+            "behaviour that ran"
+        )
+    fingerprint = next(iter(prints))
+    if fingerprint != declared_kernel:
+        raise CPExportError(
+            f"resolved kernel fingerprint {fingerprint!r} diverges from the declared kernel "
+            f"{declared_kernel!r} — the evidence was measured on a behaviour-modified backend, "
+            "so deploying the declared kernel would not reproduce it; refusing the handoff"
+        )
+    return fingerprint
 
 
 def _verify_recorded_runtime_hashes(
@@ -446,9 +495,10 @@ def bridge_analysis(
 
 def _bridge_outcomes(
     bundle: dict[str, object], traces: dict[str, dict[str, object]]
-) -> tuple[dict[tuple[str, str, int], dict[str, bool]], dict[str, list[str]]]:
-    """Per-COORDINATE recomputed outcomes: {(scenario_id, seed, repeat_index):
-    {condition_id: violated}} plus the sorted trace_refs per condition.
+) -> tuple[dict[tuple[str, str, int, str], dict[str, bool]], dict[str, list[str]]]:
+    """Per-COORDINATE recomputed outcomes: {(scenario_id, seed, repeat_index,
+    execution_id): {condition_id: violated}} plus the sorted trace_refs per
+    condition.
 
     The violation is recomputed from each trace via the scenario's own `violation`
     predicate — the same evidence a reader recomputes, NOT the uploaded aggregate
@@ -464,7 +514,7 @@ def _bridge_outcomes(
 
     scenarios = {str(s["name"]): s for s in bundle["scenarios"]}  # type: ignore[union-attr]
     by_hash = {content_hash(t): t for t in traces.values()}
-    outcomes: dict[tuple[str, str, int], dict[str, bool]] = {}
+    outcomes: dict[tuple[str, str, int, str], dict[str, bool]] = {}
     refs: dict[str, list[str]] = {}
     for trial in bundle.get("trials", []):  # type: ignore[union-attr]
         if trial.get("status") != "completed":
@@ -486,7 +536,17 @@ def _bridge_outcomes(
         inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
         violated = bool(evaluate(scenario["violation"], trace, inputs))  # type: ignore[arg-type]
         cid = str(trial["condition_id"])
-        coord = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]))
+        coord = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
+                 str(trial.get("execution_id", "")))
+        # NEVER last-write-wins: two completed trials of the same coordinate+condition
+        # would let trial array order pick which outcome the statistics see (review
+        # r21). verify_bundle already rejects a duplicate coordinate, but the bridge
+        # is a production-handoff boundary and must not depend on that upstream check.
+        if cid in outcomes.get(coord, {}):
+            raise CPExportError(
+                f"two completed trials share coordinate {coord!r} for condition {cid!r} — the "
+                "bridge outcome would depend on trial array order; reject the ambiguous bundle"
+            )
         outcomes.setdefault(coord, {})[cid] = violated
         refs.setdefault(cid, []).append(ref)
     for cid in refs:
@@ -494,32 +554,70 @@ def _bridge_outcomes(
     return outcomes, refs
 
 
+def _status_matrix(bundle: dict[str, object], condition_id: str) -> dict[str, dict[str, int]]:
+    """Per-scenario {planned, completed, failed, excluded} counts for a condition
+    (review r21). Completed-only balance is not enough for a causal claim: two arms
+    can show identical COMPLETED per-scenario counts while one arm selectively lost
+    half a scenario's PLANNED samples — a different assigned population with a
+    condition-correlated missingness mechanism. This matrix exposes both."""
+    matrix: dict[str, dict[str, int]] = {}
+    for trial in bundle.get("trials", []):  # type: ignore[union-attr]
+        if str(trial.get("condition_id")) != condition_id:
+            continue
+        sid = str(trial.get("scenario_id"))
+        status = str(trial.get("status"))
+        row = matrix.setdefault(sid, {"planned": 0, "completed": 0, "failed": 0, "excluded": 0})
+        row["planned"] += 1
+        if status in ("completed", "failed", "excluded"):
+            row[status] += 1
+    return matrix
+
+
 def _arm_coords(
     bundle: dict[str, object], condition_id: str
-) -> set[tuple[str, str, int]]:
-    """EVERY trial coordinate (scenario, seed, repeat) for a condition — regardless
-    of status. The PLANNED set for a matched contrast must include failed/excluded
-    units too, else a pair where BOTH arms failed simply vanishes from the
-    denominator and the receipt overstates coverage (review r20)."""
-    coords: set[tuple[str, str, int]] = set()
+) -> set[tuple[str, str, int, str]]:
+    """EVERY trial coordinate (scenario, seed, repeat, execution) for a condition —
+    regardless of status. The PLANNED set for a matched contrast must include
+    failed/excluded units too, else a pair where BOTH arms failed simply vanishes
+    from the denominator and the receipt overstates coverage (review r20)."""
+    coords: set[tuple[str, str, int, str]] = set()
     for trial in bundle.get("trials", []):  # type: ignore[union-attr]
         if str(trial.get("condition_id")) == condition_id:
             coords.add(
-                (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]))
+                (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
+                 str(trial.get("execution_id", "")))
             )
     return coords
 
 
 def _bridge_design(
     bundle: dict[str, object], condition_id: str
-) -> str:
-    """The comparison design for this treated condition's ASR aggregate —
-    matched_pairs (deterministic agent, McNemar) or independent_samples (live model,
-    two-proportion). Defaults to matched_pairs: the trials carry (scenario, seed,
-    repeat) coordinates, so the honest default is a paired contrast (review r19).
+) -> str | None:
+    """The comparison design, read from the run-recorded, content-hashed
+    `environment.experiment_design` block — NOT from an uploader-controlled
+    aggregate that could self-select matched_pairs for a live run, and NEVER a
+    silent default to matched_pairs (review r21). Returns None when no attested
+    design is present, so the bridge is simply NOT earned rather than assumed paired.
 
-    Two ASR aggregates for the SAME condition make the design array-order-dependent
-    (review r20): the read must be deterministic, so a duplicate is a hard error."""
+    A matched_pairs design REQUIRES the recorded agent behaviour to be deterministic
+    — independent per-condition draws cannot form real pairs, so McNemar would be
+    invalid. An aggregate may RECORD the design as a result, but it must AGREE with
+    the attested block; it can no longer SELECT the analysis method."""
+    env: dict[str, object] = bundle.get("environment", {})  # type: ignore[assignment]
+    design_obj = env.get("experiment_design") if isinstance(env, dict) else None
+    if not isinstance(design_obj, dict) or not design_obj.get("kind"):
+        return None
+    kind = str(design_obj["kind"])
+    if kind not in ("matched_pairs", "independent_samples"):
+        raise CPExportError(
+            f"experiment_design.kind {kind!r} is not a known comparison design"
+        )
+    if kind == "matched_pairs" and not bool(design_obj.get("agent_deterministic")):
+        raise CPExportError(
+            "experiment_design declares matched_pairs but agent_deterministic is false — a "
+            "live/nondeterministic agent draws each condition independently, so the pairs are "
+            "nominal and McNemar is invalid; reject the self-contradictory design"
+        )
     matching = [
         agg for agg in bundle.get("aggregates", [])  # type: ignore[union-attr]
         if str(agg.get("metric")) == "ASR" and str(agg.get("condition_id")) == condition_id
@@ -529,17 +627,21 @@ def _bridge_design(
             f"bundle has {len(matching)} ASR aggregates for condition {condition_id!r} — the "
             "comparison design would depend on array order; reject the ambiguous bundle"
         )
-    if matching and matching[0].get("comparison_design"):
-        return str(matching[0]["comparison_design"])
-    return "matched_pairs"
+    declared = matching[0].get("comparison_design") if matching else None
+    if declared and str(declared) != kind:
+        raise CPExportError(
+            f"aggregate comparison_design {str(declared)!r} disagrees with the attested "
+            f"experiment_design {kind!r} — the design is not uploader-selectable (review r21)"
+        )
+    return kind
 
 
 def _scenario_balance(
-    coords: "set[tuple[str, str, int]]",
+    coords: "set[tuple[str, str, int, str]]",
 ) -> dict[str, int]:
     """Per-scenario coordinate count, for the composition-balance check + receipt."""
     balance: dict[str, int] = {}
-    for scenario_id, _seed, _repeat in coords:
+    for scenario_id, _seed, _repeat, _exec in coords:
         balance[scenario_id] = balance.get(scenario_id, 0) + 1
     return balance
 
@@ -581,17 +683,23 @@ def _earned_for(
     if set(base_balance) != set(treated_balance):
         return False, None
     design = _bridge_design(bundle, condition_id)
+    if design is None:
+        # no ATTESTED experiment design → the analysis method is unknown, so the
+        # bridge is not earned (never a silent default to matched_pairs, review r21)
+        return False, None
+    base_matrix = _status_matrix(bundle, baseline_id)
+    treated_matrix = _status_matrix(bundle, condition_id)
     if design == "matched_pairs":
         # the PLANNED set includes failed/excluded units too (review r20)
         planned_coords = _arm_coords(bundle, baseline_id) | _arm_coords(bundle, condition_id)
         earned, extra = _earned_matched(
             outcomes, base_coords, treated_coords, base_balance, planned_coords,
-            baseline_id, condition_id,
+            baseline_id, condition_id, base_matrix, treated_matrix,
         )
     else:
         earned, extra = _earned_independent(
             outcomes, base_coords, treated_coords, base_balance, treated_balance,
-            baseline_id, condition_id,
+            baseline_id, condition_id, base_matrix, treated_matrix,
         )
     if not earned:
         return False, None
@@ -615,13 +723,15 @@ def _earned_for(
 
 
 def _earned_matched(
-    outcomes: dict[tuple[str, str, int], dict[str, bool]],
-    base_coords: "set[tuple[str, str, int]]",
-    treated_coords: "set[tuple[str, str, int]]",
+    outcomes: dict[tuple[str, str, int, str], dict[str, bool]],
+    base_coords: "set[tuple[str, str, int, str]]",
+    treated_coords: "set[tuple[str, str, int, str]]",
     base_balance: dict[str, int],
-    planned_coords: "set[tuple[str, str, int]]",
+    planned_coords: "set[tuple[str, str, int, str]]",
     baseline_id: str,
     treated_id: str,
+    base_matrix: dict[str, dict[str, int]],
+    treated_matrix: dict[str, dict[str, int]],
 ) -> tuple[bool, dict[str, object]]:
     """Matched-pairs earn: pair the SAME experimental units across arms and test
     with McNemar over the discordant pairs (review r19). Statistical significance
@@ -670,37 +780,55 @@ def _earned_matched(
             "discordant": discordant,
             "absolute_risk_reduction": net_risk_reduction,
         },
+        # the effect is a COMPLETE-CASE estimand over the pairs that finished in BOTH
+        # arms — the receipt names it and carries the per-scenario missingness so a
+        # reader can judge whether the dropped units bias it (review r21)
+        "estimand": "matched_complete_case_net_risk_reduction",
+        "missingness": _missingness_report(base_matrix, treated_matrix, baseline_id, treated_id),
         "test": test,
     }
 
 
 def _earned_independent(
-    outcomes: dict[tuple[str, str, int], dict[str, bool]],
-    base_coords: "set[tuple[str, str, int]]",
-    treated_coords: "set[tuple[str, str, int]]",
+    outcomes: dict[tuple[str, str, int, str], dict[str, bool]],
+    base_coords: "set[tuple[str, str, int, str]]",
+    treated_coords: "set[tuple[str, str, int, str]]",
     base_balance: dict[str, int],
     treated_balance: dict[str, int],
     baseline_id: str,
     treated_id: str,
+    base_matrix: dict[str, dict[str, int]],
+    treated_matrix: dict[str, dict[str, int]],
 ) -> tuple[bool, dict[str, object]]:
-    """Independent-samples earn: the arms are independently sampled (live model),
-    so the pairing is nominal — but the arms must have the SAME scenario mix before
-    the pooled two-proportion interval is consulted (review r19/r20).
+    """Independent-samples earn: the arms are independently sampled (live model), so
+    the pairing is nominal — but the arms must have the SAME scenario mix AND the same
+    PLANNED allocation and missingness before the pooled two-proportion interval is
+    consulted (review r19/r20/r21).
 
-    An APPROXIMATE per-scenario balance (ratio >= 0.5) was not enough (review r20):
-    two arms with identical scenario sets and equal totals can still reweight a
-    hard scenario against an easy one and manufacture a delta from pure composition
-    (baseline 40 hard / 20 easy vs governed 20 hard / 40 easy — each scenario ratio
-    is exactly 0.5, yet governance changed nothing). So the per-scenario arm counts
-    must be EXACTLY equal: then the pooled rate is a fixed-weight average and the
-    delta cannot be a weighting artefact. The receipt also carries the
-    scenario-standardized estimates so a reader sees the per-scenario effect."""
+    Exact per-scenario COMPLETED balance (review r20) closed the reweighting attack,
+    but completed counts alone are blind to missingness: baseline could PLAN 100 hard
+    and complete 50 while governed PLANS 50 hard and completes 50 — identical completed
+    counts, but baseline selectively lost half its hard samples, so the arms are
+    different assigned populations with a condition-correlated dropout. So the arms
+    must ALSO match, per scenario, on planned count and on failed+excluded (the missing
+    count). The effect is then a complete-case estimand over a symmetric design; the
+    receipt names it and carries the missingness."""
     from lab_analysis import two_proportion_test
 
     base_n, treated_n = len(base_coords), len(treated_coords)
     # EXACT per-scenario balance — identical composition, not merely a similar one
     if base_balance != treated_balance:
         return False, {}
+    # PLANNED allocation AND missingness must be symmetric per scenario — otherwise
+    # the completed arms are different populations (condition-correlated dropout)
+    for sid in set(base_matrix) | set(treated_matrix):
+        b_row = base_matrix.get(sid, {})
+        t_row = treated_matrix.get(sid, {})
+        if b_row.get("planned", 0) != t_row.get("planned", 0):
+            return False, {}
+        if (b_row.get("failed", 0) + b_row.get("excluded", 0)
+                != t_row.get("failed", 0) + t_row.get("excluded", 0)):
+            return False, {}
     base_v = sum(1 for c in base_coords if outcomes[c][baseline_id])
     treated_v = sum(1 for c in treated_coords if outcomes[c][treated_id])
     if base_v / base_n - treated_v / treated_n < _MIN_EFFECT_DELTA:
@@ -711,7 +839,7 @@ def _earned_independent(
         return False, {}
     # scenario-standardized rates (equal weight per scenario): with exact balance
     # these equal the pooled rates, but they make the fixed-weighting explicit
-    def _standardized(coords: "set[tuple[str, str, int]]", cid: str) -> float:
+    def _standardized(coords: "set[tuple[str, str, int, str]]", cid: str) -> float:
         per: dict[str, list[int]] = {}
         for coord in coords:
             per.setdefault(coord[0], []).append(1 if outcomes[coord][cid] else 0)
@@ -727,7 +855,29 @@ def _earned_independent(
         "baseline": {"violations": base_v, "n": base_n},
         "treated": {"violations": treated_v, "n": treated_n},
         "difference_interval": interval,
+        # a complete-case estimand over a design whose PLANNED allocation and
+        # missingness are symmetric across arms (checked above) — named so a reader
+        # knows it is not an ITT effect (review r21)
+        "estimand": "independent_complete_case_symmetric_allocation",
+        "missingness": _missingness_report(base_matrix, treated_matrix, baseline_id, treated_id),
         "test": test,
+    }
+
+
+def _missingness_report(
+    base_matrix: dict[str, dict[str, int]],
+    treated_matrix: dict[str, dict[str, int]],
+    baseline_id: str,
+    treated_id: str,
+) -> dict[str, object]:
+    """The per-scenario planned/completed/failed/excluded matrices for both arms, so
+    a reader can independently judge whether the dropped units bias the complete-case
+    effect (review r21). The gates above already require the design to be symmetric;
+    this makes the evidence for that transparent in the receipt."""
+    return {
+        "unit": "per_scenario_status_counts",
+        baseline_id: {s: dict(row) for s, row in sorted(base_matrix.items())},
+        treated_id: {s: dict(row) for s, row in sorted(treated_matrix.items())},
     }
 
 

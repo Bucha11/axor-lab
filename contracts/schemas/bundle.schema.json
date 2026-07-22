@@ -61,6 +61,20 @@
         "kernel_version": {
           "type": "string"
         },
+        "experiment_design": {
+          "type": "object",
+          "description": "comparison-design/v1 — the FIRST-CLASS comparison design, recorded at run time and bound to the agent's actual determinism. The CP bridge reads the analysis method from HERE, never from an uploader-controlled aggregate that could self-select matched_pairs for a live run; a matched_pairs design requires agent_deterministic=true (review r21).",
+          "required": [ "schema_version", "kind", "agent_deterministic" ],
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": { "const": "comparison-design/v1" },
+            "kind": { "enum": [ "matched_pairs", "independent_samples" ] },
+            "unit_key": { "type": "array", "items": { "type": "string" } },
+            "assignment": { "type": "string" },
+            "agent_deterministic": { "type": "boolean" },
+            "agent_fingerprint": { "type": "string" }
+          }
+        },
         "model": {
           "type": "object",
           "required": [
@@ -109,8 +123,8 @@
               "type": "string"
             },
             "provenance_status": {
-              "enum": [ "recorded_at_execution", "reconstructed_legacy" ],
-              "description": "recorded_at_execution when every completed trial carried its own runtime_config_hash; reconstructed_legacy when the builder had to recompute one — an evidence-backed CP export refuses the latter (review r20)"
+              "enum": [ "recorded_at_execution", "reconstructed_incident", "reconstructed_legacy" ],
+              "description": "recorded_at_execution when every completed trial DECLARED it recorded its own runtime_config_hash at execution; reconstructed_incident when an imported incident reconstructed it at import; reconstructed_legacy otherwise — an evidence-backed CP export refuses anything but recorded_at_execution (review r20/r21)"
             },
             "runtime_config_hashes": {
               "type": "object",
@@ -157,6 +171,10 @@
           "repeat_index": {
             "type": "integer"
           },
+          "execution_id": {
+            "type": "string",
+            "description": "the run/execution this unit belongs to (= the trace's producer run_id). The experimental-unit coordinate is (execution_id, scenario_id, condition_id, seed, repeat_index); two trials sharing a (scenario, seed, repeat) but from different executions are DISTINCT units, and a duplicate full coordinate is a hard integrity error, never a last-write-wins overwrite in the statistics (review r21)"
+          },
           "status": {
             "enum": [
               "completed",
@@ -179,6 +197,10 @@
           "config_compiler_version": {
             "type": "string",
             "description": "the governor-config compiler version that produced runtime_config_hash at execution"
+          },
+          "runtime_provenance": {
+            "enum": [ "recorded_at_execution", "reconstructed_incident", "reconstructed_legacy" ],
+            "description": "HOW runtime_config_hash was obtained: recorded_at_execution (the runner hashed the config AT execution), reconstructed_incident (an imported production incident reconstructed it at import), or reconstructed_legacy (hand-built / no marker). config_provenance derives the bundle status from these — recorded_at_execution only if every completed trial declares it (review r21)"
           },
           "resolved_kernel_fingerprint": {
             "type": "string",

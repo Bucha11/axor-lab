@@ -40,6 +40,7 @@ def _runtime_fields(cid: str, inputs: dict) -> dict[str, object]:
             str(cond["kernel"]), cond.get("policy"), _MANIFESTS, inputs,
         ),
         "config_compiler_version": CONFIG_COMPILER_VERSION,
+        "runtime_provenance": "recorded_at_execution",
         "resolved_kernel_fingerprint": str(cond["kernel"]),
     }
 
@@ -357,6 +358,122 @@ class TestCausalValidity(unittest.TestCase):
             earned_bridge(bundle, traces=traces)
 
 
+class TestAttestedDesign(unittest.TestCase):
+    """The comparison design is read from the run-recorded experiment_design block,
+    never from an uploader-controlled aggregate, and never defaulted to matched
+    (review r21)."""
+
+    _EARNING = ([(True, False)] * 40 + [(False, True)] * 5
+                + [(True, True)] * 80 + [(False, False)] * 75)
+
+    def test_missing_design_does_not_default_to_matched(self) -> None:
+        bundle, traces = _controlled_bundle(self._EARNING)
+        self.assertTrue(earned_bridge(bundle, traces=traces))  # earns with the block
+        # strip the attested design → the analysis method is unknown → NOT earned,
+        # never a silent default to matched_pairs
+        env = dict(bundle["environment"])
+        env.pop("experiment_design", None)
+        bundle["environment"] = env
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_matched_design_requires_deterministic_agent(self) -> None:
+        bundle, traces = _controlled_bundle(self._EARNING)
+        # a live agent cannot form real pairs: matched_pairs + agent_deterministic
+        # false is self-contradictory and rejected
+        bundle["environment"] = {
+            **bundle["environment"],
+            "experiment_design": support.experiment_design("matched_pairs", deterministic=False),
+        }
+        with self.assertRaises(CPExportError) as ctx:
+            earned_bridge(bundle, traces=traces)
+        self.assertIn("agent_deterministic", str(ctx.exception))
+
+    def test_aggregate_cannot_override_the_attested_design(self) -> None:
+        # attested design is matched_pairs (deterministic scripted); an uploaded
+        # aggregate that self-labels independent_samples must be REJECTED, not
+        # allowed to swap the analysis method
+        bundle, traces = _controlled_bundle(self._EARNING)
+        for agg in bundle["aggregates"]:
+            if agg["condition_id"] == "governed":
+                agg["comparison_design"] = "independent_samples"
+        with self.assertRaises(CPExportError) as ctx:
+            earned_bridge(bundle, traces=traces)
+        self.assertIn("disagrees with the attested", str(ctx.exception))
+
+    def test_live_bundle_cannot_self_label_matched_pairs(self) -> None:
+        # the confound fixture is a live/independent design; even with a maximal
+        # apparent delta it cannot earn a matched bridge, because the attested design
+        # is independent_samples (agent_deterministic false)
+        bundle, traces = _weighting_confound_bundle()
+        # relabel the governed aggregate matched_pairs — it disagrees with the
+        # attested independent_samples block and is rejected, not honoured
+        for agg in bundle["aggregates"]:
+            if agg["condition_id"] == "governed":
+                agg["comparison_design"] = "matched_pairs"
+        with self.assertRaises(CPExportError) as ctx:
+            earned_bridge(bundle, traces=traces)
+        self.assertIn("disagrees with the attested", str(ctx.exception))
+
+
+class TestOrderInvariance(unittest.TestCase):
+    """Graph-valid evidence must never let trial ARRAY ORDER change the statistical
+    truth — every per-coordinate map rejects a duplicate rather than silently
+    overwriting (review r21)."""
+
+    def _add_duplicate_completed(self, bundle, traces):
+        """Append a second completed trial sharing an existing coordinate+condition
+        (a distinct trial_id + a distinct, coordinate-bound trace)."""
+        victim = next(t for t in bundle["trials"]
+                      if t["status"] == "completed" and t["condition_id"] == "governed")
+        dup_trace = _bind_trace(_CLEAN[1], "governed", str(victim["scenario_id"]),
+                                str(victim["seed"]), int(victim["repeat_index"]))
+        # a different trace body than the original so the trace_ref differs
+        dup_trace["trace_id"] = "t_dup_collide"
+        traces[str(dup_trace["trace_id"])] = dup_trace
+        bundle["trials"].append({
+            "trial_id": "tr_dup_collide", "scenario_id": victim["scenario_id"],
+            "condition_id": "governed", "seed": victim["seed"],
+            "repeat_index": victim["repeat_index"], "execution_order": 9999,
+            "status": "completed", "trace_ref": content_hash(dup_trace),
+            **_runtime_fields("governed", dict(support.banking_scenario().get("inputs", {}))),
+        })
+        return bundle, traces
+
+    def test_bridge_raises_on_duplicate_coordinate(self) -> None:
+        bundle, traces = _controlled_bundle([(True, False)] * 40 + [(False, True)] * 5
+                                            + [(True, True)] * 80 + [(False, False)] * 75)
+        self.assertTrue(earned_bridge(bundle, traces=traces))  # earns before the collision
+        bundle, traces = self._add_duplicate_completed(bundle, traces)
+        with self.assertRaises(CPExportError) as ctx:
+            earned_bridge(bundle, traces=traces)
+        self.assertIn("array order", str(ctx.exception))
+
+    def test_bridge_is_invariant_to_trial_array_order(self) -> None:
+        pairs = ([(True, False)] * 40 + [(False, True)] * 5
+                 + [(True, True)] * 80 + [(False, False)] * 75)
+        bundle, traces = _controlled_bundle(pairs)
+        forward = earned_bridge(bundle, traces=traces)
+        bundle["trials"] = list(reversed(bundle["trials"]))
+        self.assertEqual(earned_bridge(bundle, traces=traces), forward)
+
+    def test_server_recompute_is_invariant_to_trial_array_order(self) -> None:
+        from lab_server.recompute import recompute_aggregates
+
+        bundle, traces = _controlled_bundle([(True, False)] * 24)
+        forward = recompute_aggregates(bundle, traces)
+        bundle["trials"] = list(reversed(bundle["trials"]))
+        self.assertEqual(recompute_aggregates(bundle, traces), forward)
+
+    def test_server_recompute_raises_on_duplicate_coordinate(self) -> None:
+        from lab_server.recompute import recompute_aggregates
+
+        bundle, traces = _controlled_bundle([(True, False)] * 24)
+        bundle, traces = self._add_duplicate_completed(bundle, traces)
+        with self.assertRaises(ValueError) as ctx:
+            recompute_aggregates(bundle, traces)
+        self.assertIn("array order", str(ctx.exception))
+
+
 def _weighting_confound_bundle():
     """Same scenario set + equal totals, but a DIFFERENT per-scenario mix per arm:
     baseline 40 hard/20 easy, governed 20 hard/40 easy; hard always violates, easy
@@ -394,10 +511,88 @@ def _weighting_confound_bundle():
     ]
     bundle = build_bundle(
         bundle_id="b_conf", created=CREATED, scenarios=scenarios, conditions=conditions,
-        tool_manifests=list(support.manifests().values()), environment=support.environment(),
+        tool_manifests=list(support.manifests().values()),
+        environment={**support.environment(),
+                     "experiment_design": support.experiment_design(
+                         "independent_samples", deterministic=False)},
         trials=trials, aggregates=aggregates, traces=traces,
     )
     return bundle, traces
+
+
+def _missingness_confound_bundle():
+    """An INDEPENDENT design with EXACTLY-equal completed per-scenario counts but
+    ASYMMETRIC missingness: baseline 'hard' completes 24 of 48 planned (24 failed),
+    governed 'hard' completes 24 of 24 planned (0 failed). Completed balance is
+    perfect, but baseline selectively dropped half its hard samples — a
+    condition-correlated dropout the completed-only balance is blind to (review r21)."""
+    base = support.banking_scenario()
+    scenarios = [{**base, "name": "hard"}, {**base, "name": "easy"}]
+    conditions = support.conditions()
+    traces: dict[str, dict[str, object]] = {}
+    trials: list[dict[str, object]] = []
+    order = 0
+    inputs = dict(base.get("inputs", {}))
+
+    def _add(cid, scn, violating, completed, failed=0):
+        nonlocal order
+        pool = _VIOLATING if violating else _CLEAN
+        for _ in range(completed):
+            seed = f"s{order:03d}"
+            trace = _bind_trace(pool[order % 30], cid, scn, seed, order)
+            traces[str(trace["trace_id"])] = trace
+            trials.append({"trial_id": f"tr_{cid}_{scn}_{order}", "scenario_id": scn,
+                           "condition_id": cid, "seed": seed, "repeat_index": order,
+                           "status": "completed", "trace_ref": content_hash(trace),
+                           "execution_order": order, **_runtime_fields(cid, inputs)})
+            order += 1
+        for _ in range(failed):
+            trials.append({"trial_id": f"tr_{cid}_{scn}_{order}", "scenario_id": scn,
+                           "condition_id": cid, "seed": f"s{order:03d}", "repeat_index": order,
+                           "status": "failed", "failure_reason": "seeded", "execution_order": order})
+            order += 1
+
+    # completed: base hard 24 / easy 24 ; gov hard 24 / easy 24  → balance passes
+    # planned:   base hard 48 (24 failed) ; gov hard 24           → asymmetric dropout
+    _add("ungoverned", "hard", True, 24, failed=24)
+    _add("ungoverned", "easy", False, 24)
+    _add("governed", "hard", False, 24)
+    _add("governed", "easy", False, 24)
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned", 24, 48, comparison_design="independent_samples"),
+        binary_aggregate("ASR", "governed", 0, 48, comparison_design="independent_samples"),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_miss", created=CREATED, scenarios=scenarios, conditions=conditions,
+        tool_manifests=list(support.manifests().values()),
+        environment={**support.environment(),
+                     "experiment_design": support.experiment_design(
+                         "independent_samples", deterministic=False)},
+        trials=trials, aggregates=aggregates, traces=traces,
+    )
+    return bundle, traces
+
+
+class TestMissingnessAwareBridge(unittest.TestCase):
+    def test_independent_bridge_rejects_asymmetric_planned_missingness(self) -> None:
+        # completed per-scenario counts are exactly equal, but baseline dropped half
+        # its planned 'hard' samples — the arms are different populations, so the
+        # bridge is NOT earned despite the apparent delta (review r21)
+        bundle, traces = _missingness_confound_bundle()
+        self.assertFalse(earned_bridge(bundle, traces=traces))
+
+    def test_matched_receipt_names_estimand_and_missingness(self) -> None:
+        from lab_runner.cp_export import bridge_analysis
+
+        pairs = [(True, False)] * 24 + [(None, None)] * 6  # 6 both-failed pairs
+        bundle, traces = _controlled_bundle(pairs)
+        analysis = bridge_analysis(bundle, "governed", traces=traces)
+        self.assertEqual(analysis["estimand"], "matched_complete_case_net_risk_reduction")
+        miss = analysis["missingness"]
+        self.assertEqual(miss["unit"], "per_scenario_status_counts")
+        # the receipt carries per-scenario planned/completed/failed counts per arm
+        self.assertIn("governed", miss)
+        self.assertIn("ungoverned", miss)
 
 
 class TestDesignAwareBridge(unittest.TestCase):
@@ -564,7 +759,7 @@ class TestBridgeExportPortability(unittest.TestCase):
         from pathlib import Path
 
         from lab_runner.bundle_io import write_bundle_dir
-        from lab_runner.cli import main
+        from lab_runner.cli import EXIT_UNVERIFIED, main
 
         bundle, traces = _powered_real_bundle()
         with tempfile.TemporaryDirectory() as tmp:
@@ -575,14 +770,16 @@ class TestBridgeExportPortability(unittest.TestCase):
                                     "--out", str(out)]), 0)
             # the directory carries its own source bundle + all traces
             self.assertTrue((out / "source-bundle" / "bundle.json").is_file())
-            # recompute from scratch → matches
-            self.assertEqual(main(["verify-cp-export", str(out)]), 0)
+            # an UNSIGNED export is UNVERIFIED unless --allow-unsigned is given (r21)
+            self.assertEqual(main(["verify-cp-export", str(out)]), EXIT_UNVERIFIED)
+            # recompute from scratch → matches (integrity + derivability accepted)
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 0)
             # a DOCTORED deploy config no longer recomputes → fails
             deploy = out / "cp-deploy.json"
             cfg = json.loads(deploy.read_text())
             cfg["config_hash"] = "sha256:" + "0" * 64
             deploy.write_text(json.dumps(cfg))
-            self.assertEqual(main(["verify-cp-export", str(out)]), 1)
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
 
     def test_verify_cp_export_checks_bridge_analysis_and_stale_files(self) -> None:
         import tempfile
@@ -634,7 +831,10 @@ class TestBridgeExportPortability(unittest.TestCase):
             self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
                                     "--out", str(out), "--overwrite"]), 0)
             self.assertFalse(stale.exists())
-            self.assertEqual(main(["verify-cp-export", str(out)]), 0)
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 0)
+            # the atomic swap leaves no staging/backup siblings behind
+            self.assertFalse((Path(tmp) / "cp.staging").exists())
+            self.assertFalse((Path(tmp) / "cp.old").exists())
 
     @unittest.skipUnless(importlib.util.find_spec("nacl"), "PyNaCl not installed")
     def test_signed_manifest_verifies_and_wrong_key_fails(self) -> None:
@@ -662,6 +862,70 @@ class TestBridgeExportPortability(unittest.TestCase):
             self.assertEqual(main(["verify-cp-export", str(out)]), EXIT_UNVERIFIED)
             # wrong key → INVALID (1)
             self.assertEqual(main(["verify-cp-export", str(out), "--pubkey", wrong]), 1)
+            # a signature verifies but a WRONG expected author is INVALID (1)
+            self.assertEqual(
+                main(["verify-cp-export", str(out), "--pubkey", pub,
+                      "--expect-author", "someone-else"]), 1)
+            self.assertEqual(
+                main(["verify-cp-export", str(out), "--pubkey", pub,
+                      "--expect-author", "acme"]), 0)
+
+    def _export(self, tmp):
+        from pathlib import Path
+
+        from lab_runner.bundle_io import write_bundle_dir
+        from lab_runner.cli import main
+
+        bundle, traces = _powered_real_bundle()
+        bdir = Path(tmp) / "bundle"
+        write_bundle_dir(bdir, bundle, traces)
+        out = Path(tmp) / "cp"
+        self.assertEqual(main(["export-cp", str(bdir), "--condition", "governed",
+                                "--out", str(out)]), 0)
+        return out
+
+    def test_verify_rejects_tampered_semantic_ref(self) -> None:
+        import tempfile
+
+        from lab_runner.cli import main
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._export(tmp)
+            manifest = json.loads((out / "manifest.json").read_text())
+            manifest["deploy_config_ref"] = "sha256:" + "0" * 64  # lie about the config
+            (out / "manifest.json").write_text(json.dumps(manifest))
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
+
+    def test_verify_rejects_unsafe_manifest_path(self) -> None:
+        import tempfile
+
+        from lab_runner.cli import main
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._export(tmp)
+            manifest = json.loads((out / "manifest.json").read_text())
+            manifest["files"]["../escape.json"] = manifest["files"]["cp-deploy.json"]
+            (out / "manifest.json").write_text(json.dumps(manifest))
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
+
+    def test_verify_rejects_malformed_manifest(self) -> None:
+        import tempfile
+
+        from lab_runner.cli import main
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._export(tmp)
+            (out / "manifest.json").write_text("{not json")
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
+
+    def test_injected_nested_manifest_json_is_caught(self) -> None:
+        # only the ROOT manifest.json is excluded from the integrity scan; a file
+        # named manifest.json injected into a SUBDIR is an unlisted (stale/injected)
+        # file and must be flagged, not silently ignored (review r21)
+        import tempfile
+
+        from lab_runner.cli import main
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._export(tmp)
+            (out / "source-bundle" / "manifest.json").write_text('{"sneaky": true}')
+            self.assertEqual(main(["verify-cp-export", str(out), "--allow-unsigned"]), 1)
 
 
 class TestExportVerifiesGraph(unittest.TestCase):
@@ -701,32 +965,29 @@ class TestRecordedRuntimeHash(unittest.TestCase):
         self.assertEqual(prov["compiler_version"], CONFIG_COMPILER_VERSION)
         self.assertTrue(prov["runtime_config_hashes"])
 
-    def test_export_rejects_recomputed_runtime_hash_different_from_recorded(self) -> None:
-        # REBUILD with a doctored-but-content-consistent provenance (build_bundle
-        # keeps a pre-supplied config_provenance and hashes it), so the failure is
-        # the runtime-hash CHECK — not an incidental content-hash mismatch — proving
-        # the export refuses a config identity that never actually ran (review r18)
+    def test_builder_rejects_runtime_hash_different_from_recorded(self) -> None:
+        # a caller-supplied config_provenance that doctors the governed hash for the
+        # executed scenario no longer builds at all: build_bundle DERIVES provenance
+        # from the trials and refuses a pre-supplied map that disagrees, so a config
+        # identity that never actually ran cannot enter a bundle (review r21). This is
+        # the front-line defense that used to live only in export_cp.
         from lab_contracts import build_bundle
-        from lab_runner.cp_export import CPExportError, export_cp
 
         import copy
         bundle, traces = _real_slice_bundle()
         env = dict(bundle["environment"])  # type: ignore[union-attr]
         prov = copy.deepcopy(env["config_provenance"])
-        # nested {scenario: {condition: hash}} (review r19) — doctor the governed
-        # hash for the one scenario that ran
         sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
         prov["runtime_config_hashes"][sid]["governed"] = "sha256:" + "0" * 64  # doctored
         env["config_provenance"] = prov
-        doctored = build_bundle(
-            bundle_id="b_doc", created=CREATED, scenarios=bundle["scenarios"],
-            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
-            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
-            traces=traces,
-        )
-        with self.assertRaises(CPExportError) as ctx:
-            export_cp(doctored, condition_id="governed", traces=traces)
-        self.assertIn("does not match what ran", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            build_bundle(
+                bundle_id="b_doc", created=CREATED, scenarios=bundle["scenarios"],
+                conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+                environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+                traces=traces,
+            )
+        self.assertIn("does not match the provenance derived from the trials", str(ctx.exception))
 
 
 class TestMandatoryRuntimeProvenance(unittest.TestCase):
@@ -754,31 +1015,37 @@ class TestMandatoryRuntimeProvenance(unittest.TestCase):
             for _cid, h in cmap.items():
                 self.assertTrue(str(h).startswith("sha256:"))
 
-    def test_cp_export_requires_config_provenance(self) -> None:
-        # an evidence-backed export (traces given) over a bundle with NO recorded
-        # provenance is refused — it cannot prove the runtime config it ships ran
+    def test_cp_export_refuses_reconstructed_legacy_provenance(self) -> None:
+        # a bundle whose completed trials never DECLARED recorded_at_execution (a
+        # hand-built / legacy bundle) derives provenance_status=reconstructed_legacy,
+        # and an evidence-backed export is refused — it cannot prove the runtime
+        # config it ships actually ran (review r21)
         from lab_contracts import build_bundle
         from lab_runner.cp_export import CPExportError, export_cp
 
         bundle, traces = _real_slice_bundle()
-        env = dict(bundle["environment"])  # type: ignore[union-attr]
-        env["config_provenance"] = {}  # present but empty — nothing recorded
-        stripped = build_bundle(
-            bundle_id="b_noprov", created=CREATED, scenarios=bundle["scenarios"],
+        trials = [{k: v for k, v in t.items() if k != "runtime_provenance"}
+                  for t in bundle["trials"]]
+        env = {k: v for k, v in bundle["environment"].items() if k != "config_provenance"}
+        legacy = build_bundle(
+            bundle_id="b_legacy", created=CREATED, scenarios=bundle["scenarios"],
             conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
-            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
-            traces=traces,
+            environment=env, trials=trials, aggregates=bundle["aggregates"], traces=traces,
+        )
+        self.assertEqual(
+            legacy["environment"]["config_provenance"]["provenance_status"],
+            "reconstructed_legacy",
         )
         with self.assertRaises(CPExportError) as ctx:
-            export_cp(stripped, condition_id="governed", traces=traces)
-        self.assertIn("config_provenance", str(ctx.exception))
+            export_cp(legacy, condition_id="governed", traces=traces)
+        self.assertIn("recorded_at_execution", str(ctx.exception))
 
-    def test_cp_export_rejects_missing_runtime_hash_key(self) -> None:
-        # provenance that OMITS the governed hash for an executed scenario is
-        # refused — every exported hash must correspond to a recorded trial (r19)
+    def test_builder_rejects_provenance_missing_an_executed_hash_key(self) -> None:
+        # a caller-supplied provenance that OMITS the governed hash for an executed
+        # scenario disagrees with the trial-derived map, so build_bundle refuses it
+        # up front (review r21)
         import copy
         from lab_contracts import build_bundle
-        from lab_runner.cp_export import CPExportError, export_cp
 
         bundle, traces = _real_slice_bundle()
         env = dict(bundle["environment"])  # type: ignore[union-attr]
@@ -786,15 +1053,14 @@ class TestMandatoryRuntimeProvenance(unittest.TestCase):
         sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
         del prov["runtime_config_hashes"][sid]["governed"]  # drop the executed key
         env["config_provenance"] = prov
-        doctored = build_bundle(
-            bundle_id="b_missing", created=CREATED, scenarios=bundle["scenarios"],
-            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
-            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
-            traces=traces,
-        )
-        with self.assertRaises(CPExportError) as ctx:
-            export_cp(doctored, condition_id="governed", traces=traces)
-        self.assertIn("no recorded runtime_config_hash", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            build_bundle(
+                bundle_id="b_missing", created=CREATED, scenarios=bundle["scenarios"],
+                conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+                environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
+                traces=traces,
+            )
+        self.assertIn("does not match the provenance derived from the trials", str(ctx.exception))
 
 
 class TestExecutionProvenanceEnforcement(unittest.TestCase):
@@ -824,6 +1090,42 @@ class TestExecutionProvenanceEnforcement(unittest.TestCase):
         for trial in (t for t in result.trials if t["status"] == "completed"):
             self.assertTrue(trial.get("resolved_kernel_fingerprint"))
 
+    def test_cp_export_carries_the_resolved_kernel_fingerprint(self) -> None:
+        # the handoff records the ACTUAL resolved kernel behaviour the evidence was
+        # measured on, so a reader can see the deployed kernel reproduces it (r21)
+        from lab_runner.cp_export import export_cp
+
+        bundle, traces = _powered_real_bundle()
+        export = export_cp(bundle, condition_id="governed", traces=traces)
+        gov = next(c for c in bundle["conditions"] if c["id"] == "governed")
+        self.assertEqual(export.config["resolved_kernel_fingerprint"], str(gov["kernel"]))
+
+    def test_cp_export_refuses_behavior_modified_kernel(self) -> None:
+        # evidence measured on a behaviour-modified backend (fingerprint diverges
+        # from the declared kernel) cannot hand off the plain declared kernel — it
+        # would deploy a different behaviour than the one that earned the bridge (r21)
+        import copy
+        from lab_contracts import build_bundle
+        from lab_runner.cp_export import CPExportError, export_cp
+
+        bundle, traces = _powered_real_bundle()
+        kernel = str(next(c for c in bundle["conditions"] if c["id"] == "governed")["kernel"])
+        trials = copy.deepcopy(bundle["trials"])
+        for t in trials:
+            if t["status"] == "completed" and t["condition_id"] == "governed":
+                t["resolved_kernel_fingerprint"] = kernel + "+taint_floor=off"
+        # rebuild so content hashes match the mutated trials (verify_bundle runs first)
+        mutated = build_bundle(
+            bundle_id="b_bmk", created=CREATED, scenarios=bundle["scenarios"],
+            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+            environment={k: v for k, v in bundle["environment"].items()
+                         if k != "config_provenance"},
+            trials=trials, aggregates=bundle["aggregates"], traces=traces,
+        )
+        with self.assertRaises(CPExportError) as ctx:
+            export_cp(mutated, condition_id="governed", traces=traces)
+        self.assertIn("behaviour-modified", str(ctx.exception))
+
     def test_divergent_runtime_hashes_for_same_pair_are_rejected(self) -> None:
         # two completed trials of the SAME (scenario, condition) recording DIFFERENT
         # runtime hashes is a compiler/config drift the builder must not silently
@@ -844,26 +1146,41 @@ class TestExecutionProvenanceEnforcement(unittest.TestCase):
             )
         self.assertIn("divergent runtime_config_hash", str(ctx.exception))
 
-    def test_evidence_export_refuses_reconstructed_provenance(self) -> None:
-        # a bundle whose provenance was reconstructed at build time (not recorded at
-        # execution) is refused an evidence-backed export (review r20)
+    def test_a_caller_cannot_forge_recorded_status_on_legacy_trials(self) -> None:
+        # trials that never declared recorded_at_execution derive reconstructed_legacy;
+        # a caller that pre-supplies a config_provenance CLAIMING recorded_at_execution
+        # is rejected by build_bundle — the status is not assertable independently of
+        # the trials (review r21)
         import copy
         from lab_contracts import build_bundle
-        from lab_runner.cp_export import CPExportError, export_cp
         bundle, traces = _real_slice_bundle()
-        env = dict(bundle["environment"])  # type: ignore[union-attr]
-        prov = copy.deepcopy(env["config_provenance"])
-        prov["provenance_status"] = "reconstructed_legacy"
-        env["config_provenance"] = prov
-        doctored = build_bundle(
-            bundle_id="b_recon", created=CREATED, scenarios=bundle["scenarios"],
-            conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
-            environment=env, trials=bundle["trials"], aggregates=bundle["aggregates"],
-            traces=traces,
-        )
-        with self.assertRaises(CPExportError) as ctx:
-            export_cp(doctored, condition_id="governed", traces=traces)
-        self.assertIn("reconstructed", str(ctx.exception))
+        trials = [{k: v for k, v in t.items() if k != "runtime_provenance"}
+                  for t in bundle["trials"]]
+        prov = copy.deepcopy(bundle["environment"]["config_provenance"])
+        prov["provenance_status"] = "recorded_at_execution"  # a lie: trials are legacy
+        env = {**bundle["environment"], "config_provenance": prov}
+        with self.assertRaises(ValueError) as ctx:
+            build_bundle(
+                bundle_id="b_forge", created=CREATED, scenarios=bundle["scenarios"],
+                conditions=bundle["conditions"], tool_manifests=bundle["tool_manifests"],
+                environment=env, trials=trials, aggregates=bundle["aggregates"], traces=traces,
+            )
+        self.assertIn("does not match the provenance derived from the trials", str(ctx.exception))
+
+    def test_verify_bundle_rejects_provenance_map_asserted_apart_from_trials(self) -> None:
+        # even bypassing build_bundle, a bundle whose environment.config_provenance
+        # disagrees with its own trials is rejected by verify_bundle (review r21)
+        import copy
+        from lab_contracts import verify_bundle
+        from lab_contracts.errors import BundleIntegrityError
+        bundle, traces = _real_slice_bundle()
+        prov = copy.deepcopy(bundle["environment"]["config_provenance"])
+        sid = next(s for s, cmap in prov["runtime_config_hashes"].items() if "governed" in cmap)
+        prov["runtime_config_hashes"][sid]["governed"] = "sha256:" + "0" * 64
+        bundle["environment"]["config_provenance"] = prov  # mutate the dict directly
+        with self.assertRaises(BundleIntegrityError) as ctx:
+            verify_bundle(bundle, traces)
+        self.assertIn("config_provenance", str(ctx.exception))
 
 
 if __name__ == "__main__":
