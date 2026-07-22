@@ -195,13 +195,12 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
                 f"[validating] experiment.scenario_ids: '{scenario_id}' not among scenarios"
             )
 
-    # the benchmark runner executes type=benchmark only; games run through
-    # lab_games, so a type it does not execute is rejected, not silently ignored
+    # the benchmark runner executes type=benchmark only; a type it does not execute
+    # is rejected, not silently ignored
     exp_type = str(experiment.get("type", "benchmark"))
     if exp_type != "benchmark":
         errors.append(
-            f"[validating] experiment.type {exp_type!r} is not executed by the benchmark "
-            "runner (games run through lab_games)"
+            f"[validating] experiment.type {exp_type!r} is not executed by the benchmark runner"
         )
 
     conditions: list[dict[str, object]] = list(experiment.get("conditions", []))  # type: ignore[arg-type]

@@ -53,8 +53,7 @@ jobs:
       - name: ruff (pyflakes + bugbear; no style noise)
         run: |
           pip install ruff
-          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server \
-            lab_agent lab_entitlement lab_endpoint lab_sandbox lab_games
+          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_agent
 
   determinism:
     name: Replay determinism matrix (${{ matrix.os }})
@@ -114,10 +113,8 @@ jobs:
           set +e
           python -m unittest -v \
             tests.test_real_kernel \
-            tests.test_endpoint_kernel_identity \
             tests.test_replay_capability \
-            tests.test_regress_candidate_kernel \
-            tests.test_r18_hardening > real_kernel.log 2>&1
+            tests.test_regress_candidate_kernel > real_kernel.log 2>&1
           rc=$?
           set -e
           cat real_kernel.log
@@ -163,7 +160,6 @@ jobs:
           set +e
           python -m unittest -v \
             tests.test_hardening \
-            tests.test_entitlement \
             tests.test_package_verification \
             tests.test_portable_receipt \
             tests.test_server_acceptance \
