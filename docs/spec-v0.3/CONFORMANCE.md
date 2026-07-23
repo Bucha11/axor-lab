@@ -30,12 +30,17 @@ framing. Adopted (commit "v0.4 two-products"):
   updated: it issues its own `axlab_` token; not shared with CP.
 - **New `lab_client/` package** (the concrete connection layer the spec introduces):
   the `AgentAdapter` protocol (`describe`/`run`/`reset` + `AgentDescription` /
-  `AgentInput` / `AgentRunResult` / `ExecutionContext`), and the Lab-owned
-  `LabRuntimeClient` + `run_job_loop` — the outbound runtime client (poll → claim →
-  run each trial locally through the adapter → upload trace), stdlib-only, with the
-  `axlab_` token. Proved end-to-end by test: a custom `AgentAdapter` drives a real
-  Lab server, Lab binds the uploaded trace to the assigned unit and builds Results —
-  no Control Plane involved.
+  `AgentInput` / `AgentRunResult` / `ExecutionContext`), the Lab-owned
+  `LabRuntimeClient` + `run_job_loop` (poll → claim → run each trial locally → upload
+  trace, stdlib-only, `axlab_` token), and **`RunnerAgentAdapter` — a real adapter
+  that actually executes an assigned trial locally through the axor-core kernel**
+  (`lab_runner.run_trial`): the agent decides, the kernel governs, provenance is
+  built, and the GENUINE `trace/v1` it produced is uploaded — nothing canned. A
+  framework/BYOK agent swaps in as the `agent`. Proved end-to-end by test: a runtime
+  connects, claims a job, runs 6 real trials (1 scenario × 2 conditions × 3 repeats)
+  through the kernel, uploads real governed traces (with real ALLOW/DENY gate
+  decisions — the governed condition blocks the attack), and Lab binds each to its
+  unit and computes ASR itself. No Control Plane involved.
 
 **Schema interpretation (unchanged):** the new spec's Lab-owned schemas are an
 older/silent snapshot (shorter descriptions; `experiment.comparison_design` absent)

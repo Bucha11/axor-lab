@@ -22,6 +22,7 @@ from .adapter import (
     ExecutionContext,
     ToolDescription,
 )
+from .runner_adapter import RunnerAgentAdapter
 from .runtime_client import LabRuntimeClient, LabRuntimeError, run_job_loop
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "ExecutionContext",
     "LabRuntimeClient",
     "LabRuntimeError",
+    "RunnerAgentAdapter",
     "ToolDescription",
     "run_job_loop",
 ]

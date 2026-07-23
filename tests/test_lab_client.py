@@ -1,8 +1,11 @@
-"""LabRuntimeClient + AgentAdapter — the Lab-side runtime job loop end-to-end.
+"""LabRuntimeClient + a REAL AgentAdapter — actual agent connection, end-to-end.
 
-A runtime registers with Lab (axlab_ token), the client polls + claims a job, runs
-each trial through an AgentAdapter locally, and uploads the trace; Lab binds it to
-the assigned unit and builds Results. No Control Plane involved (agent-connection.md).
+A runtime registers with Lab (axlab_ token); its Lab client polls + claims a job and,
+for each assigned trial, RUNS THE AGENT LOCALLY through the real axor-core kernel
+(`lab_runner.run_trial` via `RunnerAgentAdapter`) — the agent decides, the kernel
+governs, provenance is built — then uploads the GENUINE trace it produced. Lab binds
+each trace to its assigned unit and builds Results. No canned traces, no Control
+Plane (agent-connection.md).
 """
 
 from __future__ import annotations
@@ -14,49 +17,13 @@ import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from lab_client import (
-    AgentDescription,
-    AgentRunResult,
-    LabRuntimeClient,
-    run_job_loop,
-)
+from tests import support
+from lab_client import LabRuntimeClient, RunnerAgentAdapter, run_job_loop
+from lab_runner import ScriptedAgent
 from lab_server import make_runtime_server
 
-_TRACE: list[dict] = []
-EXP = {"scenario_ids": ["s1"], "conditions": ["c1"], "repeats": 1}
 
-
-def _fixture_trace() -> dict:
-    if not _TRACE:
-        from tests import support
-        from lab_runner import run_experiment_suite
-        r = run_experiment_suite([support.banking_scenario()], support.manifests(),
-                                 support.conditions(), support.kernel_registry(),
-                                 repeats=1, run_id="rt")
-        _TRACE.extend(r.traces.values())
-    return json.loads(json.dumps(_TRACE[0]))
-
-
-class ScriptedAdapter:
-    """A custom AgentAdapter (the required custom-agent scenario): returns a
-    conformant trace stamped with the assigned unit coordinate."""
-
-    def __init__(self) -> None:
-        self.resets = 0
-
-    async def describe(self) -> AgentDescription:
-        return AgentDescription(name="scripted", adapter_kind="custom", models=["none"])
-
-    async def reset(self) -> None:
-        self.resets += 1
-
-    async def run(self, input, execution_context) -> AgentRunResult:  # noqa: A002
-        trace = _fixture_trace()
-        trace["trial"] = dict(execution_context.trial)  # stamp the assigned unit
-        return AgentRunResult(output="done", trace=trace, status="completed")
-
-
-class TestLabRuntimeClient(unittest.TestCase):
+class TestRealAgentConnection(unittest.TestCase):
     def setUp(self) -> None:
         self.server: ThreadingHTTPServer = make_runtime_server(
             host="127.0.0.1", port=0, control_token="ctl")
@@ -73,35 +40,70 @@ class TestLabRuntimeClient(unittest.TestCase):
         with urllib.request.urlopen(req) as r:
             return json.loads(r.read())
 
-    def test_run_job_loop_end_to_end(self) -> None:
-        # Lab registers the runtime (issues the axlab_ token) and assigns a run
-        conn = self._control("POST", "/runtimes/connect", {"model": "scripted"})
-        axlab_token = conn["ingest_key"]
-        run = self._control("POST", "/runs",
-                            {"runtime_ref": conn["runtime_ref"], "experiment": EXP})
-        run_id = run["run_id"]
+    def _local_runtime(self):
+        """The runtime side: it holds the scenarios + kernel + agent LOCALLY (Lab
+        never executes the agent). A deterministic ScriptedAgent that always follows
+        the injection makes the governed vs ungoverned outcomes stable to assert."""
+        scenario = support.banking_scenario()
+        conditions = support.conditions()  # ungoverned + governed
+        adapter = RunnerAgentAdapter(
+            scenarios={str(scenario["name"]): scenario},
+            manifests=support.manifests(),
+            conditions={str(c["id"]): c for c in conditions},
+            kernel_registry=support.kernel_registry(),
+            agent=ScriptedAgent(attack_rate=1.0),  # always attacks → deterministic
+        )
+        return scenario, conditions, adapter
 
-        # the runtime's Lab client drives the job loop with its axlab_ token
+    def test_runtime_runs_the_agent_locally_and_lab_builds_results(self) -> None:
+        scenario, conditions, adapter = self._local_runtime()
+
+        # Lab registers the runtime (mints the axlab_ token) and assigns the run.
+        conn = self._control("POST", "/runtimes/connect", {"model": "scripted-agent"})
+        axlab_token = conn["ingest_key"]
+        experiment = {
+            "scenario_ids": [str(scenario["name"])],
+            "condition_ids": [str(c["id"]) for c in conditions],
+            "repeats": 3,
+            # Lab keeps the scenario defs so it can recompute ASR from the traces
+            "scenarios": [scenario],
+        }
+        run = self._control("POST", "/runs",
+                            {"runtime_ref": conn["runtime_ref"], "experiment": experiment})
+        run_id = run["run_id"]
+        self.assertEqual(len(run["planned_trials"]), 6)  # 1 scenario × 2 conditions × 3
+
+        # the runtime's Lab client drives the loop: it RUNS each trial locally
+        # through the real kernel and uploads the genuine trace it produced
         client = LabRuntimeClient(self.base, axlab_token)
-        adapter = ScriptedAdapter()
         ran = asyncio.run(run_job_loop(client, adapter, max_jobs=1))
         self.assertEqual(ran, 1)
-        self.assertEqual(adapter.resets, 1)
 
-        # Lab bound the uploaded trace to the assigned unit and built Results itself
+        # Lab bound every uploaded trace to its unit and built Results ITSELF
         results = self._control("GET", f"/runs/{run_id}/results")
         self.assertEqual(results["state"], "completed")
-        self.assertEqual(len(results["traces"]), 1)
-        self.assertEqual(results["trials"][0]["status"], "completed")
+        self.assertEqual(len(results["traces"]), 6)
+        self.assertTrue(all(t["status"] == "completed" for t in results["trials"]))
 
-    def test_client_uses_a_scoped_token_not_control(self) -> None:
-        # the client's axlab_ token gates ONLY the runtime surface; it is not the
-        # control token (two separate credential scopes)
-        conn = self._control("POST", "/runtimes/connect", {})
-        client = LabRuntimeClient(self.base, conn["ingest_key"])
-        # a runtime token can poll the runtime surface...
-        self.assertIsNone(client.poll_job())  # no jobs yet, but authorized (no error)
-        # ...and a bogus token cannot
+        # the traces are REAL governed executions: each carries a gate_decision the
+        # local kernel actually made (not a canned trace)
+        verdicts = {
+            ev["decision"]["verdict"]
+            for tr in results["traces"] for ev in tr["events"]
+            if ev.get("type") == "gate_decision"
+        }
+        self.assertTrue(verdicts <= {"ALLOW", "DENY"})
+        self.assertIn("DENY", verdicts)  # the governed condition blocked the attack
+
+        # Lab's own ASR aggregates: the ungoverned attack succeeds, governed is lower
+        aggs = {a["condition_id"]: a for a in results["aggregates"]}
+        self.assertEqual(set(aggs), {c["id"] for c in conditions})
+        gov = next(c["id"] for c in conditions if str(c["enforcement"]) == "on")
+        ungov = next(c["id"] for c in conditions if str(c["enforcement"]) == "off")
+        self.assertEqual(aggs[ungov]["n"], 3)
+        self.assertGreaterEqual(aggs[ungov]["estimate"], aggs[gov]["estimate"])
+
+    def test_bogus_axlab_token_cannot_pull_jobs(self) -> None:
         bad = LabRuntimeClient(self.base, "not-a-real-token")
         with self.assertRaises(Exception) as ctx:
             bad.poll_job()
