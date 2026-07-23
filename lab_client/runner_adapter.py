@@ -52,10 +52,10 @@ class RunnerAgentAdapter:
         return None
 
     async def run(self, input: AgentInput,  # noqa: A002 (protocol name)
-                  execution_context: ExecutionContext) -> AgentRunResult:
+                  ctx: ExecutionContext) -> AgentRunResult:
         from lab_runner import resolve_kernel, run_trial
 
-        coord = execution_context.trial
+        coord = ctx.trial
         scenario_id = str(coord["scenario_id"])
         condition_id = str(coord["condition_id"])
         scenario = self.scenarios.get(scenario_id)
@@ -63,17 +63,25 @@ class RunnerAgentAdapter:
         if scenario is None or condition is None:
             return AgentRunResult(
                 output={"error": f"unknown scenario/condition {scenario_id}/{condition_id}"},
-                trace={}, status="failed")
+                trace={}, status="failed", provenance_fidelity="heuristic_attribution")
 
         kernel = resolve_kernel(
             str(condition["kernel"]), self.manifests, condition.get("policy"),
             self.kernel_registry, scenario.get("inputs", {}))
+        # run_trial does the two provenance writes (mint-on-tool-result with
+        # untrusted_fields, mint-on-model-output with conservative-join) and gates
+        # BEFORE dispatch — the two interception points of adapters.md §2/§7/§8.
         outcome = run_trial(
             scenario, self.manifests, condition, kernel,
             run_id=str(coord["run_id"]), seed=str(coord["seed"]),
             repeat_index=int(coord["repeat_index"]), agent=self._agent_or_default())
-        # run_trial stamps the trace's `trial` block with exactly this coordinate,
-        # so Lab's unit-binding on `complete` passes on the ordinary path
+        # events leave ONLY through the trace_sink (adapters.md §6/§11) — never our
+        # own HTTP; the driving client ships them. run_trial stamps the trace's
+        # `trial` block with exactly this coordinate, so Lab's unit-binding passes.
+        events = outcome.trace.get("events", [])
+        if isinstance(events, list):
+            ctx.trace_sink.extend(events)
         return AgentRunResult(
             output={"violation": outcome.violation, "task_success": outcome.task_success},
-            trace=outcome.trace, status="completed")
+            trace=outcome.trace, status="completed",
+            provenance_fidelity="explicit_flow_tracked")

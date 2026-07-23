@@ -26,7 +26,7 @@
    (its own store)                  (its own registry + trace store)
 ```
 
-**Shared:** one local axor-core, one agent adapter, one runtime process, and the **trace/event + tool-manifest schemas** (defined in axor-core). **Not shared:** backends, URLs, APIs, credentials, trace stores, runtime registries, job queues. **No Axor backend — CP or Lab — connects to, executes, or proxies the agent** (both are outbound-only; the adapter runs the agent locally). There is **no shared "trace fabric" backend** — each product ingests and stores its own traces; only the *schema* is common. There are **no module flags** and no combined bootstrap: a runtime registers with each product separately, using that product's own protocol and token.
+**Shared:** one local axor-core, one agent adapter (`adapters.md`), one runtime process, and the **trace/event + tool-manifest schemas** (defined in axor-core). **Not shared:** backends, URLs, APIs, credentials, trace stores, runtime registries, job queues. **No Axor backend — CP or Lab — connects to, executes, or proxies the agent** (both are outbound-only; the adapter runs the agent locally). There is **no shared "trace fabric" backend** — each product ingests and stores its own traces; only the *schema* is common. There are **no module flags** and no combined bootstrap: a runtime registers with each product separately, using that product's own protocol and token.
 
 The earlier draft's "one trace stack / connect once / both modules see it / module flags" is retired — that collapsed two products into one backend. Correct model: two products, shared local layer + schema, two clients.
 

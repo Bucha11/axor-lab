@@ -19,8 +19,11 @@ from .adapter import (
     AgentDescription,
     AgentInput,
     AgentRunResult,
+    CancelToken,
     ExecutionContext,
+    Limits,
     ToolDescription,
+    TraceSink,
 )
 from .runner_adapter import RunnerAgentAdapter
 from .runtime_client import LabRuntimeClient, LabRuntimeError, run_job_loop
@@ -30,10 +33,13 @@ __all__ = [
     "AgentDescription",
     "AgentInput",
     "AgentRunResult",
+    "CancelToken",
     "ExecutionContext",
     "LabRuntimeClient",
     "LabRuntimeError",
+    "Limits",
     "RunnerAgentAdapter",
     "ToolDescription",
+    "TraceSink",
     "run_job_loop",
 ]
