@@ -8,7 +8,7 @@ screen  ←  API endpoint  ←  payload conforming to a schema (Lab-owned or axo
 
 ## 1. Connection model — one runtime, not a two-product ladder
 
-Lab does not connect to, execute, or proxy agents. The **Axor runtime adapter** (the same one that serves Control Plane) opens an outbound connection and pushes traces; Lab hands out experiment assignments and reads the resulting traces. A user connects a runtime **once** — both modules see it. (The old "climb the same onboarding shape twice" was the anti-pattern; it's gone.)
+Lab does not connect to, execute, or proxy agents. A runtime registers with **Lab** (its own `axlab_` token + Lab Runtime Registry — a separate connection from Control Plane's PlaneClient), polls Lab jobs, runs the trial locally, and uploads traces. Lab hands out assignments and reads results. Control Plane is a **separate product** with its own connection; see `agent-connection.md`.
 
 | Mode | What happens | Trace source |
 |---|---|---|
@@ -17,7 +17,7 @@ Lab does not connect to, execute, or proxy agents. The **Axor runtime adapter** 
 | **Trace import** | analyze a production incident or a published run | import |
 | **Offline runner** | CI / air-gapped / private code | offline_runner |
 
-"Connect runtime" issues a scoped ingest/job key for the shared adapter. Existing CP users **select** an already-connected runtime — no second integration. No Lab gateway, no MCP proxy, no black-box eval.
+"Connect runtime" registers with Lab and issues an `axlab_` runtime token. In *integrated* deployments Lab can **import a runtime reference from Control Plane** (server-side provider) and map ids, but still issues its own Lab credential and owns its own jobs. No Lab gateway, no MCP proxy, no black-box eval.
 
 ## 2. API surface
 
@@ -30,7 +30,7 @@ Lab does not connect to, execute, or proxy agents. The **Axor runtime adapter** 
 | `/runtimes` | GET | connected runtimes `[{ runtime_ref, agent_ref, model, status }]` |
 | `/runtimes/{id}` | GET | one runtime |
 | `/runtimes/{id}/manifests` | GET | `tool-manifest/v1[]` (**axor-core shared** schema) |
-| `/runtimes/connect` | POST | `{ ingest_key }` for the shared adapter |
+| `/runtimes/connect` | POST | `{ axlab_runtime_token }` (Lab's own registry; not a CP connection) |
 | `/scenarios/validate` | POST | `{ ok, errors[] }` |
 | `/scenarios` | POST | `{ scenario_id }` (`scenario/v1`, Lab-owned) |
 | `/experiments/plan` | POST | `{ trials, estimate }` from an `experiment/v1` |

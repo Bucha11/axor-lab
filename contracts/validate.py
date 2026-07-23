@@ -5,7 +5,8 @@ No network deps. Run: python3 validate.py"""
 import json, re, sys, glob, os
 
 def load(p): return json.load(open(p))
-SCHEMAS = {os.path.basename(f).replace('.schema.json',''): load(f) for f in glob.glob('schemas/*.json')}
+_files = glob.glob('schemas/*.json') + glob.glob('schemas/_shared_from_axor_core/*.json')
+SCHEMAS = {os.path.basename(f).replace('.schema.json',''): load(f) for f in _files}
 
 class V:
     def __init__(s): s.errs=[]

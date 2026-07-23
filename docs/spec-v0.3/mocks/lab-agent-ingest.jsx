@@ -19,11 +19,11 @@ const MODES = [
   },
   {
     id: "connected_runtime", icon: Radio, label: "Connect a runtime",
-    sub: "the same Axor adapter that serves Control Plane — connect once",
+    sub: "register a runtime with Lab (its own axlab_ token) — separate from Control Plane",
     repro: "runtime", reproColor: C.steel,
     gives: "real governance · provenance · EvidenceCase — the runtime runs your agent and pushes traces",
-    detects: "Connect runtime → scoped key for the shared adapter, or select an already-connected one",
-    privacy: "the runtime executes locally and sends traces outward; Lab never connects to or proxies your agent",
+    detects: "Connect runtime → Lab Runtime Registry issues an axlab_ token; integrated mode can import a CP runtime reference",
+    privacy: "the runtime executes locally and pushes traces to Lab; Lab never connects to or proxies your agent",
   },
   {
     id: "trace_import", icon: FileStack, label: "Import traces / an incident",
@@ -72,7 +72,7 @@ export default function App() {
         {stage === "pick" && (
           <>
             <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, letterSpacing: "0.05em", marginBottom: 8, lineHeight: 1.6 }}>
-              HOW YOUR AGENT REACHES LAB — Lab reads the shared Axor trace fabric; it never connects to or proxies your agent. Connect a runtime once; Control Plane sees the same one.
+              HOW YOUR AGENT REACHES LAB — a runtime registers with Lab (own axlab_ token) and pushes traces; Lab never connects to or proxies your agent. Control Plane is a separate product with its own connection.
             </div>
             <div className="flex flex-col gap-3">
               {MODES.map((x) => {
@@ -198,9 +198,9 @@ export default function App() {
         )}
 
         <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim, marginTop: 20, lineHeight: 1.7 }}>
-          Lab is the experiment & evidence layer over Axor runtime traces — it reads the <b style={{ color: C.steel }}>shared trace fabric</b>,
-          it does not connect to, execute, or proxy your agent. Connect a runtime once (the same adapter Control Plane uses);
-          both modules see it. Wiring in <span style={{ color: C.mut }}>ui-backend-contract.md</span>. How you bring your agent sets the reproducibility you get: <b style={{ color: C.steel }}>code/endpoint → live</b> (stochastic,
+          Lab is the experiment & evidence layer over Axor runtime traces — the runtime pushes traces to <b style={{ color: C.steel }}>Lab's own backend</b>,
+          it does not connect to, execute, or proxy your agent. Lab and Control Plane are <b style={{ color: C.steel }}>two separate products</b> (separate URLs, tokens, backends);
+          integrated mode links them server-side. Wiring in <span style={{ color: C.mut }}>agent-connection.md</span>. How you bring your agent sets the reproducibility you get: <b style={{ color: C.steel }}>code/endpoint → live</b> (stochastic,
           reported with CI), <b style={{ color: C.green }}>traces → replay</b> (governance verdicts, bit-identical). Code never
           has to leave your machine — the local path is first-class.
         </div>
