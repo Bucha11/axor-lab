@@ -2,6 +2,7 @@
 
 Routes:
   GET  /                                  catalog (HTML, public only)
+  GET  /api/publications                  catalog (JSON, public only)
   GET  /e/{id}                            publication page (HTML; private → 404)
   GET  /e/{id}/evidence/{trace_id}        EvidenceCase (HTML)
   GET  /api/publications/{id}             publication (JSON) + provenance axes
@@ -90,6 +91,26 @@ def make_server(
                 path = split.path
                 if path == "/" or path == "":
                     self._html(render_catalog(store.catalog()))
+                    return
+                if path == "/api/publications":
+                    # the JSON mirror of the HTML catalog, same visibility
+                    # semantics as render_catalog/store.catalog(): PUBLIC only.
+                    # unlisted stays capability-URL-reachable (GET by id) but is
+                    # never listed; private is never served anywhere (review §7).
+                    listing = [
+                        {
+                            "publication_id": s.publication["publication_id"],
+                            "question": s.publication["question"],
+                            "url": f"/e/{s.publication['publication_id']}",
+                            "license": s.publication.get("license"),
+                            "provenance": s.axes(),
+                        }
+                        for s in sorted(
+                            store.catalog(),
+                            key=lambda s: str(s.publication["publication_id"]),
+                        )
+                    ]
+                    self._json(200, {"publications": listing})
                     return
                 evidence = _EVIDENCE_RE.match(path)
                 if evidence:

@@ -4,5 +4,10 @@ dist/
 build/
 *.egg-info/
 
+# frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
 # CLI publish receipts (written next to cwd by default)
 *.acceptance.json
