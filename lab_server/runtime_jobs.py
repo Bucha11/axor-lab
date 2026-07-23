@@ -24,6 +24,8 @@ Control surface (Lab operator / UI):
   GET  /runs/{id}/events     -> text/event-stream (state + trial progress)
   GET  /runs/{id}/results    -> { trials, traces, aggregates }  (collected so far)
   GET  /runs/{id}/trials/{trial_id}/trace  -> the completed trial's trace
+  POST /wrap/scan            scan uploaded agent code for tools (axor-wrap; wrap_api.py)
+  POST /wrap/manifests       human-classified tools -> tool manifests + governance YAML
 
 Runtime-facing (Bearer <ingest_key>; the runtime pulls and pushes):
 
@@ -444,6 +446,15 @@ def make_runtime_server(
 
         def do_POST(self) -> None:  # noqa: N802
             try:
+                if self.path in ("/wrap/scan", "/wrap/manifests"):
+                    # the "upload agent code" wrap flow (axor-wrap engine, lazy
+                    # import — 501 with an install hint when it is missing)
+                    self._require_control()
+                    from . import wrap_api
+                    handler = wrap_api.handle_scan if self.path == "/wrap/scan" \
+                        else wrap_api.handle_manifests
+                    self._send(*handler(self._read_json()))
+                    return
                 if self.path == "/runtimes/connect":
                     self._require_control()
                     body = self._read_json()

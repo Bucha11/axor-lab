@@ -186,6 +186,59 @@ export interface ValidateResult {
   errors: string[];
 }
 
+// ── wrap surface (POST /wrap/*, axor-wrap engine behind the jobs server) ────
+
+export type EffectClass = "READ" | "WRITE" | "EXPORT" | "EXEC";
+
+export interface WrapEffectGuess {
+  default_class: EffectClass | "UNKNOWN";
+  confidence: "high" | "medium" | "low" | string;
+  reason: string;
+  driving_args: string[];
+  untrusted_fields: string[];
+}
+
+// one statically detected tool candidate (axor_wrap.detect.DetectedTool + guess)
+export interface WrapDetectedTool {
+  id: string;
+  source: string; // "<file>:<line> <detector kind>"
+  description: string;
+  args_schema: Record<string, unknown>;
+  framework: string; // langchain | mcp | anthropic | implicit
+  schema_confidence: "high" | "low" | string;
+  guess: WrapEffectGuess;
+}
+
+// what the human-reviewed classification posts back to /wrap/manifests
+export interface WrapReviewedTool {
+  id: string;
+  source: string;
+  description: string;
+  args_schema: Record<string, unknown>;
+  framework: string;
+  schema_confidence: string;
+  effect: {
+    default_class: EffectClass;
+    driving_args: string[];
+    untrusted_fields: string[];
+    sensitive_fields: string[];
+  };
+}
+
+export interface WrapManifestsResult {
+  manifests: Record<string, unknown>[]; // tool-manifest/v1, validated server-side
+  governance_yaml: string;
+  wrap: {
+    generated_by: string;
+    manifest_schema: string;
+    tools: number;
+    egress_sinks: string[];
+    untrusted_sources: string[];
+    sensitive_sources: string[];
+    driving_args: Record<string, string[]>;
+  };
+}
+
 // ── plumbing ────────────────────────────────────────────────────────────────
 
 async function j<T>(resp: Response): Promise<T> {
@@ -280,4 +333,12 @@ export const api = {
     jf(
       `/runs/${encodeURIComponent(runId)}/trials/${encodeURIComponent(trialId)}/trace`,
     ).then((r) => j<Trace>(r)),
+
+  // ── wrap flow (upload agent code → scan → reviewed manifests) ─────────────
+  wrapScan: (files: { path: string; content: string }[]) =>
+    jf("/wrap/scan", post({ files })).then((r) =>
+      j<{ tools: WrapDetectedTool[] }>(r).then((b) => b.tools),
+    ),
+  wrapManifests: (tools: WrapReviewedTool[]) =>
+    jf("/wrap/manifests", post({ tools })).then((r) => j<WrapManifestsResult>(r)),
 };
