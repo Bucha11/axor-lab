@@ -8,10 +8,13 @@ How the offline/local runner talks to the Lab web app. **This is the offline / C
 axor lab run experiment.axl
   1. resolve  — load scenario/bench, tool manifests, conditions; validate against schemas
   2. estimate — trial count = conditions × repeats × scenarios; token/cost estimate; print, await confirm
-  3. execute  — per trial: run agent on simulated tools + fixtures, emit trace/v1 with lineage
-  4. gate     — apply condition (enforcement off/on) via pinned kernel; verdicts recorded in-trace
-  5. analyze  — aggregate per statistics.md (unit=trial), compute intervals + tests
-  6. bundle   — write bundle/v1 with content hashes
+  3. execute  — per trial: build ExecutionContext (condition, simulated tools + fixtures, trace sink),
+                run the agent; INSIDE the loop, on every tool intent the kernel gates BEFORE dispatch
+                (ALLOW → dispatch; DENY → not dispatched), and every model call mints values with
+                conservative-join provenance. Verdicts and lineage are written to trace/v1 as they happen.
+                Gating after execution would be replay, not governance — see adapters.md §7.
+  4. analyze  — aggregate per statistics.md (unit=trial), compute intervals + tests
+  5. bundle   — write bundle/v1 with content hashes
 axor lab publish ./bundle   → uploads bundle, mints publication/v1 (origin=local)
 axor lab replay  ./bundle   → recompute verdicts over frozen traces (offline, exact)
 ```

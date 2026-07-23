@@ -17,6 +17,7 @@ from .backends import (
 )
 from .cost import CostEstimate, estimate_cost
 from .errors import AgentError, BackendUnavailable, CassetteExhausted, ProtocolViolation
+from .langchain_backend import LangChainBackend
 from .wrapped import FileCassetteAgent, WrappedModelAgent
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "CostEstimate",
     "FileCassetteAgent",
     "FINAL",
+    "LangChainBackend",
     "ModelAction",
     "ModelBackend",
     "ProtocolViolation",

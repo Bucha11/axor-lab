@@ -1,8 +1,12 @@
-"""The AgentAdapter interface (agent-connection.md).
+"""The AgentAdapter interface (contracts/adapters.md).
 
-A custom agent implements `AgentAdapter`; framework adapters (axor-claude,
-axor-langchain) are ready-made implementations of the same protocol, not the only
-path. The adapter wraps the user's EXISTING entrypoint and returns a `trace/v1`.
+An adapter wraps an existing agent entrypoint and does exactly three things:
+describe the agent, intercept the two decision points (model call + tool call) so the
+kernel builds provenance and gates effects, and emit a `trace/v1` through the
+`trace_sink`. Framework adapters (axor-claude, axor-langchain) pre-fill the
+interception; the generic/custom path implements this protocol by hand — a
+first-class scenario, not a fallback. The adapter contains NO Lab/Control-Plane
+business logic and opens NO network egress: events leave only via `trace_sink`.
 """
 
 from __future__ import annotations
@@ -32,16 +36,55 @@ class AgentInput:
     inputs: dict[str, object] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass
+class TraceSink:
+    """Append-only egress for kernel events (adapters.md §6/§11). The adapter emits
+    events here and NOWHERE else — it never opens its own HTTP connection; the
+    driving client (LabRuntimeClient) is what ships them."""
+    events: list[dict[str, object]] = field(default_factory=list)
+
+    def emit(self, event: dict[str, object]) -> None:
+        self.events.append(event)
+
+    def extend(self, events: list[dict[str, object]]) -> None:
+        self.events.extend(events)
+
+
+@dataclass
+class Limits:
+    """Per-run budget (adapters.md §6). None means unbounded for that axis."""
+    wall_time_s: float | None = None
+    tokens: int | None = None
+    tool_calls: int | None = None
+
+
+@dataclass
+class CancelToken:
+    """Cooperative cancellation (adapters.md §6/§12). A cancelled run stops without
+    losing already-completed trials."""
+    cancelled: bool = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+@dataclass
 class ExecutionContext:
-    """Per-trial context the runtime builds from the claimed job (agent-connection.md
-    `build_lab_context`). Carries the assigned TrialUnit coordinate so the adapter can
-    stamp the trace's `trial` block to match Lab's assignment exactly — Lab binds the
-    uploaded trace to this unit on `complete`."""
-    run_id: str
-    trial_id: str
-    trial: dict[str, object] = field(default_factory=dict)  # {run_id,scenario_id,condition_id,seed,repeat_index}
-    condition: dict[str, object] = field(default_factory=dict)
+    """What an adapter receives for one run (adapters.md §6). Built by whoever drives
+    the run — `LabRuntimeClient` for a Lab trial. `condition.enforcement == "off"` is
+    observe-only (the kernel still labels + records, never blocks); `tools` is the
+    SIMULATED registry in Lab (a side-effecting tool never dispatches for real unless
+    its manifest opts in). The `trial` coordinate is Lab's assigned TrialUnit, which
+    the produced trace's `trial` block must equal exactly."""
+    condition: dict[str, object]                       # enforcement + kernel_ref/policy_ref (thin)
+    trace_sink: TraceSink
+    run_id: str = ""
+    trial_id: str = ""
+    trial: dict[str, object] = field(default_factory=dict)  # the assigned coordinate
+    tools: object | None = None                        # bound/simulated tool registry
+    fixtures: dict[str, object] | None = None          # canned tool results with $injection
+    limits: Limits = field(default_factory=Limits)
+    cancel: CancelToken = field(default_factory=CancelToken)
 
 
 @dataclass
@@ -49,6 +92,8 @@ class AgentRunResult:
     output: object
     trace: dict[str, object]                # a trace/v1 body
     status: str = "completed"               # completed | failed
+    # explicit_flow_tracked (both provenance writes done) | heuristic_attribution
+    provenance_fidelity: str = "explicit_flow_tracked"
 
 
 @runtime_checkable
@@ -58,7 +103,7 @@ class AgentAdapter(Protocol):
     async def describe(self) -> AgentDescription:
         ...
 
-    async def run(self, input: AgentInput, execution_context: ExecutionContext) -> AgentRunResult:
+    async def run(self, input: AgentInput, ctx: ExecutionContext) -> AgentRunResult:  # noqa: A002
         ...
 
     async def reset(self) -> None:

@@ -5,7 +5,53 @@ traces (`contracts/architecture-boundary.md`, READ FIRST). This file tracks how 
 repo is brought into line, phase by phase, so the migration stays reviewable instead
 of one destructive sweep.
 
-## v0.4 — two separate products (latest spec)
+## v0.4 — framework adapters (contracts/adapters.md §4)
+
+The two pre-built framework adapters now exist, each a thin `AgentAdapter` = the
+generic `RunnerAgentAdapter` + a framework `ModelBackend` (the shared wrapped runtime
+does the provenance mint + gate-before-dispatch, so downstream behaviour is
+identical):
+
+- **`lab_client.frameworks.axor_claude`** — the Anthropic Messages tool-use loop; its
+  model decision is the existing `AnthropicBackend`. `axor_claude.adapter(…)` builds a
+  ready `AgentAdapter`; a deterministic `CassetteBackend` can be injected for
+  offline/CI.
+- **`lab_client.frameworks.axor_langchain`** — a LangChain chat model
+  (`bind_tools(…).invoke(…)`); its model decision is the new
+  `lab_agent.LangChainBackend` (duck-typed, so `langchain` is an optional dependency).
+
+Proved offline (no live SDK): a fake LangChain model and a cassette drive **real
+governed trials** — the injected transfer is DENIED under `enforcement=on` and
+ALLOWED under `off`, via the actual kernel, and each adapter reports its
+`adapter_kind` (`claude` / `langchain`). The generic/custom `RunnerAgentAdapter`
+stays first-class, not a fallback. (These live in `axor-lab` for now; they move to
+their own `axor-claude` / `axor-langchain` repos once those are added to the session.)
+
+## v0.4 — adapter layer (contracts/adapters.md)
+
+The latest bundle adds `contracts/adapters.md` (the adapter is the only place a
+user's agent meets Axor) and cross-references it from architecture-boundary /
+agent-connection / runner-protocol. `lab_client` is brought into line with it:
+
+- **`ExecutionContext`** now carries what §6 specifies — `condition` (thin ref),
+  `trace_sink` (append-only, the ONLY event egress), `tools`, `fixtures`, `limits`,
+  `cancel` — plus the assigned `trial` coordinate. New `TraceSink` / `Limits` /
+  `CancelToken` types.
+- **`LabRuntimeClient(url, token, adapter=…)`** (§10): the adapter is attached to the
+  client from outside; `client.run_job_loop()` builds the `ExecutionContext`, calls
+  `adapter.run()`, ships the events the adapter emitted **through the sink**, then
+  completes the trial. An adapter opens no network egress of its own (§11).
+- **`RunnerAgentAdapter`** now emits its kernel events through `ctx.trace_sink` and
+  declares `provenance_fidelity: explicit_flow_tracked` — it does the two provenance
+  writes and gates BEFORE dispatch via `run_trial` (§2/§7/§8). The e2e test asserts
+  Lab received the streamed events (sink egress) and built Results itself.
+
+Docs adopted: `adapters.md` (new), and the updated `agent-connection.md` /
+`architecture-boundary.md` / `runner-protocol.md` / `spec-lab.md` / mocks /
+`validate.py` / `validate_slice.py`. Schema interpretation unchanged (Lab-owned
+correctness supersets kept; shared schemas byte-equivalent).
+
+## v0.4 — two separate products
 
 The latest spec sharpens the boundary: **Control Plane and Axor Lab are two separate
 products** — separate repos, backends, URLs, APIs, credentials, and **stores**. What

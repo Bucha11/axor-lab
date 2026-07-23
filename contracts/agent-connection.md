@@ -35,6 +35,8 @@ No single all-powerful token. No `AXOR_URL` + module discovery. A shared local c
 
 ## The AgentAdapter interface (custom agents are a required scenario)
 
+**Full adapter layer — what an adapter is, the three kinds, interception points, `ExecutionContext`, gate ordering, provenance hooks, reset semantics: `adapters.md`.** Summary here.
+
 Framework adapters (axor-claude, axor-langchain) are ready-made implementations, not the only path. A custom agent implements:
 
 ```python

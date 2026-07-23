@@ -23,6 +23,33 @@
 
 Privacy is the default: the runtime executes locally and sends observations, never raw bodies; the offline runner keeps code and execution on your machine and uploads only the signed bundle.
 
+## 1.5. Adapters — where your agent meets Axor
+
+The adapter is the **only** part of Axor a user physically touches; kernel, gates, and backends are invisible to them. It **wraps an existing agent entrypoint** — it never reimplements the agent's loop — and adds three duties around it:
+
+1. **Describe** the agent's shape (tools, models), so Axor can reason about it.
+2. **Intercept two points**: the *model call* (where values are created — provenance is assigned by conservative join) and the *tool call* (where effects leave — the kernel gates **before** dispatch).
+3. **Emit a trace** in the shared `trace/v1` schema.
+
+```
+        user's agent loop (unchanged)
+                  │
+        ┌─────────┴─────────┐
+        │      ADAPTER      │  describe · intercept model call · GATE then dispatch · emit trace
+        └─────────┬─────────┘
+                  │
+          local axor-core (ledger, gates, decide)   ← enforcement is local, never over the network
+                  │
+        ┌─────────┴─────────┐
+   PlaneClient          LabRuntimeClient
+```
+
+**Three kinds.** `axor-claude` (knows the Anthropic loop: tool_use blocks, tool results — near-zero user cost); `axor-langchain` (LangChain/LangGraph middleware intercepting model and tool calls); and a **generic wrapper** for custom agents, where the user implements three methods (`describe / run / reset`) around their own entrypoint. The generic path is first-class, not a fallback — custom agents are a required scenario; framework adapters are pre-built conveniences with identical downstream behavior.
+
+**What the user supplies:** an entrypoint, and a one-time tool declaration (args/result shape, effect class, which result fields are attacker-controllable, whether side-effecting, whether simulatable). **What they get:** local enforcement, a provenance-carrying trace, EvidenceCase-able runs — and, because the adapter knows nothing about either product, the *same* adapter serves both Control Plane and Lab with no second integration of the agent.
+
+Details — `ExecutionContext`, gate ordering, provenance hooks, reset semantics, failure handling — in `contracts/adapters.md`.
+
 ## 2. Run modes — ungoverned is first-class
 
 Lab is for studying *your* agent, not for imposing governance on it. Three run modes; the first is the default and stands alone:

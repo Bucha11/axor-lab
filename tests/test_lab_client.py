@@ -74,9 +74,10 @@ class TestRealAgentConnection(unittest.TestCase):
         self.assertEqual(len(run["planned_trials"]), 6)  # 1 scenario × 2 conditions × 3
 
         # the runtime's Lab client drives the loop: it RUNS each trial locally
-        # through the real kernel and uploads the genuine trace it produced
-        client = LabRuntimeClient(self.base, axlab_token)
-        ran = asyncio.run(run_job_loop(client, adapter, max_jobs=1))
+        # through the real kernel and uploads the genuine trace it produced. The
+        # adapter is attached to the CLIENT (adapters.md §10), not the other way.
+        client = LabRuntimeClient(self.base, axlab_token, adapter=adapter)
+        ran = asyncio.run(client.run_job_loop(max_jobs=1))
         self.assertEqual(ran, 1)
 
         # Lab bound every uploaded trace to its unit and built Results ITSELF
@@ -84,6 +85,9 @@ class TestRealAgentConnection(unittest.TestCase):
         self.assertEqual(results["state"], "completed")
         self.assertEqual(len(results["traces"]), 6)
         self.assertTrue(all(t["status"] == "completed" for t in results["trials"]))
+        # the adapter's events reached Lab through the trace_sink egress (not a
+        # direct adapter HTTP call) — every trial has streamed kernel events
+        self.assertTrue(all(a["events"] > 0 for t in results["trials"] for a in t["attempts"]))
 
         # the traces are REAL governed executions: each carries a gate_decision the
         # local kernel actually made (not a canned trace)
