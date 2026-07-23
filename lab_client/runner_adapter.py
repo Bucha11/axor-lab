@@ -27,13 +27,15 @@ class RunnerAgentAdapter:
 
     def __init__(self, scenarios: dict[str, dict], manifests: dict[str, dict],
                  conditions: dict[str, dict], kernel_registry: object,
-                 agent: object | None = None, name: str = "runner") -> None:
+                 agent: object | None = None, name: str = "runner",
+                 kind: str | None = None) -> None:
         self.scenarios = scenarios
         self.manifests = manifests
         self.conditions = conditions
         self.kernel_registry = kernel_registry
         self._agent = agent
         self.name = name
+        self._kind = kind
 
     def _agent_or_default(self) -> object:
         if self._agent is None:
@@ -42,7 +44,7 @@ class RunnerAgentAdapter:
         return self._agent
 
     async def describe(self) -> AgentDescription:
-        kind = type(self._agent_or_default()).__name__
+        kind = self._kind or type(self._agent_or_default()).__name__
         return AgentDescription(name=self.name, adapter_kind=kind,
                                 models=[], tools=[])
 

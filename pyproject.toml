@@ -25,6 +25,7 @@ packages = [
     "lab_server",
     "lab_agent",
     "lab_client",
+    "lab_client.frameworks",
 ]
 
 # ship the contract schemas as package data so an installed wheel is
