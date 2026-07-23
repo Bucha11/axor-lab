@@ -127,6 +127,79 @@ export interface ReproductionPackage {
   acceptance: Record<string, unknown>;
 }
 
+// ── incidents surface (Control Plane → Lab cross-link) ──────────────────────
+
+// the axor-lab-incident/v1 envelope the Control Plane's "Open in Lab" ships
+export interface IncidentPackage {
+  schema_version: string; // "axor-lab-incident/v1"
+  trace: Trace;
+  scenario: { name?: string; task?: string; [k: string]: unknown };
+  manifests: Record<string, unknown>[];
+  condition: {
+    id?: string;
+    kernel?: string;
+    enforcement?: string;
+    policy?: Record<string, unknown>;
+    config_hash?: string;
+    [k: string]: unknown;
+  };
+  source?: { product?: string; run_id?: string; url?: string };
+}
+
+// POST /api/incidents → 201
+export interface IncidentImportResult {
+  incident_id: string;
+  trace_id: string;
+  replay: string; // "match"
+  url: string; // "/i/{incident_id}" (UI route #/i/{incident_id})
+}
+
+// one side of the 422 replay-mismatch detail: verdict cores, recorded vs recomputed
+export interface VerdictCore {
+  verdict?: string;
+  gate?: string;
+  driving_value_id?: string | null;
+}
+
+export interface ReplayMismatchDetail {
+  status: string; // "mismatch" | "malformed_trace" | …
+  recorded_verdicts: VerdictCore[];
+  recomputed_verdicts: VerdictCore[];
+}
+
+// thrown by importIncident so the UI can show the divergence honestly
+export class IncidentImportError extends Error {
+  status: number;
+  replay?: ReplayMismatchDetail;
+  constructor(status: number, message: string, replay?: ReplayMismatchDetail) {
+    super(message);
+    this.status = status;
+    this.replay = replay;
+  }
+}
+
+export interface IncidentSummary {
+  incident_id: string;
+  trace_id: string;
+  scenario_id: string;
+  source?: { product?: string; run_id?: string; url?: string } | null;
+  imported_at: string;
+}
+
+// GET /api/incidents/{id} — the accepted envelope + the built bundle
+export interface Incident extends IncidentPackage {
+  incident_id: string;
+  imported_at: string;
+  bundle: Bundle;
+}
+
+// GET /api/traces/{trace_id} — where does this trace live?
+export interface TraceResolution {
+  trace_id: string;
+  publications: string[];
+  incidents: string[];
+}
+
 // ── runtime-jobs surface ────────────────────────────────────────────────────
 
 export interface RuntimeInfo {
@@ -285,6 +358,36 @@ export const api = {
     fetch(`/api/publications/${encodeURIComponent(publicationId)}/bundle`).then((r) =>
       j<ReproductionPackage>(r),
     ),
+
+  // ── incidents (Control Plane → Lab) ──────────────────────────────────────
+  // POST is write-token-gated (--write-token on the publications server); the
+  // token comes from the store like the runtime-jobs control token does.
+  importIncident: async (pkg: IncidentPackage): Promise<IncidentImportResult> => {
+    const token = useApp.getState().writeToken;
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const r = await fetch("/api/incidents", {
+      method: "POST", headers, body: JSON.stringify(pkg),
+    });
+    let body: { error?: string; replay?: ReplayMismatchDetail } & Partial<IncidentImportResult> = {};
+    try {
+      body = (await r.json()) as typeof body;
+    } catch {
+      /* non-JSON error body */
+    }
+    if (!r.ok) {
+      throw new IncidentImportError(r.status, body.error ?? `${r.status}`, body.replay);
+    }
+    return body as IncidentImportResult;
+  },
+  listIncidents: () =>
+    fetch("/api/incidents").then((r) =>
+      j<{ incidents: IncidentSummary[] }>(r).then((b) => b.incidents),
+    ),
+  getIncident: (incidentId: string) =>
+    fetch(`/api/incidents/${encodeURIComponent(incidentId)}`).then((r) => j<Incident>(r)),
+  resolveTrace: (traceId: string) =>
+    fetch(`/api/traces/${encodeURIComponent(traceId)}`).then((r) => j<TraceResolution>(r)),
 
   // ── runtime jobs (control surface) ────────────────────────────────────────
   connectRuntime: (model: string, agentRef?: string) =>

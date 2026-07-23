@@ -16,7 +16,6 @@ import unittest
 from lab_runner import (
     REPLAY_MATCH,
     REPLAY_REDACTED_INPUT_UNAVAILABLE,
-    Kernel,
     ScriptedAgent,
     default_registry,
     replay_trace_status,

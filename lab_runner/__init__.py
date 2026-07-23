@@ -22,6 +22,8 @@ from .axor_backend import (
 from .errors import (
     ConfirmationRequired,
     ExperimentFileError,
+    IncidentImportError,
+    IncidentReplayMismatch,
     RealExecutionBlocked,
     RunnerError,
     UnknownAgentError,
@@ -29,6 +31,7 @@ from .errors import (
     UnsupportedPredicateError,
 )
 from .evidence import build_evidence_case, evidence_condition, validate_twin
+from .incident import ImportResult, import_incident
 from .kernel import Kernel, KernelRegistry, default_registry
 from .ledger import ValueLedger
 from .predicates import evaluate
@@ -68,6 +71,9 @@ __all__ = [
     "resolve_recorded_kernel_for_trace",
     "ExperimentFileError",
     "ExperimentResult",
+    "ImportResult",
+    "IncidentImportError",
+    "IncidentReplayMismatch",
     "Kernel",
     "KernelRegistry",
     "REPLAY_MALFORMED_TRACE",
@@ -92,6 +98,7 @@ __all__ = [
     "check_pins",
     "default_registry",
     "evaluate",
+    "import_incident",
     "pin",
     "replay_bundle",
     "replay_trace",

@@ -1072,114 +1072,22 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
     """Second funnel: a production trace -> a trace-replay bundle you can test a
     policy against, pin, and export (control-plane-handoff.md §Second funnel).
 
-    The recorded condition is REQUIRED and used verbatim — reconstructing it
-    (enforcement=on, kernel from the trace) silently loses enforcement mode,
-    policy, allowlist, criticality overrides and the config hash, so replay
-    could then yield a different verdict than the incident actually produced.
-    Everything is validated (schema + semantics + cross-references + config
-    hash) and REPLAYED before anything is written."""
-    from datetime import datetime, timezone
-
-    from lab_contracts import (
-        ScenarioValidationError,
-        build_bundle,
-        condition_config_hash,
-        content_hash,
-        validate_artifact,
-        validate_scenario,
-    )
-
-    from .replay import REPLAY_MATCH, replay_trace_status
+    All the semantics (schema + semantic + cross-reference validation, config
+    hash, replay BEFORE write, reconstructed_incident provenance) live in the
+    shared core `lab_runner.incident.import_incident` — the HTTP
+    `POST /api/incidents` calls the SAME function, so both surfaces build
+    byte-identical bundles (repo rule: replay is the same code)."""
+    from .incident import import_incident
 
     trace: dict[str, object] = json.loads(Path(args.trace).read_text())
     scenario: dict[str, object] = json.loads(Path(args.scenario).read_text())
     manifests: list[dict[str, object]] = json.loads(Path(args.manifests).read_text())
     condition: dict[str, object] = json.loads(Path(args.condition).read_text())
 
-    # 1. schema validation of every artifact
-    for obj, name in ((trace, "trace"), (scenario, "scenario"), (condition, "condition")):
-        errors = validate_artifact(obj, name)
-        if errors:
-            raise RunnerError(f"incident {name} is not conformant: {errors}")
-    manifests_by_id: dict[str, dict[str, object]] = {}
-    for manifest in manifests:
-        errors = validate_artifact(manifest, "tool-manifest")
-        if errors:
-            raise RunnerError(f"incident manifest {manifest.get('id')} is not conformant: {errors}")
-        manifests_by_id[str(manifest["id"])] = manifest
-
-    # 2. semantic + cross-reference validation
-    try:
-        validate_scenario(scenario, manifests_by_id)
-    except ScenarioValidationError as exc:
-        raise RunnerError(f"incident scenario failed semantic validation: {exc}") from exc
-    trial: dict[str, object] = trace["trial"]  # type: ignore[assignment]
-    if str(condition["id"]) != str(trial["condition_id"]):
-        raise RunnerError(
-            f"condition.id {condition['id']!r} != trace condition_id {trial['condition_id']!r}"
-        )
-    if str(scenario["name"]) != str(trial["scenario_id"]):
-        raise RunnerError(
-            f"scenario.name {scenario['name']!r} != trace scenario_id {trial['scenario_id']!r}"
-        )
-
-    # 3. config-hash verification (if the recorded condition carries one)
-    if "config_hash" in condition:
-        expected = condition_config_hash(str(condition["kernel"]), condition.get("policy"))  # type: ignore[arg-type]
-        if str(condition["config_hash"]) != expected:
-            raise RunnerError(
-                f"condition config_hash {condition['config_hash']!r} != recomputed {expected!r}"
-            )
-
-    # 4. replay the incident under its OWN recorded condition before writing — a
-    # wrong/reconstructed condition would surface here as a mismatch. Pass the
-    # scenario inputs so a real-kernel `$inputs` allowlist expands to the concrete
-    # values the incident actually ran under, not the symbolic ref (review r17).
-    kernel = resolve_kernel(
-        str(condition["kernel"]), manifests_by_id, condition.get("policy"),  # type: ignore[arg-type]
-        default_registry((str(condition["kernel"]),)), scenario.get("inputs", {}),  # type: ignore[arg-type]
+    import_incident(
+        trace, scenario, manifests, condition, Path(args.out),
+        created=args.created, overwrite=bool(getattr(args, "overwrite", False)),
     )
-    _, status = replay_trace_status(
-        trace, condition, kernel, manifests_by_id, scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    if status != REPLAY_MATCH:
-        raise RunnerError(
-            f"incident trace does not replay under its condition (status={status}) — "
-            "refusing to import a bundle whose verdicts don't reproduce"
-        )
-
-    # a completed trial carries the runtime config it ran under, but this hash is
-    # RECONSTRUCTED at import from the incident's condition + scenario inputs — the
-    # original production trace never carried it, and this process did not observe
-    # the runtime compilation. Mark it reconstructed_incident so config_provenance
-    # reports the honest status and an evidence-backed CP export refuses it as
-    # "the exact runtime config that actually ran in production" (review r21).
-    from lab_contracts import CONFIG_COMPILER_VERSION, runtime_config_hash
-
-    incident_rch = runtime_config_hash(
-        str(condition["kernel"]), condition.get("policy"), manifests,
-        scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    trials = [{
-        "trial_id": content_hash(trace), "scenario_id": str(trial["scenario_id"]),
-        "condition_id": str(trial["condition_id"]), "seed": str(trial["seed"]),
-        "repeat_index": int(trial["repeat_index"]), "status": "completed",
-        "trace_ref": content_hash(trace),
-        "runtime_config_hash": incident_rch,
-        "config_compiler_version": CONFIG_COMPILER_VERSION,
-        "runtime_provenance": "reconstructed_incident",
-    }]
-    bundle = build_bundle(
-        bundle_id="b_incident_" + content_hash(trace).removeprefix("sha256:")[:32],
-        created=args.created or datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        scenarios=[scenario], conditions=[condition], tool_manifests=manifests,
-        environment={"kernel_version": str(trace["producer"]["kernel_version"]),  # type: ignore[index]
-                     "model": {"provider": "imported", "id": "production-incident"}},
-        trials=trials, aggregates=[], traces={str(trace["trace_id"]): trace},
-        packaging=dict(PACKAGING),
-    )
-    write_bundle_dir(Path(args.out), bundle, {str(trace["trace_id"]): trace},
-                     overwrite=bool(getattr(args, "overwrite", False)))
     print(f"imported incident -> {args.out} (trace-replay bundle)")
     print(f"  replay it:  axor-lab replay {args.out}")
     print(f"  pin + export:  axor-lab pin ... && axor-lab export-cp {args.out} --pins pins.json")

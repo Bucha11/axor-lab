@@ -218,7 +218,7 @@ class TestExecutableConfigHash(unittest.TestCase):
         compiled = compiled_governor_config(
             support.KERNEL_PINNED, policy, list(support.manifests().values()), inputs
         )
-        enums = [vp for vp in compiled["value_policies"].values()]
+        enums = list(compiled["value_policies"].values())
         flat = [v for vp in enums for arg in vp.values() for v in arg["enum"]]
         self.assertIn(support.LANDLORD_IBAN, flat)
         self.assertNotIn("$inputs.known_ibans", flat)

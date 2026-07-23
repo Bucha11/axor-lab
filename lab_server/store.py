@@ -499,6 +499,20 @@ class PublicationStore:
             and s.lineage_ref not in self._lineage_tombstones
         ]
 
+    def publications_with_trace(self, trace_id: str) -> list[str]:
+        """Publication ids whose evidence contains this trace — the
+        `/api/traces/{trace_id}` resolver. Same visibility posture as reads:
+        private is never revealed anywhere, and a tombstoned id or lineage is
+        never returned (unlisted stays reachable — knowing a trace_id is the
+        capability, like knowing the publication URL)."""
+        return sorted(
+            pid for pid, s in self._cache.items()
+            if trace_id in s.traces
+            and s.publication.get("visibility") != "private"
+            and pid not in self._tombstones
+            and s.lineage_ref not in self._lineage_tombstones
+        )
+
     def acceptance(self, stored: StoredPublication) -> dict[str, object]:
         """A server ACCEPTANCE receipt (review r15): the server's SIGNED attestation
         of what it verified before minting, portable and cryptographically checkable

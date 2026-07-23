@@ -8,6 +8,7 @@ only deterministic replay to confirm published verdicts.
 
 from .app import Unauthorized, make_server
 from .errors import NotFound, PublishRejected, ServerError
+from .incidents import IncidentStore, StoredIncident
 from .runtime_jobs import (
     RuntimeJobsError,
     RuntimeJobStore,
@@ -17,8 +18,10 @@ from .runtime_jobs import (
 from .store import PublicationStore, StoredPublication
 
 __all__ = [
+    "IncidentStore",
     "NotFound",
     "PublicationStore",
+    "StoredIncident",
     "PublishRejected",
     "RuntimeJobStore",
     "RuntimeJobsError",

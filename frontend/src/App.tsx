@@ -14,11 +14,14 @@ import Published from "./tabs/Published";
 import PublicationView from "./tabs/PublicationView";
 import EvidenceView from "./tabs/EvidenceView";
 import ScenarioAuthor from "./tabs/ScenarioAuthor";
+import ImportIncident from "./tabs/ImportIncident";
+import IncidentView from "./tabs/IncidentView";
 
 const PRIMARY = ["home", "builder", "runs", "results", "published"] as const;
 const MORE = [
   { id: "agent-ingest", label: "bring an agent" },
   { id: "scenario-author", label: "scenario author" },
+  { id: "import", label: "import incident" },
 ] as const;
 
 function NavLink({ id, active }: { id: string; active: boolean }) {
@@ -111,6 +114,10 @@ export default function App() {
       {key === "e" && p1 && p2 !== "evidence" && <PublicationView publicationId={p1} />}
       {key === "agent-ingest" && <AgentIngest />}
       {key === "scenario-author" && <ScenarioAuthor />}
+      {/* Control Plane → Lab cross-link: "Open in Lab" deep-links to #/import;
+          an imported incident lives at #/i/{incident_id} */}
+      {key === "import" && <ImportIncident />}
+      {key === "i" && p1 && <IncidentView incidentId={p1} />}
     </div>
   );
 }

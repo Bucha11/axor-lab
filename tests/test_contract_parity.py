@@ -8,7 +8,6 @@ schema-valid yet runtime-invalid; and a wrong config_hash is caught on resolve.
 
 from __future__ import annotations
 
-import copy
 import unittest
 
 from tests import support

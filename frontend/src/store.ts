@@ -13,9 +13,14 @@ interface AppState {
   // bearer token for the runtime-jobs CONTROL surface (--control-token /
   // AXOR_LAB_CONTROL_TOKEN on the server). Empty when the server runs open.
   controlToken: string;
+  // bearer token for publications-server WRITES (--write-token /
+  // AXOR_LAB_WRITE_TOKEN): publish, attest, POST /api/incidents. Empty when
+  // the server runs open (local dev).
+  writeToken: string;
   setLastRun: (runId: string) => void;
   setRuntimeRef: (runtimeRef: string | null) => void;
   setControlToken: (token: string) => void;
+  setWriteToken: (token: string) => void;
 }
 
 export const useApp = create<AppState>()(
@@ -24,9 +29,11 @@ export const useApp = create<AppState>()(
       lastRunId: null,
       runtimeRef: null,
       controlToken: "",
+      writeToken: "",
       setLastRun: (runId) => set({ lastRunId: runId }),
       setRuntimeRef: (runtimeRef) => set({ runtimeRef }),
       setControlToken: (token) => set({ controlToken: token }),
+      setWriteToken: (token) => set({ writeToken: token }),
     }),
     { name: "axor-lab" },
   ),

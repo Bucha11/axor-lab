@@ -21,7 +21,7 @@ from lab_agent import (
 )
 from lab_agent.backends import AnthropicBackend
 from lab_contracts import condition_config_hash
-from lab_runner import default_registry, replay_trace, run_trial
+from lab_runner import replay_trace, run_trial
 from lab_runner.agents import DrivingAgent
 
 

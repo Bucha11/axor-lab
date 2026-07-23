@@ -102,7 +102,7 @@ class TestConditionAwareMissingness(unittest.TestCase):
         self.assertTrue(summary.condition_imbalanced)
         self.assertIn("condition-imbalanced", summary.display())
         self.assertIn("by condition:", summary.display())
-        by = dict((cid, (done, tot)) for cid, done, tot in summary.by_condition)
+        by = {cid: (done, tot) for cid, done, tot in summary.by_condition}
         self.assertEqual(by["baseline"], (4, 4))
         self.assertEqual(by["governed"], (0, 4))
 

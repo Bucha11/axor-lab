@@ -31,6 +31,22 @@ class UnknownAgentError(RunnerError):
     """experiment.agent_ref does not resolve to a registered agent adapter."""
 
 
+class IncidentImportError(RunnerError):
+    """An incident package failed validation (schema, semantics, cross-refs or
+    config hash) — nothing was written."""
+
+
+class IncidentReplayMismatch(IncidentImportError):
+    """The incident trace does not replay under its recorded condition.
+
+    Carries a structured `detail` (replay status + recorded vs recomputed
+    verdict cores) so an HTTP surface can report the divergence honestly."""
+
+    def __init__(self, message: str, detail: dict[str, object]) -> None:
+        super().__init__(message)
+        self.detail = detail
+
+
 class ExperimentFileError(RunnerError):
     """An .axl experiment file is malformed or fails contract validation.
 

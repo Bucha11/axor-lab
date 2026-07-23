@@ -9,6 +9,11 @@ Routes:
   POST /api/publications                  publish handshake        [write token]
   POST /api/publications/{id}/reproductions   append an attestation [write token]
   POST /api/publications/{id}/takedown    remove from catalog       [admin token]
+  POST /api/incidents                     import an incident package [write token]
+  GET  /api/incidents                     list imported incidents (JSON)
+  GET  /api/incidents/{id}                one incident: full package + bundle
+  GET  /api/traces/{trace_id}             resolver: publications + incidents
+                                          containing this trace (404 if none)
 
 Auth: pass `write_token` / `admin_token` to gate mutations with a bearer token.
 When a token is set, a mutation without a matching `Authorization: Bearer …`
@@ -28,8 +33,11 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from lab_runner.errors import IncidentImportError, IncidentReplayMismatch
+
 from .errors import NotFound, PublishRejected, ServerError
 from .html import render_catalog, render_evidence, render_publication
+from .incidents import IncidentStore
 from .store import PublicationStore
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # uploaded bundles are bounded (threat-model §4)
@@ -42,6 +50,9 @@ _API_PUB_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)$")
 _API_BUNDLE_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/bundle$")
 _API_REPRO_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/reproductions$")
 _API_TAKEDOWN_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/takedown$")
+_API_INCIDENT_RE = re.compile(r"^/api/incidents/([A-Za-z0-9_-]+)$")
+# trace_ids carry the scenario slug (hyphens), same safe class as the evidence route
+_API_TRACE_RE = re.compile(r"^/api/traces/([A-Za-z0-9_-]+)$")
 
 
 class Unauthorized(ServerError):
@@ -74,6 +85,9 @@ def make_server(
         server_id=server_id, server_key_id=server_key_id,
         server_signing_key=server_signing_key,
     )
+    # incidents live in a SEPARATE namespace under the same root — imported
+    # production traces are not publications and never enter the catalog
+    incidents = IncidentStore(root=store_root / "incidents")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "axor-lab-server/0.1"
@@ -111,6 +125,37 @@ def make_server(
                         )
                     ]
                     self._json(200, {"publications": listing})
+                    return
+                if path == "/api/incidents":
+                    self._json(200, {"incidents": [s.summary() for s in incidents.list()]})
+                    return
+                api_incident = _API_INCIDENT_RE.match(path)
+                if api_incident:
+                    stored_incident = incidents.get(api_incident.group(1))
+                    self._json(200, {
+                        "incident_id": stored_incident.incident_id,
+                        "imported_at": stored_incident.imported_at,
+                        # the accepted envelope, verbatim (trace/scenario/
+                        # manifests/condition/source) …
+                        **stored_incident.package,
+                        # … plus the trace-replay bundle the shared core built,
+                        # so `axor-lab replay` can consume the download directly
+                        "bundle": stored_incident.bundle,
+                    })
+                    return
+                api_trace = _API_TRACE_RE.match(path)
+                if api_trace:
+                    # resolver: where does this trace_id live? Searches the
+                    # published bundles (private never revealed) AND the
+                    # imported incidents; 404 when it is nowhere.
+                    trace_id = api_trace.group(1)
+                    pubs = store.publications_with_trace(trace_id)
+                    incs = incidents.incidents_with_trace(trace_id)
+                    if not pubs and not incs:
+                        raise NotFound(f"trace {trace_id} not found")
+                    self._json(200, {
+                        "trace_id": trace_id, "publications": pubs, "incidents": incs,
+                    })
                     return
                 evidence = _EVIDENCE_RE.match(path)
                 if evidence:
@@ -197,6 +242,29 @@ def make_server(
                         "publication_id": pid, "url": f"/e/{pid}",
                         "integrity": stored.publication["integrity"],
                         "acceptance": store.acceptance(stored),
+                    })
+                    return
+                if self.path == "/api/incidents":
+                    # the HTTP twin of `axor-lab import-incident`: the SAME
+                    # shared core (validation + config hash + replay under the
+                    # recorded condition) runs BEFORE anything is stored.
+                    # Gated by the write token like publish; the body cap in
+                    # _read_json already bounds the upload.
+                    self._require(write_token)
+                    try:
+                        stored_incident, created = incidents.import_package(payload)
+                    except IncidentReplayMismatch as exc:
+                        # the honest 422: the recorded verdicts do not reproduce
+                        # under the shipped condition — show both sides
+                        self._json(422, {"error": str(exc), "replay": exc.detail})
+                        return
+                    except IncidentImportError as exc:
+                        raise PublishRejected(str(exc), status=422) from exc
+                    self._json(201 if created else 200, {
+                        "incident_id": stored_incident.incident_id,
+                        "trace_id": stored_incident.trace_id,
+                        "replay": "match",
+                        "url": f"/i/{stored_incident.incident_id}",
                     })
                     return
                 takedown = _API_TAKEDOWN_RE.match(self.path)

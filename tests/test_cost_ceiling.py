@@ -12,7 +12,7 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_agent.backends import FINAL, TOOL_CALL, CassetteBackend, ModelAction
+from lab_agent.backends import CassetteBackend
 from lab_agent.cost import CostBudget, actual_usd
 from lab_agent.wrapped import WrappedModelAgent
 from lab_runner import run_experiment_suite
