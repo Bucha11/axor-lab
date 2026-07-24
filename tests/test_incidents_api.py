@@ -11,6 +11,7 @@ the /api/traces/{trace_id} resolver over both publications and incidents.
 
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import threading
@@ -184,6 +185,31 @@ class TestIncidentsAPI(unittest.TestCase):
         self.assertEqual(status, 200, again)
         self.assertEqual(again["incident_id"], incident_id)
 
+    def test_replay_fidelity_round_trips_normalized(self) -> None:
+        """A CP-authored replay_fidelity block is kept (bounded to known keys)
+        and returned on the full incident GET — so a reader sees which gates
+        the reference replay reproduces and which it cannot."""
+        # a DISTINCT trace so this is a fresh incident (ids are content-derived,
+        # so reusing self._pkg() would hit the already-imported one at 200)
+        trace = copy.deepcopy(self.trace)
+        trace["trace_id"] = "t_fidelity_probe"
+        pkg = _package(trace, self.scenario, self.manifests, self.condition)
+        pkg["replay_fidelity"] = {
+            "backend": "reference_taint_floor_kernel",
+            "recorded_kernel": "axor-core@9.9.9",
+            "reproducible_gates": ["taint_floor"],
+            "not_reproducible_gates": ["ssrf", "value_policy"],
+            "note": "CP records observations, not bodies.",
+            "evil_extra_key": "x" * 5000,  # dropped: not a known key
+        }
+        status, imported = self._post("/api/incidents", pkg)
+        self.assertEqual(status, 201, imported)
+        _, full = self._get(f"/api/incidents/{imported['incident_id']}")
+        fidelity = full["replay_fidelity"]
+        self.assertEqual(fidelity["reproducible_gates"], ["taint_floor"])
+        self.assertIn("value_policy", fidelity["not_reproducible_gates"])
+        self.assertNotIn("evil_extra_key", fidelity)
+
     def test_bad_config_hash_is_4xx(self) -> None:
         pkg = self._pkg()
         doctored = dict(self.condition)
@@ -194,6 +220,10 @@ class TestIncidentsAPI(unittest.TestCase):
         self.assertIn("config_hash", body["error"])
 
     def test_replay_mismatch_is_422_with_detail(self) -> None:
+        # snapshot the store first: other tests share this class-level store, so
+        # assert the mismatch attempt mints NOTHING NEW rather than an absolute count
+        _, before = self._get("/api/incidents")
+        before_ids = {i["trace_id"] for i in before["incidents"]}
         pkg = self._pkg()
         wrong = {k: v for k, v in self.condition.items() if k != "config_hash"}
         wrong["enforcement"] = "off"
@@ -203,13 +233,11 @@ class TestIncidentsAPI(unittest.TestCase):
         self.assertIn("does not replay", body["error"])
         self.assertEqual(body["replay"]["status"], "mismatch")
         self.assertIn("DENY", [d["verdict"] for d in body["replay"]["recorded_verdicts"]])
-        # nothing was stored
+        # the mismatch attempt stored nothing: the trace-id set is unchanged
         _, listing = self._get("/api/incidents")
-        trace_ids = {i["trace_id"] for i in listing["incidents"]}
-        # the valid import test may have stored the same trace; the mismatch
-        # attempt itself must not have minted anything new beyond it
-        self.assertLessEqual(len(listing["incidents"]), 1)
-        self.assertTrue(trace_ids <= {str(self.trace["trace_id"])})
+        after_ids = {i["trace_id"] for i in listing["incidents"]}
+        self.assertEqual(after_ids, before_ids)
+        self.assertNotIn(str(self.trace["trace_id"]), after_ids - before_ids)
 
     def test_not_an_incident_package_is_rejected(self) -> None:
         status, body = self._post("/api/incidents", {"schema_version": "nope/v1"})

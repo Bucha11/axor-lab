@@ -144,6 +144,16 @@ export interface IncidentPackage {
     [k: string]: unknown;
   };
   source?: { product?: string; run_id?: string; url?: string };
+  // the producer's honest per-gate replay-fidelity statement: the reference
+  // taint_floor verdict reproduces faithfully; content gates (ssrf, value_policy)
+  // are not reproducible because the Control Plane records observations, not bodies
+  replay_fidelity?: {
+    backend?: string;
+    recorded_kernel?: string;
+    reproducible_gates?: string[];
+    not_reproducible_gates?: string[];
+    note?: string;
+  };
 }
 
 // POST /api/incidents → 201

@@ -110,6 +110,21 @@ export default function IncidentView({ incidentId }: { incidentId: string }) {
               re-derived from the shipped condition + inputs, so the bundle is marked{" "}
               <span style={{ color: C.text }}>runtime_provenance = reconstructed_incident</span> — it never
               masquerades as the exact config recorded at production execution time.</div>
+            {inc.replay_fidelity && (
+              <div className="mt-2" style={{ borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
+                {(inc.replay_fidelity.reproducible_gates?.length ?? 0) > 0 && (
+                  <div><span style={{ color: C.green }}>reproducible gates:</span>{" "}
+                    <span style={{ color: C.text }}>{inc.replay_fidelity.reproducible_gates!.join(", ")}</span>{" "}
+                    — reproduced faithfully (a pure function of the recorded provenance).</div>
+                )}
+                {(inc.replay_fidelity.not_reproducible_gates?.length ?? 0) > 0 && (
+                  <div className="mt-1"><span style={{ color: C.red }}>not reproducible:</span>{" "}
+                    <span style={{ color: C.text }}>{inc.replay_fidelity.not_reproducible_gates!.join(", ")}</span>{" "}
+                    — {inc.replay_fidelity.note
+                      || "the Control Plane records observations (provenance labels), not payload bodies."}</div>
+                )}
+              </div>
+            )}
           </div>
         </Collapse>
       </div>

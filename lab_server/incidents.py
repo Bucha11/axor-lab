@@ -88,6 +88,36 @@ def _clean_source(source: object) -> dict[str, str] | None:
     return cleaned or None
 
 
+# `replay_fidelity` is the producer's honest per-gate statement of what this
+# incident's replay can and cannot reproduce (the Control Plane records
+# observations, not payload bodies, so content-inspecting gates are not
+# reproducible). It is uploader-controlled, so — like `source` — the server
+# keeps only known keys with bounded strings, never an arbitrary blob.
+_FIDELITY_STR_KEYS = ("backend", "recorded_kernel", "note")
+_FIDELITY_LIST_KEYS = ("reproducible_gates", "not_reproducible_gates")
+_FIDELITY_NOTE_MAX = 2000
+_FIDELITY_GATE_MAX = 64
+_FIDELITY_GATES_MAX = 32
+
+
+def _clean_fidelity(obj: object) -> dict[str, object] | None:
+    """Normalize the optional `replay_fidelity` block to known keys with bounded
+    strings — never store an arbitrary uploader blob under a trusted field."""
+    if obj is None:
+        return None
+    if not isinstance(obj, dict):
+        raise PublishRejected("incident replay_fidelity must be a JSON object", status=400)
+    cleaned: dict[str, object] = {}
+    for k in _FIDELITY_STR_KEYS:
+        if obj.get(k) is not None:
+            cleaned[k] = str(obj[k])[:_FIDELITY_NOTE_MAX]
+    for k in _FIDELITY_LIST_KEYS:
+        value = obj.get(k)
+        if isinstance(value, list):
+            cleaned[k] = [str(g)[:_FIDELITY_GATE_MAX] for g in value[:_FIDELITY_GATES_MAX]]
+    return cleaned or None
+
+
 def _envelope(payload: dict[str, object]) -> tuple[
     dict[str, object], dict[str, object], list[dict[str, object]],
     dict[str, object], dict[str, str] | None,
@@ -153,6 +183,7 @@ class IncidentStore:
         / IncidentReplayMismatch (from the shared core) or PublishRejected (bad
         envelope) — nothing is persisted on any failure."""
         trace, scenario, manifests, condition, source = _envelope(payload)
+        fidelity = _clean_fidelity(payload.get("replay_fidelity"))
         # the SAME core the CLI runs — full validation + replay, no write yet
         result = import_incident(trace, scenario, manifests, condition)
         incident_id = self.derive_id(trace)
@@ -161,6 +192,8 @@ class IncidentStore:
             "trace": trace, "scenario": scenario,
             "manifests": manifests, "condition": condition,
         }
+        if fidelity:
+            package["replay_fidelity"] = fidelity
         if source:
             package["source"] = source
         with self._lock:
