@@ -195,6 +195,34 @@ export interface IncidentSummary {
   source?: { product?: string; run_id?: string; url?: string } | null;
   imported_at: string;
   approved?: boolean; // set on the hosted listing once an approval is recorded
+  pinned?: boolean; // set once the incident is pinned into the regression corpus
+}
+
+export interface RegressionPin {
+  trace_id: string;
+  incident_id: string;
+  side: string; // "must_block" | "must_pass"
+  expected_verdict: string;
+  expected_sequence: string[];
+  pinned_at: string;
+}
+
+export interface RegressionReport {
+  rows: {
+    trace_id: string;
+    incident_id?: string;
+    side: string;
+    outcome: string; // held | passed | regressed | escaped | skipped
+    status?: string;
+    expected?: unknown;
+    actual?: unknown;
+  }[];
+  held: number;
+  passed: number;
+  regressed: number;
+  escaped: number;
+  skipped: number;
+  safe_to_ship: boolean;
 }
 
 // ── workspace entitlement + paid Security features ──────────────────────────
@@ -460,6 +488,20 @@ export const api = {
     });
     return j<ApprovalResult>(r);
   },
+  // pin the incident's verdict into the regression corpus (write token)
+  pinIncident: async (incidentId: string): Promise<{ pinned: boolean; pin: RegressionPin }> => {
+    const token = useApp.getState().writeToken;
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const r = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/pin`, {
+      method: "POST", headers, body: "{}",
+    });
+    return j<{ pinned: boolean; pin: RegressionPin }>(r);
+  },
+  regressionCorpus: () =>
+    fetch("/api/regression").then((r) => j<{ pins: RegressionPin[] }>(r).then((b) => b.pins)),
+  runRegression: () =>
+    fetch("/api/regression/run", { method: "POST" }).then((r) => j<RegressionReport>(r)),
 
   // ── runtime jobs (control surface) ────────────────────────────────────────
   connectRuntime: (model: string, agentRef?: string) =>

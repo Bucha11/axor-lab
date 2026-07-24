@@ -24,6 +24,7 @@ from pathlib import Path
 # The action types the workflow records. New types are additive — a reader that
 # does not know a type still lists it (the log is the source of truth).
 INCIDENT_IMPORTED = "incident_imported"
+INCIDENT_PINNED = "incident_pinned"
 REGRESSION_RUN = "regression_run"
 APPROVAL_GRANTED = "approval_granted"
 REPORT_EXPORTED = "report_exported"

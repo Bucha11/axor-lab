@@ -25,51 +25,69 @@ function Row({ k, children }: { k: string; children: React.ReactNode }) {
 // incident→regression conversion is auditable. The approval is written to the
 // append-only audit log; on a hosted workspace below the Security tier the
 // server answers 402, shown honestly here.
-function ApprovalPanel({ incidentId }: { incidentId: string }) {
+function GovernancePanel({ incidentId }: { incidentId: string }) {
   const qc = useQueryClient();
   const [approver, setApprover] = useState("");
   const [note, setNote] = useState("");
   const list = useQuery({ queryKey: ["incidents"], queryFn: api.listIncidents });
-  const approved = list.data?.find((i) => i.incident_id === incidentId)?.approved ?? false;
-  const m = useMutation({
+  const row = list.data?.find((i) => i.incident_id === incidentId);
+  const approved = row?.approved ?? false;
+  const pinned = row?.pinned ?? false;
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["incidents"] });
+    qc.invalidateQueries({ queryKey: ["audit"] });
+    qc.invalidateQueries({ queryKey: ["regression"] });
+  };
+  const approve = useMutation({
     mutationFn: () => api.approveIncident(incidentId, approver.trim() || "operator", note.trim()),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["incidents"] });
-      qc.invalidateQueries({ queryKey: ["audit"] });
-    },
+    onSuccess: invalidate,
   });
+  const pin = useMutation({ mutationFn: () => api.pinIncident(incidentId), onSuccess: invalidate });
+  const err = approve.error ?? pin.error;
 
-  if (approved) {
-    return (
-      <div className="p-3 mb-3" style={{ background: C.panel, border: `1px solid ${C.green}`, borderRadius: 10 }}>
-        <span className="wrapline" style={{ gap: 6, fontFamily: MONO, fontSize: 11.5, color: C.green }}>
-          <Check size={13} /> approved — recorded in the audit trail
-        </span>
-      </div>
-    );
-  }
   return (
     <div className="p-3 mb-3" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
       <div style={{ fontFamily: MONO, fontSize: 11.5, fontWeight: 700, color: C.text, marginBottom: 8 }}>
-        approve this incident
+        incident governance
       </div>
-      <div className="wrapline" style={{ gap: 8 }}>
-        <input
-          value={approver} onChange={(e) => setApprover(e.target.value)}
-          placeholder="approver" style={{ ...inp, width: 130 }}
-        />
-        <input
-          value={note} onChange={(e) => setNote(e.target.value)}
-          placeholder="note (optional)" style={{ ...inp, flex: 1, minWidth: 120 }}
-        />
-        <button onClick={() => m.mutate()} disabled={m.isPending} style={cta(!m.isPending)}>
-          {m.isPending ? "…" : "approve"}
-        </button>
+
+      {/* approve */}
+      {approved ? (
+        <span className="wrapline" style={{ gap: 6, fontFamily: MONO, fontSize: 11, color: C.green }}>
+          <Check size={13} /> approved — in the audit trail
+        </span>
+      ) : (
+        <div className="wrapline" style={{ gap: 8 }}>
+          <input value={approver} onChange={(e) => setApprover(e.target.value)}
+            placeholder="approver" style={{ ...inp, width: 120 }} />
+          <input value={note} onChange={(e) => setNote(e.target.value)}
+            placeholder="note (optional)" style={{ ...inp, flex: 1, minWidth: 110 }} />
+          <button onClick={() => approve.mutate()} disabled={approve.isPending} style={cta(!approve.isPending)}>
+            {approve.isPending ? "…" : "approve"}
+          </button>
+        </div>
+      )}
+
+      {/* pin into the regression corpus */}
+      <div className="wrapline" style={{ gap: 8, marginTop: 10, justifyContent: "space-between" }}>
+        <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut }}>
+          pin this verdict into the regression corpus so it is re-checked
+        </span>
+        {pinned ? (
+          <span className="wrapline" style={{ gap: 6, fontFamily: MONO, fontSize: 11, color: C.green }}>
+            <Check size={13} /> pinned
+          </span>
+        ) : (
+          <button onClick={() => pin.mutate()} disabled={pin.isPending} style={cta(!pin.isPending)}>
+            {pin.isPending ? "…" : "pin as regression"}
+          </button>
+        )}
       </div>
-      {m.isError && (
+
+      {err && (
         <div style={{ fontFamily: MONO, fontSize: 10, color: C.amber, marginTop: 8, lineHeight: 1.5 }}>
-          {m.error instanceof Error ? m.error.message : "approval failed"} — a hosted
-          workspace needs the Security tier and a write token (Settings).
+          {err instanceof Error ? err.message : "failed"} — a hosted workspace needs the
+          Security tier and a write token (Settings).
         </div>
       )}
     </div>
@@ -154,7 +172,7 @@ export default function IncidentView({ incidentId }: { incidentId: string }) {
         )}
       </div>
 
-      <ApprovalPanel incidentId={incidentId} />
+      <GovernancePanel incidentId={incidentId} />
 
       <TraceSteps trace={inc.trace} />
 

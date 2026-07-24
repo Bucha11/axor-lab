@@ -119,6 +119,57 @@ function History() {
   );
 }
 
+function Regression() {
+  const q = useQuery({ queryKey: ["regression"], queryFn: api.regressionCorpus, retry: false });
+  const [report, setReport] = useState<Awaited<ReturnType<typeof api.runRegression>> | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (q.isError && isGated(q.error)) return <Gated what="Regression corpus" />;
+  const pins = q.data ?? [];
+  const run = async () => {
+    setBusy(true);
+    try {
+      setReport(await api.runRegression());
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="p-3 mb-4" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
+      <div className="wrapline" style={{ gap: 8, justifyContent: "space-between", marginBottom: 8 }}>
+        <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700, color: C.text }}>
+          regression corpus · {pins.length} pin{pins.length === 1 ? "" : "s"}
+        </span>
+        <button onClick={run} disabled={busy || pins.length === 0} style={cta(!busy && pins.length > 0)}>
+          {busy ? "running…" : "run corpus"}
+        </button>
+      </div>
+      {pins.length === 0 ? (
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>
+          no pins yet — pin an incident's verdict from its page.
+        </div>
+      ) : (
+        pins.map((p) => (
+          <div key={p.trace_id} className="wrapline" style={{ gap: 8, padding: "2px 0", fontFamily: MONO, fontSize: 10.5 }}>
+            <span style={{ color: p.side === "must_block" ? C.red : C.green, minWidth: 90 }}>{p.side}</span>
+            <span style={{ color: C.mut }}>{p.trace_id}</span>
+          </div>
+        ))
+      )}
+      {report && (
+        <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 8, fontFamily: MONO, fontSize: 10.5 }}>
+          <span style={{ color: report.safe_to_ship ? C.green : C.red }}>
+            {report.safe_to_ship ? "safe to ship" : "NOT safe"} ·{" "}
+          </span>
+          <span style={{ color: C.mut }}>
+            {report.held} held · {report.passed} passed · {report.regressed} regressed ·{" "}
+            {report.escaped} escaped · {report.skipped} skipped
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Compliance() {
   const [report, setReport] = useState<ComplianceReport | null>(null);
   const [gated, setGated] = useState(false);
@@ -177,6 +228,7 @@ export default function Workspace() {
       </div>
       <LicenseCard />
       <History />
+      <Regression />
       <Compliance />
       <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.6 }}>
         On a self-hosted Lab these are free; on a hosted workspace they need the

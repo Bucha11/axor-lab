@@ -75,6 +75,8 @@ class TestHostedGate(_ServerCase):
         base = self._serve(hosted=True, license_obj=None)
         self.assertEqual(self._get(base, "/api/audit")[0], 402)
         self.assertEqual(self._get(base, "/api/compliance/report")[0], 402)
+        self.assertEqual(self._get(base, "/api/regression")[0], 402)
+        self.assertEqual(self._post(base, "/api/regression/run", {})[0], 402)
 
     def test_hosted_below_tier_is_402(self) -> None:
         base = self._serve(hosted=True, license_obj=_license("team"))
@@ -138,6 +140,46 @@ class TestWorkflowSpine(_ServerCase):
 
     def test_approve_unknown_incident_is_404(self) -> None:
         code, _ = self._post(self.base, "/api/incidents/i_missing/approve", {"approver": "x"})
+        self.assertEqual(code, 404)
+
+    def test_pin_then_regression_run_closes_the_chain(self) -> None:
+        incident_id = self._import()
+        # pin the incident's verdict into the corpus
+        code, body = self._post(self.base, f"/api/incidents/{incident_id}/pin", {})
+        self.assertEqual(code, 200, body)
+        self.assertTrue(body["pinned"])
+        side = body["pin"]["side"]
+        self.assertIn(side, ("must_block", "must_pass"))
+
+        # it shows in the corpus and on the incident listing
+        _, corpus = self._get(self.base, "/api/regression")
+        self.assertEqual(len(corpus["pins"]), 1)
+        _, listing = self._get(self.base, "/api/incidents")
+        self.assertTrue(next(i for i in listing["incidents"] if i["incident_id"] == incident_id)["pinned"])
+
+        # a regression run re-verifies it (recorded kernel → reproduces → held/passed)
+        code, report = self._post(self.base, "/api/regression/run", {})
+        self.assertEqual(code, 200, report)
+        outcomes = {r["outcome"] for r in report["rows"]}
+        self.assertTrue(outcomes <= {"held", "passed"}, report)
+        self.assertTrue(report["safe_to_ship"])
+        self.assertEqual(report["regressed"], 0)
+        self.assertEqual(report["escaped"], 0)
+
+        # the chain is now auditable: pin + run are in the log and the report
+        _, audit = self._get(self.base, "/api/audit")
+        actions = [e["action"] for e in audit["events"]]
+        self.assertIn("incident_pinned", actions)
+        self.assertIn("regression_run", actions)
+        _, compliance = self._get(self.base, "/api/compliance/report")
+        self.assertEqual(compliance["action_counts"]["incident_pinned"], 1)
+        self.assertEqual(compliance["action_counts"]["regression_run"], 1)
+        self.assertTrue(next(
+            i for i in compliance["incidents"] if i["incident_id"] == incident_id
+        )["pinned"])
+
+    def test_pin_unknown_incident_is_404(self) -> None:
+        code, _ = self._post(self.base, "/api/incidents/i_missing/pin", {})
         self.assertEqual(code, 404)
 
     def test_approve_requires_write_token(self) -> None:
