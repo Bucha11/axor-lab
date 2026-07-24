@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -40,16 +41,47 @@ def main(argv: list[str] | None = None) -> int:
              "(or AXOR_LAB_CONTROL_TOKEN); runtime-facing endpoints stay gated "
              "by their per-runtime ingest_key",
     )
+    parser.add_argument(
+        "--license-file", default=os.environ.get("AXOR_LAB_LICENSE_FILE"),
+        help="workspace license file (axor-packaging.md §4); none = community tier",
+    )
+    parser.add_argument(
+        "--vendor-pubkey", default=os.environ.get("AXOR_VENDOR_PUBKEY"),
+        help="vendor Ed25519 public key (hex) to verify the license against "
+             "(or AXOR_VENDOR_PUBKEY)",
+    )
     args = parser.parse_args(argv)
+
+    # the workspace entitlement is OPTIONAL: without a valid license the server
+    # runs as the community tier (free, local/public). An invalid or unverifiable
+    # license is a loud warning, never a hard stop — safety never checks it.
+    license_obj = None
+    if args.license_file:
+        from .license import LicenseError, verify_license
+        if not args.vendor_pubkey:
+            print("license file given but no --vendor-pubkey / AXOR_VENDOR_PUBKEY — "
+                  "running as community tier", file=sys.stderr)
+        else:
+            try:
+                license_obj = verify_license(
+                    Path(args.license_file).read_text(), args.vendor_pubkey,
+                )
+            except (LicenseError, OSError) as exc:
+                print(f"license not activated ({exc}) — running as community tier",
+                      file=sys.stderr)
+
     server = make_server(
         Path(args.root), host=args.host, port=args.port,
         write_token=args.write_token, admin_token=args.admin_token,
+        license_obj=license_obj,
     )
     auth = "token-gated" if args.write_token else "OPEN (local dev only — do not expose)"
+    tier = f"{license_obj.workspace_tier} workspace" if license_obj else "community tier"
     # report the BOUND port (server_address), not the requested one — with
     # --port 0 the OS picks an ephemeral port and the printed URL must work
     bound_port = server.server_address[1]
-    print(f"axor-lab server on http://{args.host}:{bound_port} (store: {args.root}) — writes: {auth}")
+    print(f"axor-lab server on http://{args.host}:{bound_port} (store: {args.root}) — "
+          f"writes: {auth} — {tier}")
     if args.runtime_port:
         runtime_server = make_runtime_server(
             host=args.host, port=args.runtime_port, control_token=args.control_token,

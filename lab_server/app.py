@@ -78,8 +78,14 @@ def make_server(
     server_id: str = "lab.local",
     server_key_id: str | None = None,
     server_signing_key: str | None = None,
+    license_obj: object | None = None,
 ) -> ThreadingHTTPServer:
-    """Build (do not start) an HTTP server bound to host:port."""
+    """Build (do not start) an HTTP server bound to host:port.
+
+    `license_obj` is an optional verified `lab_server.license.License` — the
+    workspace's entitlement (tier + modules), surfaced at GET /api/license/status.
+    None means the community tier (free, local/public); a paid workspace passes a
+    license the vendor signed."""
     store = PublicationStore(
         root=store_root, known_keys=known_keys or {},
         server_id=server_id, server_key_id=server_key_id,
@@ -125,6 +131,24 @@ def make_server(
                         )
                     ]
                     self._json(200, {"publications": listing})
+                    return
+                if path == "/api/license/status":
+                    # the workspace entitlement (axor-packaging.md §4): tier +
+                    # modules the UI reads to unlock vs render locked. None → the
+                    # community tier; a safety feature never consults this.
+                    if license_obj is None:
+                        self._json(200, {"active": False, "workspace_tier": "community"})
+                        return
+                    from .license import KNOWN_MODULES
+                    self._json(200, {
+                        "active": True,
+                        "organization": license_obj.organization,
+                        "workspace_tier": license_obj.workspace_tier,
+                        "modules": {m: license_obj.has_module(m) for m in KNOWN_MODULES},
+                        "governed_node_ceiling": license_obj.governed_node_ceiling,
+                        "self_hosted_runner": license_obj.self_hosted_runner,
+                        "expires_at": license_obj.expires_at,
+                    })
                     return
                 if path == "/api/incidents":
                     self._json(200, {"incidents": [s.summary() for s in incidents.list()]})
