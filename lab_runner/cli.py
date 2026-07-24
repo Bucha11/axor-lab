@@ -1094,6 +1094,34 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_serve_runtime(args: argparse.Namespace) -> int:
+    """Run the connected-runtime worker: pull assigned experiments from a Lab
+    runtime-jobs server, execute them locally, and push back traces + aggregates
+    so the Builder -> Run -> Results flow finishes at `completed` (the reverse of
+    `run`, which writes a bundle directory instead of pushing to a server)."""
+    from . import worker
+
+    agent = _resolve_agent_override(args.agent) if getattr(args, "agent", None) else None
+    processed = worker.serve(
+        args.url,
+        once=bool(args.once),
+        control_token=args.control_token,
+        agent=agent,
+        model=args.model,
+        poll_interval=args.poll_interval,
+    )
+    if args.once and not processed:
+        print("no runs available — nothing to execute")
+        return EXIT_OK
+    for summary in processed:
+        print(
+            f"ran {summary['run_id']} -> {summary['state']} "
+            f"({summary['completed']}/{summary['trials']} trials, "
+            f"{summary['aggregates']} aggregates)"
+        )
+    return EXIT_OK
+
+
 def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
     from lab_adapters import (
         UnknownSuiteError,
@@ -1607,6 +1635,37 @@ def _build_parser() -> argparse.ArgumentParser:
     p_incident.add_argument("--created", default=None)
     p_incident.add_argument("--overwrite", action="store_true", help="replace a non-empty --out")
     p_incident.set_defaults(func=_cmd_import_incident)
+
+    p_serve = sub.add_parser(
+        "serve-runtime",
+        help="run the connected-runtime worker: pull, execute, and push assigned runs",
+    )
+    p_serve.add_argument(
+        "--url", default="http://127.0.0.1:8010",
+        help="Lab runtime-jobs base URL (default: http://127.0.0.1:8010)",
+    )
+    p_serve.add_argument(
+        "--once", action="store_true",
+        help="process at most one available run, then exit (default: poll forever)",
+    )
+    p_serve.add_argument(
+        "--control-token", default=None,
+        help="bearer token for the runtime-jobs control surface (connect + aggregates)",
+    )
+    p_serve.add_argument(
+        "--model", default="scripted",
+        help="model label to register this runtime under (default: scripted)",
+    )
+    p_serve.add_argument(
+        "--agent", default=None,
+        help="BYOK agent override: cassette:<file> or anthropic:<model> "
+             "(default: the scripted agent from the assignment)",
+    )
+    p_serve.add_argument(
+        "--poll-interval", type=float, default=1.0,
+        help="seconds between polls when waiting for a run (ignored with --once)",
+    )
+    p_serve.set_defaults(func=_cmd_serve_runtime)
 
     p_import = sub.add_parser(
         "import-agentdojo", help="materialize a curated AgentDojo suite as an .axl file"
