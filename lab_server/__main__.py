@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.runtime_port:
         runtime_server = make_runtime_server(
             host=args.host, port=args.runtime_port, control_token=args.control_token,
+            store_root=Path(args.root) / "runtime-jobs",
         )
         threading.Thread(
             target=runtime_server.serve_forever, daemon=True, name="runtime-jobs",

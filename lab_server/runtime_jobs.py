@@ -48,6 +48,7 @@ import secrets
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 _MAX_BODY = 8 * 1024 * 1024
 
@@ -82,6 +83,18 @@ class _Trial:
     attempt: int = 1     # the current TrialAttempt ordinal (retries supersede)
     superseded: int = 0  # how many prior attempts this trial superseded
 
+    def to_dict(self) -> dict[str, object]:
+        return {"trial_id": self.trial_id, "events": self.events, "trace": self.trace,
+                "status": self.status, "attempt": self.attempt, "superseded": self.superseded}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> "_Trial":
+        return cls(
+            trial_id=str(d["trial_id"]), events=list(d.get("events", [])),  # type: ignore[arg-type]
+            trace=d.get("trace"), status=str(d.get("status", "pending")),  # type: ignore[arg-type]
+            attempt=int(d.get("attempt", 1)), superseded=int(d.get("superseded", 0)),  # type: ignore[arg-type]
+        )
+
 
 @dataclass
 class _Job:
@@ -94,6 +107,28 @@ class _Job:
     estimate: dict[str, object] = field(default_factory=dict)
     aggregates: list[dict[str, object]] = field(default_factory=list)
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "job_id": self.job_id, "runtime_ref": self.runtime_ref,
+            "assignment": self.assignment, "planned": list(self.planned),
+            "state": self.state, "estimate": self.estimate, "aggregates": self.aggregates,
+            "trials": {tid: t.to_dict() for tid, t in self.trials.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> "_Job":
+        trials = {str(k): _Trial.from_dict(v)  # type: ignore[arg-type]
+                  for k, v in (d.get("trials") or {}).items()}  # type: ignore[union-attr]
+        return cls(
+            job_id=str(d["job_id"]), runtime_ref=str(d["runtime_ref"]),
+            assignment=dict(d.get("assignment") or {}),  # type: ignore[arg-type]
+            planned=tuple(str(t) for t in (d.get("planned") or [])),  # type: ignore[union-attr]
+            state=str(d.get("state", "waiting_for_runtime")),
+            estimate=dict(d.get("estimate") or {}),  # type: ignore[arg-type]
+            aggregates=list(d.get("aggregates") or []),  # type: ignore[arg-type]
+            trials=trials,
+        )
+
 
 class RuntimeJobStore:
     """Thread-safe, in-memory assignment store. Lab hands out jobs; a connected
@@ -101,12 +136,43 @@ class RuntimeJobStore:
     uploading the finished trace. A job reaches `completed` once every planned
     trial has completed."""
 
-    def __init__(self) -> None:
+    def __init__(self, root: "Path | None" = None) -> None:
         self._lock = threading.Lock()
         self._runtimes: dict[str, dict[str, object]] = {}  # runtime_ref -> {..., ingest_key}
         self._by_key: dict[str, str] = {}                  # ingest_key -> runtime_ref
         self._jobs: dict[str, _Job] = {}
         self._n = 0
+        # optional durability: runs (assignments + collected traces/aggregates)
+        # persist to disk and reload on restart, so a completed run's results
+        # survive a process bounce. Runtimes are NOT persisted — a runtime
+        # reconnects for a fresh ingest_key; the valuable data is the run results.
+        self._root = root
+        if self._root is not None:
+            self._load()
+
+    def _load(self) -> None:
+        assert self._root is not None
+        if not self._root.exists():
+            return
+        for path in self._root.glob("*.json"):
+            try:
+                job = _Job.from_dict(json.loads(path.read_text()))
+            except (ValueError, KeyError):
+                continue  # one corrupt run file is skipped, never fatal
+            self._jobs[job.job_id] = job
+            # keep id generation past any reloaded run so a new run cannot collide
+            head = job.job_id.split("_")
+            if len(head) >= 2 and head[1].isdigit():
+                self._n = max(self._n, int(head[1]))
+
+    def _persist_locked(self, job: _Job) -> None:
+        if self._root is None:
+            return
+        self._root.mkdir(parents=True, exist_ok=True)
+        path = self._root / f"{job.job_id}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(job.to_dict()))
+        tmp.replace(path)
 
     def _next(self, prefix: str) -> str:
         self._n += 1
@@ -147,10 +213,12 @@ class RuntimeJobStore:
             # ever offered to a runtime. Default stays waiting_for_runtime so the
             # unconfirmed simple flow is unchanged.
             state = "awaiting_confirmation" if require_confirmation else "waiting_for_runtime"
-            self._jobs[job_id] = _Job(
+            job = _Job(
                 job_id=job_id, runtime_ref=runtime_ref, assignment=dict(experiment),
                 planned=plan, state=state, estimate=dict(estimate or {}),
             )
+            self._jobs[job_id] = job
+            self._persist_locked(job)
             return {"run_id": job_id, "state": state, "estimate": dict(estimate or {})}
 
     def confirm_run(self, job_id: str) -> dict[str, object]:
@@ -164,6 +232,7 @@ class RuntimeJobStore:
                 raise RuntimeJobsError(409, f"run {job_id!r} is not awaiting confirmation "
                                             f"(state {job.state})")
             job.state = "waiting_for_runtime"
+            self._persist_locked(job)
             return {"run_id": job_id, "state": job.state}
 
     def attach_aggregates(self, job_id: str,
@@ -178,6 +247,7 @@ class RuntimeJobStore:
             job.aggregates = list(aggregates)
             if job.state in ("running", "receiving_traces", "analyzing"):
                 job.state = "completed"
+            self._persist_locked(job)
             return {"run_id": job_id, "state": job.state, "aggregates": len(job.aggregates)}
 
     def run_state(self, job_id: str) -> str:
@@ -265,6 +335,7 @@ class RuntimeJobStore:
             if job.state != "waiting_for_runtime":
                 raise RuntimeJobsError(409, f"run {job_id!r} is not claimable (state {job.state})")
             job.state = "running"
+            self._persist_locked(job)
             return {"run_id": job_id, "assignment": job.assignment,
                     "planned_trials": list(job.planned)}
 
@@ -307,6 +378,7 @@ class RuntimeJobStore:
             trial.trace = trace
             trial.status = new_status
             self._maybe_finish(job)
+            self._persist_locked(job)
             return {"trial_id": trial_id, "status": trial.status, "run_state": job.state,
                     "attempt": trial.attempt, "superseded": trial.superseded}
 
@@ -498,11 +570,14 @@ def make_runtime_server(
     *,
     control_token: str | None = None,
     store: RuntimeJobStore | None = None,
+    store_root: Path | None = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs server. `control_token`, if set, gates the control
     surface (runtime registration + run assignment); the runtime-facing endpoints
-    are gated by the per-runtime ingest_key issued at connect."""
-    jobs = store or RuntimeJobStore()
+    are gated by the per-runtime ingest_key issued at connect. `store_root`, if
+    given (and no explicit `store`), persists runs there so a completed run's
+    results survive a restart."""
+    jobs = store or RuntimeJobStore(root=store_root)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:  # quiet
