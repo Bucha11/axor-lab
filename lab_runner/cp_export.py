@@ -134,6 +134,20 @@ def export_cp(
         )
 
     carried_pins = _validate_pins(bundle, regressions or [], traces or {})
+    # The COMPLETE frozen trace BODY for every carried pin, embedded so the
+    # Control Plane can actually REPLAY the pin (not merely record its hash).
+    # cp-deploy.json travels to CP as a single JSON document — the pin's
+    # trace_ref is only a content hash, so without the bodies here the CP has
+    # nothing to fold through its kernel and every Lab pin stays `skipped`.
+    # Additive under axor-cp-deploy/v1; keyed by trace_id and content-addressed
+    # by the pin's trace_ref, so a receiver verifies body-vs-ref before replay.
+    # Each trace already records the kernel it ran under (producer.kernel_version
+    # / trial.condition_id), so the CP knows whether it may faithfully replay it
+    # under the real axor-core kernel or must leave it skipped (reference kernel).
+    by_trace_id = {str(t["trace_id"]): t for t in (traces or {}).values()}
+    regression_traces = {
+        str(pin["trace_id"]): by_trace_id[str(pin["trace_id"])] for pin in carried_pins
+    }
     baseline_id = _baseline_condition_id(bundle)
     # the bridge is EARNED from RECOMPUTED evidence, not stored aggregates — so it
     # needs the traces. Without them it cannot be verified and is not earned (r16).
@@ -198,6 +212,9 @@ def export_cp(
         "runtime_config_hashes": runtime_hashes,
         "tool_manifests": bundle["tool_manifests"],
         "regressions": carried_pins,
+        # the frozen trace bodies for the carried pins (additive) — what makes
+        # the pins REPLAYABLE on the Control Plane rather than hash-only skips
+        "regression_traces": regression_traces,
         "source": source,
     }
     return CPExport(
@@ -247,6 +264,8 @@ def export_cp_template(
         "runtime_config_hashes": {},
         "tool_manifests": bundle["tool_manifests"],
         "regressions": [],
+        # no pins in a template → no bodies (kept for a uniform shape, additive)
+        "regression_traces": {},
         "source": {
             "bundle_id": bundle.get("bundle_id"),
             "condition_id": governed["id"],

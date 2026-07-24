@@ -119,6 +119,29 @@ class TestCPExport(unittest.TestCase):
         self.assertEqual(got["condition_id"], "governed")
         self.assertIn("scenario_id", got)
 
+    def test_carried_pin_embeds_the_frozen_trace_body(self) -> None:
+        # the exported config carries each carried pin's FULL frozen trace body
+        # (additive regression_traces), content-addressed by the pin's trace_ref,
+        # so the Control Plane can REPLAY the pin instead of skipping a hash-only
+        # reference. schema_version stays axor-cp-deploy/v1 (the field is additive).
+        bundle, traces = _bundle_and_traces()
+        trace = _denied_trace(traces)
+        pin = {"trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
+               "expected_verdict": "DENY"}
+        export = export_cp(bundle, regressions=[pin], traces=traces)
+        self.assertEqual(export.config["schema_version"], "axor-cp-deploy/v1")
+        embedded = export.config["regression_traces"]
+        self.assertIn(str(trace["trace_id"]), embedded)  # type: ignore[operator]
+        body = embedded[str(trace["trace_id"])]  # type: ignore[index]
+        # the embedded body IS the frozen trace (content-addresses to the pin ref)
+        self.assertEqual(content_hash(body), content_hash(trace))
+        self.assertEqual(body["trace_id"], str(trace["trace_id"]))
+
+    def test_export_with_no_pins_embeds_no_trace_bodies(self) -> None:
+        bundle, traces = _bundle_and_traces()
+        export = export_cp(bundle, regressions=[], traces=traces)
+        self.assertEqual(export.config["regression_traces"], {})
+
     def test_pin_for_a_trace_not_in_the_bundle_is_rejected(self) -> None:
         bundle, traces = _bundle_and_traces()
         pins = [{"trace_id": "t_never_ran", "expected_verdict": "DENY"}]
