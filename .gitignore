@@ -11,3 +11,9 @@ frontend/dist/
 
 # CLI publish receipts (written next to cwd by default)
 *.acceptance.json
+
+# deployment secrets — NEVER commit these
+.env
+secrets/
+certs/
+lab-store/

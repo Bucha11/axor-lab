@@ -1,0 +1,41 @@
+# Axor Lab — hosted pilot deployment (single-tenant), behind Cloudflare.
+#
+#   cp .env.example .env      # then fill in the tokens + vendor pubkey
+#   # put the workspace license at ./secrets/license.json
+#   # put the Cloudflare Origin Cert at ./certs/origin.pem + origin.key
+#   docker compose up -d --build
+#
+# See deploy/README.md for the full Hetzner + Cloudflare runbook.
+services:
+  lab-server:
+    build:
+      context: .
+      # axor-core may need a private index — pass it as a BuildKit secret:
+      #   secrets: [pip_conf]
+    env_file: .env
+    volumes:
+      - labdata:/data/lab-store
+      # the workspace license dir (axor-packaging.md §4). A directory mount does
+      # not fail when empty, so a community-tier box (no license.json) still comes
+      # up — the server falls back to community when the file is absent.
+      - ./secrets:/run/secrets:ro
+    expose:
+      - "8000"   # catalog/publish + paid API
+      - "8010"   # runtime-jobs
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Cloudflare Origin Certificate (Full-strict)
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - lab-server
+    restart: unless-stopped
+
+volumes:
+  labdata: {}
