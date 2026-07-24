@@ -339,6 +339,32 @@ export interface ValidateResult {
   errors: string[];
 }
 
+// GET /runs/{id}/bundle — a publishable bundle assembled from a COMPLETED run.
+// traces are keyed by trace_id, the exact shape POST /api/publications expects.
+export interface RunBundle {
+  bundle: Bundle;
+  traces: Record<string, Trace>;
+}
+
+// POST /api/publications → 201
+export interface PublishResult {
+  publication_id: string;
+  url: string; // "/e/{id}" (UI route #/e/{id})
+  integrity: string; // "hash_verified" | "signed"
+  acceptance?: Record<string, unknown>;
+}
+
+// thrown by publishBundle so the UI can show 402/replay-mismatch honestly. The
+// publish handshake rejects with the SERVER's own reason: a replay mismatch, a
+// content-hash failure, a 402 entitlement message, or a 409 takedown.
+export class PublishError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 // ── wrap surface (POST /wrap/*, axor-wrap engine behind the jobs server) ────
 
 export type EffectClass = "READ" | "WRITE" | "EXPORT" | "EXEC";
@@ -546,6 +572,38 @@ export const api = {
     ),
   runResults: (runId: string) =>
     jf(`/runs/${encodeURIComponent(runId)}/results`).then((r) => j<RunResults>(r)),
+  // assemble the publishable bundle from a completed run (control-token gated,
+  // like the other /runs/* control-surface reads)
+  runBundle: (runId: string) =>
+    jf(`/runs/${encodeURIComponent(runId)}/bundle`).then((r) => j<RunBundle>(r)),
+  // publish an assembled bundle — the server RE-VERIFIES (content hashes +
+  // bit-identical replay + statistical recomputation) before minting. Write-token
+  // gated on the publications server, like importIncident.
+  publishBundle: async (
+    bundle: Bundle,
+    traces: Record<string, Trace>,
+    question: string,
+    visibility: "public" | "unlisted" = "unlisted",
+  ): Promise<PublishResult> => {
+    const token = useApp.getState().writeToken;
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const r = await fetch("/api/publications", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ bundle, traces, question, visibility }),
+    });
+    let body: { error?: string } & Partial<PublishResult> = {};
+    try {
+      body = (await r.json()) as typeof body;
+    } catch {
+      /* non-JSON error body */
+    }
+    if (!r.ok) {
+      throw new PublishError(r.status, body.error ?? `${r.status}`);
+    }
+    return body as PublishResult;
+  },
   trialTrace: (runId: string, trialId: string) =>
     jf(
       `/runs/${encodeURIComponent(runId)}/trials/${encodeURIComponent(trialId)}/trace`,

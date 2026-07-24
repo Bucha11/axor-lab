@@ -23,6 +23,8 @@ Control surface (Lab operator / UI):
   GET  /runs/{id}            -> { state }  (a lifecycle state)
   GET  /runs/{id}/events     -> text/event-stream (state + trial progress)
   GET  /runs/{id}/results    -> { trials, traces, aggregates }  (collected so far)
+  GET  /runs/{id}/bundle     -> { bundle, traces }  (a bundle/v1 assembled from a
+                               COMPLETED run — publishable; 409 while still running)
   GET  /runs/{id}/trials/{trial_id}/trace  -> the completed trial's trace
   POST /wrap/scan            scan uploaded agent code for tools (axor-wrap; wrap_api.py)
   POST /wrap/manifests       human-classified tools -> tool manifests + governance YAML
@@ -55,6 +57,7 @@ _EVENTS_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]
 _TRIAL_DONE_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/complete$")
 _RUN_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)$")
 _RUN_RESULTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/results$")
+_RUN_BUNDLE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/bundle$")
 _RUN_EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
 _RUN_CONFIRM_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/confirm$")
 _RUN_AGG_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/aggregates$")
@@ -217,6 +220,37 @@ class RuntimeJobStore:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             return self._results_locked(job)
 
+    def run_bundle(self, job_id: str) -> dict[str, object]:
+        """Assemble a publishable bundle/v1 from a COMPLETED run.
+
+        Lab does not execute — it RECONSTRUCTS the bundle from the assignment (the
+        `.axl` experiment the runtime ran) plus the traces + aggregates the runtime
+        pushed back. A run that has not reached `completed` has no finished evidence
+        to bundle → 409; one that completed but carries no traces → 422. Returns
+        `{bundle, traces}` with traces keyed by trace_id, the shape publish expects.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise RuntimeJobsError(404, f"unknown run {job_id!r}")
+            if job.state != "completed":
+                raise RuntimeJobsError(
+                    409,
+                    f"run {job_id!r} is not completed (state {job.state}); a bundle can "
+                    "only be assembled once every planned trial has finished",
+                )
+            assignment = dict(job.assignment)
+            traces = [t.trace for t in job.trials.values() if t.trace is not None]
+            aggregates = list(job.aggregates)
+        if not traces:
+            raise RuntimeJobsError(
+                422, f"run {job_id!r} completed but pushed no traces to bundle"
+            )
+        # build OUTSIDE the lock — assembly resolves the assignment and hashes the
+        # traces, which never touches the shared store state
+        bundle, trace_map = build_run_bundle(assignment, traces, aggregates)
+        return {"bundle": bundle, "traces": trace_map}
+
     # -- runtime-facing surface ------------------------------------------
     def list_jobs(self, runtime_ref: str) -> list[dict[str, object]]:
         with self._lock:
@@ -334,6 +368,130 @@ def plan_experiment(experiment: dict[str, object]) -> dict[str, object]:
     }
 
 
+def build_run_bundle(
+    assignment: dict[str, object],
+    traces: list[dict[str, object]],
+    aggregates: list[dict[str, object]],
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """Assemble a bundle/v1 from a completed run's collected evidence.
+
+    The pieces build_bundle needs come from two places, exactly as the runner does:
+      - scenarios / conditions / tool_manifests / environment: RESOLVED from the
+        assignment (the `.axl` document the runtime ran) — `resolve` re-pins each
+        condition's config_hash and applies run_mode, so these are byte-identical to
+        what the runtime executed;
+      - trials: RECONSTRUCTED from each pushed trace's own trial coordinate. The
+        runtime-jobs store keeps traces, not the runner's trial records, so Lab
+        rebuilds a completed-trial record per trace. The bundle schema requires each
+        trial to carry a `runtime_config_hash`, so Lab RECOMPUTES it at build time
+        from the resolved condition + scenario inputs (deterministic — the same value
+        the runner recorded) but deliberately sets NO `runtime_provenance` marker, so
+        config_provenance derives `reconstructed_legacy`: Lab never observed the
+        execution-time config compilation and must not claim recorded_at_execution
+        (review r21).
+
+    Raises RuntimeJobsError(422) when the assignment is not a full runnable
+    experiment (e.g. an experiment-only block with no scenario/manifest bodies — such
+    a run could never have been executed by the runtime either)."""
+    from lab_contracts import (
+        CONFIG_COMPILER_VERSION,
+        build_bundle,
+        content_hash,
+        runtime_config_hash,
+    )
+    from lab_runner.bundle_io import PACKAGING
+    from lab_runner.cli import _environment
+    from lab_runner.errors import ExperimentFileError, RunnerError
+    from lab_runner.experiment_file import resolve
+
+    try:
+        resolved = resolve(assignment)
+    except ExperimentFileError as exc:
+        raise RuntimeJobsError(
+            422,
+            "cannot assemble a bundle: the run assignment is not a full runnable "
+            "experiment (" + "; ".join(exc.errors) + ")",
+        ) from exc
+
+    scen_by_id = {str(s["name"]): s for s in resolved.scenarios}
+    cond_by_id = {str(c["id"]): c for c in resolved.conditions}
+    manifest_list = list(resolved.manifests.values())
+
+    trials: list[dict[str, object]] = []
+    trace_map: dict[str, dict[str, object]] = {}
+    for trace in traces:
+        meta: dict[str, object] = trace.get("trial") or {}  # type: ignore[assignment]
+        ref = content_hash(trace)
+        sid, cid = str(meta.get("scenario_id")), str(meta.get("condition_id"))
+        scenario, condition = scen_by_id.get(sid), cond_by_id.get(cid)
+        if scenario is None or condition is None:
+            raise RuntimeJobsError(
+                422,
+                f"cannot assemble a bundle: trace {trace.get('trace_id')!r} names "
+                f"scenario/condition ({sid!r}, {cid!r}) not in the run assignment",
+            )
+        # RECOMPUTE the runtime config hash the schema requires — deterministic from
+        # (kernel, policy, manifests, scenario inputs), byte-identical to what the
+        # runner recorded. No runtime_provenance marker → reconstructed_legacy.
+        rch = runtime_config_hash(
+            str(condition["kernel"]), condition.get("policy"),  # type: ignore[arg-type]
+            manifest_list, scenario.get("inputs", {}),  # type: ignore[arg-type]
+        )
+        trials.append({
+            "trial_id": ref,
+            "scenario_id": sid,
+            "condition_id": cid,
+            "seed": str(meta.get("seed")),
+            "repeat_index": int(meta.get("repeat_index", 0)),
+            # the EXECUTION this unit belongs to — the trace's producer run_id, so
+            # verify_bundle can bind trial.execution_id to trace.trial.run_id
+            "execution_id": str(meta.get("run_id")),
+            "status": "completed",
+            "trace_ref": ref,
+            "runtime_config_hash": rch,
+            "config_compiler_version": CONFIG_COMPILER_VERSION,
+        })
+        trace_map[str(trace.get("trace_id"))] = trace
+
+    # the environment must describe the ACTUAL agent the runtime ran so its
+    # determinism matches the collected aggregates' comparison_design (a live model
+    # cannot carry a matched-pairs test). `resolve` reconstructs the same agent the
+    # worker resolved by default; `_environment` is the runner's own assembly.
+    agent = resolved.agent
+    model = str(resolved.experiment.get("agent_ref", "") or "scripted")
+    try:
+        environment = _environment(resolved, model, agent=agent)
+    except RunnerError as exc:
+        # e.g. a matched_pairs design declared over a non-deterministic agent — the
+        # same error the runner would raise; surface it cleanly rather than as a 500
+        raise RuntimeJobsError(422, f"cannot assemble a bundle: {exc}") from exc
+
+    # a CONTENT-derived bundle id: the same evidence always yields the same id, so a
+    # re-fetch of the same completed run bundles identically
+    bundle_id = "b_run_" + content_hash({
+        "experiment_id": resolved.experiment.get("id"),
+        "trace_refs": sorted(str(t["trace_ref"]) for t in trials),
+        "aggregates": aggregates,
+    }).removeprefix("sha256:")[:32]
+    # a SERVER timestamp — this is server code assembling the bundle now
+    from datetime import datetime, timezone
+    created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    bundle = build_bundle(
+        bundle_id=bundle_id,
+        created=created,
+        scenarios=list(resolved.scenarios),
+        conditions=list(resolved.conditions),
+        tool_manifests=list(resolved.manifests.values()),
+        environment=environment,
+        trials=trials,
+        aggregates=list(aggregates),
+        traces=trace_map,
+        packaging=dict(PACKAGING),
+    )
+    return bundle, trace_map
+
+
 def make_runtime_server(
     host: str = "127.0.0.1",
     port: int = 0,
@@ -417,6 +575,11 @@ def make_runtime_server(
                 if m:
                     self._require_control()
                     self._send(200, jobs.results(m.group(1)))
+                    return
+                m = _RUN_BUNDLE_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    self._send(200, jobs.run_bundle(m.group(1)))
                     return
                 m = _RUN_TRACE_RE.match(self.path)
                 if m:

@@ -12,6 +12,7 @@ from .incidents import IncidentStore, StoredIncident
 from .runtime_jobs import (
     RuntimeJobsError,
     RuntimeJobStore,
+    build_run_bundle,
     make_runtime_server,
     plan_experiment,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "ServerError",
     "StoredPublication",
     "Unauthorized",
+    "build_run_bundle",
     "make_runtime_server",
     "make_server",
     "plan_experiment",

@@ -5,10 +5,10 @@
 // traces (GET /runs/{id}/trials/{trial_id}/trace).
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, ChevronDown, ChevronRight, FileText, Search } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, FileText, Search, Upload } from "lucide-react";
 import { C, MONO, btn, cta } from "../theme";
 import { navigate } from "../router";
-import { api } from "../api";
+import { api, PublishError } from "../api";
 import { useApp } from "../store";
 import AggregateTable from "../components/AggregateTable";
 import TraceSteps from "../components/TraceSteps";
@@ -18,6 +18,13 @@ export default function Results({ runId }: { runId?: string }) {
   const lastRunId = useApp((s) => s.lastRunId);
   const id = runId ?? lastRunId ?? undefined;
   const [openTrial, setOpenTrial] = useState<string | null>(null);
+  // publish-this-run state: the question the publication answers, its visibility
+  // (unlisted by default — the backend's safe default), and the in-flight status.
+  const [question, setQuestion] = useState("");
+  const [visibility, setVisibility] = useState<"unlisted" | "public">("unlisted");
+  const [publishing, setPublishing] = useState(false);
+  const [publishErr, setPublishErr] = useState<string | null>(null);
+  const [publishedId, setPublishedId] = useState<string | null>(null);
 
   const results = useQuery({
     queryKey: ["run-results", id],
@@ -63,6 +70,31 @@ export default function Results({ runId }: { runId?: string }) {
     a.download = `${r.run_id}-results.md`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  // publish this run: assemble the bundle from the completed run (GET
+  // /runs/{id}/bundle), then POST it to the publications server, which RE-VERIFIES
+  // (content hashes + bit-identical replay + statistical recomputation) before
+  // minting. Any failure — a 402 entitlement, a replay mismatch, a content-hash
+  // failure — surfaces the server's own reason, unedited.
+  const doPublish = async () => {
+    if (!r) return;
+    setPublishing(true);
+    setPublishErr(null);
+    setPublishedId(null);
+    try {
+      const { bundle, traces } = await api.runBundle(r.run_id);
+      const res = await api.publishBundle(bundle, traces, question.trim(), visibility);
+      setPublishedId(res.publication_id);
+    } catch (e) {
+      setPublishErr(
+        e instanceof PublishError
+          ? `${e.status} — ${e.message}`
+          : String(e instanceof Error ? e.message : e),
+      );
+    } finally {
+      setPublishing(false);
+    }
   };
 
   return (
@@ -158,15 +190,78 @@ export default function Results({ runId }: { runId?: string }) {
               </div>
             </div>
           </div>
-          <div className="wrapline">
+          <div className="wrapline" style={{ marginBottom: 12 }}>
             <button onClick={doExport} style={btn({ color: C.text, background: C.bg, padding: "7px 13px" })}>
               <FileText size={12} /> Export Markdown
             </button>
             <span style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim }}>
-              publish-from-UI is not wired yet — assemble the bundle with the runner, then{" "}
-              <span style={{ color: C.mut }}>axor-lab publish ./bundle --server …</span>
+              or publish this run below — the server re-verifies (replay + stats) before minting
             </span>
           </div>
+
+          {/* publish this run — the bundle is assembled from the completed run
+              (GET /runs/{id}/bundle) and re-verified server-side before minting */}
+          {r.state !== "completed" ? (
+            <div style={{ fontFamily: MONO, fontSize: 10, color: C.mut, lineHeight: 1.5 }}>
+              publish becomes available once the run reaches <span style={{ color: C.text }}>completed</span>{" "}
+              (current state: <span style={{ color: C.amber }}>{r.state}</span>) — every planned trial must
+              finish so the bundle carries its full evidence.
+            </div>
+          ) : publishedId ? (
+            <div className="flex items-center gap-2" style={{ fontFamily: MONO, fontSize: 11, color: C.green }}>
+              <ExternalLink size={12} />
+              <span>published — </span>
+              <a
+                href={`#/e/${publishedId}`}
+                onClick={() => navigate(`e/${publishedId}`)}
+                style={{ color: C.steel, textDecoration: "underline" }}
+              >
+                #/e/{publishedId}
+              </a>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <input
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                placeholder="the question this publication answers (e.g. does content-ledger governance cut ASR?)"
+                style={{
+                  fontFamily: MONO, fontSize: 11, color: C.text, background: C.bg,
+                  border: `1px solid ${C.line}`, borderRadius: 5, padding: "7px 10px", width: "100%",
+                  boxSizing: "border-box",
+                }}
+              />
+              <div className="wrapline" style={{ gap: 10 }}>
+                <label style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, display: "flex", alignItems: "center", gap: 6 }}>
+                  visibility
+                  <select
+                    value={visibility}
+                    onChange={(e) => setVisibility(e.target.value as "unlisted" | "public")}
+                    style={{
+                      fontFamily: MONO, fontSize: 10.5, color: C.text, background: C.bg,
+                      border: `1px solid ${C.line}`, borderRadius: 5, padding: "5px 8px",
+                    }}
+                  >
+                    <option value="unlisted">unlisted (capability URL only)</option>
+                    <option value="public">public (listed in the catalog)</option>
+                  </select>
+                </label>
+                <button
+                  onClick={doPublish}
+                  disabled={publishing || !question.trim()}
+                  style={cta(!publishing && !!question.trim(), { padding: "7px 13px" })}
+                >
+                  <Upload size={12} /> {publishing ? "publishing…" : "publish this run"}
+                </button>
+              </div>
+              {publishErr && (
+                <div className="flex items-start gap-2" style={{ fontFamily: MONO, fontSize: 10, color: C.red, lineHeight: 1.5 }}>
+                  <AlertTriangle size={11} style={{ marginTop: 1, flexShrink: 0 }} />
+                  <span>{publishErr}</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
