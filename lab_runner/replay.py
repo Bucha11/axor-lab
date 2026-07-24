@@ -107,7 +107,7 @@ def replay_trace_status(
     matching intent, a duplicate decision for one intent, or an intent left with
     no decision at end of trace ⇒ MALFORMED_TRACE. An incomplete trace is NEVER
     reported as reproduced."""
-    from .axor_backend import AxorKernel, gate_with_governor
+    from .axor_backend import AxorKernel, driving_value_id, gate_with_governor
 
     values = {str(v["value_id"]): v for v in trace["values"]}  # type: ignore[union-attr]
     events: list[dict[str, object]] = list(trace["events"])  # type: ignore[arg-type]
@@ -175,10 +175,12 @@ def replay_trace_status(
             # the off-path ignores args entirely, so pass empty args to it
             args = {} if bound_redacted else resolve_args(bindings, values)
             if isinstance(kernel, AxorKernel):
-                driving = pending_call.get("arg_bindings", {}).get("recipient", "v_none")  # type: ignore[union-attr]
+                driving = driving_value_id(
+                    manifests[str(pending_call["tool"])], bindings,
+                )
                 decision = gate_with_governor(
                     kernel.config, str(condition["enforcement"]), registrations,
-                    str(pending_call["tool"]), args, str(driving),
+                    str(pending_call["tool"]), args, driving,
                 )
             else:
                 labels = {

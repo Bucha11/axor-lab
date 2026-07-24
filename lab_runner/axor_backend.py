@@ -212,6 +212,24 @@ def governor_config(
     return config
 
 
+def driving_value_id(manifest: dict[str, object], arg_bindings: dict[str, str]) -> str:
+    """The ledger value id the governor's verdict is attributed to.
+
+    The real-governor path reports the binding of the manifest's first declared
+    driving arg (``effect.driving_args``) — the SAME selection the reference
+    kernel makes (``kernel.decide``) — so the recorded ``driving_value_id``
+    follows the tool manifest instead of a hardcoded ``recipient`` arg name.
+    Both the live gate and replay call this, so the value they attribute the
+    verdict to cannot diverge (architecture rule 0). ``"v_none"`` when the
+    declared driving arg is not bound (the real-governor path's existing
+    sentinel; the verdict itself is unaffected — it is a pure function of the
+    tainted registrations and the sink args, not of this reported id)."""
+    driving_args = list((manifest.get("effect") or {}).get("driving_args") or [])  # type: ignore[union-attr]
+    if driving_args and str(driving_args[0]) in arg_bindings:
+        return str(arg_bindings[str(driving_args[0])])
+    return "v_none"
+
+
 def gate_with_governor(
     config: dict[str, object],
     enforcement: str,

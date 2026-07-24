@@ -20,7 +20,7 @@ from lab_contracts.canonical import (
 )
 
 from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
-from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
+from .axor_backend import AxorKernel, driving_value_id, gate_with_governor, resolve_kernel
 from .errors import CostCeilingReached
 from .kernel import Kernel, KernelRegistry
 from .ledger import ValueLedger
@@ -170,7 +170,7 @@ def run_trial(
         ]
         decision = gate_with_governor(
             kernel.config, str(condition["enforcement"]), registrations,
-            sink_tool, args, v_recipient,
+            sink_tool, args, driving_value_id(manifests[sink_tool], arg_bindings),
         )
     else:
         decision = kernel.decide(
