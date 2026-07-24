@@ -2,9 +2,10 @@
 // summary of what was imported (scenario, recorded condition, source pointer
 // back to the Control Plane run) and the trace, step by step, reusing the
 // evidence-view components. Data: GET /api/incidents/{id}.
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink } from "lucide-react";
-import { C, MONO } from "../theme";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Check, ExternalLink } from "lucide-react";
+import { C, MONO, cta, inp } from "../theme";
 import { navigate } from "../router";
 import { api } from "../api";
 import TraceSteps, { verdictOf } from "../components/TraceSteps";
@@ -16,6 +17,61 @@ function Row({ k, children }: { k: string; children: React.ReactNode }) {
     <div className="wrapline" style={{ gap: 8, padding: "3px 0" }}>
       <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim, minWidth: 110 }}>{k}</span>
       <span style={{ fontFamily: MONO, fontSize: 11.5, color: C.text }}>{children}</span>
+    </div>
+  );
+}
+
+// Approvals (Security-tier paid feature): sign off on an incident so its
+// incident→regression conversion is auditable. The approval is written to the
+// append-only audit log; on a hosted workspace below the Security tier the
+// server answers 402, shown honestly here.
+function ApprovalPanel({ incidentId }: { incidentId: string }) {
+  const qc = useQueryClient();
+  const [approver, setApprover] = useState("");
+  const [note, setNote] = useState("");
+  const list = useQuery({ queryKey: ["incidents"], queryFn: api.listIncidents });
+  const approved = list.data?.find((i) => i.incident_id === incidentId)?.approved ?? false;
+  const m = useMutation({
+    mutationFn: () => api.approveIncident(incidentId, approver.trim() || "operator", note.trim()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["incidents"] });
+      qc.invalidateQueries({ queryKey: ["audit"] });
+    },
+  });
+
+  if (approved) {
+    return (
+      <div className="p-3 mb-3" style={{ background: C.panel, border: `1px solid ${C.green}`, borderRadius: 10 }}>
+        <span className="wrapline" style={{ gap: 6, fontFamily: MONO, fontSize: 11.5, color: C.green }}>
+          <Check size={13} /> approved — recorded in the audit trail
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="p-3 mb-3" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
+      <div style={{ fontFamily: MONO, fontSize: 11.5, fontWeight: 700, color: C.text, marginBottom: 8 }}>
+        approve this incident
+      </div>
+      <div className="wrapline" style={{ gap: 8 }}>
+        <input
+          value={approver} onChange={(e) => setApprover(e.target.value)}
+          placeholder="approver" style={{ ...inp, width: 130 }}
+        />
+        <input
+          value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder="note (optional)" style={{ ...inp, flex: 1, minWidth: 120 }}
+        />
+        <button onClick={() => m.mutate()} disabled={m.isPending} style={cta(!m.isPending)}>
+          {m.isPending ? "…" : "approve"}
+        </button>
+      </div>
+      {m.isError && (
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.amber, marginTop: 8, lineHeight: 1.5 }}>
+          {m.error instanceof Error ? m.error.message : "approval failed"} — a hosted
+          workspace needs the Security tier and a write token (Settings).
+        </div>
+      )}
     </div>
   );
 }
@@ -97,6 +153,8 @@ export default function IncidentView({ incidentId }: { incidentId: string }) {
           </Row>
         )}
       </div>
+
+      <ApprovalPanel incidentId={incidentId} />
 
       <TraceSteps trace={inc.trace} />
 

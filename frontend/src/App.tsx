@@ -4,7 +4,9 @@
 // and EvidenceCases (#/e/{publication_id}/evidence/{trace_id}) are addressable.
 // Five primary tabs; the rest behind "more…".
 import { C, MONO } from "./theme";
+import { useQuery } from "@tanstack/react-query";
 import { navigate, useRoute } from "./router";
+import { api } from "./api";
 import Landing from "./tabs/Landing";
 import AgentIngest from "./tabs/AgentIngest";
 import Builder from "./tabs/Builder";
@@ -16,12 +18,14 @@ import EvidenceView from "./tabs/EvidenceView";
 import ScenarioAuthor from "./tabs/ScenarioAuthor";
 import ImportIncident from "./tabs/ImportIncident";
 import IncidentView from "./tabs/IncidentView";
+import Workspace from "./tabs/Workspace";
 
 const PRIMARY = ["home", "builder", "runs", "results", "published"] as const;
 const MORE = [
   { id: "agent-ingest", label: "bring an agent" },
   { id: "scenario-author", label: "scenario author" },
   { id: "import", label: "import incident" },
+  { id: "workspace", label: "workspace" },
 ] as const;
 
 function NavLink({ id, active }: { id: string; active: boolean }) {
@@ -66,6 +70,28 @@ function MoreMenu({ activeKey }: { activeKey: string }) {
   );
 }
 
+// Header badge: the live workspace tier from /api/license/status. Community
+// (self-hosted / unlicensed) reads "free for research"; a licensed hosted
+// workspace shows its tier, clickable through to the workspace surface.
+function TierBadge() {
+  const q = useQuery({ queryKey: ["license-status"], queryFn: api.licenseStatus, retry: false });
+  const active = q.data?.active === true;
+  const label = active ? `${q.data?.workspace_tier} workspace` : "free for research";
+  return (
+    <button
+      onClick={() => navigate("workspace")}
+      title="workspace entitlement"
+      style={{
+        background: "none", border: `1px solid ${active ? C.green : C.line}`, borderRadius: 20,
+        padding: "3px 10px", cursor: "pointer", fontFamily: MONO, fontSize: 10,
+        color: active ? C.green : C.dim,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 // which primary tab a route key highlights
 function activeTab(key: string): string {
   if (key === "" ) return "home";
@@ -98,9 +124,7 @@ export default function App() {
             <MoreMenu activeKey={key} />
           </div>
         </div>
-        <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>
-          lab.useaxor.net · free for research
-        </span>
+        <TierBadge />
       </div>
 
       {(key === "home" || key === "") && <Landing />}
@@ -118,6 +142,7 @@ export default function App() {
           an imported incident lives at #/i/{incident_id} */}
       {key === "import" && <ImportIncident />}
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
+      {key === "workspace" && <Workspace />}
     </div>
   );
 }

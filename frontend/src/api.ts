@@ -194,6 +194,48 @@ export interface IncidentSummary {
   scenario_id: string;
   source?: { product?: string; run_id?: string; url?: string } | null;
   imported_at: string;
+  approved?: boolean; // set on the hosted listing once an approval is recorded
+}
+
+// ── workspace entitlement + paid Security features ──────────────────────────
+export interface LicenseStatus {
+  active: boolean;
+  organization?: string;
+  workspace_tier?: string; // "community" | "team" | "security"
+  modules?: { private_lab: boolean; control_plane: boolean };
+  governed_node_ceiling?: number;
+  self_hosted_runner?: boolean;
+  expires_at?: string;
+}
+
+export interface AuditEntry {
+  seq: number;
+  ts: string;
+  action: string;
+  actor: string;
+  target?: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface ApprovalResult {
+  incident_id: string;
+  approved: boolean;
+  approval: AuditEntry;
+}
+
+export interface ComplianceReport {
+  schema_version: string;
+  window: { since: string | null; until: string | null };
+  generated_at: string;
+  action_counts: Record<string, number>;
+  total_events: number;
+  incidents: {
+    incident_id: string;
+    trace_id?: string;
+    imported_at?: string;
+    approved: boolean;
+    approvals: { actor?: string; ts?: string; note?: string }[];
+  }[];
 }
 
 // GET /api/incidents/{id} — the accepted envelope + the built bundle
@@ -398,6 +440,26 @@ export const api = {
     fetch(`/api/incidents/${encodeURIComponent(incidentId)}`).then((r) => j<Incident>(r)),
   resolveTrace: (traceId: string) =>
     fetch(`/api/traces/${encodeURIComponent(traceId)}`).then((r) => j<TraceResolution>(r)),
+
+  // ── workspace entitlement + paid Security features ────────────────────────
+  licenseStatus: () =>
+    fetch("/api/license/status").then((r) => j<LicenseStatus>(r)),
+  auditLog: () =>
+    fetch("/api/audit").then((r) => j<{ events: AuditEntry[] }>(r).then((b) => b.events)),
+  complianceReport: () =>
+    fetch("/api/compliance/report").then((r) => j<ComplianceReport>(r)),
+  // approve is a WRITE — it carries the write token like importIncident
+  approveIncident: async (
+    incidentId: string, approver: string, note: string,
+  ): Promise<ApprovalResult> => {
+    const token = useApp.getState().writeToken;
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const r = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/approve`, {
+      method: "POST", headers, body: JSON.stringify({ approver, note }),
+    });
+    return j<ApprovalResult>(r);
+  },
 
   // ── runtime jobs (control surface) ────────────────────────────────────────
   connectRuntime: (model: string, agentRef?: string) =>
