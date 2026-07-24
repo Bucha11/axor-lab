@@ -1,4 +1,4 @@
-> **Canonical prices/tiers: `axor-packaging.md`.** This doc explains the open-core reasoning; where a number here differs from packaging, packaging wins.
+> Canonical packaging, tiers, and prices are defined in **axor-packaging.md**. If this document conflicts with it, axor-packaging.md wins. This doc explains the open-core reasoning; packaging is the price list.
 
 # Axor Control Plane — Monetization (v0.1): Open Core + Enterprise License
 

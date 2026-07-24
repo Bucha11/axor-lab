@@ -1,5 +1,7 @@
 # Axor Lab — Economics (v0.1)
 
+> Canonical packaging, tiers, and prices are defined in **axor-packaging.md**. If this document conflicts with it, axor-packaging.md wins. This doc is the reasoning; packaging is the price list.
+
 The missing half of `cp-monetization.md`. That doc priced the Control Plane; this one explains Lab economics. **Canonical tier names, prices, modules, and pilot rules live in `axor-packaging.md` (single source of truth); where this doc and packaging disagree on a number, packaging wins.** This doc is the reasoning; packaging is the price list. It does **not** introduce a second product or a second bill: Private Lab is the **first rung of the same Axor license**, so a team climbs Community → Team → Security → Enterprise as one ladder, and Control Plane is an expansion on top, not a separate checkout.
 
 Correction to earlier framing: Lab is **not** "lead-gen, not revenue." Lab has two parts with different economics.

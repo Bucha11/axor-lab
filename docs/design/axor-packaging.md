@@ -6,7 +6,7 @@ Canonical for tier names, prices, included modules, usage metrics, bundles, host
 
 ## 0. The frame: one ladder, two modules — not two products
 
-Private Lab and Control Plane are **two modules under one Axor account and one commercial ladder**. Control Plane is a **production add-on to a Lab workspace**, not a separate customer journey. One organization, one entitlement model, one renewal — two modules, two price components. (We do **not** promise a literal single invoice: enterprise procurement may still cut a separate order form. "One ladder," not "one bill.")
+Private Lab and Control Plane are **two modules within one Axor workspace and one commercial ladder**. Control Plane **adds production enforcement to an existing security workflow** rather than starting a separate customer journey. One organization, one entitlement model, one renewal — two modules, two price components. (We do **not** promise a literal single invoice: enterprise procurement may still cut a separate order form. "One ladder," not "one bill.")
 
 ```
 Community  →  Team Workspace  →  Security Workspace  →  + Production Governance add-on  →  Enterprise Platform
