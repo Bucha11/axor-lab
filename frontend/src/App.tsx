@@ -18,6 +18,7 @@ import EvidenceView from "./tabs/EvidenceView";
 import ScenarioAuthor from "./tabs/ScenarioAuthor";
 import ImportIncident from "./tabs/ImportIncident";
 import IncidentView from "./tabs/IncidentView";
+import Incidents from "./tabs/Incidents";
 import Workspace from "./tabs/Workspace";
 
 const PRIMARY = ["home", "builder", "runs", "results", "published"] as const;
@@ -25,6 +26,7 @@ const MORE = [
   { id: "agent-ingest", label: "bring an agent" },
   { id: "scenario-author", label: "scenario author" },
   { id: "import", label: "import incident" },
+  { id: "incidents", label: "incidents" },
   { id: "workspace", label: "workspace" },
 ] as const;
 
@@ -141,6 +143,7 @@ export default function App() {
       {/* Control Plane → Lab cross-link: "Open in Lab" deep-links to #/import;
           an imported incident lives at #/i/{incident_id} */}
       {key === "import" && <ImportIncident />}
+      {key === "incidents" && <Incidents />}
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
       {key === "workspace" && <Workspace />}
     </div>
