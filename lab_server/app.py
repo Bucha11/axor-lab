@@ -12,8 +12,13 @@ Routes:
   POST /api/incidents                     import an incident package [write token]
   GET  /api/incidents                     list imported incidents (JSON)
   GET  /api/incidents/{id}                one incident: full package + bundle
+  POST /api/incidents/{id}/approve        sign off on an incident   [write token]
+                                          (Security tier when hosted_mode)
   GET  /api/traces/{trace_id}             resolver: publications + incidents
                                           containing this trace (404 if none)
+  GET  /api/audit                         workflow history (Security tier when hosted)
+  GET  /api/compliance/report             period compliance report (Security tier)
+  GET  /api/license/status                the workspace entitlement (tier + modules)
 
 Auth: pass `write_token` / `admin_token` to gate mutations with a bearer token.
 When a token is set, a mutation without a matching `Authorization: Bearer …`
@@ -35,9 +40,16 @@ from pathlib import Path
 
 from lab_runner.errors import IncidentImportError, IncidentReplayMismatch
 
+from .audit import (
+    APPROVAL_GRANTED,
+    INCIDENT_IMPORTED,
+    REPORT_EXPORTED,
+    AuditLog,
+)
 from .errors import NotFound, PublishRejected, ServerError
 from .html import render_catalog, render_evidence, render_publication
 from .incidents import IncidentStore
+from .license import LicenseRequired, require_workspace_tier
 from .store import PublicationStore
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # uploaded bundles are bounded (threat-model §4)
@@ -51,6 +63,7 @@ _API_BUNDLE_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/bundle$")
 _API_REPRO_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/reproductions$")
 _API_TAKEDOWN_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/takedown$")
 _API_INCIDENT_RE = re.compile(r"^/api/incidents/([A-Za-z0-9_-]+)$")
+_API_APPROVE_RE = re.compile(r"^/api/incidents/([A-Za-z0-9_-]+)/approve$")
 # trace_ids carry the scenario slug (hyphens), same safe class as the evidence route
 _API_TRACE_RE = re.compile(r"^/api/traces/([A-Za-z0-9_-]+)$")
 
@@ -68,6 +81,49 @@ def _opaque_500() -> ServerError:
     return exc
 
 
+def _compliance_report(
+    incidents: IncidentStore,
+    audit: AuditLog,
+    since: str | None,
+    until: str | None,
+) -> dict[str, object]:
+    """A period compliance report aggregated over the audit log: action counts in
+    the window, and each incident imported in the window with its approval state.
+    A read-only projection of the append-only log — the evidence, summarized."""
+    from .audit import _utc_now_iso
+
+    events = audit.list(since=since, until=until)
+    counts: dict[str, int] = {}
+    for event in events:
+        action = str(event.get("action", ""))
+        counts[action] = counts.get(action, 0) + 1
+    rows: list[dict[str, object]] = []
+    for event in events:
+        if event.get("action") != INCIDENT_IMPORTED:
+            continue
+        incident_id = str(event.get("target", ""))
+        approvals = audit.approvals_for(incident_id)
+        rows.append({
+            "incident_id": incident_id,
+            "trace_id": (event.get("detail") or {}).get("trace_id"),  # type: ignore[union-attr]
+            "imported_at": event.get("ts"),
+            "approved": bool(approvals),
+            "approvals": [
+                {"actor": a.get("actor"), "ts": a.get("ts"),
+                 "note": (a.get("detail") or {}).get("note")}  # type: ignore[union-attr]
+                for a in approvals
+            ],
+        })
+    return {
+        "schema_version": "axor-lab-compliance/v1",
+        "window": {"since": since, "until": until},
+        "generated_at": _utc_now_iso(),
+        "action_counts": counts,
+        "total_events": len(events),
+        "incidents": rows,
+    }
+
+
 def make_server(
     store_root: Path,
     host: str = "127.0.0.1",
@@ -79,13 +135,20 @@ def make_server(
     server_key_id: str | None = None,
     server_signing_key: str | None = None,
     license_obj: object | None = None,
+    hosted_mode: bool = False,
 ) -> ThreadingHTTPServer:
     """Build (do not start) an HTTP server bound to host:port.
 
     `license_obj` is an optional verified `lab_server.license.License` — the
     workspace's entitlement (tier + modules), surfaced at GET /api/license/status.
     None means the community tier (free, local/public); a paid workspace passes a
-    license the vendor signed."""
+    license the vendor signed.
+
+    `hosted_mode` turns on entitlement ENFORCEMENT (axor-packaging.md §3): the
+    paid Security-Workspace endpoints (history, approvals, compliance export)
+    require a security-tier license and answer 402 otherwise. Off (the default) is
+    the self-hosted / local posture — unlimited local use, nothing gated. A safety
+    feature never consults either flag."""
     store = PublicationStore(
         root=store_root, known_keys=known_keys or {},
         server_id=server_id, server_key_id=server_key_id,
@@ -94,6 +157,9 @@ def make_server(
     # incidents live in a SEPARATE namespace under the same root — imported
     # production traces are not publications and never enter the catalog
     incidents = IncidentStore(root=store_root / "incidents")
+    # the append-only workflow log — the spine of the paid history / approvals /
+    # compliance-export features (Security tier when hosted_mode is on)
+    audit = AuditLog(root=store_root / "audit")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "axor-lab-server/0.1"
@@ -150,8 +216,31 @@ def make_server(
                         "expires_at": license_obj.expires_at,
                     })
                     return
+                if path == "/api/audit":
+                    # Security-tier paid feature: the workflow history — the
+                    # ordered record of imports, approvals and exports.
+                    self._gate("security")
+                    q = parse_qs(split.query)
+                    self._json(200, {"events": audit.list(
+                        since=q.get("since", [None])[0], until=q.get("until", [None])[0],
+                    )})
+                    return
+                if path == "/api/compliance/report":
+                    # Security-tier paid feature: a period compliance report
+                    # aggregated over the audit log (the export is itself logged).
+                    self._gate("security")
+                    q = parse_qs(split.query)
+                    since = q.get("since", [None])[0]
+                    until = q.get("until", [None])[0]
+                    report = _compliance_report(incidents, audit, since, until)
+                    audit.append(REPORT_EXPORTED, detail={"since": since, "until": until})
+                    self._json(200, report)
+                    return
                 if path == "/api/incidents":
-                    self._json(200, {"incidents": [s.summary() for s in incidents.list()]})
+                    self._json(200, {"incidents": [
+                        {**s.summary(), "approved": audit.is_approved(s.incident_id)}
+                        for s in incidents.list()
+                    ]})
                     return
                 api_incident = _API_INCIDENT_RE.match(path)
                 if api_incident:
@@ -284,11 +373,37 @@ def make_server(
                         return
                     except IncidentImportError as exc:
                         raise PublishRejected(str(exc), status=422) from exc
+                    if created:
+                        # the workflow log records a real intake; an idempotent
+                        # re-import mints nothing, so it is not re-logged
+                        audit.append(
+                            INCIDENT_IMPORTED, target=stored_incident.incident_id,
+                            detail={"trace_id": stored_incident.trace_id},
+                        )
                     self._json(201 if created else 200, {
                         "incident_id": stored_incident.incident_id,
                         "trace_id": stored_incident.trace_id,
                         "replay": "match",
                         "url": f"/i/{stored_incident.incident_id}",
+                    })
+                    return
+                approve = _API_APPROVE_RE.match(self.path)
+                if approve:
+                    # Security-tier paid feature: sign off on an incident so its
+                    # incident→regression conversion is auditable. Write-token
+                    # gated like other mutations; 402 in hosted mode below tier.
+                    self._require(write_token)
+                    self._gate("security")
+                    incident_id = approve.group(1)
+                    incidents.get(incident_id)  # 404 if the incident is unknown
+                    approver = str(payload.get("approver", "")).strip() or "operator"
+                    note = str(payload.get("note", "")).strip()
+                    entry = audit.append(
+                        APPROVAL_GRANTED, actor=approver, target=incident_id,
+                        detail={"note": note} if note else None,
+                    )
+                    self._json(200, {
+                        "incident_id": incident_id, "approved": True, "approval": entry,
                     })
                     return
                 takedown = _API_TAKEDOWN_RE.match(self.path)
@@ -338,6 +453,18 @@ def make_server(
             presented = header[7:] if header.startswith("Bearer ") else ""
             if not hmac.compare_digest(presented, expected):
                 raise Unauthorized("missing or invalid bearer token")
+
+        def _gate(self, tier: str) -> None:
+            """Entitlement gate for a paid workspace feature. A no-op unless
+            `hosted_mode` is on; when it is, a workspace below `tier` gets a 402
+            that names what to buy. Self-hosted / local use is never gated, and a
+            safety feature never calls this."""
+            if not hosted_mode:
+                return
+            try:
+                require_workspace_tier(license_obj, tier)  # type: ignore[arg-type]
+            except LicenseRequired as exc:
+                raise PublishRejected(str(exc), status=402) from exc
 
         def _read_json(self) -> dict[str, object]:
             raw = self.headers.get("Content-Length")

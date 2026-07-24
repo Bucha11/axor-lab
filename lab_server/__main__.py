@@ -50,6 +50,13 @@ def main(argv: list[str] | None = None) -> int:
         help="vendor Ed25519 public key (hex) to verify the license against "
              "(or AXOR_VENDOR_PUBKEY)",
     )
+    parser.add_argument(
+        "--hosted", action="store_true",
+        default=os.environ.get("AXOR_LAB_HOSTED", "").lower() in ("1", "true", "yes"),
+        help="hosted posture: ENFORCE workspace entitlements (paid Security "
+             "features answer 402 below tier). Off = self-hosted, unlimited local "
+             "use, nothing gated (or AXOR_LAB_HOSTED=1)",
+    )
     args = parser.parse_args(argv)
 
     # the workspace entitlement is OPTIONAL: without a valid license the server
@@ -73,10 +80,12 @@ def main(argv: list[str] | None = None) -> int:
     server = make_server(
         Path(args.root), host=args.host, port=args.port,
         write_token=args.write_token, admin_token=args.admin_token,
-        license_obj=license_obj,
+        license_obj=license_obj, hosted_mode=args.hosted,
     )
     auth = "token-gated" if args.write_token else "OPEN (local dev only — do not expose)"
     tier = f"{license_obj.workspace_tier} workspace" if license_obj else "community tier"
+    if args.hosted:
+        tier += " · hosted (entitlements enforced)"
     # report the BOUND port (server_address), not the requested one — with
     # --port 0 the OS picks an ephemeral port and the printed URL must work
     bound_port = server.server_address[1]
