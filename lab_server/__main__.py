@@ -40,19 +40,26 @@ def main(argv: list[str] | None = None) -> int:
         help="serve the runtime-jobs API (connect runtimes, plan/assign runs, "
              "local runs) on this port [default: 8010]",
     )
-    # Signing a CP export is an operator action vouching for a production config,
-    # so the key belongs in the Control Plane's signing vault — which signs and
-    # never surrenders. Lab hands over the manifest bytes and never holds a key.
+    # Key custody is a WORKSPACE capability (axor-packaging.md §0: one ladder,
+    # two modules). The vault signs and never surrenders the key, so Lab hands
+    # over manifest bytes and never holds one. It runs inside the Control Plane
+    # process today because CP needed operator-command signing first — that is
+    # where the service lives, not who it belongs to. Signing is gated on the
+    # workspace TIER, not on owning the Production Governance add-on.
     # Unset → exports come back honestly UNSIGNED.
     parser.add_argument(
-        "--cp-url", default=os.environ.get("AXOR_LAB_CP_URL"),
-        help="Control Plane base URL; its signing vault signs CP export manifests "
-             "(or AXOR_LAB_CP_URL). Unset = exports are unsigned",
+        "--vault-url", "--cp-url", dest="vault_url",
+        default=os.environ.get("AXOR_LAB_VAULT_URL") or os.environ.get("AXOR_LAB_CP_URL"),
+        help="workspace signing-vault base URL — it signs CP export manifests and "
+             "never surrenders the key (or AXOR_LAB_VAULT_URL). The vault is "
+             "hosted by the Control Plane process today. Unset = unsigned exports",
     )
     parser.add_argument(
-        "--cp-signing-token", default=os.environ.get("AXOR_LAB_CP_SIGNING_TOKEN"),
-        help="bearer for the Control Plane vault's signing subsystem "
-             "(or AXOR_LAB_CP_SIGNING_TOKEN)",
+        "--vault-signing-token", "--cp-signing-token", dest="vault_signing_token",
+        default=(os.environ.get("AXOR_LAB_VAULT_SIGNING_TOKEN")
+                 or os.environ.get("AXOR_LAB_CP_SIGNING_TOKEN")),
+        help="bearer for the vault's signing subsystem "
+             "(or AXOR_LAB_VAULT_SIGNING_TOKEN)",
     )
     parser.add_argument(
         "--no-runtime-api", action="store_true",
@@ -122,7 +129,8 @@ def main(argv: list[str] | None = None) -> int:
         runtime_server = make_runtime_server(
             host=args.host, port=args.runtime_port, control_token=args.control_token,
             store_root=Path(args.root) / "runtime-jobs",
-            cp_url=args.cp_url, cp_signing_token=args.cp_signing_token,
+            cp_url=args.vault_url, cp_signing_token=args.vault_signing_token,
+            license_obj=license_obj, hosted_mode=args.hosted,
         )
         threading.Thread(
             target=runtime_server.serve_forever, daemon=True, name="runtime-jobs",

@@ -633,6 +633,8 @@ def make_runtime_server(
     store_root: Path | None = None,
     cp_url: str | None = None,
     cp_signing_token: str | None = None,
+    license_obj: object | None = None,
+    hosted_mode: bool = False,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs server. `control_token`, if set, gates the control
     surface (runtime registration + run assignment); the runtime-facing endpoints
@@ -642,18 +644,33 @@ def make_runtime_server(
     jobs = store or RuntimeJobStore(root=store_root)
 
     def _signing_config(requested: object) -> dict[str, object] | None:
-        """Merge the server's vault configuration with the caller's identity.
+        """Merge the workspace's vault configuration with the caller's identity.
 
-        The Control Plane URL and the vault token come from SERVER config, never
-        from the request: a request that could name the URL would point this
-        server at anywhere it liked, and the token is a server secret regardless.
-        What the caller supplies is who they are — `operator` and `key_id` — which
-        the vault authorises on its own side anyway.
+        Key custody is a WORKSPACE capability, not a Control Plane one. It lives
+        in the Control Plane's process today because CP needed operator-command
+        signing first, but under one-ladder-two-modules (axor-packaging.md §0) the
+        vault belongs to the workspace and both modules use it. So signing is
+        gated on the workspace TIER — a Security Workspace has it — and NOT on
+        having bought the Production Governance add-on. You need the add-on to
+        *apply* a config in production, not to sign one.
 
-        No CP configured → None, and the export comes back honestly unsigned.
+        The vault URL and token come from SERVER config, never from the request: a
+        request that could name the URL would point this server at anywhere it
+        liked, and the token is a server secret regardless. What the caller
+        supplies is who they are — `operator` and `key_id` — which the vault
+        authorises on its own side anyway.
+
+        No vault configured → None, and the export comes back honestly unsigned.
         """
         if not cp_url or not isinstance(requested, dict):
             return None
+        if hosted_mode:
+            from .license import LicenseRequired, require_workspace_tier
+
+            try:
+                require_workspace_tier(license_obj, "security")  # type: ignore[arg-type]
+            except LicenseRequired as exc:
+                raise RuntimeJobsError(402, str(exc)) from exc
         operator = str(requested.get("operator") or "").strip()
         key_id = str(requested.get("key_id") or "").strip()
         if not operator or not key_id:

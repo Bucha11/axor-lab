@@ -182,18 +182,24 @@ twice over: a Lab server must not hold your signing key, and a browser is a wors
 place for it than a terminal — a private key that vouches for a production config
 does not belong in a web form, however convenient.
 
-The Control Plane already solved this class of problem. Its signing vault SIGNS
-and never surrenders: `sign(operator, key_id, payload)` returns a signature over
-bytes you submit, the private half never leaves, and every request is authorised
-against the key's operator list and audited. An export signature says "this named
-author vouches for this production config" — an operator action, which CP already
-treats this way.
+A signing vault solves it: `sign(operator, key_id, payload)` returns a signature
+over bytes you submit, the private half never leaves, and every request is
+authorised against the key's operator list and audited.
+
+**Whose capability is it? The workspace's.** The vault runs inside the Control
+Plane process today because CP needed operator-command signing first — that is
+where the service lives, not who it belongs to. Under one ladder, two modules
+(`axor-packaging.md` §0) key custody is an org capability both modules use, so
+signing is gated on the workspace **tier**: a Security Workspace has it. It is
+**not** gated on owning the Production Governance add-on — you need the add-on to
+*apply* a config in production, not to sign one. Charging for the second would be
+charging for the wrong thing.
 
 So `POST /runs/{id}/cp-export` with `tree: true` assembles the whole export
 directory using the CLI's own code (the two cannot drift) and hands the manifest's
-canonical bytes to the vault. Configure it with `--cp-url` / `--cp-signing-token`;
-the URL and token come from **server** config, never from the request — a request
-that could name the URL would point the server anywhere it liked.
+canonical bytes to the vault. Configure it with `--vault-url` /
+`--vault-signing-token`; both come from **server** config, never from the request
+— a request that could name the URL would point the server anywhere it liked.
 
 The load-bearing property is a byte one, and it has a test: what Lab hands the
 vault is EXACTLY what `lab_contracts.signing.sign_bundle` would sign locally

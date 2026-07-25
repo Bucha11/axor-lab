@@ -5,13 +5,17 @@ it to the server" was the wrong answer twice over. A Lab server cannot hold your
 signing key, and a browser should not either: a private key that vouches for a
 production config does not belong in a web form, however convenient.
 
-The Control Plane already solved this, for exactly this class of action. Its
-signing vault SIGNS and never surrenders — `sign(operator, key_id, payload)`
-returns a signature over bytes you submit, the private half never leaves, every
-request is authorised against the key's operator list and audited unconditionally.
-An export signature says "this named author vouches for this production config",
-which is an operator action, and operator actions in CP are vault-signed and
-audited already. So the signature comes from there.
+The signing vault solves exactly this: `sign(operator, key_id, payload)` returns a
+signature over bytes you submit, the private half never leaves, and every request
+is authorised against the key's operator list and audited unconditionally.
+
+Whose capability is it? The **workspace's**. The vault runs inside the Control
+Plane process today because CP needed operator-command signing first, but that is
+where the service lives, not who it belongs to — under one-ladder-two-modules
+(axor-packaging.md §0) key custody is an org capability both modules use. So
+signing here is gated on the workspace TIER, never on owning the Production
+Governance add-on: you need the add-on to *apply* a config in production, not to
+sign one.
 
 What Lab does here is assemble the tree and hand over the manifest's canonical
 bytes. It never sees a key.
@@ -48,7 +52,7 @@ class CpSignRefused(ValueError):
 def _sign_via_vault(
     manifest: dict[str, Any], *, cp_url: str, operator: str, key_id: str, token: str | None,
 ) -> str:
-    """Ask the Control Plane vault for a signature over the manifest's bytes.
+    """Ask the workspace signing vault for a signature over the manifest's bytes.
 
     Signs the manifest MINUS its `signature` field, canonicalized — byte-identical
     to what `lab_contracts.signing.sign_bundle` produces locally, so an export
@@ -81,10 +85,10 @@ def _sign_via_vault(
         detail = exc.read().decode()[:300]
         raise CpSignRefused(
             exc.code if exc.code in (401, 403, 404) else 502,
-            f"the Control Plane vault refused to sign ({exc.code}): {detail}",
+            f"the signing vault refused to sign ({exc.code}): {detail}",
         ) from exc
     except OSError as exc:
-        raise CpSignRefused(502, f"the Control Plane vault is unreachable: {exc}") from exc
+        raise CpSignRefused(502, f"the signing vault is unreachable: {exc}") from exc
 
     signature = str(answer.get("signature_hex") or "")
     if not signature:
@@ -156,7 +160,7 @@ def build_export(
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
             signed = True
             note = (
-                f"signed by {manifest['author']} via Control Plane vault custody "
+                f"signed by {manifest['author']} via workspace vault custody "
                 f"(key {signing.get('key_id')!r}) — the private key never left the "
                 "vault, and the request is in its audit log."
             )

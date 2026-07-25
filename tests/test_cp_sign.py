@@ -193,5 +193,77 @@ class VaultFailureTest(_Base):
         self.assertIn("unreachable", caught.exception.message)
 
 
+class SigningIsGatedOnTheWorkspaceTierTest(unittest.TestCase):
+    """Key custody is a WORKSPACE capability, not a Control Plane one.
+
+    The vault runs inside CP's process because CP needed operator-command signing
+    first — that is where the service lives, not who it belongs to. Under
+    one-ladder-two-modules a Security Workspace has custody; the Production
+    Governance add-on is what lets you APPLY a config in production, not what lets
+    you sign one. Gating signing on the add-on would charge for the wrong thing.
+    """
+
+    def _server(self, license_obj: object | None, hosted: bool) -> str:
+        from lab_server import make_runtime_server
+
+        server = make_runtime_server(
+            host="127.0.0.1", port=0, control_token=None,
+            cp_url="http://127.0.0.1:1", hosted_mode=hosted, license_obj=license_obj,
+        )
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def _try_sign(self, base: str) -> int:
+        import urllib.error
+        import urllib.request
+
+        run = urllib.request.Request(
+            base + "/runs/local", data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(run, timeout=300) as response:
+            run_id = json.loads(response.read())["run_id"]
+
+        request = urllib.request.Request(
+            f"{base}/runs/{run_id}/cp-export",
+            data=json.dumps({
+                "tree": True, "signing": {"operator": "op", "key_id": "k"},
+            }).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    def test_a_community_workspace_is_refused_with_402(self) -> None:
+        # 402 names what to buy; it does not silently hand back an unsigned tree
+        # while the caller asked for a signature.
+        self.assertEqual(self._try_sign(self._server(None, hosted=True)), 402)
+
+    def test_a_security_workspace_may_sign(self) -> None:
+        from lab_server.license import License
+
+        # A real License, explicitly WITHOUT the Production Governance add-on:
+        # signing must not depend on it.
+        security = License(
+            organization="acme", workspace_tier="security",
+            modules=("private_lab",), governed_node_ceiling=0,
+            expires_at="2099-01-01",
+        )
+        self.assertFalse(security.has_module("control_plane"))
+
+        # 502 because the configured vault URL is dead — but it got past the
+        # gate, which is what this asserts.
+        self.assertEqual(self._try_sign(self._server(security, hosted=True)), 502)
+
+    def test_self_hosted_is_never_gated(self) -> None:
+        # unlimited local use, same posture as every other paid feature here
+        self.assertEqual(self._try_sign(self._server(None, hosted=False)), 502)
+
+
 if __name__ == "__main__":
     unittest.main()
