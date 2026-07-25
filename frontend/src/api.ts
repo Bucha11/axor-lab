@@ -355,6 +355,38 @@ export interface ReplayUploadReport {
   claim: string;
 }
 
+export interface RunTraceEntry {
+  trace_id: string;
+  scenario_id: string;
+  condition_id: string;
+  seed: string;
+  repeat_index: number | null;
+  verdicts: string[];
+  denied: boolean;
+}
+
+export interface RegressionPinBody {
+  trace_id: string;
+  trace_ref: string;
+  expected_verdict: string;
+  expected_sequence: string[];
+}
+
+export interface RunPinResult {
+  pin: RegressionPinBody;
+  scenario_id: string;
+  condition_id: string;
+  kernel: string[];
+}
+
+export interface CpExportResult {
+  config: Record<string, unknown>;
+  production_todo: string;
+  // whether the deployed config's advantage is statistically EARNED, not merely
+  // observed — the two must never be presented the same way
+  earned_bridge: boolean;
+}
+
 export interface ComposeSpec {
   suite: string;
   conditions?: string[];
@@ -647,6 +679,31 @@ export const api = {
   // a kernel this server does not have and therefore never replayed at all.
   replayUpload: (bundle: Record<string, unknown>, traces: unknown) =>
     jf("/replay", post({ bundle, traces })).then((r) => j<ReplayUploadReport>(r)),
+
+  // ── working over YOUR OWN run, before (or without) publishing it ───────────
+  // The chooser: which trace, and which ones were denied. Finding the one
+  // interesting trace in a 60-trace run otherwise means opening each.
+  runTraces: (runId: string) =>
+    jf(`/runs/${encodeURIComponent(runId)}/traces`).then((r) =>
+      j<{ traces: RunTraceEntry[] }>(r)),
+  // The same EvidenceCase the CLI and the published page render. Investigation
+  // is what decides whether a run is worth publishing, so it cannot require
+  // publishing first.
+  runEvidence: (runId: string, traceId: string) =>
+    jf(`/runs/${encodeURIComponent(runId)}/evidence/${encodeURIComponent(traceId)}`)
+      .then((r) => j<Record<string, unknown>>(r)),
+  // Pin one of your own traces as a regression case. Web pinning used to need an
+  // imported production incident to exist first.
+  pinRunTrace: (runId: string, traceId: string, expected?: string) =>
+    jf(`/runs/${encodeURIComponent(runId)}/pin`,
+       post({ trace_id: traceId, ...(expected ? { expected } : {}) }))
+      .then((r) => j<RunPinResult>(r)),
+  // The Lab → Control Plane handoff, which had no web path at all.
+  cpExport: (runId: string, regressions?: RegressionPinBody[], conditionId?: string) =>
+    jf(`/runs/${encodeURIComponent(runId)}/cp-export`, post({
+      ...(regressions?.length ? { regressions } : {}),
+      ...(conditionId ? { condition_id: conditionId } : {}),
+    })).then((r) => j<CpExportResult>(r)),
   // Compose without running — the advanced level shows the .axl this produces.
   composeExperiment: (spec: ComposeSpec) =>
     jf("/experiments/compose", post(spec)).then((r) => j<ComposeResult>(r)),

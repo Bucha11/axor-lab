@@ -133,6 +133,31 @@ function BuilderBody({ catalog }: { catalog: Catalog }) {
     }
   };
 
+  // An .axl the user wrote. The endpoint already accepted `{experiment}`; what
+  // was missing was any way to hand it one from the browser, so a hand-edited
+  // experiment could only be run from a terminal.
+  const runUploaded = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true); setError(null);
+    try {
+      let document: Record<string, unknown>;
+      try {
+        document = JSON.parse(await file.text());
+      } catch {
+        throw new Error(`${file.name} is not valid JSON`);
+      }
+      const run = await api.runLocal(document);
+      setLastRun(run.run_id);
+      navigate(`results/${run.run_id}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const showSpec = async () => {
     setError(null);
     try {
@@ -299,6 +324,17 @@ function BuilderBody({ catalog }: { catalog: Catalog }) {
             {spec}
           </pre>
         )}
+
+        <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.text, margin: "16px 0 6px" }}>
+          Run your own experiment file
+        </div>
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, marginBottom: 8, lineHeight: 1.6 }}>
+          A hand-written or hand-edited <span style={{ color: C.mut }}>.axl</span> — the composer above only
+          offers the catalogue, so this is the way in for an experiment you wrote yourself. Same guards as
+          any run here: an offline agent and a bounded trial count.
+        </div>
+        <input type="file" accept=".axl,.json,application/json" onChange={runUploaded}
+          style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut }} />
 
         <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.text, margin: "16px 0 6px" }}>
           The same thing from the CLI

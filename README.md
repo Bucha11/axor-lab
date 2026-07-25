@@ -107,7 +107,27 @@ POST /runs/local            # {} → runs examples/banking-exfil-01.axl
 POST /runs/local            # {"compose": {...}} → composes a selection and runs it
 POST /runs/local            # {"experiment": {...}} → runs an .axl you pass in
 POST /replay                # {bundle, traces} → reproduce recorded verdicts
+GET  /runs/{id}/traces      # which trace to look at, and which were denied
+GET  /runs/{id}/evidence/{trace_id}   # EvidenceCase — no publishing required
+POST /runs/{id}/pin         # pin one of YOUR OWN traces as a regression case
+POST /runs/{id}/cp-export   # the Lab → Control Plane handoff config
 ```
+
+The web is the primary surface; the CLI is what you reach for when the browser
+must not do the job. Four capabilities used to be CLI-only for no good reason and
+are not any more: an EvidenceCase over an unpublished run (investigation is what
+decides whether a run is worth publishing, so it cannot require publishing
+first), pinning a trace from your own run (pinning used to need an imported
+production incident to exist), the Control Plane handoff (the bridge into the
+paid contour sat behind a terminal), and running a hand-written `.axl`.
+
+What stays with the CLI stays for a reason: `verify` / `verify-cp-export` are
+**offline** verification whose whole value is trusting no server — a web button
+saying "the server checked itself" would destroy the guarantee rather than move
+it; a live model needs the hard cost ceiling and the estimate-confirm gate;
+`--real-kernel` needs axor-core installed where the run happens; and writing the
+signed, manifest-bound CP export tree needs your signing key, which a server
+cannot hold on your behalf.
 
 It lands as an ordinary COMPLETED run, so results, bundle assembly and publish all
 work over it unchanged — in the UI that is **Run the example → results → publish**,

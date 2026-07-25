@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import compose, local_run, replay_api
+from . import compose, evidence_api, local_run, replay_api
 
 _MAX_BODY = 8 * 1024 * 1024
 
@@ -61,6 +61,11 @@ _TRIAL_DONE_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_
 _RUN_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)$")
 _RUN_RESULTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/results$")
 _RUN_BUNDLE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/bundle$")
+# trace ids carry the scenario slug, so hyphens/dots/colons are in the safe class
+_RUN_TRACES_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/traces$")
+_RUN_EVIDENCE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/evidence/([A-Za-z0-9_.:-]+)$")
+_RUN_PIN_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/pin$")
+_RUN_CP_EXPORT_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/cp-export$")
 _RUN_EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
 _RUN_CONFIRM_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/confirm$")
 _RUN_AGG_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/aggregates$")
@@ -712,6 +717,39 @@ def make_runtime_server(
                     self._require_control()
                     self._send(200, jobs.results(m.group(1)))
                     return
+                # `twin` and `policy` refine the counterfactual an EvidenceCase
+                # renders; everything else here is query-free.
+                bare, _, raw_query = self.path.partition("?")
+                query = {
+                    k: v for k, v in (
+                        p.split("=", 1) for p in raw_query.split("&") if "=" in p
+                    )
+                }
+                m = _RUN_TRACES_RE.match(bare)
+                if m:
+                    # the chooser: which trace do you want to look at, and which
+                    # ones were denied
+                    self._require_control()
+                    payload = jobs.run_bundle(m.group(1))
+                    self._send(200, {
+                        "traces": evidence_api.trace_index(payload["traces"]),  # type: ignore[arg-type]
+                    })
+                    return
+                m = _RUN_EVIDENCE_RE.match(bare)
+                if m:
+                    # An EvidenceCase for a run that was never published.
+                    # Investigation happens BEFORE you decide something is worth
+                    # publishing, and most runs never should be.
+                    self._require_control()
+                    payload = jobs.run_bundle(m.group(1))
+                    try:
+                        self._send(200, evidence_api.build_case(
+                            payload["bundle"], payload["traces"], m.group(2),  # type: ignore[arg-type]
+                            twin_id=query.get("twin"), policy=query.get("policy"),
+                        ))
+                    except evidence_api.EvidenceRefused as exc:
+                        raise RuntimeJobsError(exc.status, exc.message) from exc
+                    return
                 m = _RUN_BUNDLE_RE.match(self.path)
                 if m:
                     self._require_control()
@@ -849,6 +887,39 @@ def make_runtime_server(
                     except local_run.LocalRunRefused as exc:
                         raise RuntimeJobsError(exc.status, exc.message) from exc
                     self._send(201, jobs.create_local_run(outcome))
+                    return
+                m = _RUN_PIN_RE.match(self.path)
+                if m:
+                    # Pin a trace from YOUR OWN run. Web pinning used to run only
+                    # off an incident, so the experiment → regression loop needed
+                    # a production incident to exist first — or the CLI.
+                    self._require_control()
+                    body = self._read_json()
+                    payload = jobs.run_bundle(m.group(1))
+                    try:
+                        self._send(201, evidence_api.pin_from_run(
+                            payload["bundle"], payload["traces"],  # type: ignore[arg-type]
+                            str(body.get("trace_id", "")),
+                            expected=body.get("expected"),  # type: ignore[arg-type]
+                        ))
+                    except evidence_api.EvidenceRefused as exc:
+                        raise RuntimeJobsError(exc.status, exc.message) from exc
+                    return
+                m = _RUN_CP_EXPORT_RE.match(self.path)
+                if m:
+                    # The Lab → Control Plane handoff. It had no web path at all,
+                    # which put the bridge into the paid contour behind a CLI.
+                    self._require_control()
+                    body = self._read_json()
+                    payload = jobs.run_bundle(m.group(1))
+                    try:
+                        self._send(200, evidence_api.cp_export(
+                            payload["bundle"], payload["traces"],  # type: ignore[arg-type]
+                            regressions=body.get("regressions"),  # type: ignore[arg-type]
+                            condition_id=body.get("condition_id"),  # type: ignore[arg-type]
+                        ))
+                    except evidence_api.EvidenceRefused as exc:
+                        raise RuntimeJobsError(exc.status, exc.message) from exc
                     return
                 m = _RUN_CONFIRM_RE.match(self.path)
                 if m:
