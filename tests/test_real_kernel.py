@@ -28,7 +28,7 @@ from lab_runner import (
     run_experiment,
     run_trial,
 )
-from lab_runner.kernel import KernelRegistry
+from lab_runner.kernel import KernelRegistry, default_registry
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 FAITHFUL_ALWAYS = ScriptedAgent(attack_rate=0.0)
@@ -287,10 +287,107 @@ class TestRealKernelInputAllowlist(unittest.TestCase):
             version, support.manifests(), policy, KernelRegistry(kernels=()), inputs,
         )
         self.assertIsInstance(kernel, AxorKernel)
+        # the governor runs PREDICATES; the canonical JSON map is what the
+        # config hash is taken over. Either way the symbolic ref must not survive
         vps = kernel.config.get("value_policies", {})
-        flat = [v for vp in vps.values() for arg in vp.values() for v in arg["enum"]]
+        flat = [v for predicates in vps.values() for p in predicates for v in p.allowed]
         self.assertIn(support.LANDLORD_IBAN, flat)
         self.assertNotIn("$inputs.known_ibans", flat)
+
+
+@unittest.skipUnless(axor_available(), "axor-core not installed")
+class TestRealKernelAllowlist(unittest.TestCase):
+    """The allowlist path on the REAL governor — an operator's first reach.
+
+    Nothing covered it. The tests that pair a real kernel with an allowlist
+    assert on the compiled CONFIG; the tests that gate the real governor use
+    allowlist-free policies. In the gap, `governor_config` handed the CANONICAL
+    value-policy map (plain JSON, the shape `executable_config_hash` is taken
+    over) straight to `ToolCallGovernor`, which iterates `policies[tool]` and
+    calls `.check()` on each item — so it got the argument NAME, a `str`, and
+    every real-kernel run carrying an allowlist died on its first gated call.
+    """
+
+    POLICY = {"profile": "strict", "trust_model": "content-ledger",
+              "allowlist": ["$inputs.known_ibans"]}
+
+    def setUp(self) -> None:
+        self.scenario = support.banking_scenario()
+        self.manifests = support.manifests()
+        self.inputs = self.scenario["inputs"]
+        self.landlord = self.inputs["landlord_iban"]
+
+    def _gate(self, recipient: str, policy: dict[str, object]) -> dict[str, object]:
+        """Gate a sink call whose recipient arrived THROUGH the untrusted read."""
+        from lab_runner.axor_backend import driving_value_id, gate_with_governor
+        from lab_runner.ledger import ValueLedger
+
+        version = real_kernel_version()
+        kernel = resolve_kernel(
+            version, self.manifests, policy, default_registry((version,)), self.inputs,
+        )
+        ledger = ValueLedger()
+        read = ledger.mint_external_read(
+            f"rent payment to {recipient}", "read_txns:transactions[1].description",
+        )
+        bindings = {
+            "recipient": ledger.mint_model_extraction(recipient, context_value_ids=(read,)),
+            "amount": ledger.mint_constant(1200, "prompt:amount"),
+        }
+        args = {"recipient": recipient, "amount": 1200}
+        return gate_with_governor(
+            kernel.config, "on", [("read_txns", ledger.runtime_value(read))],
+            "send_money", args, driving_value_id(self.manifests["send_money"], bindings),
+        )
+
+    def test_an_allowlist_policy_reaches_a_verdict_at_all(self) -> None:
+        # the regression: this used to raise AttributeError from inside the governor
+        decision = self._gate(self.landlord, self.POLICY)
+        self.assertIn(decision["verdict"], ("ALLOW", "DENY"))
+
+    def test_an_allowlisted_destination_supersedes_taint(self) -> None:
+        """The legitimate IBAN read from an untrusted source still goes through."""
+        self.assertEqual(self._gate(self.landlord, self.POLICY)["verdict"], "ALLOW")
+
+    def test_an_unlisted_destination_is_still_denied(self) -> None:
+        """Supersession is per-VALUE — it is not a way to disable the gate."""
+        self.assertEqual(self._gate("DE89370400440532013000", self.POLICY)["verdict"], "DENY")
+
+    def test_without_the_allowlist_the_same_legitimate_call_is_denied(self) -> None:
+        """The utility cost the allowlist exists to pay for, made visible.
+
+        A taint floor cannot tell a legitimate destination from an attacker's
+        when BOTH arrive through the untrusted channel — it denies on
+        provenance. That is the false positive an operator meets in production,
+        and the allowlist is the control that answers it.
+        """
+        bare = {"profile": "strict", "trust_model": "content-ledger"}
+        self.assertEqual(self._gate(self.landlord, bare)["verdict"], "DENY")
+
+    def test_the_canonical_config_is_not_disturbed_by_the_compilation(self) -> None:
+        """The runtime predicates are a projection, not a second canonical form.
+
+        `executable_config_hash` is taken over the canonical JSON map; compiling
+        predicates for the governor must not change what is hashed, or a bundle's
+        config fingerprint would drift from the config that ran.
+        """
+        canonical = compiled_governor_config(
+            real_kernel_version(), self.POLICY, list(self.manifests.values()), self.inputs,
+        )
+        self.assertEqual(
+            canonical["value_policies"],
+            {"send_money": {"recipient": {"enum": list(self.inputs["known_ibans"])}}},
+        )
+        runtime = governor_config(self.manifests, self.POLICY, self.inputs)
+        predicates = runtime["value_policies"]["send_money"]
+        self.assertEqual([p.arg for p in predicates], ["recipient"])
+        self.assertEqual(predicates[0].allowed, frozenset(self.inputs["known_ibans"]))
+
+    def test_no_allowlist_means_no_value_policy_at_all(self) -> None:
+        runtime = governor_config(
+            self.manifests, {"profile": "strict", "trust_model": "content-ledger"}, self.inputs,
+        )
+        self.assertNotIn("value_policies", runtime)
 
 
 if __name__ == "__main__":

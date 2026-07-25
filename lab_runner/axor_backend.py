@@ -207,9 +207,57 @@ def governor_config(
         "untrusted_sources": set(canon["untrusted_sources"]),  # type: ignore[arg-type]
         "driving_args": canon["driving_args"],
     }
-    if canon["value_policies"]:
-        config["value_policies"] = canon["value_policies"]
+    predicates = _value_predicates(canon["value_policies"])  # type: ignore[arg-type]
+    if predicates:
+        config["value_policies"] = predicates
     return config
+
+
+def _value_predicates(canonical: dict[str, object]) -> dict[str, list[object]]:
+    """Compile the CANONICAL value-policy map into axor-core predicates.
+
+    These are two different shapes for a reason: the canonical form is what the
+    `executable_config_hash` is taken over, so it must stay plain, ordered JSON;
+    the governor wants `ValuePredicate` objects it can `.check()`. Handing the
+    canonical dict straight to `ToolCallGovernor` meant that iterating
+    `policies[tool]` yielded the ARGUMENT NAME — a `str` — and the governor
+    crashed with `'str' object has no attribute 'check'` on the first gated call.
+
+    So every real-kernel run carrying an allowlist died, and nothing caught it:
+    the tests that pair a real kernel with an allowlist assert on the compiled
+    CONFIG, and the tests that gate the real governor use allowlist-free
+    policies. The one path nobody exercised is the one an operator reaches for
+    first — the allowlist is how a legitimate destination survives taint.
+    """
+    if not canonical or not HAS_AXOR_CORE:
+        return {}
+    from axor_core.policy.value_policy import ValuePredicate
+
+    compiled: dict[str, list[object]] = {}
+    for sink, by_arg in canonical.items():
+        predicates: list[object] = []
+        for arg, spec in by_arg.items():  # type: ignore[union-attr]
+            if "enum" in spec:
+                predicates.append(
+                    ValuePredicate(arg=str(arg), kind="enum",
+                                   allowed=frozenset(spec["enum"]))
+                )
+            elif "numeric_range" in spec:
+                bounds = spec["numeric_range"]
+                predicates.append(
+                    ValuePredicate(arg=str(arg), kind="numeric_range",
+                                   lo=bounds["lo"], hi=bounds["hi"])
+                )
+            else:
+                # an unknown predicate shape must not be dropped: a value policy
+                # that silently does not apply is a control the operator believes
+                # they have. ValuePredicate fails closed on an unknown kind.
+                predicates.append(
+                    ValuePredicate(arg=str(arg), kind=str(sorted(spec)[:1] or ["unknown"])[0])
+                )
+        if predicates:
+            compiled[str(sink)] = predicates
+    return compiled
 
 
 def driving_value_id(manifest: dict[str, object], arg_bindings: dict[str, str]) -> str:
