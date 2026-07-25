@@ -5,10 +5,10 @@
 // traces (GET /runs/{id}/trials/{trial_id}/trace).
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, FileText, Search, Upload } from "lucide-react";
-import { C, MONO, btn, cta } from "../theme";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Download, ExternalLink, FileText, Search, Upload } from "lucide-react";
+import { C, MONO, btn, cta, inp } from "../theme";
 import { navigate } from "../router";
-import { api, PublishError, type CpExportResult, type RegressionPinBody } from "../api";
+import { api, PublishError, type CpExportResult, type CpExportTree, type RegressionPinBody } from "../api";
 import { useApp } from "../store";
 import AggregateTable from "../components/AggregateTable";
 import TraceSteps from "../components/TraceSteps";
@@ -291,6 +291,9 @@ function RunWorkbench({ runId }: { runId: string }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cp, setCp] = useState<CpExportResult | null>(null);
+  const [tree, setTree] = useState<CpExportTree | null>(null);
+  const [operator, setOperator] = useState("");
+  const [keyId, setKeyId] = useState("");
   const [onlyDenied, setOnlyDenied] = useState(true);
 
   const index = useQuery({
@@ -323,6 +326,31 @@ function RunWorkbench({ runId }: { runId: string }) {
     setBusy("cp"); setError(null); setCp(null);
     try {
       setCp(await api.cpExport(runId, Object.values(pins)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // The tree arrives as {path: content}; a single JSON keeps every file together
+  // with its manifest, which is what verify-cp-export needs to see.
+  const downloadTree = async () => {
+    setBusy("tree"); setError(null); setTree(null);
+    try {
+      const signing = operator.trim() && keyId.trim()
+        ? { operator: operator.trim(), key_id: keyId.trim() }
+        : undefined;
+      const built = await api.cpExportTree(runId, Object.values(pins), signing);
+      setTree(built);
+      const url = URL.createObjectURL(
+        new Blob([JSON.stringify(built.files, null, 2)], { type: "application/json" }),
+      );
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${runId}-cp-export${built.signed ? "-signed" : "-unsigned"}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -432,10 +460,35 @@ function RunWorkbench({ runId }: { runId: string }) {
             <pre style={{ margin: 0, maxHeight: 220, overflow: "auto", background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, fontFamily: MONO, fontSize: 9.5, color: C.mut, lineHeight: 1.5 }}>
               {JSON.stringify(cp.config, null, 2)}
             </pre>
-            <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-              This is the config and its production to-do. Writing the signed, manifest-bound export
-              tree stays with <span style={{ color: C.mut }}>axor-lab export-cp</span>, where your
-              signing key lives — a server cannot sign on your behalf.
+            <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.line}` }}>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: C.text, marginBottom: 4 }}>
+                Download the full export tree
+              </div>
+              <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, marginBottom: 8, lineHeight: 1.6 }}>
+                The manifest is signed by the Control Plane's vault, which signs and never
+                surrenders the key — neither this server nor your browser ever holds one. Leave the
+                operator blank for an unsigned tree.
+              </div>
+              <div className="wrapline" style={{ gap: 6 }}>
+                <input value={operator} onChange={(e) => setOperator(e.target.value)}
+                  placeholder="operator" style={{ ...inp, width: 120, fontSize: 10.5 }} />
+                <input value={keyId} onChange={(e) => setKeyId(e.target.value)}
+                  placeholder="vault key id" style={{ ...inp, width: 130, fontSize: 10.5 }} />
+                <button onClick={downloadTree} disabled={busy === "tree"}
+                  style={btn({ padding: "4px 10px", fontSize: 10.5 })}>
+                  <Download size={11} /> {busy === "tree" ? "building…" : "download tree"}
+                </button>
+              </div>
+              {tree && (
+                <div className="wrapline mt-2" style={{ gap: 6 }}>
+                  {tree.signed
+                    ? <Check size={12} color={C.green} />
+                    : <AlertTriangle size={12} color={C.amber} />}
+                  <span style={{ fontFamily: MONO, fontSize: 10, color: tree.signed ? C.green : C.amber, lineHeight: 1.6 }}>
+                    {tree.file_count} files — {tree.signature_note}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}

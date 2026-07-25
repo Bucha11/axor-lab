@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import compose, evidence_api, live_run, local_run, replay_api
+from . import compose, cp_sign, evidence_api, live_run, local_run, replay_api
 
 _MAX_BODY = 8 * 1024 * 1024
 
@@ -631,6 +631,8 @@ def make_runtime_server(
     control_token: str | None = None,
     store: RuntimeJobStore | None = None,
     store_root: Path | None = None,
+    cp_url: str | None = None,
+    cp_signing_token: str | None = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs server. `control_token`, if set, gates the control
     surface (runtime registration + run assignment); the runtime-facing endpoints
@@ -638,6 +640,30 @@ def make_runtime_server(
     given (and no explicit `store`), persists runs there so a completed run's
     results survive a restart."""
     jobs = store or RuntimeJobStore(root=store_root)
+
+    def _signing_config(requested: object) -> dict[str, object] | None:
+        """Merge the server's vault configuration with the caller's identity.
+
+        The Control Plane URL and the vault token come from SERVER config, never
+        from the request: a request that could name the URL would point this
+        server at anywhere it liked, and the token is a server secret regardless.
+        What the caller supplies is who they are — `operator` and `key_id` — which
+        the vault authorises on its own side anyway.
+
+        No CP configured → None, and the export comes back honestly unsigned.
+        """
+        if not cp_url or not isinstance(requested, dict):
+            return None
+        operator = str(requested.get("operator") or "").strip()
+        key_id = str(requested.get("key_id") or "").strip()
+        if not operator or not key_id:
+            raise RuntimeJobsError(
+                400, "signing needs {operator, key_id} — the vault authorises both",
+            )
+        return {
+            "cp_url": cp_url, "token": cp_signing_token,
+            "operator": operator, "key_id": key_id,
+        }
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:  # quiet
@@ -931,15 +957,31 @@ def make_runtime_server(
                 if m:
                     # The Lab → Control Plane handoff. It had no web path at all,
                     # which put the bridge into the paid contour behind a CLI.
+                    #
+                    # `tree: true` builds the WHOLE export directory and, when a
+                    # vault is configured, has the Control Plane sign its manifest
+                    # — the vault signs and never surrenders the key, so neither
+                    # this server nor a browser ever holds one. Without it the
+                    # tree comes back UNSIGNED and labelled so.
                     self._require_control()
                     body = self._read_json()
                     payload = jobs.run_bundle(m.group(1))
                     try:
+                        if body.get("tree"):
+                            self._send(200, cp_sign.build_export(
+                                payload["bundle"], payload["traces"],  # type: ignore[arg-type]
+                                regressions=body.get("regressions"),  # type: ignore[arg-type]
+                                condition_id=body.get("condition_id"),  # type: ignore[arg-type]
+                                signing=_signing_config(body.get("signing")),
+                            ))
+                            return
                         self._send(200, evidence_api.cp_export(
                             payload["bundle"], payload["traces"],  # type: ignore[arg-type]
                             regressions=body.get("regressions"),  # type: ignore[arg-type]
                             condition_id=body.get("condition_id"),  # type: ignore[arg-type]
                         ))
+                    except cp_sign.CpSignRefused as exc:
+                        raise RuntimeJobsError(exc.status, exc.message) from exc
                     except evidence_api.EvidenceRefused as exc:
                         raise RuntimeJobsError(exc.status, exc.message) from exc
                     return

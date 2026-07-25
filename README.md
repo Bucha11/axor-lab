@@ -175,11 +175,34 @@ separate surface carrying the CLI's safeguards rather than waiving them:
 - **A run where every trial failed is a 502, not a completed run with no
   traces.** A rejected key used to land as an empty success.
 
-### Still CLI-only
+### Signing the CP export: vault custody, not a key in a form
 
-Writing the **signed, manifest-bound CP export tree** needs your signing key,
-which a server cannot hold on your behalf — the web builds the config and hands
-it over unsigned.
+The last CLI-only capability, and the one where "move it to the server" was wrong
+twice over: a Lab server must not hold your signing key, and a browser is a worse
+place for it than a terminal — a private key that vouches for a production config
+does not belong in a web form, however convenient.
+
+The Control Plane already solved this class of problem. Its signing vault SIGNS
+and never surrenders: `sign(operator, key_id, payload)` returns a signature over
+bytes you submit, the private half never leaves, and every request is authorised
+against the key's operator list and audited. An export signature says "this named
+author vouches for this production config" — an operator action, which CP already
+treats this way.
+
+So `POST /runs/{id}/cp-export` with `tree: true` assembles the whole export
+directory using the CLI's own code (the two cannot drift) and hands the manifest's
+canonical bytes to the vault. Configure it with `--cp-url` / `--cp-signing-token`;
+the URL and token come from **server** config, never from the request — a request
+that could name the URL would point the server anywhere it liked.
+
+The load-bearing property is a byte one, and it has a test: what Lab hands the
+vault is EXACTLY what `lab_contracts.signing.sign_bundle` would sign locally
+(manifest minus `signature`, canonicalized, author included). If those differed, a
+vault signature would verify nowhere.
+
+No vault configured, unreachable, or refusing → the tree comes back **UNSIGNED and
+labelled unsigned**, or the refusal is surfaced. An export that quietly claims an
+authority it does not have is the failure this subsystem exists to prevent.
 
 It lands as an ordinary COMPLETED run, so results, bundle assembly and publish all
 work over it unchanged — in the UI that is **Run the example → results → publish**,

@@ -40,6 +40,20 @@ def main(argv: list[str] | None = None) -> int:
         help="serve the runtime-jobs API (connect runtimes, plan/assign runs, "
              "local runs) on this port [default: 8010]",
     )
+    # Signing a CP export is an operator action vouching for a production config,
+    # so the key belongs in the Control Plane's signing vault — which signs and
+    # never surrenders. Lab hands over the manifest bytes and never holds a key.
+    # Unset → exports come back honestly UNSIGNED.
+    parser.add_argument(
+        "--cp-url", default=os.environ.get("AXOR_LAB_CP_URL"),
+        help="Control Plane base URL; its signing vault signs CP export manifests "
+             "(or AXOR_LAB_CP_URL). Unset = exports are unsigned",
+    )
+    parser.add_argument(
+        "--cp-signing-token", default=os.environ.get("AXOR_LAB_CP_SIGNING_TOKEN"),
+        help="bearer for the Control Plane vault's signing subsystem "
+             "(or AXOR_LAB_CP_SIGNING_TOKEN)",
+    )
     parser.add_argument(
         "--no-runtime-api", action="store_true",
         help="catalog only — do not serve the runtime-jobs API. The builder, runs, "
@@ -108,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime_server = make_runtime_server(
             host=args.host, port=args.runtime_port, control_token=args.control_token,
             store_root=Path(args.root) / "runtime-jobs",
+            cp_url=args.cp_url, cp_signing_token=args.cp_signing_token,
         )
         threading.Thread(
             target=runtime_server.serve_forever, daemon=True, name="runtime-jobs",

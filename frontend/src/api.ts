@@ -418,6 +418,17 @@ export interface CpExportResult {
   earned_bridge: boolean;
 }
 
+export interface CpExportTree {
+  // every file of the export directory, keyed by its relative path
+  files: Record<string, string>;
+  manifest: Record<string, unknown> & { author?: string; signature?: string };
+  // false means genuinely unsigned — integrity and derivability only, with
+  // nothing saying WHO vouches for it. It is never quietly true.
+  signed: boolean;
+  signature_note: string;
+  file_count: number;
+}
+
 export interface ComposeSpec {
   suite: string;
   conditions?: string[];
@@ -749,6 +760,20 @@ export const api = {
       ...(regressions?.length ? { regressions } : {}),
       ...(conditionId ? { condition_id: conditionId } : {}),
     })).then((r) => j<CpExportResult>(r)),
+  // The whole export TREE, and — when the server has a Control Plane configured —
+  // its manifest signed by CP's vault. The vault signs and never surrenders, so
+  // no key touches this server or your browser. No vault → an honestly UNSIGNED
+  // tree, never one that quietly claims an authority it does not have.
+  cpExportTree: (
+    runId: string, regressions?: RegressionPinBody[],
+    signing?: { operator: string; key_id: string }, conditionId?: string,
+  ) =>
+    jf(`/runs/${encodeURIComponent(runId)}/cp-export`, post({
+      tree: true,
+      ...(regressions?.length ? { regressions } : {}),
+      ...(conditionId ? { condition_id: conditionId } : {}),
+      ...(signing ? { signing } : {}),
+    })).then((r) => j<CpExportTree>(r)),
   // Compose without running — the advanced level shows the .axl this produces.
   composeExperiment: (spec: ComposeSpec) =>
     jf("/experiments/compose", post(spec)).then((r) => j<ComposeResult>(r)),
