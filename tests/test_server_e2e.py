@@ -162,7 +162,12 @@ class TestServerEndToEnd(unittest.TestCase):
         self.assertIn("Exactly replayable", page)
         self.assertIn("Statistically reproducible", page)
         self.assertIn("axor-lab replay", page)
-        self.assertIn("origin: local", page)
+        # the provenance axes are on the page; the badge is "origin <b>local</b>"
+        self.assertIn("origin", page)
+        self.assertIn("<b>local</b>", page)
+        # the shareable page carries link-preview metadata and the headline result
+        self.assertIn("og:description", page)
+        self.assertIn("Attack success rate", page)
 
     def test_evidence_page_renders_the_chain(self) -> None:
         pid = self._publish()

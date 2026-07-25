@@ -108,7 +108,9 @@ class TestReproductionVerification(unittest.TestCase):
 
         log = add_reproduction((), _att())  # unsigned
         badges = _provenance_badges(provenance_axes(_PUB, log))
-        self.assertIn("verified reproductions &times;0", badges)
+        # the headline badge counts ZERO verified; the self-report is shown, but
+        # separately and never folded into that number
+        self.assertIn("verified reproductions <b>&times;0</b>", badges)
         self.assertIn("1 unverified self-report", badges)
 
 
