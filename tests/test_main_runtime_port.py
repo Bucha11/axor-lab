@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -61,6 +62,28 @@ class TestMainRuntimePort(unittest.TestCase):
     def _line(self, lines: queue.Queue[str], timeout: float = _LINE_TIMEOUT) -> str:
         return lines.get(timeout=timeout)
 
+    def _line_containing(
+        self, lines: queue.Queue[str], needle: str, timeout: float = _LINE_TIMEOUT,
+    ) -> str:
+        """Wait for the startup line that says `needle`.
+
+        Reading by POSITION made these tests break whenever startup gained a line
+        — as it did when the server started reporting which UI it serves. What
+        each test cares about is that a particular line appears, not that it is
+        the second one.
+        """
+        deadline = time.monotonic() + timeout
+        seen: list[str] = []
+        while time.monotonic() < deadline:
+            try:
+                line = lines.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            seen.append(line)
+            if needle in line:
+                return line
+        raise AssertionError(f"never saw a startup line containing {needle!r}; saw {seen}")
+
     def _get(self, url: str, token: str | None = None) -> tuple[int, str]:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         request = urllib.request.Request(url, headers=headers)
@@ -74,14 +97,12 @@ class TestMainRuntimePort(unittest.TestCase):
         runtime_port = _free_port()
         lines = self._spawn(["--runtime-port", str(runtime_port), "--control-token", "ctl"])
 
-        catalog_line = self._line(lines)
-        self.assertIn("axor-lab server on", catalog_line)
+        catalog_line = self._line_containing(lines, "axor-lab server on")
         catalog_match = _URL_RE.search(catalog_line)
         assert catalog_match is not None, catalog_line
         catalog_port = int(catalog_match.group(1))
 
-        runtime_line = self._line(lines)
-        self.assertIn("axor-lab runtime-jobs on", runtime_line)
+        runtime_line = self._line_containing(lines, "axor-lab runtime-jobs on")
         self.assertIn(f":{runtime_port}", runtime_line)
         self.assertIn("token-gated", runtime_line)
 
@@ -102,8 +123,7 @@ class TestMainRuntimePort(unittest.TestCase):
             ["--runtime-port", str(runtime_port)],
             env_extra={"AXOR_LAB_CONTROL_TOKEN": "envtok"},
         )
-        self._line(lines)  # catalog line
-        runtime_line = self._line(lines)
+        runtime_line = self._line_containing(lines, "axor-lab runtime-jobs on")
         self.assertIn("token-gated", runtime_line)
         status, _ = self._get(f"http://127.0.0.1:{runtime_port}/runtimes", token="wrong")
         self.assertEqual(status, 401)
@@ -121,8 +141,7 @@ class TestMainRuntimePort(unittest.TestCase):
         """
         lines = self._spawn([])
         self.assertIn("axor-lab server on", self._line(lines))
-        runtime_line = self._line(lines)
-        self.assertIn("axor-lab runtime-jobs on", runtime_line)
+        runtime_line = self._line_containing(lines, "axor-lab runtime-jobs on")
         runtime_match = _URL_RE.search(runtime_line)
         assert runtime_match is not None, runtime_line
         status, body = self._get(f"http://127.0.0.1:{int(runtime_match.group(1))}/runtimes")
@@ -131,9 +150,9 @@ class TestMainRuntimePort(unittest.TestCase):
 
     def test_no_runtime_api_opts_out(self) -> None:
         lines = self._spawn(["--no-runtime-api"])
-        self.assertIn("axor-lab server on", self._line(lines))
+        self._line_containing(lines, "axor-lab server on")
         # the opt-out says what it costs, then serves the catalog alone
-        self.assertIn("runtime-jobs API disabled", self._line(lines))
+        self._line_containing(lines, "runtime-jobs API disabled")
         with self.assertRaises(queue.Empty):
             lines.get(timeout=1.0)
 

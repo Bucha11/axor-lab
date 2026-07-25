@@ -53,6 +53,7 @@ from .audit import (
     AuditLog,
 )
 from .errors import NotFound, PublishRejected, ServerError
+from . import spa
 from .html import render_catalog, render_evidence, render_publication
 from .incidents import IncidentStore
 from .license import LicenseRequired, require_workspace_tier
@@ -212,6 +213,8 @@ def make_server(
     server_signing_key: str | None = None,
     license_obj: object | None = None,
     hosted_mode: bool = False,
+    frontend_dist: str | None = None,
+    runtime_base: str | None = None,
 ) -> ThreadingHTTPServer:
     """Build (do not start) an HTTP server bound to host:port.
 
@@ -240,6 +243,14 @@ def make_server(
     # by a regression run, closing the incident → regression → report chain
     pins = PinStore(root=store_root / "pins")
 
+    # The built web UI, when there is one, plus the bridge to the runtime API it
+    # also talks to. Without both, a one-command install raises either nothing or
+    # a UI whose every run call fails.
+    # Explicit only — see spa.find_dist: auto-detection belongs to the entrypoint,
+    # so this factory behaves the same whether or not a build happens to exist.
+    dist = spa.find_dist(frontend_dist) if frontend_dist else None
+    jobs_proxy = spa.JobsProxy(runtime_base) if runtime_base else None
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "axor-lab-server/0.1"
 
@@ -254,7 +265,23 @@ def make_server(
 
                 split = urlsplit(self.path)
                 path = split.path
-                if path == "/" or path == "":
+
+                if jobs_proxy is not None and path.startswith("/jobs-api/"):
+                    self._proxy("GET", None)
+                    return
+                # `/` is the app when a build exists. The server-rendered catalog
+                # keeps its own address rather than disappearing: it is the no-JS,
+                # crawlable index, and `/e/{id}` below stays server-rendered for
+                # the same reason — those pages are the citable artifacts.
+                if dist is not None and (path == "/" or path == ""):
+                    self._bytes(200, spa.index_html(dist), "text/html; charset=utf-8")
+                    return
+                if dist is not None and path != "/catalog":
+                    asset = spa.resolve_asset(dist, path)
+                    if asset is not None:
+                        self._bytes(200, asset[0], asset[1])
+                        return
+                if path == "/catalog" or path == "/" or path == "":
                     self._html(render_catalog(store.catalog()))
                     return
                 if path == "/api/publications":
@@ -419,6 +446,14 @@ def make_server(
 
         def do_POST(self) -> None:  # noqa: N802
             try:
+                if jobs_proxy is not None and self.path.startswith("/jobs-api/"):
+                    # forwarded verbatim — the runtime API validates its own
+                    # bodies, and re-parsing here would be a second, drifting
+                    # reading of them
+                    raw = self.headers.get("Content-Length")
+                    length = int(raw) if raw and raw.isdigit() else 0
+                    self._proxy("POST", self.rfile.read(length) if length else b"")
+                    return
                 payload = self._read_json()
                 if self.path == "/api/publications":
                     self._require(write_token)
@@ -613,6 +648,20 @@ def make_server(
             if not isinstance(data, dict):
                 raise PublishRejected("request body must be a JSON object", status=400)
             return data
+
+        def _bytes(self, status: int, body: bytes, content_type: str) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _proxy(self, method: str, body: bytes | None) -> None:
+            assert jobs_proxy is not None
+            status, payload, content_type = jobs_proxy.forward(
+                method, self.path, body, dict(self.headers),
+            )
+            self._bytes(status, payload, content_type)
 
         def _html(self, markup: str) -> None:
             body = markup.encode("utf-8")

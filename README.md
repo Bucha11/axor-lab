@@ -82,23 +82,43 @@ Lifecycle, exit codes, and the estimate-confirm gate follow
 directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
 
 Run the server (stdlib only, no live agents). One process, and one command brings
-up the **whole** product — the catalog on `--port` (8000) and the run API on
-`--runtime-port` (8010). The run API used to default to off, which meant this
-command served the catalog and left the builder, runs, results and agent ingest
-dark against a server that looked healthy; `--no-runtime-api` is the explicit
-opt-out.
+up the **whole** product — the web UI and catalog on `--port` (8000) and the run
+API on `--runtime-port` (8010). The run API used to default to off, which meant
+this command served the catalog and left the builder, runs, results and agent
+ingest dark against a server that looked healthy; `--no-runtime-api` is the
+explicit opt-out.
 
 ```
+cd frontend && npm install && npm run build && cd ..   # once — builds the web UI
 python -m lab_server --root ./lab-store
-# :8000  GET / catalog · GET /e/{id} publication · GET /e/{id}/evidence/{trace_id}
+# :8000  GET /  the web UI · /catalog server-rendered index
+#        GET /e/{id} publication · GET /e/{id}/evidence/{trace_id}
+#        /jobs-api/*  bridged to the run API below
 # :8010  runtimes · experiments/plan · runs · runs/local
 ```
+
+The server serves the built UI itself, from `frontend/dist` beside the package or
+wherever `--frontend-dist` points. It also bridges `/jobs-api/*` to the run API,
+because the UI talks to two backends and only one of them is that port — in
+development vite proxies this and in the compose deployment nginx does, so
+without the bridge a `pip install` user would get a UI whose every run, compose,
+replay and evidence call failed. Startup prints which UI it is serving; with no
+build present `/` answers with the server-rendered catalog and says where the UI
+went, rather than leaving you to conclude the product is empty.
+
+`/catalog` and `/e/{id}` stay server-rendered on purpose: a publication is the
+citable, no-JS, crawlable artifact, and it should not need a bundler to be read.
 
 ## No-CLI path: a first result from the UI
 
 The bundled example is fully offline — `scripted@0.6` is a deterministic stand-in
 for the model layer, the kernel is the stdlib reference kernel, and the tools are
-simulated. So the server can just run it:
+simulated. So the server can just run it.
+
+These are the run API's endpoints (`:8010`, or `/jobs-api/*` through the UI's
+port). `GET /catalog` here returns the builder's suites and scenarios as JSON —
+not the same thing as `:8000/catalog`, which is the server-rendered page of
+published results.
 
 ```
 GET  /catalog               # the real suites/scenarios a builder may offer

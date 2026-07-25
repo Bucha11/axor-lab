@@ -62,6 +62,12 @@ def main(argv: list[str] | None = None) -> int:
              "(or AXOR_LAB_VAULT_SIGNING_TOKEN)",
     )
     parser.add_argument(
+        "--frontend-dist", default=os.environ.get("AXOR_LAB_FRONTEND_DIST"),
+        help="the built web UI to serve at / (default: frontend/dist beside the "
+             "package, when it exists). Without a build the server-rendered "
+             "catalog answers / instead",
+    )
+    parser.add_argument(
         "--no-runtime-api", action="store_true",
         help="catalog only — do not serve the runtime-jobs API. The builder, runs, "
              "results and agent ingest will be unavailable",
@@ -108,10 +114,22 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"license not activated ({exc}) — running as community tier",
                       file=sys.stderr)
 
+    # One command should raise the whole product. The catalog server serves the
+    # built UI when there is one and bridges /jobs-api to the runtime API, so a
+    # `pip install` user gets what a compose deployment gets — rather than a
+    # sparse HTML index and the reasonable conclusion that the product is empty.
+    runtime_base = (
+        None if args.no_runtime_api or not args.runtime_port
+        else f"http://{args.host}:{args.runtime_port}"
+    )
+    from .spa import find_dist
+
+    dist = find_dist(args.frontend_dist)
     server = make_server(
         Path(args.root), host=args.host, port=args.port,
         write_token=args.write_token, admin_token=args.admin_token,
         license_obj=license_obj, hosted_mode=args.hosted,
+        frontend_dist=str(dist) if dist else None, runtime_base=runtime_base,
     )
     auth = "token-gated" if args.write_token else "OPEN (local dev only — do not expose)"
     tier = f"{license_obj.workspace_tier} workspace" if license_obj else "community tier"
@@ -122,6 +140,15 @@ def main(argv: list[str] | None = None) -> int:
     bound_port = server.server_address[1]
     print(f"axor-lab server on http://{args.host}:{bound_port} (store: {args.root}) — "
           f"writes: {auth} — {tier}")
+    # Say which UI is up. A sparse HTML index where the app was expected reads as
+    # an empty product, so the absence of a build is stated, not left to guess.
+    if dist is not None:
+        print(f"  web UI at http://{args.host}:{bound_port}/ "
+              f"(server-rendered catalog at /catalog)")
+    else:
+        print(f"  no web UI build — serving the server-rendered catalog at /. "
+              f"Build it with `cd frontend && npm install && npm run build`, "
+              f"or point --frontend-dist at one.", file=sys.stderr)
     if args.no_runtime_api:
         print("runtime-jobs API disabled (--no-runtime-api) — the builder, runs, "
               "results and agent ingest will not work", file=sys.stderr)
