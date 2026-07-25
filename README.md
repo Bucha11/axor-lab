@@ -147,13 +147,39 @@ driven over a real published package plus five specific attacks
 (`tests/test_browser_verify.py`), including the case people forget: a genuine
 package must still pass.
 
-### Still CLI-only, and why
+### Live-model runs: the only measurement of a model
 
-`--real-kernel` and running a hand-written `.axl` are now in the web too. What
-remains: a **live model** needs the hard cost ceiling and the estimate-confirm
-gate, and writing the **signed, manifest-bound CP export tree** needs your
-signing key, which a server cannot hold on your behalf — the web builds the
-config and hands it over unsigned.
+The scripted agent's attack rate is a **parameter** — `scripted@0.6` follows the
+injection about 60% of the time — so an ungoverned ASR from it is a dial, not a
+finding. What it does prove is real and replayable: the kernel denies a tainted
+egress sink. But nothing about any model.
+
+`POST /runs/live/plan` → `POST /runs/live` is the run where the ungoverned arm
+becomes a measurement, and the only way to ask which of several models actually
+gets exfiltrated. `/runs/local` still refuses to spend anything; this is a
+separate surface carrying the CLI's safeguards rather than waiving them:
+
+- **Two steps.** Pricing needs no key — see the cost before handing anything over
+  — and returns a confirm token derived from the exact experiment, model and
+  budget. A token from a 6-trial estimate will not execute 120 trials, raise the
+  ceiling, or switch models.
+- **A budget is required.** The CLI may run unbounded because a human is watching
+  the terminal; nothing in an HTTP request plays that role.
+- **The key is yours.** Per request, used, never stored, logged or echoed.
+- **Token ceilings are hard; `max_usd` is best-effort** — it comes from an
+  illustrative price table, not your provider's billing, so it stops the run
+  *near* the figure. The UI says this next to the field, not in a footnote.
+- **No fake pairing.** A live model samples each condition independently, so the
+  result is a two-proportion comparison and never a paired McNemar p-value —
+  stated at plan time, before the money moves.
+- **A run where every trial failed is a 502, not a completed run with no
+  traces.** A rejected key used to land as an empty success.
+
+### Still CLI-only
+
+Writing the **signed, manifest-bound CP export tree** needs your signing key,
+which a server cannot hold on your behalf — the web builds the config and hands
+it over unsigned.
 
 It lands as an ordinary COMPLETED run, so results, bundle assembly and publish all
 work over it unchanged — in the UI that is **Run the example → results → publish**,

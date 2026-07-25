@@ -8,6 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { navigate, useRoute } from "./router";
 import { api } from "./api";
 import Landing from "./tabs/Landing";
+import LiveModels from "./tabs/LiveModels";
 import AgentIngest from "./tabs/AgentIngest";
 import Builder from "./tabs/Builder";
 import RunProgress from "./tabs/RunProgress";
@@ -39,6 +40,7 @@ const MORE = [
   { id: "agent-ingest", label: "bring an agent" },
   { id: "import", label: "import an incident" },
   { id: "verify", label: "verify a package" },
+  { id: "models", label: "compare models" },
   { id: "scenario-author", label: "author a scenario" },
   { id: "runs", label: "run progress" },
   { id: "workspace", label: "workspace" },
@@ -159,6 +161,7 @@ export default function App() {
       {key === "import" && <ImportIncident />}
       {key === "incidents" && <Incidents />}
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
+      {key === "models" && <LiveModels />}
       {key === "verify" && <Verify />}
       {key === "workspace" && <Workspace />}
     </div>
