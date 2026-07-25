@@ -47,9 +47,21 @@ class LocalRunRefused(ValueError):
         self.message = message
 
 
+#: the checkout's examples/ is the source of truth; lab_server/examples/ is the
+#: build-time copy that ships in the wheel (the lab_contracts/schemas pattern,
+#: kept byte-identical by tests/test_packaging.py). Without the copy, the one
+#: capability the landing page leads with — "run the worked example", one click,
+#: no setup — answered 500 for every installed user, because an installed
+#: package has no repository root to resolve against.
+EXAMPLE_NAME = "banking-exfil-01.axl"
+_CHECKOUT_EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+_PACKAGED_EXAMPLES = Path(__file__).resolve().parent / "examples"
+
+
 def example_path() -> Path:
-    """The bundled example experiment, resolved from the installed package."""
-    return Path(__file__).resolve().parent.parent / "examples" / "banking-exfil-01.axl"
+    """The bundled example experiment, in a checkout or an installed wheel."""
+    checkout = _CHECKOUT_EXAMPLES / EXAMPLE_NAME
+    return checkout if checkout.is_file() else _PACKAGED_EXAMPLES / EXAMPLE_NAME
 
 
 def load_example() -> dict[str, Any]:

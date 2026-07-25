@@ -43,19 +43,32 @@ _TYPES = {
 }
 
 
+#: the build shipped INSIDE the wheel, and the checkout's build — searched in
+#: that order. An installed user has no `frontend/` at all, so without the
+#: package-data copy `pip install axor-lab` could never serve the UI and node
+#: would be a hard prerequisite for seeing the product at all.
+PACKAGED_WEB = Path(__file__).resolve().parent / "web"
+CHECKOUT_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+
 def find_dist(explicit: str | None = None) -> Path | None:
-    """The built UI, if there is one. `frontend/dist` beside the package.
+    """The built UI, if there is one.
 
     Auto-detection lives here and is called from the ENTRYPOINT, never from
     `make_server`: a library factory whose behaviour depends on whether someone
     happened to run `npm run build` is not a factory anyone can test. Callers
     that want the UI pass the directory explicitly.
+
+    A checkout build WINS over the packaged one: someone who just ran
+    `npm run build` means the thing they built, not the copy frozen at release.
     """
     if explicit:
         path = Path(explicit)
         return path if (path / "index.html").is_file() else None
-    candidate = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-    return candidate if (candidate / "index.html").is_file() else None
+    for candidate in (CHECKOUT_DIST, PACKAGED_WEB):
+        if (candidate / "index.html").is_file():
+            return candidate
+    return None
 
 
 def resolve_asset(dist: Path, path: str) -> tuple[bytes, str] | None:

@@ -8,6 +8,9 @@ build/
 node_modules/
 frontend/dist/
 *.tsbuildinfo
+# the built UI staged as package data (scripts/build_web.py) — a release
+# artifact, generated from frontend/dist at build time, never committed
+lab_server/web/
 
 # CLI publish receipts (written next to cwd by default)
 *.acceptance.json

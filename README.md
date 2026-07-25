@@ -2,6 +2,42 @@
 
 Axor Lab — standalone research surface for the Axor governance stack: bring an agent, run attack scenarios ungoverned/governed on simulated tools, investigate single trials (EvidenceCase), replay governance verdicts exactly, and publish reproducible bundles.
 
+## Quickstart
+
+```
+pip install axor-lab
+axor-lab serve --open
+```
+
+That is the whole product: the web UI, the catalog, and the run API. Click
+**Start with the worked example** and you have a real result in a few seconds —
+a banking agent under a prompt-injected exfiltration attempt, run 60 times
+ungoverned and governed, with every trial's trace kept and exactly replayable.
+
+Nothing to configure and nothing to pay for: the agent is a deterministic
+stand-in, the kernel is the stdlib reference kernel, and the tools are
+simulated, so the run happens in-process and offline. It is byte-identical to
+`axor-lab run` over the same file — the shortcut is not a lesser path. Bringing
+your own agent, a live model (BYOK), or the real `axor-core` kernel are steps up
+from there, not prerequisites.
+
+Working from a checkout instead? Build the UI once, then serve:
+
+```
+python scripts/build_web.py     # or: cd frontend && pnpm install && pnpm build
+python -m lab_server --root ./lab-store
+```
+
+Or in Docker — one image, the whole product, no compose file:
+
+```
+docker build -t axor-lab . && docker run -p 8000:8000 -p 8010:8010 axor-lab
+```
+
+(`docker-compose.yml` is the hosted deployment: nginx terminates TLS at the edge
+with a Cloudflare Origin Certificate. It is what puts the product on the
+internet, not what makes it viewable.)
+
 - **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — the production-ready implementation plan (phases, reuse map, milestones, definition of done). The MVP spine is implemented; see its status block.
 - **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the post-MVP plan: BYOK model adapter, Control Plane export, full web app, production hardening, then the Later tier and the commercial track. Written before v0.3, so its Later tier still plans the gateway, sandbox, games and black-box evaluation that v0.3 retired — see "Retired in v0.3" below.
 - **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
@@ -88,17 +124,28 @@ this command served the catalog and left the builder, runs, results and agent
 ingest dark against a server that looked healthy; `--no-runtime-api` is the
 explicit opt-out.
 
+`axor-lab serve` and `python -m lab_server` are the same command — the first is
+the one `axor-lab --help` lists, and it forwards its whole argv tail untouched,
+so there is one argument list rather than two copies that drift.
+
 ```
-cd frontend && npm install && npm run build && cd ..   # once — builds the web UI
-python -m lab_server --root ./lab-store
+python scripts/build_web.py                # once, in a checkout — builds the UI
+axor-lab serve --root ./lab-store [--open]
 # :8000  GET /  the web UI · /catalog server-rendered index
 #        GET /e/{id} publication · GET /e/{id}/evidence/{trace_id}
 #        /jobs-api/*  bridged to the run API below
 # :8010  runtimes · experiments/plan · runs · runs/local
 ```
 
-The server serves the built UI itself, from `frontend/dist` beside the package or
-wherever `--frontend-dist` points. It also bridges `/jobs-api/*` to the run API,
+The server serves the built UI itself. It looks for a checkout build
+(`frontend/dist`) first, then the copy shipped inside the package
+(`lab_server/web`, staged from that build by `scripts/build_web.py` before a
+release), or wherever `--frontend-dist` points. The packaged copy is what makes
+`pip install axor-lab` enough — an installed user has no `frontend/` directory,
+so without it node would be a hard prerequisite for seeing the product at all.
+The bundled example experiment ships the same way and for the same reason.
+
+It also bridges `/jobs-api/*` to the run API,
 because the UI talks to two backends and only one of them is that port — in
 development vite proxies this and in the compose deployment nginx does, so
 without the bridge a `pip install` user would get a UI whose every run, compose,

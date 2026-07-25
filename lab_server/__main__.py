@@ -17,8 +17,13 @@ from .app import make_server
 from .runtime_jobs import make_runtime_server
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="lab-server", description="Axor Lab catalog server")
+def main(argv: list[str] | None = None, prog: str = "lab-server") -> int:
+    # `prog` so the help text names the command the user actually typed —
+    # `axor-lab serve` forwards here, and usage lines that say `lab-server` send
+    # people looking for a command that is not on their PATH.
+    parser = argparse.ArgumentParser(
+        prog=prog, description="Axor Lab server — web UI, catalog, and run API",
+    )
     parser.add_argument("--root", default="./lab-store", help="publication store directory")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -66,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
         help="the built web UI to serve at / (default: frontend/dist beside the "
              "package, when it exists). Without a build the server-rendered "
              "catalog answers / instead",
+    )
+    parser.add_argument(
+        "--open", dest="open_browser", action="store_true",
+        help="open the web UI in a browser once the server is up",
     )
     parser.add_argument(
         "--no-runtime-api", action="store_true",
@@ -165,6 +174,12 @@ def main(argv: list[str] | None = None) -> int:
         control = "token-gated" if args.control_token else "OPEN (local dev only — do not expose)"
         runtime_port = runtime_server.server_address[1]
         print(f"axor-lab runtime-jobs on http://{args.host}:{runtime_port} — control: {control}")
+    if args.open_browser:
+        # the socket is already bound and listening, so a request that arrives
+        # before serve_forever() waits in the backlog rather than being refused
+        import webbrowser
+
+        webbrowser.open(f"http://{args.host}:{bound_port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

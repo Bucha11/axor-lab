@@ -71,6 +71,15 @@ _METRIC_UTILITY = "task_success_rate"
 
 
 def main(argv: list[str] | None = None) -> int:
+    # `serve` is handed its argv tail untouched, before this parser sees it: the
+    # server owns its own flags and its own --help, so there is one argument list
+    # rather than two copies that drift. argparse cannot express this (REMAINDER
+    # will not capture a leading `--help`), so the handoff happens here.
+    tail = sys.argv[1:] if argv is None else argv
+    if tail and tail[0] == "serve":
+        from lab_server.__main__ import main as serve_main
+
+        return serve_main(list(tail[1:]), prog="axor-lab serve")
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
@@ -1122,6 +1131,18 @@ def _cmd_serve_runtime(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Run the Lab server — the web UI, the catalog, and the run API.
+
+    This is `python -m lab_server` under a name `axor-lab --help` actually
+    lists. The whole argv tail is handed over untouched, so there is one
+    argument list and one help text, not two that drift apart.
+    """
+    from lab_server.__main__ import main as serve_main
+
+    return serve_main(list(args.server_args), prog="axor-lab serve")
+
+
 def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
     from lab_adapters import (
         UnknownSuiteError,
@@ -1666,6 +1687,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="seconds between polls when waiting for a run (ignored with --once)",
     )
     p_serve.set_defaults(func=_cmd_serve_runtime)
+
+    # The one command that raises the product. It used to be `python -m
+    # lab_server` — a module path nobody discovers from `axor-lab --help`, which
+    # meant the CLI listed twelve expert commands and not the way in.
+    #
+    # Every flag is forwarded VERBATIM rather than redeclared here: a second copy
+    # of an argument list is a second copy that drifts, and `axor-lab serve
+    # --help` then documents flags the server does not have. main() intercepts
+    # `serve` before this parser runs (argparse will not let REMAINDER capture a
+    # leading `--help`); this registration is what puts it in `--help`, and
+    # serves anyone who drives the parser directly.
+    p_serve_all = sub.add_parser(
+        "serve",
+        help="run the Axor Lab server: web UI, catalog and run API (one command)",
+        add_help=False,
+    )
+    p_serve_all.add_argument(
+        "server_args", nargs=argparse.REMAINDER,
+        help="flags for the server (see `axor-lab serve --help`)",
+    )
+    p_serve_all.set_defaults(func=_cmd_serve)
 
     p_import = sub.add_parser(
         "import-agentdojo", help="materialize a curated AgentDojo suite as an .axl file"
