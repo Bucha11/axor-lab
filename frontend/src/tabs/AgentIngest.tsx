@@ -352,7 +352,7 @@ function WrapCode({ goInstrumented }: { goInstrumented: () => void }) {
         <div className="mt-3">
           <EmptyState title="wrap request failed">
             {error}. Is the runtime-jobs server up?
-            <Cmd>python -m lab_server --root ./lab-store --runtime-port 8010</Cmd>
+            <Cmd>python -m lab_server --root ./lab-store</Cmd>
           </EmptyState>
         </div>
       )}
@@ -519,7 +519,7 @@ function ConnectRuntime() {
         <div className="mt-3">
           <EmptyState title="connect failed">
             {error}. Is the runtime-jobs server up?
-            <Cmd>python -m lab_server --root ./lab-store --runtime-port 8010</Cmd>
+            <Cmd>python -m lab_server --root ./lab-store</Cmd>
           </EmptyState>
         </div>
       )}

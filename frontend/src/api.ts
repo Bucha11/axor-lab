@@ -312,6 +312,19 @@ export interface CreateRunResult {
   estimate: Record<string, unknown>;
 }
 
+// A run the SERVER executed (POST /runs/local) rather than a runtime. It arrives
+// already completed, so there is no progress to follow — `executed: "local"` is
+// the honest record of who ran it.
+export interface LocalRunResult {
+  run_id: string;
+  state: string;
+  trials: number;
+  aggregates: number;
+  missingness: string;
+  by_status: Record<string, number>;
+  executed: string;
+}
+
 export interface TrialStatus {
   trial_id: string;
   status: "pending" | "completed" | "failed" | string;
@@ -565,6 +578,16 @@ export const api = {
   confirmRun: (runId: string) =>
     jf(`/runs/${encodeURIComponent(runId)}/confirm`, post({})).then((r) =>
       j<{ run_id: string; state: string }>(r),
+    ),
+  // Execute an experiment IN THE SERVER and land it as a completed run. No
+  // runtime, no provider, no CLI — the bundled example is offline (scripted
+  // agent, reference kernel, simulated tools), so this is the shortest honest
+  // path to a first result. Omit `experiment` to run the bundled example.
+  // The server refuses anything that would need a live model (409) or exceed its
+  // trial ceiling (413); a run that costs money stays with the operator's CLI.
+  runLocal: (experiment?: Record<string, unknown>) =>
+    jf("/runs/local", post(experiment ? { experiment } : {})).then((r) =>
+      j<LocalRunResult>(r),
     ),
   runState: (runId: string) =>
     jf(`/runs/${encodeURIComponent(runId)}`).then((r) =>

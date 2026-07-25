@@ -395,14 +395,14 @@ export default function Builder() {
             <div className="mt-2">
               <EmptyState title="no connected runtimes">
                 Connect one first ("bring an agent" → endpoint instrumented), or start the jobs server:
-                <Cmd>python -m lab_server --root ./lab-store --runtime-port 8010</Cmd>
+                <Cmd>python -m lab_server --root ./lab-store</Cmd>
               </EmptyState>
             </div>
           )}
           {runtimes.isError && (
             <div className="mt-2">
               <EmptyState title="runtime-jobs server unreachable">
-                <Cmd>python -m lab_server --root ./lab-store --runtime-port 8010</Cmd>
+                <Cmd>python -m lab_server --root ./lab-store</Cmd>
                 If the control surface is token-gated, set the control token here:
                 <div className="mt-2">
                   <input value={controlToken} onChange={(e) => setControlToken(e.target.value)}
@@ -427,7 +427,7 @@ export default function Builder() {
         <div className="mt-3">
           <EmptyState title="request failed">
             {error}. The runtime-jobs server must be running:
-            <Cmd>python -m lab_server --root ./lab-store --runtime-port 8010</Cmd>
+            <Cmd>python -m lab_server --root ./lab-store</Cmd>
           </EmptyState>
         </div>
       )}

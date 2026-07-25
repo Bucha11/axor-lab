@@ -2,9 +2,9 @@
 // /api/publications — public entries only; unlisted stays reachable by its
 // capability URL #/e/{id}, private is never served).
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, GitFork, Search } from "lucide-react";
-import { C, MONO } from "../theme";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { ChevronRight, GitFork, Play, RefreshCw, Search } from "lucide-react";
+import { C, MONO, cta } from "../theme";
 import { navigate } from "../router";
 import { api } from "../api";
 import { STATUS_LEGEND, StatusChip } from "../components/Provenance";
@@ -13,6 +13,12 @@ import EmptyState, { Cmd } from "../components/EmptyState";
 export default function Published() {
   const [q, setQ] = useState("");
   const pubs = useQuery({ queryKey: ["publications"], queryFn: api.listPublications });
+  // An empty catalog is the one place a new user reliably lands, so it offers the
+  // run rather than a shell command to go type elsewhere.
+  const runExample = useMutation({
+    mutationFn: () => api.runLocal(),
+    onSuccess: (run) => navigate(`results/${run.run_id}`),
+  });
   const list = (pubs.data ?? []).filter((p) =>
     (p.question + p.publication_id).toLowerCase().includes(q.toLowerCase()),
   );
@@ -35,17 +41,29 @@ export default function Published() {
       {pubs.isError && (
         <EmptyState title="catalog unreachable">
           The publications server is not answering. Start it, then reload:
-          <Cmd>python -m lab_server --root ./lab-store --port 8000</Cmd>
+          <Cmd>python -m lab_server --root ./lab-store</Cmd>
         </EmptyState>
       )}
       {pubs.isSuccess && list.length === 0 && (
         <EmptyState title={q ? "no publications match the search" : "no published experiments yet"}>
           {!q && (
             <>
-              Run an experiment and publish its bundle — the server verifies replay before minting:
-              <Cmd>{`axor-lab run examples/banking-exfil-01.axl --out ./bundle --yes
-axor-lab publish ./bundle --question "…" --visibility public \\
-    --server http://127.0.0.1:8000`}</Cmd>
+              Nothing has been published here yet. Run the worked example — it needs no
+              agent and no setup — then publish it from its results page. The server
+              re-verifies the bundle (content hashes, bit-identical replay, recomputed
+              statistics) before it mints anything.
+              <div style={{ marginTop: 10 }}>
+                <button onClick={() => runExample.mutate()} disabled={runExample.isPending} style={cta(!runExample.isPending)}>
+                  {runExample.isPending
+                    ? <><RefreshCw size={13} className="animate-spin" /> running…</>
+                    : <><Play size={13} /> Run the example</>}
+                </button>
+              </div>
+              {runExample.isError && (
+                <div style={{ color: C.red, marginTop: 8 }}>
+                  {(runExample.error as Error).message}
+                </div>
+              )}
             </>
           )}
         </EmptyState>

@@ -1,39 +1,54 @@
-// Landing (lab-landing mockup): a reproducible lab for agent governance. Three
-// low-barrier entry points plus the incident path, and the published catalog —
-// fetched live from GET /api/publications, never hardcoded.
+// Landing: a reproducible lab for agent governance. Entry points that DO
+// something, plus the published catalog — fetched live from GET /api/publications.
+//
+// The first result is reachable from here with one click. The bundled example is
+// offline (scripted agent, reference kernel, simulated tools), so the server can
+// execute it directly — no agent, no provider, no CLI. That run is byte-identical
+// to `axor-lab run` over the same file, so the shortcut is not a lesser path.
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ChevronRight, Compass, GitFork, RefreshCw, Search, ShieldAlert, Upload,
+  ChevronRight, Compass, GitFork, Play, RefreshCw, Search, ShieldAlert, Upload,
 } from "lucide-react";
-import { C, MONO } from "../theme";
+import { C, MONO, cta } from "../theme";
 import { navigate } from "../router";
 import { api } from "../api";
 import { STATUS_LEGEND, StatusChip } from "../components/Provenance";
-import EmptyState, { Cmd } from "../components/EmptyState";
+import EmptyState from "../components/EmptyState";
 
+// Three, not four. "Explore experiments" and "Reproduce a run" were two cards
+// on one route — two doors into the same room. The catalog IS where you reproduce
+// someone's run, so it says so once.
 const ENTRIES = [
   {
-    icon: Compass, title: "Explore experiments", color: C.violet, tag: "lowest barrier",
-    desc: "browse published runs, see the mechanism, fork one", to: "published",
-  },
-  {
-    icon: RefreshCw, title: "Reproduce a run", color: C.green, tag: "no agent needed",
-    desc: "drop a bundle → re-run its governance verdicts exactly", to: "published",
+    icon: Compass, title: "Explore & reproduce", color: C.violet, tag: "no agent needed",
+    desc: "browse published runs, replay their verdicts bit-for-bit, fork one", to: "published",
   },
   {
     icon: Upload, title: "Bring your agent", color: C.steel, tag: "your setup",
     desc: "code · endpoint · traces → run your own", to: "agent-ingest",
   },
   {
+    // this card promises the incident path, so it goes to the incident
+    // importer — it used to land on the generic agent-ingest screen
     icon: ShieldAlert, title: "Investigate a production incident", color: C.red, tag: "for teams",
-    desc: "import the trace → reproduce it → test a fix → pin a regression", to: "agent-ingest",
+    desc: "import the trace → reproduce it → test a fix → pin a regression", to: "import",
   },
 ] as const;
 
 export default function Landing() {
   const [q, setQ] = useState("");
+  const qc = useQueryClient();
   const pubs = useQuery({ queryKey: ["publications"], queryFn: api.listPublications });
+
+  // Run the bundled example in the server and go straight to its results.
+  const runExample = useMutation({
+    mutationFn: () => api.runLocal(),
+    onSuccess: (run) => {
+      qc.invalidateQueries({ queryKey: ["run-results", run.run_id] });
+      navigate(`results/${run.run_id}`);
+    },
+  });
 
   const list = (pubs.data ?? []).filter((p) =>
     p.question.toLowerCase().includes(q.toLowerCase()),
@@ -44,12 +59,47 @@ export default function Landing() {
       <h1 style={{ fontSize: 27, fontWeight: 700, lineHeight: 1.2, margin: "0 0 8px", maxWidth: 540 }}>
         A reproducible lab for agent governance.
       </h1>
-      <div style={{ fontFamily: MONO, fontSize: 12, color: C.mut, marginBottom: 28, maxWidth: 560, lineHeight: 1.6 }}>
+      <div style={{ fontFamily: MONO, fontSize: 12, color: C.mut, marginBottom: 20, maxWidth: 560, lineHeight: 1.6 }}>
         Run experiments on LLM agents under Axor governance — or reproduce someone else's, bit-for-bit on the
         governance layer. Free for research. Standalone; no Axor deployment needed.
       </div>
 
-      {/* three entry points + incidents — a lower first step than "bring your agent" */}
+      {/* The shortest path to a real result: one click, no setup. */}
+      <div className="mb-8 p-4" style={{ background: C.panel, border: `1px solid ${C.violet}`, borderRadius: 10 }}>
+        <div className="wrapline" style={{ gap: 12, justifyContent: "space-between" }}>
+          <div style={{ flex: "1 1 320px", minWidth: 260 }}>
+            <div style={{ fontFamily: MONO, fontSize: 13, color: C.text, fontWeight: 600 }}>
+              Start with the worked example
+            </div>
+            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, marginTop: 4, lineHeight: 1.6 }}>
+              A banking agent gets a prompt-injected exfiltration attempt, run 60 times
+              ungoverned and governed. Nothing to install: the agent is a deterministic
+              stand-in and the tools are simulated, so it runs here in a few seconds.
+            </div>
+          </div>
+          <button
+            onClick={() => runExample.mutate()}
+            disabled={runExample.isPending}
+            style={cta(!runExample.isPending)}
+          >
+            {runExample.isPending
+              ? <><RefreshCw size={13} className="animate-spin" /> running…</>
+              : <><Play size={13} /> Run the example</>}
+          </button>
+        </div>
+        {runExample.isError && (
+          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.red, marginTop: 10, lineHeight: 1.6 }}>
+            {(runExample.error as Error).message}
+          </div>
+        )}
+        <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
+          The server executes it and records the run — the same run `axor-lab run` produces from
+          the same file, down to the bundle id. A run that needs a live model is refused here and
+          stays with the CLI, where the cost ceiling lives.
+        </div>
+      </div>
+
+      {/* entry points */}
       <div className="entrygrid mb-10">
         {ENTRIES.map(({ icon: Icon, title, desc, color, tag, to }) => (
           <div key={title} onClick={() => navigate(to)}
@@ -77,18 +127,20 @@ export default function Landing() {
       )}
       {pubs.isError && (
         <EmptyState title="catalog unreachable">
-          The publications server is not answering. Start it, then reload:
-          <Cmd>python -m lab_server --root ./lab-store --port 8000</Cmd>
+          The publications server is not answering — start it and reload. One process
+          serves the catalog and the run API:
+          <div style={{ fontFamily: MONO, fontSize: 10, color: C.mut, marginTop: 6 }}>
+            python -m lab_server --root ./lab-store
+          </div>
         </EmptyState>
       )}
       {pubs.isSuccess && list.length === 0 && (
         <EmptyState title={q ? "no publications match the search" : "no published experiments yet"}>
           {!q && (
             <>
-              Publish a run to fill the catalog — the bundle is verified server-side before it is minted:
-              <Cmd>{`axor-lab run examples/banking-exfil-01.axl --out ./bundle --yes
-axor-lab publish ./bundle --question "…" --visibility public \\
-    --server http://127.0.0.1:8000`}</Cmd>
+              Run the example above, then publish it from its results page — the bundle is
+              re-verified server-side (content hashes, bit-identical replay, recomputed
+              statistics) before it is minted.
             </>
           )}
         </EmptyState>

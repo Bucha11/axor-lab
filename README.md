@@ -78,12 +78,40 @@ Lifecycle, exit codes, and the estimate-confirm gate follow
 `contracts/runner-protocol.md` and `contracts/lifecycle.md`. The bundle
 directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
 
-Run the catalog/publish server (stdlib only, no live agents):
+Run the server (stdlib only, no live agents). One process, and one command brings
+up the **whole** product — the catalog on `--port` (8000) and the run API on
+`--runtime-port` (8010). The run API used to default to off, which meant this
+command served the catalog and left the builder, runs, results and agent ingest
+dark against a server that looked healthy; `--no-runtime-api` is the explicit
+opt-out.
 
 ```
-python -m lab_server --root ./lab-store --port 8000
-# GET / catalog · GET /e/{id} publication · GET /e/{id}/evidence/{trace_id}
+python -m lab_server --root ./lab-store
+# :8000  GET / catalog · GET /e/{id} publication · GET /e/{id}/evidence/{trace_id}
+# :8010  runtimes · experiments/plan · runs · runs/local
 ```
+
+## No-CLI path: a first result from the UI
+
+The bundled example is fully offline — `scripted@0.6` is a deterministic stand-in
+for the model layer, the kernel is the stdlib reference kernel, and the tools are
+simulated. So the server can just run it:
+
+```
+POST /runs/local            # {} → runs examples/banking-exfil-01.axl
+POST /runs/local            # {"experiment": {...}} → runs an .axl you pass in
+```
+
+It lands as an ordinary COMPLETED run, so results, bundle assembly and publish all
+work over it unchanged — in the UI that is **Run the example → results → publish**,
+no terminal at any step. The run is byte-identical to `axor-lab run` over the same
+file (same `bundle_id`, trials, traces, aggregates and environment — pinned by
+`tests/test_local_run.py`), and it keeps `recorded_at_execution` config provenance
+rather than the weaker reconstructed kind, so it is publishable evidence.
+
+Two things it refuses, on purpose: an experiment needing a **live model** (409 — a
+browser must not be able to spend money; the cost ceiling and estimate-confirm gate
+live in the CLI) and a suite over its **trial ceiling** (413).
 
 ## Executable acceptance suite
 

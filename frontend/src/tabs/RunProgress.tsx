@@ -142,7 +142,7 @@ export default function RunProgress({ runId }: { runId?: string }) {
           {String(results.error instanceof Error ? results.error.message : results.error)} — the
           runtime-jobs server must be running (and this run must exist on it; the in-memory store
           forgets runs on restart):
-          <Cmd>python -m lab_server --root ./lab-store --runtime-port 8010</Cmd>
+          <Cmd>python -m lab_server --root ./lab-store</Cmd>
         </EmptyState>
       )}
 

@@ -30,10 +30,20 @@ def main(argv: list[str] | None = None) -> int:
         "--admin-token", default=os.environ.get("AXOR_LAB_ADMIN_TOKEN"),
         help="require this bearer token for takedown (or AXOR_LAB_ADMIN_TOKEN)",
     )
+    # ON by default. It used to default to 0 (off), which meant the documented
+    # start command brought up the catalog and left the whole run surface dark —
+    # the builder, runs, results and "bring an agent" all failed against a server
+    # that looked healthy. Half a product behind an undocumented flag is worse
+    # than a missing flag, so the default is now the whole product.
     parser.add_argument(
-        "--runtime-port", type=int, default=0,
-        help="also serve the runtime-jobs API (connect runtimes, plan and assign "
-             "runs) on this port; 0 (the default) disables it",
+        "--runtime-port", type=int, default=8010,
+        help="serve the runtime-jobs API (connect runtimes, plan/assign runs, "
+             "local runs) on this port [default: 8010]",
+    )
+    parser.add_argument(
+        "--no-runtime-api", action="store_true",
+        help="catalog only — do not serve the runtime-jobs API. The builder, runs, "
+             "results and agent ingest will be unavailable",
     )
     parser.add_argument(
         "--control-token", default=os.environ.get("AXOR_LAB_CONTROL_TOKEN"),
@@ -91,7 +101,10 @@ def main(argv: list[str] | None = None) -> int:
     bound_port = server.server_address[1]
     print(f"axor-lab server on http://{args.host}:{bound_port} (store: {args.root}) — "
           f"writes: {auth} — {tier}")
-    if args.runtime_port:
+    if args.no_runtime_api:
+        print("runtime-jobs API disabled (--no-runtime-api) — the builder, runs, "
+              "results and agent ingest will not work", file=sys.stderr)
+    elif args.runtime_port:
         runtime_server = make_runtime_server(
             host=args.host, port=args.runtime_port, control_token=args.control_token,
             store_root=Path(args.root) / "runtime-jobs",

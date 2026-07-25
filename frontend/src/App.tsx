@@ -21,26 +21,38 @@ import IncidentView from "./tabs/IncidentView";
 import Incidents from "./tabs/Incidents";
 import Workspace from "./tabs/Workspace";
 
-const PRIMARY = ["home", "builder", "runs", "results", "published"] as const;
+// The nav reads as words, not route ids. It used to render the raw segment, so
+// the bar said "home builder runs results published" while the overflow menu had
+// real labels — two vocabularies in one header.
+//
+// `incidents` is primary: importing a production incident is the path teams
+// actually pay for, and it was buried behind "more…".
+const PRIMARY = [
+  { id: "home", label: "home" },
+  { id: "builder", label: "build" },
+  { id: "results", label: "results" },
+  { id: "published", label: "catalog" },
+  { id: "incidents", label: "incidents" },
+] as const;
 const MORE = [
   { id: "agent-ingest", label: "bring an agent" },
-  { id: "scenario-author", label: "scenario author" },
-  { id: "import", label: "import incident" },
-  { id: "incidents", label: "incidents" },
+  { id: "import", label: "import an incident" },
+  { id: "scenario-author", label: "author a scenario" },
+  { id: "runs", label: "run progress" },
   { id: "workspace", label: "workspace" },
 ] as const;
 
-function NavLink({ id, active }: { id: string; active: boolean }) {
+function NavLink({ id, label, active }: { id: string; label: string; active: boolean }) {
   return (
     <button
-      onClick={() => navigate(id === "home" ? "home" : id)}
+      onClick={() => navigate(id)}
       style={{
         background: "none", border: "none", padding: "2px 0", cursor: "pointer",
         color: active ? C.text : C.dim, fontSize: 13, fontFamily: MONO,
         borderBottom: `2px solid ${active ? C.violet : "transparent"}`,
       }}
     >
-      {id}
+      {label}
     </button>
   );
 }
@@ -120,8 +132,8 @@ export default function App() {
             AXOR<span style={{ color: C.violet }}> LAB</span>
           </button>
           <div className="wrapline" style={{ gap: 14 }}>
-            {PRIMARY.map((id) => (
-              <NavLink key={id} id={id} active={tab === id} />
+            {PRIMARY.map(({ id, label }) => (
+              <NavLink key={id} id={id} label={label} active={tab === id} />
             ))}
             <MoreMenu activeKey={key} />
           </div>

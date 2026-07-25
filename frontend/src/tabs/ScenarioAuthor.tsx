@@ -355,7 +355,7 @@ export default function ScenarioAuthor() {
         <div className="mt-3">
           <EmptyState title="validate failed">
             {serverError}. The runtime-jobs server must be running:
-            <Cmd>python -m lab_server --root ./lab-store --runtime-port 8010</Cmd>
+            <Cmd>python -m lab_server --root ./lab-store</Cmd>
           </EmptyState>
         </div>
       )}

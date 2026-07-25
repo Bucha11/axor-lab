@@ -30,7 +30,7 @@ export default function EvidenceView({
       <div style={{ maxWidth: 660, margin: "0 auto" }}>
         <EmptyState title="bundle unreachable">
           {String(pkg.error instanceof Error ? pkg.error.message : "not found")}
-          <Cmd>python -m lab_server --root ./lab-store --port 8000</Cmd>
+          <Cmd>python -m lab_server --root ./lab-store</Cmd>
         </EmptyState>
       </div>
     );

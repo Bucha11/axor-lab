@@ -111,7 +111,7 @@ export default function Results({ runId }: { runId?: string }) {
         <EmptyState title="run unreachable">
           {String(results.error instanceof Error ? results.error.message : results.error)} — start the
           runtime-jobs server (the in-memory store forgets runs on restart):
-          <Cmd>python -m lab_server --root ./lab-store --runtime-port 8010</Cmd>
+          <Cmd>python -m lab_server --root ./lab-store</Cmd>
         </EmptyState>
       )}
 

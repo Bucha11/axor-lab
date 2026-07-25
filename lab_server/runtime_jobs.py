@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from . import local_run
+
 _MAX_BODY = 8 * 1024 * 1024
 
 _RUNTIME_JOBS_RE = re.compile(r"^/runtime/jobs$")
@@ -106,12 +108,19 @@ class _Job:
     trials: dict[str, _Trial] = field(default_factory=dict)
     estimate: dict[str, object] = field(default_factory=dict)
     aggregates: list[dict[str, object]] = field(default_factory=list)
+    # A run EXECUTED in this process (see local_run.py) keeps the runner's own
+    # bundle instead of having one reconstructed from its traces. The reconstruct
+    # path has to recompute each trial's runtime_config_hash and marks it
+    # `reconstructed_legacy`, which the evidence export refuses — a bundle the
+    # runner built records the hash at execution, so it is publishable evidence.
+    bundle: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "job_id": self.job_id, "runtime_ref": self.runtime_ref,
             "assignment": self.assignment, "planned": list(self.planned),
             "state": self.state, "estimate": self.estimate, "aggregates": self.aggregates,
+            "bundle": self.bundle,
             "trials": {tid: t.to_dict() for tid, t in self.trials.items()},
         }
 
@@ -126,6 +135,7 @@ class _Job:
             state=str(d.get("state", "waiting_for_runtime")),
             estimate=dict(d.get("estimate") or {}),  # type: ignore[arg-type]
             aggregates=list(d.get("aggregates") or []),  # type: ignore[arg-type]
+            bundle=d.get("bundle") or None,  # type: ignore[arg-type]
             trials=trials,
         )
 
@@ -221,6 +231,43 @@ class RuntimeJobStore:
             self._persist_locked(job)
             return {"run_id": job_id, "state": state, "estimate": dict(estimate or {})}
 
+    def create_local_run(self, outcome: dict[str, object]) -> dict[str, object]:
+        """Land an already-EXECUTED local run (local_run.run_local) as a completed
+        job, so every downstream surface reads it like any other run.
+
+        There is no runtime behind it — `runtime_ref` is the literal "local", which
+        is not a connected runtime and can never claim work. That is the honest
+        record: this run was executed by the server, not by someone's agent.
+        """
+        bundle: dict[str, object] = outcome["bundle"]  # type: ignore[assignment]
+        traces: list[dict[str, object]] = list(outcome["traces"].values())  # type: ignore[union-attr]
+        with self._lock:
+            job_id = self._next("run")
+            job = _Job(
+                job_id=job_id, runtime_ref="local",
+                assignment={"experiment": bundle.get("experiment", {})},
+                planned=tuple(str(t.get("trial_id")) for t in bundle.get("trials", [])),  # type: ignore[union-attr]
+                state="completed",
+                aggregates=list(outcome.get("aggregates") or []),  # type: ignore[arg-type]
+                bundle=bundle,
+            )
+            for trace in traces:
+                trial_id = str(trace.get("trace_id"))
+                job.trials[trial_id] = _Trial(
+                    trial_id=trial_id, trace=trace, status="completed",
+                )
+            self._jobs[job_id] = job
+            self._persist_locked(job)
+            return {
+                "run_id": job_id,
+                "state": job.state,
+                "trials": len(job.trials),
+                "aggregates": len(job.aggregates),
+                "missingness": outcome.get("missingness", ""),
+                "by_status": outcome.get("by_status", {}),
+                "executed": "local",
+            }
+
     def confirm_run(self, job_id: str) -> dict[str, object]:
         """Confirm an `awaiting_confirmation` run (the operator accepted the
         estimate) → it becomes claimable (`waiting_for_runtime`)."""
@@ -312,10 +359,18 @@ class RuntimeJobStore:
             assignment = dict(job.assignment)
             traces = [t.trace for t in job.trials.values() if t.trace is not None]
             aggregates = list(job.aggregates)
+            executed_bundle = job.bundle
         if not traces:
             raise RuntimeJobsError(
                 422, f"run {job_id!r} completed but pushed no traces to bundle"
             )
+        # A run executed in this process already HAS the runner's bundle — return it
+        # rather than reconstructing a weaker one over the same traces.
+        if executed_bundle is not None:
+            return {
+                "bundle": executed_bundle,
+                "traces": {str(t.get("trace_id")): t for t in traces},
+            }
         # build OUTSIDE the lock — assembly resolves the assignment and hashes the
         # traces, which never touches the shared store state
         bundle, trace_map = build_run_bundle(assignment, traces, aggregates)
@@ -740,6 +795,27 @@ def make_runtime_server(
                         require_confirmation=bool(body.get("require_confirmation", False)),
                         estimate=estimate if isinstance(estimate, dict) else None,
                     ))
+                    return
+                if self.path == "/runs/local":
+                    # Execute here and now. This is what makes a first result
+                    # reachable from the UI: the bundled example is offline
+                    # (scripted agent, reference kernel, simulated tools), so it
+                    # needs no runtime, no provider and no CLI. The guards live in
+                    # local_run: offline agents only, bounded trial count.
+                    self._require_control()
+                    body = self._read_json()
+                    document = body.get("experiment")
+                    try:
+                        if document is None:
+                            document = local_run.load_example()
+                        elif not isinstance(document, dict):
+                            raise local_run.LocalRunRefused(
+                                400, "`experiment` must be an .axl document object"
+                            )
+                        outcome = local_run.run_local(document)
+                    except local_run.LocalRunRefused as exc:
+                        raise RuntimeJobsError(exc.status, exc.message) from exc
+                    self._send(201, jobs.create_local_run(outcome))
                     return
                 m = _RUN_CONFIRM_RE.match(self.path)
                 if m:

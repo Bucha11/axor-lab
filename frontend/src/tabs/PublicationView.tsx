@@ -54,7 +54,7 @@ export default function PublicationView({ publicationId }: { publicationId: stri
         <EmptyState title={`publication ${publicationId} unreachable`}>
           {String(pub.error instanceof Error ? pub.error.message : "not found")} — is the publications
           server running, and does this id exist (private publications are never served)?
-          <Cmd>python -m lab_server --root ./lab-store --port 8000</Cmd>
+          <Cmd>python -m lab_server --root ./lab-store</Cmd>
         </EmptyState>
       </div>
     );
