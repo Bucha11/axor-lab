@@ -313,10 +313,9 @@ axor-lab run suite.axl --out ./bundle --yes --real-kernel`}</Cmd>
         </div>
 
         <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, marginTop: 14, lineHeight: 1.7 }}>
-          Multi-agent games (players, federations, trust levels, rounds, faults) are a separate
-          experimental track in <span style={{ color: C.mut }}>lab_games</span> — a deterministic toy
-          model whose containment is demonstrated, not proven. It is deliberately not offered here:
-          the builder parameterizes primitives that exist, it never invents mechanics.
+          Multi-agent games (players, federations, trust levels, rounds, faults) are not offered:
+          spec v0.3 retired that subsystem along with the Lab gateway and the sandbox. The builder
+          parameterizes primitives that exist; it never invents mechanics.
         </div>
       </Disclosure>
     </div>

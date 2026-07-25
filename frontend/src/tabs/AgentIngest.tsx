@@ -1,13 +1,12 @@
-// "Bring an agent" (lab-agent-ingest mockup): pick how your agent reaches Lab;
-// it decides which reproducibility layer you get. Four modes:
-//   upload code           — REAL: POST /wrap/scan → review guesses → /wrap/manifests
-//                           (axor-wrap engine behind the jobs server)
-//   endpoint instrumented — REAL: POST /runtimes/connect → runtime_ref + ingest_key
-//   endpoint black-box    — observe-only proxy harness: coming soon
-//   upload traces         — parsed locally in the browser; upload endpoint TODO
+// "What do you have?" — one question, and only the answered path opens. Three
+// answers, ordered least-setup-first, and each reaches real code:
+//   a recorded run  — POST /replay: verdicts recomputed under the pinned kernel
+//   a running agent — POST /runtimes/connect → runtime_ref + ingest_key
+//   python source   — POST /wrap/scan → review guesses → /wrap/manifests
+//                     (the axor-wrap engine behind the jobs server)
 import { ChangeEvent, useState } from "react";
 import {
-  ArrowRight, Check, Copy, Download, FileStack, Globe, Lock, Radio, Terminal,
+  ArrowRight, Check, Copy, Download, FileStack, Lock, Radio, Terminal,
   TriangleAlert, Upload,
 } from "lucide-react";
 import { C, MONO, btn, cta, inp } from "../theme";
@@ -20,10 +19,16 @@ import EmptyState, { Cmd } from "../components/EmptyState";
 
 // Three answers, and each one does something. There used to be four modes with
 // five attributes apiece — twenty cells of reading before you could choose — and
-// two of them were dead ends: the black-box proxy answered "coming soon" and the
-// trace upload said its server side was a TODO. A door that opens onto a notice
-// is worse than no door, so the black-box harness is a roadmap line at the foot
-// of the page now, and trace upload replays for real.
+// two of them were dead ends: the trace upload said its server side was a TODO,
+// and an "endpoint — black-box" mode advertised itself as coming soon.
+//
+// Black-box is gone rather than deferred. It was retired by spec v0.3 alongside
+// the Lab gateway and the MCP proxy (contracts/mvp-contract.md, ui-backend-
+// contract.md), because driving an uninstrumented endpoint would make Lab
+// dispatch tools, hold tool credentials and act as a synchronous enforcement
+// boundary — the three things it must not be. It also could not produce a
+// conformant trace: provenance-semantics.md omits `black_box` from
+// `trace.producer.mode` precisely because there is no ledger to build.
 //
 // Ordered by how little you need to have ready.
 type ModeId = "traces" | "endpoint_instrumented" | "code";
@@ -732,14 +737,6 @@ export default function AgentIngest() {
         leave your machine — the local path is first-class.
       </div>
 
-      <div className="wrapline mt-3" style={{ gap: 6, alignItems: "flex-start" }}>
-        <Globe size={11} color={C.dim} style={{ marginTop: 3, flexShrink: 0 }} />
-        <span style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, lineHeight: 1.6 }}>
-          Not built: a black-box harness for an uninstrumented HTTP endpoint. It would give
-          boundary observations only — no in-agent flow, so no provenance and no EvidenceCase — and
-          it is not offered as a choice while that is true.
-        </span>
-      </div>
     </div>
   );
 }

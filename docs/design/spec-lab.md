@@ -16,12 +16,12 @@ Lab is standalone, so it owns full agent onboarding (it can't lean on a Control 
 
 | Mode | What | Reproducibility | Code leaves you? |
 |---|---|---|---|
-| **Upload code** (Python/LangChain/MCP) | full wrap — reuses code-in-wrapped-out (§11.3): detect tools → classify sinks → wrapped package | **live** (stochastic, CI) | sandbox — or **local `uvx axor lab wrap ./agent`**, code never leaves |
-| **Point at endpoint** (instrumented) | agent emits tool-call events + routes tools through the Lab gateway (SSE `/runs/{id}/events` + tool proxy, or MCP proxy) — Lab sees provenance and can gate | **live (proxy)** | no — events + tool I/O, not source |
-| **Point at endpoint** (black-box) | plain HTTP task-in / result-out, no instrumentation | **live, evaluation-only** | no — but governance can't act; only the final answer is scored |
+| **Demo** | the bundled example, no agent at all — open → Run → Results → EvidenceCase | **live** (deterministic stand-in) | no — nothing to bring |
+| **Upload code** (Python/LangChain/MCP) | full wrap — reuses code-in-wrapped-out (§11.3): detect tools → classify sinks → wrapped package | **live** (stochastic, CI) | scanned statically server-side (AST only, never imported) — or **local `uvx axor lab wrap ./agent`**, code never leaves |
+| **Connected runtime** | an existing Axor runtime claims an assignment, runs your agent locally, pushes events | **live** (stochastic, CI) | no — events, not source |
 | **Upload traces** | no agent; governance over frozen behavior | **replay** (bit-identical) | no — observations only (§8.3) |
 
-**Endpoint governance requires instrumentation — stated plainly.** From the outside, HTTP task-in/result-out only reveals the final answer: Lab cannot see internal tool calls, propagate provenance, or stop a sink. So the endpoint mode splits: *instrumented* (the agent emits tool-call events and routes tools through a Lab gateway — the contract is `POST /runs`, `SSE /runs/{id}/events`, tool calls dispatched via the gateway or an MCP proxy) supports real governance; *black-box* (no instrumentation) is honestly labeled evaluation-only — it scores outcomes, it does not govern. We never call black-box scoring "governance."
+**Governance requires instrumentation, so Lab does not drive endpoints at all.** From the outside, HTTP task-in/result-out reveals only the final answer: Lab cannot see internal tool calls, propagate provenance, or stop a sink. An earlier revision split the endpoint mode into *instrumented* (via a Lab-owned gateway or MCP proxy) and *black-box* (labeled evaluation-only). **Spec v0.3 retired all three** — the Lab gateway, the MCP proxy and black-box evaluation — because each would make Lab dispatch tools, hold tool credentials, or act as a synchronous enforcement boundary, which is runtime territory. Instrumented endpoints are served by the shared runtime adapter instead ("connect runtime"), and `black_box` is absent from `trace.producer.mode` by design: with no ledger to build there is no conformant trace to produce. See `contracts/mvp-contract.md`, `contracts/ui-backend-contract.md` and `contracts/provenance-semantics.md` §fidelity.
 
 Privacy is the default posture, not an option: on a public lab the code is someone else's research, so the local path is first-class and the endpoint/traces modes take no code at all.
 
