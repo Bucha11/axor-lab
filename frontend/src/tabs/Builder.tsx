@@ -340,10 +340,11 @@ function BuilderBody({ catalog }: { catalog: Catalog }) {
           The same thing from the CLI
         </div>
         <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.6 }}>
-          The CLI is the supplementary path, not the main one. Reach for it when you need what the
-          browser must not do — a live model and its hard cost ceiling — or{" "}
-          <span style={{ color: C.mut }}>--real-kernel</span>, which repins every condition to the
-          installed axor-core so the comparison isolates enforcement rather than a mixed kernel.
+          The CLI is the supplementary path, not the main one — live models, the real kernel and
+          the Control Plane handoff are all here in the web now. Reach for it to version an
+          experiment as a file, to run air-gapped or in CI, and for{" "}
+          <span style={{ color: C.mut }}>axor-lab verify</span>, whose whole value is trusting no
+          server at all.
           <Cmd>{`axor-lab import-agentdojo ${suiteId || "banking"} --out suite.axl --repeats ${repeats}
 axor-lab run suite.axl --out ./bundle --yes --real-kernel`}</Cmd>
         </div>
