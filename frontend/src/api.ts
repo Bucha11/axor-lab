@@ -341,6 +341,20 @@ export interface ComposeResult {
   estimate: { trials: number; scenarios: number; conditions: number; repeats: number };
 }
 
+export interface ReplayUploadReport {
+  // "reproduced" every trace matched · "diverged" recomputed verdicts differ (or
+  // a trace is malformed) · "not_attempted" the pinned kernel is absent here, so
+  // nothing was replayed — which is NOT the same as verdicts differing.
+  outcome: "reproduced" | "diverged" | "not_attempted";
+  bit_identical: boolean;
+  traces: number;
+  decisions: number;
+  deny: number;
+  allow: number;
+  statuses: { trace_id: string; status: string; verdicts: string[] }[];
+  claim: string;
+}
+
 export interface ComposeSpec {
   suite: string;
   conditions?: string[];
@@ -628,6 +642,11 @@ export const api = {
   runComposed: (spec: ComposeSpec) =>
     jf("/runs/local", post({ compose: spec })).then((r) => j<LocalRunResult>(r)),
   catalog: () => jf("/catalog").then((r) => j<Catalog>(r)),
+  // Replay someone's bundle server-side. `outcome` separates the two answers a
+  // bare bit_identical conflates: verdicts that differ, versus a bundle pinned to
+  // a kernel this server does not have and therefore never replayed at all.
+  replayUpload: (bundle: Record<string, unknown>, traces: unknown) =>
+    jf("/replay", post({ bundle, traces })).then((r) => j<ReplayUploadReport>(r)),
   // Compose without running — the advanced level shows the .axl this produces.
   composeExperiment: (spec: ComposeSpec) =>
     jf("/experiments/compose", post(spec)).then((r) => j<ComposeResult>(r)),

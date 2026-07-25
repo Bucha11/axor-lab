@@ -98,8 +98,12 @@ for the model layer, the kernel is the stdlib reference kernel, and the tools ar
 simulated. So the server can just run it:
 
 ```
+GET  /catalog               # the real suites/scenarios a builder may offer
+POST /experiments/compose   # {suite, conditions, repeats} → a validated .axl
 POST /runs/local            # {} → runs examples/banking-exfil-01.axl
+POST /runs/local            # {"compose": {...}} → composes a selection and runs it
 POST /runs/local            # {"experiment": {...}} → runs an .axl you pass in
+POST /replay                # {bundle, traces} → reproduce recorded verdicts
 ```
 
 It lands as an ordinary COMPLETED run, so results, bundle assembly and publish all
@@ -112,6 +116,21 @@ rather than the weaker reconstructed kind, so it is publishable evidence.
 Two things it refuses, on purpose: an experiment needing a **live model** (409 — a
 browser must not be able to spend money; the cost ceiling and estimate-confirm gate
 live in the CLI) and a suite over its **trial ceiling** (413).
+
+`POST /replay` is the other half — reproducing someone else's run without an agent
+at all. It returns a named `outcome` rather than a bare boolean, because
+`bit_identical: false` conflates two different answers: **`diverged`** (the
+recomputed verdicts differ from the recorded ones) and **`not_attempted`** (the
+bundle pins a kernel this server does not have, so nothing was replayed). Calling
+the second one a divergence would be a false claim about someone's evidence. Each
+trace carries its own status, so one malformed trace is visible as itself instead
+of dragging the whole upload into an unexplained mismatch.
+
+What replay proves is deliberately narrow: the verdict core — verdict, gate,
+driving value id — recomputed under the pinned kernel and compared to what was
+recorded. Decision prose may evolve without changing a verdict, so it is outside
+the comparison, and behaviour is not reproduced at all: the model's choices were
+sampled once and frozen into the traces.
 
 ## Executable acceptance suite
 

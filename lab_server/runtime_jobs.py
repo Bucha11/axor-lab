@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import compose, local_run
+from . import compose, local_run, replay_api
 
 _MAX_BODY = 8 * 1024 * 1024
 
@@ -801,6 +801,16 @@ def make_runtime_server(
                         require_confirmation=bool(body.get("require_confirmation", False)),
                         estimate=estimate if isinstance(estimate, dict) else None,
                     ))
+                    return
+                if self.path == "/replay":
+                    # Reproduce someone's governance verdicts without an agent —
+                    # the lowest-barrier path the landing page has always
+                    # advertised, and which until now only the CLI could do.
+                    self._require_control()
+                    try:
+                        self._send(200, replay_api.replay_upload(self._read_json()))
+                    except replay_api.ReplayRefused as exc:
+                        raise RuntimeJobsError(exc.status, exc.message) from exc
                     return
                 if self.path == "/experiments/compose":
                     # Compose a runnable .axl from a selection over the REAL

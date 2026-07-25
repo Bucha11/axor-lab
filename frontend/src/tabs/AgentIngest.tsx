@@ -13,27 +13,35 @@ import {
 import { C, MONO, btn, cta, inp } from "../theme";
 import { navigate } from "../router";
 import {
-  api, EffectClass, Trace, WrapDetectedTool, WrapManifestsResult,
+  api, EffectClass, ReplayUploadReport, Trace, WrapDetectedTool, WrapManifestsResult,
 } from "../api";
 import { useApp } from "../store";
 import EmptyState, { Cmd } from "../components/EmptyState";
 
-type ModeId = "code" | "endpoint_instrumented" | "endpoint_blackbox" | "traces";
+// Three answers, and each one does something. There used to be four modes with
+// five attributes apiece — twenty cells of reading before you could choose — and
+// two of them were dead ends: the black-box proxy answered "coming soon" and the
+// trace upload said its server side was a TODO. A door that opens onto a notice
+// is worse than no door, so the black-box harness is a roadmap line at the foot
+// of the page now, and trace upload replays for real.
+//
+// Ordered by how little you need to have ready.
+type ModeId = "traces" | "endpoint_instrumented" | "code";
 
 const MODES: {
   id: ModeId; icon: typeof Radio; label: string; sub: string;
   repro: string; reproColor: string; gives: string; setup: string; privacy: string;
 }[] = [
   {
-    id: "code", icon: Terminal, label: "Upload code",
-    sub: "scan your agent's tools, review effect classes, get manifests + governance",
-    repro: "live", reproColor: C.steel,
-    gives: "tool-manifest/v1 per detected tool + a GovernanceConfig YAML — the wrap engine (axor-wrap) does the static analysis, you make the final classification",
-    setup: "pick your agent's .py files → review each tool's guessed class → Build manifests",
-    privacy: "sources are scanned statically (AST only) in a temp dir server-side — never imported or executed",
+    id: "traces", icon: FileStack, label: "A recorded run",
+    sub: "someone's published bundle, or your own — nothing to install",
+    repro: "replay", reproColor: C.green,
+    gives: "governance verdicts recomputed from the traces and compared to what was recorded — the strongest reproduction there is, and the only one that needs no agent",
+    setup: "drop a bundle or a downloaded reproduction package",
+    privacy: "the file is replayed server-side and not stored — nothing is published unless you publish it",
   },
   {
-    id: "endpoint_instrumented", icon: Radio, label: "Endpoint — instrumented",
+    id: "endpoint_instrumented", icon: Radio, label: "A running agent",
     sub: "the same Axor runtime adapter that serves Control Plane — connect once",
     repro: "runtime", reproColor: C.steel,
     gives: "real governance · provenance · EvidenceCase — the runtime runs your agent and pushes traces",
@@ -41,20 +49,12 @@ const MODES: {
     privacy: "the runtime executes locally and sends traces outward; Lab never connects to or proxies your agent",
   },
   {
-    id: "endpoint_blackbox", icon: Globe, label: "Endpoint — black-box",
-    sub: "an HTTP agent endpoint with no instrumentation",
-    repro: "observed", reproColor: C.amber,
-    gives: "observe-only runs — coarser provenance (boundary observations, no in-agent flow)",
-    setup: "paste the endpoint URL; the Lab proxy drives the scenario against it",
-    privacy: "requests/responses observed at the boundary only",
-  },
-  {
-    id: "traces", icon: FileStack, label: "Upload traces / an incident",
-    sub: "a production incident or someone's published run",
-    repro: "replay", reproColor: C.green,
-    gives: "reproduce governance verdicts bit-identical · turn an incident into a regression",
-    setup: "drop an axor-core trace bundle — nothing to wrap",
-    privacy: "observations only, never raw bodies",
+    id: "code", icon: Terminal, label: "Python source",
+    sub: "scan your agent's tools, review effect classes, get manifests + governance",
+    repro: "live", reproColor: C.steel,
+    gives: "tool-manifest/v1 per detected tool + a GovernanceConfig YAML — the wrap engine (axor-wrap) does the static analysis, you make the final classification",
+    setup: "pick your agent's .py files → review each tool's guessed class → Build manifests",
+    privacy: "sources are scanned statically (AST only) in a temp dir server-side — never imported or executed",
   },
 ];
 
@@ -66,18 +66,6 @@ function Row({ k, v, icon: Icon }: { k: string; v: string; icon?: typeof Lock })
         : <span style={{ width: 44, flexShrink: 0, fontFamily: MONO, fontSize: 9.5, color: C.dim }}>{k}</span>}
       <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.5 }}>
         {Icon && <span style={{ color: C.dim }}>{k}: </span>}{v}
-      </span>
-    </div>
-  );
-}
-
-function ComingSoon({ what }: { what: string }) {
-  return (
-    <div className="mt-4 p-3 flex items-start gap-2" style={{ background: C.panel, border: `1px dashed ${C.amber}`, borderRadius: 8 }}>
-      <TriangleAlert size={13} color={C.amber} style={{ marginTop: 1, flexShrink: 0 }} />
-      <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.6 }}>
-        {what} — <b style={{ color: C.amber }}>coming soon</b>. Meanwhile, "endpoint — instrumented"
-        connects a real runtime today, and "upload traces" replays a recorded run.
       </span>
     </div>
   );
@@ -563,50 +551,124 @@ function summarize(parsed: unknown): TraceSummary {
   };
 }
 
+const OUTCOME: Record<ReplayUploadReport["outcome"], { color: string; line: string }> = {
+  reproduced: {
+    color: C.green,
+    line: "reproduced — every recorded verdict recomputed identically",
+  },
+  diverged: {
+    color: C.red,
+    line: "diverged — the recomputed verdicts do not match what was recorded",
+  },
+  not_attempted: {
+    color: C.amber,
+    line: "not attempted — this bundle pins a kernel this server does not have, so nothing was replayed",
+  },
+};
+
 function TraceImport() {
   const [summary, setSummary] = useState<TraceSummary | null>(null);
+  const [report, setReport] = useState<ReplayUploadReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const onFile = (e: ChangeEvent<HTMLInputElement>) => {
+  const onFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
-    setFileName(file.name); setSummary(null); setError(null);
-    file.text()
-      .then((text) => setSummary(summarize(JSON.parse(text))))
-      .catch((err) => setError(String(err instanceof Error ? err.message : err)));
+    setFileName(file.name); setSummary(null); setReport(null); setError(null); setBusy(true);
+    try {
+      const parsed = JSON.parse(await file.text());
+      setSummary(summarize(parsed));
+      // A bundle directory's bundle.json alone has no traces to replay; a
+      // reproduction package carries both. Say which is missing rather than
+      // failing on the server with a shape error.
+      const pkg = parsed as { bundle?: Record<string, unknown>; traces?: unknown };
+      if (!pkg.bundle || !pkg.traces) {
+        setError(
+          "this file has traces but no bundle — replay needs the pair. Use the " +
+          "reproduction package a publication page serves (bundle + traces), or " +
+          "the bundle directory's own package.",
+        );
+        return;
+      }
+      setReport(await api.replayUpload(pkg.bundle, pkg.traces));
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <div className="mt-4 p-4" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
       <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, letterSpacing: "0.06em", marginBottom: 10 }}>
-        IMPORT TRACES — parsed locally in your browser
+        REPLAY A RECORDED RUN — POST /replay
       </div>
       <input type="file" accept=".json,application/json" onChange={onFile}
         style={{ fontFamily: MONO, fontSize: 11, color: C.mut }} />
+      {busy && (
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, marginTop: 10 }}>replaying…</div>
+      )}
       {error && (
-        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.red, marginTop: 10 }}>
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.red, marginTop: 10, lineHeight: 1.6 }}>
           {fileName}: {error}
         </div>
       )}
+
       {summary && (
-        <div className="mt-3 p-3" style={{ background: C.panel2, border: `1px solid ${C.green}`, borderRadius: 8 }}>
-          <div className="flex items-center gap-2 mb-2">
-            <Check size={13} color={C.green} />
-            <span style={{ fontFamily: MONO, fontSize: 12, color: C.text }}>{fileName} — traces loaded</span>
-          </div>
-          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.9, paddingLeft: 21 }}>
-            <div>traces <b style={{ color: C.text }}>{summary.traces}</b> · events <b style={{ color: C.text }}>{summary.events}</b></div>
-            <div>gate decisions <b style={{ color: C.text }}>{summary.gateDecisions}</b> · DENY <b style={{ color: summary.denies ? C.green : C.mut }}>{summary.denies}</b></div>
+        <div className="mt-3 p-3" style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8 }}>
+          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.9 }}>
+            <div>{fileName} — traces <b style={{ color: C.text }}>{summary.traces}</b> · events <b style={{ color: C.text }}>{summary.events}</b></div>
             {summary.scenarios.length > 0 && <div>scenarios: {summary.scenarios.join(", ")}</div>}
             {summary.conditions.length > 0 && <div>conditions: {summary.conditions.join(", ")}</div>}
           </div>
         </div>
       )}
+
+      {report && (
+        <div className="mt-3 p-3" style={{ background: C.panel2, border: `1px solid ${OUTCOME[report.outcome].color}`, borderRadius: 8 }}>
+          <div className="flex items-center gap-2 mb-2">
+            {report.outcome === "reproduced"
+              ? <Check size={14} color={C.green} />
+              : <TriangleAlert size={14} color={OUTCOME[report.outcome].color} />}
+            <span style={{ fontFamily: MONO, fontSize: 12, color: OUTCOME[report.outcome].color, fontWeight: 600 }}>
+              {OUTCOME[report.outcome].line}
+            </span>
+          </div>
+          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.9, paddingLeft: 22 }}>
+            <div>
+              {report.traces} trace{report.traces === 1 ? "" : "s"} · {report.decisions} decisions ·
+              {" "}DENY <b style={{ color: C.text }}>{report.deny}</b> · ALLOW <b style={{ color: C.text }}>{report.allow}</b>
+            </div>
+          </div>
+          {report.outcome !== "reproduced" && (
+            <div style={{ marginTop: 8, paddingLeft: 22 }}>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, marginBottom: 4 }}>
+                the traces that did not match:
+              </div>
+              {report.statuses.filter((s) => s.status !== "match").slice(0, 12).map((s) => (
+                <div key={s.trace_id} style={{ fontFamily: MONO, fontSize: 9.5, color: C.mut }}>
+                  <span style={{ color: OUTCOME[report.outcome].color }}>{s.status}</span> · {s.trace_id}
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, marginTop: 10, paddingLeft: 22, lineHeight: 1.6 }}>
+            {report.claim}
+          </div>
+        </div>
+      )}
+
       <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
-        TODO: server-side trace ingestion (upload → replay → EvidenceCase) is not wired yet — this
-        summary is computed locally and nothing leaves the browser. Use{" "}
-        <span style={{ color: C.mut }}>axor-lab replay ./bundle</span> for exact replay today.
+        The file is replayed and discarded — nothing is stored and nothing is published. To turn a
+        production incident into a pinned regression instead, use{" "}
+        <button onClick={() => navigate("import")}
+          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: C.steel, fontFamily: MONO, fontSize: 9.5, textDecoration: "underline" }}>
+          import an incident
+        </button>
+        {" "}— it takes the CP's axor-lab-incident/v1 package and keeps it.
       </div>
     </div>
   );
@@ -618,15 +680,15 @@ export default function AgentIngest() {
   return (
     <div style={{ maxWidth: 660, margin: "0 auto" }}>
       <h1 style={{ fontSize: 23, fontWeight: 680, lineHeight: 1.25, margin: "0 0 6px" }}>
-        Bring your agent. Run experiments on it under governance.
+        What do you have?
       </h1>
-      <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.mut, marginBottom: 24 }}>
-        No Axor deployment needed — this is standalone. Pick how your agent gets here; it decides which
-        reproducibility layer you get.
+      <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.mut, marginBottom: 24, lineHeight: 1.6 }}>
+        No Axor deployment needed — this is standalone. Answer once and only that path opens.
+        Nothing here needs an agent to start: the first option runs on a file.
       </div>
 
       <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, letterSpacing: "0.05em", marginBottom: 8, lineHeight: 1.6 }}>
-        HOW YOUR AGENT REACHES LAB — Lab reads the shared Axor trace fabric; it never connects to or
+        LEAST TO MOST SETUP — Lab reads the shared Axor trace fabric; it never connects to or
         proxies your agent. Connect a runtime once; Control Plane sees the same one.
       </div>
       <div className="flex flex-col gap-3">
@@ -659,16 +721,24 @@ export default function AgentIngest() {
       </div>
 
       {mode === "code" && <WrapCode goInstrumented={() => setMode("endpoint_instrumented")} />}
-      {mode === "endpoint_blackbox" && <ComingSoon what="the black-box endpoint proxy harness" />}
       {mode === "endpoint_instrumented" && <ConnectRuntime />}
       {mode === "traces" && <TraceImport />}
 
       <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim, marginTop: 20, lineHeight: 1.7 }}>
         Lab is the experiment & evidence layer over Axor runtime traces — it reads the <b style={{ color: C.steel }}>shared trace fabric</b>,
-        it does not connect to, execute, or proxy your agent. How you bring your agent sets the reproducibility you get:{" "}
-        <b style={{ color: C.steel }}>code/endpoint → live</b> (stochastic, reported with CI),{" "}
-        <b style={{ color: C.green }}>traces → replay</b> (governance verdicts, bit-identical). Code never has to leave
-        your machine — the local path is first-class.
+        it does not connect to, execute, or proxy your agent. What you bring sets the reproducibility you get:{" "}
+        <b style={{ color: C.steel }}>source/runtime → live</b> (stochastic, reported with CI),{" "}
+        <b style={{ color: C.green }}>a recorded run → replay</b> (governance verdicts, bit-identical). Code never has to
+        leave your machine — the local path is first-class.
+      </div>
+
+      <div className="wrapline mt-3" style={{ gap: 6, alignItems: "flex-start" }}>
+        <Globe size={11} color={C.dim} style={{ marginTop: 3, flexShrink: 0 }} />
+        <span style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, lineHeight: 1.6 }}>
+          Not built: a black-box harness for an uninstrumented HTTP endpoint. It would give
+          boundary observations only — no in-agent flow, so no provenance and no EvidenceCase — and
+          it is not offered as a choice while that is true.
+        </span>
       </div>
     </div>
   );
