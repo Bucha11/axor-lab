@@ -121,13 +121,39 @@ first), pinning a trace from your own run (pinning used to need an imported
 production incident to exist), the Control Plane handoff (the bridge into the
 paid contour sat behind a terminal), and running a hand-written `.axl`.
 
-What stays with the CLI stays for a reason: `verify` / `verify-cp-export` are
-**offline** verification whose whole value is trusting no server — a web button
-saying "the server checked itself" would destroy the guarantee rather than move
-it; a live model needs the hard cost ceiling and the estimate-confirm gate;
-`--real-kernel` needs axor-core installed where the run happens; and writing the
-signed, manifest-bound CP export tree needs your signing key, which a server
-cannot hold on your behalf.
+### Verification moved to the browser, not to the server
+
+`verify` was the one capability that could not become a server endpoint: its
+whole value is that no server is trusted, so "the server checked itself" would
+have deleted the guarantee rather than moved it. It runs in the **browser**
+instead (`#/verify`) — the reader's machine, over bytes the reader already holds.
+
+Checked locally, trusting nothing: the versioned envelope (a server package
+stripped of its envelope *and* every proof cannot pass as an honest bare file),
+every content hash, each trial's binding to its trace body, the publication's
+commitment to this bundle, the receipt's binding to it, and — with an author key
+— the Ed25519 signature. An unsigned receipt reads **skipped**, never pass:
+integrity is not authenticity.
+
+Replay is the exception and is labelled as one. Recomputing verdicts needs the
+kernel, so `POST /replay` does it and the panel says plainly that this is a check
+the *server* performed. For a verdict that trusts nobody, run `axor-lab verify`.
+
+The browser canonicalizer is pinned byte-for-byte against
+`contracts/canonicalization-vectors.json` — the same vectors the Python one is
+pinned against — because a hash the browser computes differently is worse than no
+check at all (`tests/test_browser_canonicalization.py`). The verifier itself is
+driven over a real published package plus five specific attacks
+(`tests/test_browser_verify.py`), including the case people forget: a genuine
+package must still pass.
+
+### Still CLI-only, and why
+
+`--real-kernel` and running a hand-written `.axl` are now in the web too. What
+remains: a **live model** needs the hard cost ceiling and the estimate-confirm
+gate, and writing the **signed, manifest-bound CP export tree** needs your
+signing key, which a server cannot hold on your behalf — the web builds the
+config and hands it over unsigned.
 
 It lands as an ordinary COMPLETED run, so results, bundle assembly and publish all
 work over it unchanged — in the UI that is **Run the example → results → publish**,

@@ -19,6 +19,7 @@ import ScenarioAuthor from "./tabs/ScenarioAuthor";
 import ImportIncident from "./tabs/ImportIncident";
 import IncidentView from "./tabs/IncidentView";
 import Incidents from "./tabs/Incidents";
+import Verify from "./tabs/Verify";
 import Workspace from "./tabs/Workspace";
 
 // The nav reads as words, not route ids. It used to render the raw segment, so
@@ -37,6 +38,7 @@ const PRIMARY = [
 const MORE = [
   { id: "agent-ingest", label: "bring an agent" },
   { id: "import", label: "import an incident" },
+  { id: "verify", label: "verify a package" },
   { id: "scenario-author", label: "author a scenario" },
   { id: "runs", label: "run progress" },
   { id: "workspace", label: "workspace" },
@@ -157,6 +159,7 @@ export default function App() {
       {key === "import" && <ImportIncident />}
       {key === "incidents" && <Incidents />}
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
+      {key === "verify" && <Verify />}
       {key === "workspace" && <Workspace />}
     </div>
   );

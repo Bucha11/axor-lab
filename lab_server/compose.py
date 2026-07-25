@@ -55,6 +55,18 @@ class ComposeRefused(ValueError):
         self.message = message
 
 
+def _axor_available() -> bool:
+    from lab_runner import axor_available
+
+    return bool(axor_available())
+
+
+def _real_kernel_version() -> str | None:
+    from lab_runner import real_kernel_version
+
+    return real_kernel_version()
+
+
 def catalogue() -> dict[str, Any]:
     """Everything a builder can legitimately offer, with real scenario counts.
 
@@ -83,6 +95,15 @@ def catalogue() -> dict[str, Any]:
             for name, policy in _PRESETS.items()
         ],
         "kernel": REFERENCE_KERNEL,
+        # Whether this server can drive the PRODUCTION governor. `--real-kernel`
+        # was CLI-only only because that is where axor-core happened to be
+        # installed; when the server has it, the server can repin every condition
+        # — baseline included, so the compare isolates enforcement rather than
+        # mixing an enforcement change with a kernel change.
+        "real_kernel": {
+            "available": _axor_available(),
+            "version": _real_kernel_version(),
+        },
         "agent": {
             "ref": "scripted@0.6",
             "deterministic": True,
@@ -166,6 +187,18 @@ def compose(spec: dict[str, Any]) -> dict[str, Any]:
         )
     except UnknownSuiteError as exc:
         raise ComposeRefused(404, str(exc)) from exc
+
+    if spec.get("real_kernel"):
+        # Drive the production axor-core governor instead of the stdlib reference
+        # kernel. This was CLI-only only because the CLI is where axor-core
+        # happened to be installed; when the server has it, the server can do it.
+        from lab_runner.cli import _repin_to_real_kernel
+        from lab_runner.errors import RunnerError
+
+        try:
+            _repin_to_real_kernel(document)
+        except RunnerError as exc:
+            raise ComposeRefused(409, str(exc)) from exc
 
     try:
         resolve(document)
