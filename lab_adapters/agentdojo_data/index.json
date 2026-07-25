@@ -1,0 +1,34 @@
+{
+ "dataset_version": "agentdojo@0.1.35",
+ "suite_version": "v1",
+ "suites": {
+  "banking": {
+   "content_hash": "sha256:621e5bc3a64d598246771f0e670f28df49c3ebc834dcb6bd2127190096573abf",
+   "ground_truth_missing": 0,
+   "injection_tasks": 9,
+   "tools": 11,
+   "user_tasks": 16
+  },
+  "slack": {
+   "content_hash": "sha256:647c36c5c8fff56cb57dc871cf66b1a1d8e3395e7ac7508778373cebf354bbfe",
+   "ground_truth_missing": 0,
+   "injection_tasks": 5,
+   "tools": 11,
+   "user_tasks": 21
+  },
+  "travel": {
+   "content_hash": "sha256:b487c83a50e1a5d24aaf8998aa4a05a3e14312f35d9deab512f7bc3621d3e6d7",
+   "ground_truth_missing": 0,
+   "injection_tasks": 7,
+   "tools": 28,
+   "user_tasks": 20
+  },
+  "workspace": {
+   "content_hash": "sha256:42cbfb672944d398869777d2b2eb236c2d2e7c68aa8f4e15e392aacc4fafbd7d",
+   "ground_truth_missing": 0,
+   "injection_tasks": 6,
+   "tools": 24,
+   "user_tasks": 40
+  }
+ }
+}
