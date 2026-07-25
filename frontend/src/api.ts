@@ -312,6 +312,41 @@ export interface CreateRunResult {
   estimate: Record<string, unknown>;
 }
 
+// The REAL experiment menu (GET /catalog), served from the code that owns the
+// scenarios. The builder used to invent its own suite list client-side with
+// fabricated scenario ids, so nothing it composed could run.
+export interface CatalogScenario {
+  name: string;
+  task: string;
+}
+
+export interface CatalogSuite {
+  id: string;
+  label: string;
+  source: string;
+  scenarios: CatalogScenario[];
+}
+
+export interface Catalog {
+  suites: CatalogSuite[];
+  conditions: { id: string; policy: Record<string, unknown> | null; baseline: boolean }[];
+  kernel: string;
+  agent: { ref: string; deterministic: boolean; note: string };
+  repeats: { default: number; max: number; min_powered: number };
+}
+
+export interface ComposeResult {
+  document: Record<string, unknown>;
+  planned_trials: string[];
+  estimate: { trials: number; scenarios: number; conditions: number; repeats: number };
+}
+
+export interface ComposeSpec {
+  suite: string;
+  conditions?: string[];
+  repeats?: number;
+}
+
 // A run the SERVER executed (POST /runs/local) rather than a runtime. It arrives
 // already completed, so there is no progress to follow — `executed: "local"` is
 // the honest record of who ran it.
@@ -589,6 +624,13 @@ export const api = {
     jf("/runs/local", post(experiment ? { experiment } : {})).then((r) =>
       j<LocalRunResult>(r),
     ),
+  // One round trip for the builder's Run button: compose the selection, run it.
+  runComposed: (spec: ComposeSpec) =>
+    jf("/runs/local", post({ compose: spec })).then((r) => j<LocalRunResult>(r)),
+  catalog: () => jf("/catalog").then((r) => j<Catalog>(r)),
+  // Compose without running — the advanced level shows the .axl this produces.
+  composeExperiment: (spec: ComposeSpec) =>
+    jf("/experiments/compose", post(spec)).then((r) => j<ComposeResult>(r)),
   runState: (runId: string) =>
     jf(`/runs/${encodeURIComponent(runId)}`).then((r) =>
       j<{ run_id: string; state: string }>(r),

@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import local_run
+from . import compose, local_run
 
 _MAX_BODY = 8 * 1024 * 1024
 
@@ -693,6 +693,12 @@ def make_runtime_server(
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             try:
+                if self.path == "/catalog":
+                    # The real menu, from the code that owns the scenarios — so a
+                    # builder cannot offer something that does not exist.
+                    self._require_control()
+                    self._send(200, compose.catalogue())
+                    return
                 if self.path == "/runtimes":
                     self._require_control()
                     self._send(200, {"runtimes": jobs.list_runtimes()})
@@ -796,6 +802,16 @@ def make_runtime_server(
                         estimate=estimate if isinstance(estimate, dict) else None,
                     ))
                     return
+                if self.path == "/experiments/compose":
+                    # Compose a runnable .axl from a selection over the REAL
+                    # catalogue. Server-side because the document carries config
+                    # hashes that must agree with what the kernel computes.
+                    self._require_control()
+                    try:
+                        self._send(200, compose.compose(self._read_json()))
+                    except compose.ComposeRefused as exc:
+                        raise RuntimeJobsError(exc.status, exc.message) from exc
+                    return
                 if self.path == "/runs/local":
                     # Execute here and now. This is what makes a first result
                     # reachable from the UI: the bundled example is offline
@@ -805,14 +821,21 @@ def make_runtime_server(
                     self._require_control()
                     body = self._read_json()
                     document = body.get("experiment")
+                    selection = body.get("compose")
                     try:
-                        if document is None:
+                        if isinstance(selection, dict):
+                            # one round trip for the common case: compose a
+                            # selection and run it
+                            document = compose.compose(selection)["document"]
+                        elif document is None:
                             document = local_run.load_example()
                         elif not isinstance(document, dict):
                             raise local_run.LocalRunRefused(
                                 400, "`experiment` must be an .axl document object"
                             )
                         outcome = local_run.run_local(document)
+                    except compose.ComposeRefused as exc:
+                        raise RuntimeJobsError(exc.status, exc.message) from exc
                     except local_run.LocalRunRefused as exc:
                         raise RuntimeJobsError(exc.status, exc.message) from exc
                     self._send(201, jobs.create_local_run(outcome))
