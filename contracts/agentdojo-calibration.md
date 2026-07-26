@@ -414,3 +414,49 @@ declarations therefore carry the same config fingerprint, which is exactly the
 drift the hash exists to prevent. It is wired this way to avoid changing a
 hashed canonical structure late in a session; moving it into the canonical
 config is the fix, and it is a contract change, not a patch.
+
+## 11. Secrets are a deployment's own declaration, so make them measurable
+
+§10 concluded the floor was pure cost on these suites. That conclusion was
+right about the default declaration and wrong as a general statement, and the
+difference matters more than the number.
+
+**The floor is not all-or-nothing.** Its cost falls entirely on sources that a
+benign task reads *before* an egress. Whether a given source does that is a
+property of the deployment's own workflows, not of the mechanism — so it is
+measurable, and nobody can derive it from first principles.
+
+`--sweep-secrets banking` reports the marginal cost of declaring each candidate
+source alone:
+
+| declared secret source | utility | ASR | denials | cost |
+|---|---|---|---|---|
+| `get_scheduled_transactions` | 56.2% | 11.1% | 8 | −12.5pp |
+| `read_file` | 56.2% | 11.1% | 7 | −12.5pp |
+| `get_most_recent_transactions` | 62.5% | 11.1% | 8 | −6.2pp |
+| `get_balance` | 68.8% | 11.1% | 5 | **free** |
+| `get_iban` | 68.8% | 11.1% | 5 | **free** |
+| `get_user_info` | 68.8% | 11.1% | 5 | **free** |
+| *all of the above* | 50.0% | 11.1% | 11 | −18.8pp |
+
+Three of the six cost **nothing**: no benign banking task reads the balance, the
+account IBAN or the customer record before sending money. Declaring those three
+buys a paraphrase-proof guarantee over exactly those secrets at zero utility
+cost — and that is invisible unless the sweep is run, because the all-or-nothing
+default reports −18.8pp and looks like a bad trade.
+
+The rows are marginal, not cumulative: declaring several is not additive, since
+sources that appear in the same tasks overlap. The total is measured separately.
+
+`--secrets FILE` takes `{suite: [tool, ...]}` so a deployment measures the policy
+it would actually ship rather than ours. The taxonomy default stays, so the
+suites still run out of the box.
+
+### What this changes about the recommendation
+
+§10 said the floor should stay off by default and wait for the endorsement
+mechanism. The first half holds — the reference's rows are integrity-only, and a
+default-on floor would compare a two-axis run against a one-axis one. The second
+half was too strong: an operator does not have to wait for anything to declare
+the free sources. The endorsement mechanism is what makes the *expensive*
+declarations usable, and that is a smaller claim than "the floor is unusable".

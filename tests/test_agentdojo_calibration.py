@@ -48,6 +48,12 @@ REFERENCE_DENIALS = {
 SUPERSESSION_CEILING_TASKS = frozenset({3, 4, 6, 15})
 BANKING_SUITE_SIZE = 16
 
+#: every candidate secret source in banking — declaring all of them costs 18.8pp
+TAXONOMIES_BANKING_SECRETS = frozenset({
+    "get_balance", "get_iban", "get_user_info",
+    "get_most_recent_transactions", "get_scheduled_transactions",
+})
+
 
 class TestCalibrationConstants(unittest.TestCase):
     """The reference itself, guarded against drift in transcription."""
@@ -174,7 +180,7 @@ class TestSuiteLevelCalibration(unittest.TestCase):
         "contracts/agentdojo-calibration.md §7."
     )
 
-    def _run(self, suite: str, allowlist: bool = False):
+    def _run(self, suite: str, allowlist: bool = False, secrets=None):
         import json
         from pathlib import Path
 
@@ -192,8 +198,14 @@ class TestSuiteLevelCalibration(unittest.TestCase):
         for task in data["user_tasks"]:
             if task["calls"] is None:
                 continue
-            result = gate_sequence(task["calls"], TAXONOMIES[suite], data["tools"],
-                                   policy=policy, inputs=inputs)
+            taxonomy = TAXONOMIES[suite]
+            if secrets is not None:
+                import dataclasses
+
+                taxonomy = dataclasses.replace(taxonomy, sensitive_sources=secrets)
+            result = gate_sequence(task["calls"], taxonomy, data["tools"],
+                                   policy=policy, inputs=inputs,
+                                   confidentiality=secrets is not None)
             if result.denied:
                 denied.append(task["id"])
                 denials += len(result.denials)
@@ -250,6 +262,33 @@ class TestSuiteLevelCalibration(unittest.TestCase):
         bare, _ = self._run("banking")
         lifted, _ = self._run("banking", allowlist=True)
         self.assertTrue(set(lifted) <= set(bare), f"newly denied: {set(lifted) - set(bare)}")
+
+    def test_a_secret_declaration_can_be_free(self) -> None:
+        """The floor is not all-or-nothing, which is the point of measuring it.
+
+        Declaring EVERY candidate source secret costs banking 18.8pp of utility.
+        But three of its six — the balance, the account IBAN, the customer
+        record — are read by no benign task before an egress, so declaring those
+        is free: the same denials, the same utility, and a paraphrase-proof
+        guarantee over exactly those secrets.
+
+        An operator cannot derive that from first principles; it depends on
+        which reads their own tasks do. Hence `--sweep-secrets`.
+        """
+        from lab_adapters.agentdojo_taxonomy import TAXONOMIES
+
+        free = frozenset({"get_balance", "get_iban", "get_user_info"})
+        self.assertTrue(free <= TAXONOMIES["banking"].sensitive_sources)
+        bare, bare_n = self._run("banking")
+        armed, armed_n = self._run("banking", secrets=free)
+        self.assertEqual((sorted(armed), armed_n), (sorted(bare), bare_n))
+
+    def test_declaring_every_source_secret_is_not_free(self) -> None:
+        """…and the converse, so the first test cannot pass by doing nothing."""
+        bare, bare_n = self._run("banking")
+        armed, armed_n = self._run(
+            "banking", secrets=TAXONOMIES_BANKING_SECRETS)
+        self.assertGreater(armed_n, bare_n)
 
     def test_workspace_denials_split_into_taint_and_consequence(self) -> None:
         self.skipTest(self.ENGINE_DEBT + " Target 92 taint / 12 consequence over 7 passes.")

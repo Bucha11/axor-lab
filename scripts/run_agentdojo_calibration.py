@@ -59,9 +59,29 @@ def _outcome(task: dict, denied_indices: list[int]) -> bool | None:
     return outcomes.get(",".join(map(str, sorted(denied_indices))))
 
 
-def run_suite(name: str, allowlist: bool, confidentiality: bool = False) -> dict[str, object]:
+def load_secrets(path: str | None) -> dict[str, frozenset[str]]:
+    """A deployment's own secret declaration: {suite: [tool, ...]}.
+
+    Which tools read secrets is a property of YOUR deployment, not of the
+    benchmark — the same `search_files` is a secret read in a law firm and
+    routine in a public wiki. The taxonomy ships a default so the suites run out
+    of the box; this replaces it, so the cost you measure is the cost of the
+    policy you would actually deploy.
+    """
+    if not path:
+        return {}
+    declared = json.loads(Path(path).read_text())
+    return {suite: frozenset(tools) for suite, tools in declared.items()}
+
+
+def run_suite(name: str, allowlist: bool, confidentiality: bool = False,
+              secrets: frozenset[str] | None = None) -> dict[str, object]:
     data = json.loads((DATA / f"{name}.json").read_text())
     taxonomy = TAXONOMIES[name]
+    if secrets is not None:
+        import dataclasses
+
+        taxonomy = dataclasses.replace(taxonomy, sensitive_sources=secrets)
     policy: dict[str, object] = {"profile": "strict", "trust_model": "content-ledger"}
     inputs: dict[str, object] = {}
     if allowlist and name == "banking":
@@ -129,6 +149,53 @@ def run_suite(name: str, allowlist: bool, confidentiality: bool = False) -> dict
             "utility": util, "asr": asr}
 
 
+def sweep_secrets(name: str, allowlist: bool) -> int:
+    """What does declaring each candidate secret source cost, one at a time?
+
+    The floor is sound but coarse: after ANY declared secret read, every egress
+    in the session is refused. So the useful question is never "should I turn on
+    confidentiality" but "which reads am I willing to pay for", and that is a
+    per-source number nobody can answer from first principles.
+
+    Marginal, not cumulative: each row is that source declared ALONE, so the
+    rows are comparable to each other. Declaring several is not additive — two
+    sources that appear in the same tasks overlap — so the total is measured
+    separately at the bottom.
+    """
+    taxonomy = TAXONOMIES[name]
+    candidates = sorted(set(taxonomy.untrusted_sources) | set(taxonomy.sensitive_sources))
+    baseline = run_suite(name, allowlist, confidentiality=False)
+    b_util, b_asr = baseline["utility"], baseline["asr"]
+    print(f"marginal cost of each secret declaration — {name}\n")
+    print(f"baseline (integrity only): utility {_rate(b_util['governed'], b_util['base'])}"
+          f" · ASR {_rate(b_asr['governed'], b_asr['base'])}"
+          f" · {baseline['denials']} denials\n")
+    print(f"{'declared secret source':<34}{'utility':>10}{'ASR':>8}{'denials':>9}  cost")
+    print("-" * 72)
+    rows = []
+    for source in candidates:
+        r = run_suite(name, allowlist, confidentiality=True, secrets=frozenset({source}))
+        u, a = r["utility"], r["asr"]
+        cost = (100 * b_util["governed"] / b_util["base"] if b_util["base"] else 0) - (
+            100 * u["governed"] / u["base"] if u["base"] else 0)
+        rows.append((cost, source, u, a, r["denials"]))
+    for cost, source, u, a, denials in sorted(rows, key=lambda r: (-r[0], r[1])):
+        marker = "free" if cost <= 0 else f"-{cost:.1f}pp"
+        print(f"{source:<34}{_rate(u['governed'], u['base']):>10}"
+              f"{_rate(a['governed'], a['base']):>8}{denials:>9}  {marker}")
+    everything = run_suite(name, allowlist, confidentiality=True,
+                           secrets=frozenset(candidates))
+    u, a = everything["utility"], everything["asr"]
+    print("-" * 72)
+    print(f"{'ALL of the above together':<34}{_rate(u['governed'], u['base']):>10}"
+          f"{_rate(a['governed'], a['base']):>8}{everything['denials']:>9}")
+    print("\nA source that costs `free` is one no benign task reads before an egress —"
+          "\ndeclaring it is pure upside. A source with a cost and no ASR movement is"
+          "\nbuying protection this benchmark cannot show; that may still be the right"
+          "\ncall, but it should be a decision, not a default.")
+    return 0
+
+
 def _rate(part: int, whole: int) -> str:
     return f"{100 * part / whole:.1f}%" if whole else "n/a"
 
@@ -140,7 +207,16 @@ def main(argv: list[str] | None = None) -> int:
                              "integrity-only, so this is OFF by default)")
     parser.add_argument("--allowlist", action="store_true",
                         help="declare the banking known-payee enum (App. D supersession)")
+    parser.add_argument("--secrets", metavar="FILE",
+                        help="your own secret declaration, {suite: [tool, ...]} as JSON; "
+                             "replaces the taxonomy default")
+    parser.add_argument("--sweep-secrets", metavar="SUITE",
+                        help="report the MARGINAL cost of declaring each candidate "
+                             "secret source in SUITE, one at a time")
     args = parser.parse_args(argv)
+
+    if args.sweep_secrets:
+        return sweep_secrets(args.sweep_secrets, args.allowlist)
 
     index = json.loads((DATA / "index.json").read_text())
     print(f"dataset: {index['dataset_version']} ({index['suite_version']})")
@@ -151,8 +227,11 @@ def main(argv: list[str] | None = None) -> int:
               f"{'reference':<32}")
     print(header)
     print("-" * len(header))
+    declared = load_secrets(args.secrets)
     for name in ("banking", "slack", "workspace", "travel"):
-        r = run_suite(name, args.allowlist, args.confidentiality)
+        r = run_suite(name, args.allowlist,
+                      args.confidentiality or bool(declared),
+                      declared.get(name) if declared else None)
         u, a = r["utility"], r["asr"]
         util = f"{_rate(u['governed'], u['base'])} of {u['base']}"
         asr = f"{_rate(a['governed'], a['base'])} of {a['base']}"
