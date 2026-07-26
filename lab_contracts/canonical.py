@@ -192,8 +192,10 @@ def compiled_governor_config(
 
     egress: list[str] = []
     untrusted_sources: list[str] = []
+    sensitive_sources: list[str] = []
     driving: dict[str, list[str]] = {}
     taint_fields: dict[str, list[str]] = {}
+    secret_fields: dict[str, list[str]] = {}
     for manifest in tool_manifests:
         tool_id = str(manifest.get("id"))
         effect: dict[str, object] = manifest.get("effect", {}) or {}  # type: ignore[assignment]
@@ -205,11 +207,16 @@ def compiled_governor_config(
         if fields:
             untrusted_sources.append(tool_id)
             taint_fields[tool_id] = sorted(fields)
+        secret = [str(p) for p in manifest.get("sensitive_fields", [])]  # type: ignore[union-attr]
+        if secret:
+            sensitive_sources.append(tool_id)
+            secret_fields[tool_id] = sorted(secret)
         args = [str(a) for a in effect.get("driving_args", [])]  # type: ignore[union-attr]
         if args:
             driving[tool_id] = args
     egress.sort()
     untrusted_sources.sort()
+    sensitive_sources.sort()
     value_policies: dict[str, object] = {}
     allowlist = (policy or {}).get("allowlist")
     if allowlist:
@@ -220,7 +227,7 @@ def compiled_governor_config(
         for sink in egress:
             arg = (driving.get(sink) or ["recipient"])[0]
             value_policies[sink] = {arg: {"enum": resolved}}
-    return {
+    config: dict[str, object] = {
         "kernel": kernel,
         "egress_sinks": egress,
         "untrusted_sources": untrusted_sources,
@@ -228,6 +235,20 @@ def compiled_governor_config(
         "driving_args": driving,
         "value_policies": value_policies,
     }
+    # The CONFIDENTIALITY axis, added only when something declares it. Omitting
+    # the keys when empty is deliberate: a config with no sensitive sources
+    # hashes exactly as it did before this field existed, so every bundle and
+    # pin minted earlier still recomputes. A migration that invalidated all of
+    # them to record an absence would be paying the whole cost for nothing.
+    #
+    # This has to be in the CANONICAL config rather than passed to the governor
+    # on the side: `executable_config_hash` is taken over this structure, so a
+    # declaration outside it means two runs governed differently carry the same
+    # fingerprint — the exact drift the hash exists to catch.
+    if sensitive_sources:
+        config["sensitive_sources"] = sensitive_sources
+        config["sensitive_fields"] = secret_fields
+    return config
 
 
 def parametric_policy_hash(

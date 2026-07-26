@@ -56,7 +56,8 @@ class SequenceResult:
         return counts
 
 
-def _manifests_for(taxonomy: Any, tools: list[str]) -> dict[str, dict[str, object]]:
+def _manifests_for(taxonomy: Any, tools: list[str],
+                   confidentiality: bool = False) -> dict[str, dict[str, object]]:
     """Synthesize Lab tool manifests from the declared taxonomy.
 
     The taxonomy is the operator's statement about the tools; a manifest is how
@@ -81,6 +82,12 @@ def _manifests_for(taxonomy: Any, tools: list[str]) -> dict[str, dict[str, objec
             "result_schema": {"type": "object"},
             "effect": effect,
         }
+        if confidentiality and tool in getattr(taxonomy, "sensitive_sources", ()):
+            # declared IN THE MANIFEST so it reaches the governor through the
+            # canonical config and is covered by executable_config_hash — it
+            # used to be handed to ToolCallGovernor on the side, which meant two
+            # runs with different confidentiality policies shared a fingerprint
+            manifest["sensitive_fields"] = ["result"]
         if tool in taxonomy.untrusted_sources:
             # the whole result of an untrusted source is attacker-reachable: the
             # injection vectors land inside these payloads and which field
@@ -125,22 +132,8 @@ def gate_sequence(
         )
     from axor_core.governor import ToolCallGovernor
 
-    manifests = _manifests_for(taxonomy, tools)
+    manifests = _manifests_for(taxonomy, tools, confidentiality)
     config = governor_config(manifests, policy, inputs)
-    # The confidentiality axis, declared separately from integrity. It is passed
-    # here rather than compiled into the canonical config because
-    # `compiled_governor_config` does not yet carry a sensitive-source field —
-    # see contracts/agentdojo-calibration.md §10. Until it does, this
-    # declaration is NOT covered by `executable_config_hash`, which is a real
-    # gap and is named as one rather than left to be discovered.
-    # OFF by default, because the reference's per-suite numbers are an
-    # INTEGRITY-only measurement: it states that the confidentiality axis "was
-    # never engaged" in those runs and carries no row for it. Arming the floor
-    # by default would compare our two-axis run against their one-axis one and
-    # call the difference a mismatch.
-    sensitive = getattr(taxonomy, "sensitive_sources", frozenset()) if confidentiality else ()
-    if sensitive:
-        config["sensitive_sources"] = set(sensitive)
     governor = ToolCallGovernor(**config)
 
     verdicts: list[CallVerdict] = []

@@ -742,14 +742,14 @@ def make_runtime_server(
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             try:
-                if self.path == "/agentdojo":
+                if self.path in ("/benchmarks", "/agentdojo"):
                     # the governance benchmark: suites, and what an operator may
                     # declare a secret read. Read-only, so control-gated like
                     # the rest of this surface but nothing to spend.
                     self._require_control()
-                    from . import agentdojo_api
+                    from . import benchmark_api
 
-                    self._send(*agentdojo_api.handle_index())
+                    self._send(*benchmark_api.handle_index())
                     return
                 if self.path == "/catalog":
                     # The real menu, from the code that owns the scenarios — so a
@@ -925,12 +925,13 @@ def make_runtime_server(
                     except replay_api.ReplayRefused as exc:
                         raise RuntimeJobsError(exc.status, exc.message) from exc
                     return
-                if self.path in ("/agentdojo/run", "/agentdojo/sweep"):
+                if self.path in ("/benchmarks/run", "/benchmarks/sweep",
+                                 "/agentdojo/run", "/agentdojo/sweep"):
                     self._require_control()
-                    from . import agentdojo_api
+                    from . import benchmark_api
 
-                    handler = (agentdojo_api.handle_run if self.path.endswith("/run")
-                               else agentdojo_api.handle_sweep)
+                    handler = (benchmark_api.handle_run if self.path.endswith("/run")
+                               else benchmark_api.handle_sweep)
                     try:
                         self._send(*handler(self._read_json()))
                     except PublishRejected as exc:

@@ -34,15 +34,21 @@ function Rate({ value, of, tone }: { value: BenchRates; of: string; tone: string
 
 export default function Benchmark() {
   const index = useQuery({ queryKey: ["bench-index"], queryFn: api.benchIndex });
+  // AgentDojo is the DEFAULT entry in a library, not the only shape a benchmark
+  // can take — a deployment measuring its own suites asks the same question
+  const [benchmark, setBenchmark] = useState<string>("");
+  const entry =
+    index.data?.benchmarks.find((b) => b.benchmark === (benchmark || index.data?.default)) ??
+    index.data?.benchmarks[0];
   const [allowlist, setAllowlist] = useState(false);
   const [secrets, setSecrets] = useState<Record<string, string[]>>({});
   const [sweepSuite, setSweepSuite] = useState("banking");
 
   const run = useMutation({
-    mutationFn: () => api.benchRun({ allowlist, secrets }),
+    mutationFn: () => api.benchRun({ benchmark: entry?.benchmark, allowlist, secrets }),
   });
   const sweep = useMutation({
-    mutationFn: () => api.benchSweep(sweepSuite, allowlist),
+    mutationFn: () => api.benchSweep(sweepSuite, allowlist, entry?.benchmark),
   });
 
   const toggleSecret = (suite: string, tool: string) =>
@@ -62,9 +68,29 @@ export default function Benchmark() {
       <h1 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 8px" }}>
         Governance benchmark
       </h1>
+      {(index.data?.benchmarks.length ?? 0) > 1 && (
+        <div className="wrapline" style={{ gap: 6, marginBottom: 12 }}>
+          {index.data?.benchmarks.map((b) => (
+            <button
+              key={b.benchmark}
+              onClick={() => setBenchmark(b.benchmark)}
+              style={{
+                fontFamily: MONO, fontSize: 11, padding: "4px 10px", borderRadius: 6,
+                cursor: "pointer",
+                border: `1px solid ${b.benchmark === entry?.benchmark ? C.violet : C.line}`,
+                background: "transparent",
+                color: b.benchmark === entry?.benchmark ? C.text : C.mut,
+              }}
+            >
+              {b.title}
+            </button>
+          ))}
+        </div>
+      )}
       <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.mut, lineHeight: 1.7, marginBottom: 20 }}>
-        The four AgentDojo suites, replayed through the real axor-core governor over the
-        benchmark's own ground truth. Two axes, always together:{" "}
+        <b style={{ color: C.text }}>{entry?.title ?? "…"}</b>
+        <span> ({entry?.source}) — {entry?.description} </span>
+        Replayed Two axes, always together:{" "}
         <b style={{ color: C.text }}>utility retained</b> is how much legitimate work
         survives the gate, <b style={{ color: C.text }}>ASR retained</b> is how much attack
         survives it. Reporting one without the other describes half a trade.
@@ -109,7 +135,7 @@ export default function Benchmark() {
           makes it paraphrase-proof, and why it can be expensive. Run the sweep below before
           choosing.
         </div>
-        {(index.data?.suites ?? []).map((suite) => (
+        {(entry?.suites ?? []).map((suite) => (
           <div key={suite.suite} style={{ marginBottom: 10 }}>
             <div style={{ fontFamily: MONO, fontSize: 11, color: C.text, marginBottom: 4 }}>
               {suite.suite}
@@ -205,7 +231,7 @@ export default function Benchmark() {
           onChange={(e) => setSweepSuite(e.target.value)}
           style={{ fontFamily: MONO, fontSize: 11, padding: "5px 8px", background: C.panel, color: C.text, border: `1px solid ${C.line}`, borderRadius: 6 }}
         >
-          {(index.data?.suites ?? []).map((s) => (
+          {(entry?.suites ?? []).map((s) => (
             <option key={s.suite} value={s.suite}>{s.suite}</option>
           ))}
         </select>

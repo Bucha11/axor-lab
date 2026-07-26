@@ -210,6 +210,9 @@ def governor_config(
     predicates = _value_predicates(canon["value_policies"])  # type: ignore[arg-type]
     if predicates:
         config["value_policies"] = predicates
+    if canon.get("sensitive_sources"):
+        # the floor the governor arms once one of these has been read
+        config["sensitive_sources"] = set(canon["sensitive_sources"])  # type: ignore[arg-type]
     overrides = _consequence_overrides(manifests)
     if overrides:
         config["consequence_overrides"] = overrides

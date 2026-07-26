@@ -609,6 +609,13 @@ export interface BenchSuite {
   untrusted_sources: string[];
   reference_denials: string;
 }
+export interface BenchmarkEntry {
+  benchmark: string;
+  title: string;
+  source: string;
+  description: string;
+  suites: BenchSuite[];
+}
 export interface SweepRow {
   source: string;
   utility: BenchRates;
@@ -620,19 +627,20 @@ export interface SweepRow {
 export const api = {
   // ── the governance benchmark ──────────────────────────────────────────────
   benchIndex: () =>
-    jf("/agentdojo").then((r) =>
-      j<{ dataset_version: string; suite_version: string; suites: BenchSuite[] }>(r),
+    jf("/benchmarks").then((r) =>
+      j<{ default: string; benchmarks: BenchmarkEntry[] }>(r),
     ),
   benchRun: (body: {
+    benchmark?: string;
     allowlist?: boolean;
     confidentiality?: boolean;
     secrets?: Record<string, string[]>;
   }) =>
-    jf("/agentdojo/run", post(body)).then((r) =>
-      j<{ dataset_version: string; rows: BenchRow[] }>(r),
+    jf("/benchmarks/run", post(body)).then((r) =>
+      j<{ benchmark: string; source: string; rows: BenchRow[] }>(r),
     ),
-  benchSweep: (suite: string, allowlist = false) =>
-    jf("/agentdojo/sweep", post({ suite, allowlist })).then((r) =>
+  benchSweep: (suite: string, allowlist = false, benchmark?: string) =>
+    jf("/benchmarks/sweep", post({ suite, allowlist, benchmark })).then((r) =>
       j<{
         suite: string;
         baseline: { utility: BenchRates; asr: BenchRates; denials: number };

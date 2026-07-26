@@ -405,15 +405,17 @@ secret. Closing it means either declaring the read sources sensitive — which i
 the utility collapse above, applied to the suites where those tasks live — or a
 mechanism neither axis currently provides.
 
-### A gap that is named, not hidden
+### The gap, closed
 
-`compiled_governor_config` has no sensitive-source field, so this declaration is
-passed to the governor directly by `lab_runner/sequence.py` and is **not covered
-by `executable_config_hash`**. Two runs with different confidentiality
-declarations therefore carry the same config fingerprint, which is exactly the
-drift the hash exists to prevent. It is wired this way to avoid changing a
-hashed canonical structure late in a session; moving it into the canonical
-config is the fix, and it is a contract change, not a patch.
+`compiled_governor_config` now carries `sensitive_sources`/`sensitive_fields`,
+declared on the tool manifest like `untrusted_fields` and reaching the governor
+through the canonical config — so `executable_config_hash` covers it and two
+runs governed differently can no longer share a fingerprint.
+
+The keys are emitted **only when something declares them**. A config with no
+sensitive sources hashes exactly as it did before the field existed, so every
+bundle and pin minted earlier still recomputes; a migration that invalidated all
+of them in order to record an absence would pay the whole cost for nothing.
 
 ## 11. Secrets are a deployment's own declaration, so make them measurable
 
