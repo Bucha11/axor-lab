@@ -586,7 +586,61 @@ const post = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
+export interface BenchRates { base: number; governed: number; unmapped: number }
+export interface BenchRow {
+  suite: string;
+  utility: BenchRates;
+  asr: BenchRates;
+  denials: number;
+  denied_tasks: string[];
+  by_gate: Record<string, number>;
+  reference_denials: string;
+  note: string;
+}
+export interface BenchSuite {
+  suite: string;
+  note: string;
+  user_tasks: number;
+  injection_tasks: number;
+  tools: string[];
+  secret_candidates: string[];
+  default_secrets: string[];
+  egress_sinks: Record<string, string[]>;
+  untrusted_sources: string[];
+  reference_denials: string;
+}
+export interface SweepRow {
+  source: string;
+  utility: BenchRates;
+  asr: BenchRates;
+  denials: number;
+  cost_pp: number;
+}
+
 export const api = {
+  // ── the governance benchmark ──────────────────────────────────────────────
+  benchIndex: () =>
+    jf("/agentdojo").then((r) =>
+      j<{ dataset_version: string; suite_version: string; suites: BenchSuite[] }>(r),
+    ),
+  benchRun: (body: {
+    allowlist?: boolean;
+    confidentiality?: boolean;
+    secrets?: Record<string, string[]>;
+  }) =>
+    jf("/agentdojo/run", post(body)).then((r) =>
+      j<{ dataset_version: string; rows: BenchRow[] }>(r),
+    ),
+  benchSweep: (suite: string, allowlist = false) =>
+    jf("/agentdojo/sweep", post({ suite, allowlist })).then((r) =>
+      j<{
+        suite: string;
+        baseline: { utility: BenchRates; asr: BenchRates; denials: number };
+        rows: SweepRow[];
+        combined: { utility: BenchRates; asr: BenchRates; denials: number };
+      }>(r),
+    ),
+
   // ── publications ──────────────────────────────────────────────────────────
   listPublications: () =>
     fetch("/api/publications").then((r) =>

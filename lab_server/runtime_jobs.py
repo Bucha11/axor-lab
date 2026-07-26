@@ -51,6 +51,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import compose, cp_sign, evidence_api, live_run, local_run, replay_api
+from .errors import PublishRejected
 
 _MAX_BODY = 8 * 1024 * 1024
 
@@ -741,6 +742,15 @@ def make_runtime_server(
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             try:
+                if self.path == "/agentdojo":
+                    # the governance benchmark: suites, and what an operator may
+                    # declare a secret read. Read-only, so control-gated like
+                    # the rest of this surface but nothing to spend.
+                    self._require_control()
+                    from . import agentdojo_api
+
+                    self._send(*agentdojo_api.handle_index())
+                    return
                 if self.path == "/catalog":
                     # The real menu, from the code that owns the scenarios — so a
                     # builder cannot offer something that does not exist.
@@ -914,6 +924,20 @@ def make_runtime_server(
                         self._send(200, replay_api.replay_upload(self._read_json()))
                     except replay_api.ReplayRefused as exc:
                         raise RuntimeJobsError(exc.status, exc.message) from exc
+                    return
+                if self.path in ("/agentdojo/run", "/agentdojo/sweep"):
+                    self._require_control()
+                    from . import agentdojo_api
+
+                    handler = (agentdojo_api.handle_run if self.path.endswith("/run")
+                               else agentdojo_api.handle_sweep)
+                    try:
+                        self._send(*handler(self._read_json()))
+                    except PublishRejected as exc:
+                        # a policy naming a tool the suite does not have is a
+                        # 400 with the offending names, not a 500: the operator
+                        # has to be told WHICH declaration was wrong
+                        raise RuntimeJobsError(exc.status, str(exc)) from exc
                     return
                 if self.path == "/experiments/compose":
                     # Compose a runnable .axl from a selection over the REAL

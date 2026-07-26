@@ -21,6 +21,7 @@ import ImportIncident from "./tabs/ImportIncident";
 import IncidentView from "./tabs/IncidentView";
 import Incidents from "./tabs/Incidents";
 import Verify from "./tabs/Verify";
+import Benchmark from "./tabs/Benchmark";
 import Workspace from "./tabs/Workspace";
 
 // The nav reads as words, not route ids. It used to render the raw segment, so
@@ -35,6 +36,9 @@ const PRIMARY = [
   { id: "results", label: "results" },
   { id: "published", label: "catalog" },
   { id: "incidents", label: "incidents" },
+  // the governance benchmark is PRIMARY: "what does this cost me" is the first
+  // question a buyer asks, and it lived only in a CLI script until now
+  { id: "benchmark", label: "benchmark" },
 ] as const;
 const MORE = [
   { id: "agent-ingest", label: "bring an agent" },
@@ -163,6 +167,7 @@ export default function App() {
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
       {key === "models" && <LiveModels />}
       {key === "verify" && <Verify />}
+      {key === "benchmark" && <Benchmark />}
       {key === "workspace" && <Workspace />}
     </div>
   );
