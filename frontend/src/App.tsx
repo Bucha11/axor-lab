@@ -38,7 +38,7 @@ const PRIMARY = [
   { id: "incidents", label: "incidents" },
   // the governance benchmark is PRIMARY: "what does this cost me" is the first
   // question a buyer asks, and it lived only in a CLI script until now
-  { id: "benchmark", label: "benchmark" },
+  { id: "benchmark", label: "experiments" },
 ] as const;
 const MORE = [
   { id: "agent-ingest", label: "bring an agent" },

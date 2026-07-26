@@ -156,11 +156,18 @@ def run_suite(name: str, allowlist: bool, confidentiality: bool = False,
 
 
 def matrix(allowlist: bool = False, confidentiality: bool = False,
-           secrets: dict[str, list[str]] | None = None) -> list[dict[str, object]]:
-    """The full error matrix, one row per suite."""
+           secrets: dict[str, list[str]] | None = None,
+           suites: list[str] | None = None) -> list[dict[str, object]]:
+    """The error matrix, one row per selected suite.
+
+    `suites` narrows the run. An experiment that measures three suites and
+    reports four is describing a different experiment, so the selection travels
+    with the result rather than being applied by whoever reads it.
+    """
     declared = {k: frozenset(v) for k, v in (secrets or {}).items()}
+    chosen = [s for s in SUITES if not suites or s in suites]
     rows = []
-    for name in SUITES:
+    for name in chosen:
         result = run_suite(
             name, allowlist,
             confidentiality or name in declared,

@@ -632,6 +632,7 @@ export const api = {
     ),
   benchRun: (body: {
     benchmark?: string;
+    suites?: string[];
     allowlist?: boolean;
     confidentiality?: boolean;
     secrets?: Record<string, string[]>;

@@ -92,10 +92,16 @@ def handle_run(body: dict[str, Any]) -> tuple[int, dict[str, object]]:
     """The error matrix: what the gate costs in utility and buys in ASR."""
     bench = _benchmark(body.get("benchmark"))
     secrets = _secrets(bench, body.get("secrets"))
+    chosen = body.get("suites")
+    if chosen is not None:
+        if not isinstance(chosen, list) or not chosen:
+            raise PublishRejected("suites must be a non-empty list", status=400)
+        chosen = [_suite(bench, s) for s in chosen]
     rows = bench.matrix(
         allowlist=bool(body.get("allowlist")),
         confidentiality=bool(body.get("confidentiality")),
         secrets=secrets,
+        suites=chosen,
     )
     return 200, {
         "benchmark": bench.id,
@@ -107,6 +113,7 @@ def handle_run(body: dict[str, Any]) -> tuple[int, dict[str, object]]:
             "allowlist": bool(body.get("allowlist")),
             "confidentiality": bool(body.get("confidentiality")),
             "secrets": secrets,
+            "suites": chosen or [s["suite"] for s in bench.suites()],
         },
         "rows": rows,
     }

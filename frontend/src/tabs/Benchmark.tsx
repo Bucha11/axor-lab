@@ -1,55 +1,97 @@
-// The governance benchmark: what the gate costs, what it buys, and what your
-// own secret declaration would cost YOU.
+// The experiment constructor for the benchmark library.
 //
-// The old headline — "ASR 55% → 0%" — came from a scripted agent whose
-// injection-following rate is a parameter, so it was a dial, not a finding.
-// This screen shows the two axes together instead: utility retained and ASR
-// retained. A defense that reports only one of them is reporting half a trade.
+// Four steps in the order the decisions actually depend on each other: pick a
+// benchmark, pick what to measure, declare the policy, run it. Every field
+// carries a hint, because each one here is a choice with a cost that is not
+// obvious from its label — "declare a secret" sounds free and is not, and an
+// allowlist sounds permissive while it also restricts.
 //
-// The sweep is the part an operator cannot get anywhere else. The
-// confidentiality floor is sound but coarse — after ANY declared secret read,
-// every egress in the session is refused — so the useful question is never
-// "should I turn it on" but "which reads am I willing to pay for". That is a
-// per-source number that depends on your own workflows, and on the stock
-// banking suite three of six sources turn out to cost nothing at all.
+// AgentDojo is the DEFAULT entry, not the only shape. A deployment measuring its
+// own agent against its own suites asks the same two questions — what does the
+// gate cost me, what does each secret cost — with different task names.
+//
+// The old headline "ASR 55% → 0%" is gone for good: it came from a scripted
+// agent whose injection-following rate is a parameter, so it was a dial. This
+// screen always shows both axes, because a defense reporting one describes half
+// a trade.
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Play, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Copy, Play, ShieldCheck } from "lucide-react";
 import { C, MONO, cta } from "../theme";
 import { api, type BenchRates, type BenchRow, type SweepRow } from "../api";
 
 const pct = (r: BenchRates) =>
   r.base ? `${((100 * r.governed) / r.base).toFixed(1)}%` : "n/a";
 
-function Rate({ value, of, tone }: { value: BenchRates; of: string; tone: string }) {
+/** A field's label and the thing you would otherwise learn by getting it wrong. */
+function Field({ step, label, hint, children }: {
+  step?: number; label: string; hint: string; children?: React.ReactNode;
+}) {
   return (
-    <div>
-      <span style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700, color: tone }}>
-        {pct(value)}
-      </span>
-      <span style={{ fontFamily: MONO, fontSize: 10, color: C.mut }}> of {value.base} {of}</span>
+    <div className="p-4 mb-3" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
+      <div style={{ fontFamily: MONO, fontSize: 12, fontWeight: 600, color: C.text }}>
+        {step !== undefined && <span style={{ color: C.violet }}>{step}. </span>}
+        {label}
+      </div>
+      <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.65, margin: "6px 0 12px" }}>
+        {hint}
+      </div>
+      {children}
     </div>
+  );
+}
+
+function Chip({ on, onClick, children, title }: {
+  on: boolean; onClick: () => void; children: React.ReactNode; title?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        fontFamily: MONO, fontSize: 10, padding: "3px 9px", borderRadius: 999,
+        cursor: "pointer", border: `1px solid ${on ? C.violet : C.line}`,
+        background: on ? C.violet : "transparent", color: on ? "#fff" : C.mut,
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
 export default function Benchmark() {
   const index = useQuery({ queryKey: ["bench-index"], queryFn: api.benchIndex });
-  // AgentDojo is the DEFAULT entry in a library, not the only shape a benchmark
-  // can take — a deployment measuring its own suites asks the same question
   const [benchmark, setBenchmark] = useState<string>("");
   const entry =
     index.data?.benchmarks.find((b) => b.benchmark === (benchmark || index.data?.default)) ??
     index.data?.benchmarks[0];
+
+  const [suites, setSuites] = useState<string[] | null>(null); // null = all
   const [allowlist, setAllowlist] = useState(false);
   const [secrets, setSecrets] = useState<Record<string, string[]>>({});
-  const [sweepSuite, setSweepSuite] = useState("banking");
+  const [sweepSuite, setSweepSuite] = useState("");
+  const [copied, setCopied] = useState(false);
 
-  const run = useMutation({
-    mutationFn: () => api.benchRun({ benchmark: entry?.benchmark, allowlist, secrets }),
-  });
+  const chosenSuites = suites ?? (entry?.suites ?? []).map((s) => s.suite);
+  const spec = {
+    benchmark: entry?.benchmark,
+    suites: chosenSuites,
+    allowlist,
+    secrets,
+  };
+
+  const run = useMutation({ mutationFn: () => api.benchRun(spec) });
   const sweep = useMutation({
-    mutationFn: () => api.benchSweep(sweepSuite, allowlist, entry?.benchmark),
+    mutationFn: () =>
+      api.benchSweep(sweepSuite || chosenSuites[0], allowlist, entry?.benchmark),
   });
+
+  const toggleSuite = (suite: string) =>
+    setSuites(() => {
+      const current = new Set(chosenSuites);
+      current.has(suite) ? current.delete(suite) : current.add(suite);
+      return current.size ? [...current] : chosenSuites; // never empty
+    });
 
   const toggleSecret = (suite: string, tool: string) =>
     setSecrets((prev) => {
@@ -64,36 +106,13 @@ export default function Benchmark() {
   const declared = Object.values(secrets).reduce((n, list) => n + list.length, 0);
 
   return (
-    <div style={{ maxWidth: 860, margin: "0 auto" }}>
-      <h1 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 8px" }}>
-        Governance benchmark
-      </h1>
-      {(index.data?.benchmarks.length ?? 0) > 1 && (
-        <div className="wrapline" style={{ gap: 6, marginBottom: 12 }}>
-          {index.data?.benchmarks.map((b) => (
-            <button
-              key={b.benchmark}
-              onClick={() => setBenchmark(b.benchmark)}
-              style={{
-                fontFamily: MONO, fontSize: 11, padding: "4px 10px", borderRadius: 6,
-                cursor: "pointer",
-                border: `1px solid ${b.benchmark === entry?.benchmark ? C.violet : C.line}`,
-                background: "transparent",
-                color: b.benchmark === entry?.benchmark ? C.text : C.mut,
-              }}
-            >
-              {b.title}
-            </button>
-          ))}
-        </div>
-      )}
+    <div style={{ maxWidth: 880, margin: "0 auto" }}>
+      <h1 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 6px" }}>Experiment constructor</h1>
       <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.mut, lineHeight: 1.7, marginBottom: 20 }}>
-        <b style={{ color: C.text }}>{entry?.title ?? "…"}</b>
-        <span> ({entry?.source}) — {entry?.description} </span>
-        Replayed Two axes, always together:{" "}
-        <b style={{ color: C.text }}>utility retained</b> is how much legitimate work
-        survives the gate, <b style={{ color: C.text }}>ASR retained</b> is how much attack
-        survives it. Reporting one without the other describes half a trade.
+        Compose a governance measurement and run it against the real axor-core governor.
+        Two axes, always together: <b style={{ color: C.text }}>utility retained</b> is how
+        much legitimate work survives the gate, <b style={{ color: C.text }}>ASR retained</b>{" "}
+        is how much attack survives it. Reporting one without the other describes half a trade.
       </div>
 
       {index.isError && (
@@ -102,84 +121,120 @@ export default function Benchmark() {
         </div>
       )}
 
-      {/* ── policy ─────────────────────────────────────────────────────── */}
-      <div className="p-4 mb-3" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
-        <div style={{ fontFamily: MONO, fontSize: 12, fontWeight: 600, marginBottom: 10 }}>
-          Policy
+      <Field
+        step={1}
+        label="Benchmark"
+        hint={
+          entry
+            ? `${entry.title} (${entry.source}) — ${entry.description} A benchmark is a registered provider; more can be added without this screen learning a new concept.`
+            : "loading the registered benchmarks…"
+        }
+      >
+        <div className="wrapline" style={{ gap: 6 }}>
+          {index.data?.benchmarks.map((b) => (
+            <Chip key={b.benchmark} on={b.benchmark === entry?.benchmark}
+                  onClick={() => setBenchmark(b.benchmark)} title={b.description}>
+              {b.title}
+            </Chip>
+          ))}
         </div>
-        <label className="wrapline" style={{ gap: 8, cursor: "pointer", marginBottom: 6 }}>
+      </Field>
+
+      <Field
+        step={2}
+        label={`Suites · ${chosenSuites.length} of ${entry?.suites.length ?? 0}`}
+        hint="What to measure. Each suite exercises a different data flow, so the numbers are not
+              interchangeable — one that denies nothing is telling you its egress arguments come
+              from the prompt, not that the gate is idle. Narrowing the selection narrows the
+              claim: an experiment over three suites must not be reported as four."
+      >
+        <div className="wrapline" style={{ gap: 6 }}>
+          {(entry?.suites ?? []).map((s) => (
+            <Chip key={s.suite} on={chosenSuites.includes(s.suite)}
+                  onClick={() => toggleSuite(s.suite)}
+                  title={`${s.note} · ${s.user_tasks} benign / ${s.injection_tasks} attack · reference denials ${s.reference_denials}`}>
+              {s.suite} · {s.user_tasks}/{s.injection_tasks}
+            </Chip>
+          ))}
+        </div>
+      </Field>
+
+      <Field
+        step={3}
+        label="Integrity policy"
+        hint="How the gate decides which destinations an effect may reach."
+      >
+        <label className="wrapline" style={{ gap: 8, cursor: "pointer" }}>
           <input type="checkbox" checked={allowlist} onChange={(e) => setAllowlist(e.target.checked)} />
           <span style={{ fontFamily: MONO, fontSize: 11.5, color: C.text }}>
-            declare the banking known-payee enum
+            declare the known-payee enum
           </span>
         </label>
-        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.6, marginLeft: 24 }}>
-          An enum on a driving argument <b>restricts as well as supersedes</b>: it lifts the
-          taint on payees you vetted, and denies every destination outside the set — including
-          clean, prompt-given ones you forgot to list.
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.65, marginTop: 6, marginLeft: 24 }}>
+          An enum on a driving argument <b>restricts as well as supersedes</b>. It lifts the taint
+          on destinations you vetted — the recovery — and denies every destination outside the set,
+          including clean, prompt-given ones you forgot to list. It is a closed set the sink is
+          confined to, not an exception list for tainted values.
         </div>
-      </div>
+      </Field>
 
-      {/* ── secrets ────────────────────────────────────────────────────── */}
-      <div className="p-4 mb-3" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>
-        <div className="wrapline" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-          <div style={{ fontFamily: MONO, fontSize: 12, fontWeight: 600 }}>
-            Secrets <span style={{ color: C.mut, fontWeight: 400 }}>· {declared} declared</span>
-          </div>
-        </div>
-        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.6, marginBottom: 12 }}>
-          Which tools read secrets is a property of <i>your</i> deployment — the same
-          <code> search_files</code> is a secret read in a law firm and routine in a public wiki.
-          Declaring one arms a floor that is content-blind and sticky: after that read, every
-          egress in the session is refused, whatever the outgoing value looks like. That is what
-          makes it paraphrase-proof, and why it can be expensive. Run the sweep below before
-          choosing.
-        </div>
-        {(entry?.suites ?? []).map((suite) => (
-          <div key={suite.suite} style={{ marginBottom: 10 }}>
-            <div style={{ fontFamily: MONO, fontSize: 11, color: C.text, marginBottom: 4 }}>
-              {suite.suite}
-              <span style={{ color: C.mut }}> · {suite.user_tasks} benign / {suite.injection_tasks} attack</span>
-            </div>
-            <div className="wrapline" style={{ gap: 6 }}>
-              {suite.secret_candidates.map((tool) => {
-                const on = (secrets[suite.suite] ?? []).includes(tool);
-                return (
-                  <button
-                    key={tool}
-                    onClick={() => toggleSecret(suite.suite, tool)}
-                    style={{
-                      fontFamily: MONO, fontSize: 10, padding: "3px 8px", borderRadius: 999,
-                      cursor: "pointer",
-                      border: `1px solid ${on ? C.violet : C.line}`,
-                      background: on ? C.violet : "transparent",
-                      color: on ? "#fff" : C.mut,
-                    }}
-                  >
+      <Field
+        step={4}
+        label={`Secrets · ${declared} declared`}
+        hint="Which tools read secrets is a property of YOUR deployment — the same search_files is
+              a secret read in a law firm and routine in a public wiki. Declaring one arms a floor
+              that is content-blind and sticky: after that read, every egress in the session is
+              refused whatever the outgoing value looks like. That is what makes it
+              paraphrase-proof, and why it can be expensive. Sweep first."
+      >
+        {(entry?.suites ?? [])
+          .filter((s) => chosenSuites.includes(s.suite))
+          .map((suite) => (
+            <div key={suite.suite} style={{ marginBottom: 10 }}>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: C.text, marginBottom: 4 }}>
+                {suite.suite}
+                <span style={{ color: C.mut }}> · {suite.secret_candidates.length} candidates</span>
+              </div>
+              <div className="wrapline" style={{ gap: 6 }}>
+                {suite.secret_candidates.map((tool) => (
+                  <Chip key={tool} on={(secrets[suite.suite] ?? []).includes(tool)}
+                        onClick={() => toggleSecret(suite.suite, tool)}
+                        title="declaring this arms the confidentiality floor after it is read">
                     {tool}
-                  </button>
-                );
-              })}
+                  </Chip>
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+      </Field>
+
+      <div className="wrapline" style={{ gap: 8, marginBottom: 6 }}>
+        <button style={cta(!run.isPending)} onClick={() => run.mutate()} disabled={run.isPending}>
+          <Play size={14} /> {run.isPending ? "measuring…" : "Run this experiment"}
+        </button>
+        <button
+          style={{ ...cta(true), background: "transparent", color: C.mut, border: `1px solid ${C.line}` }}
+          onClick={() => {
+            navigator.clipboard?.writeText(JSON.stringify(spec, null, 2));
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+          title="the exact request body — paste it into a script and the run is the same run"
+        >
+          <Copy size={13} /> {copied ? "copied" : "copy spec"}
+        </button>
       </div>
 
-      <button style={cta(!run.isPending)} onClick={() => run.mutate()} disabled={run.isPending}>
-        <Play size={14} /> {run.isPending ? "measuring…" : "Measure this policy"}
-      </button>
-
-      {/* ── the matrix ─────────────────────────────────────────────────── */}
       {run.data && (
-        <div className="mt-4" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, overflowX: "auto" }}>
+        <div className="mt-3" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11 }}>
             <thead>
               <tr style={{ color: C.mut, textAlign: "left" }}>
-                <th style={{ padding: "10px 12px" }}>suite</th>
-                <th style={{ padding: "10px 12px" }}>utility retained</th>
-                <th style={{ padding: "10px 12px" }}>ASR retained</th>
-                <th style={{ padding: "10px 12px" }}>denials</th>
-                <th style={{ padding: "10px 12px" }}>reference</th>
+                <th style={{ padding: "10px 12px" }} title="the suite this row measures">suite</th>
+                <th style={{ padding: "10px 12px" }} title="benign tasks still succeeding after the gate, of those that succeed ungoverned — the gap is the false-positive cost">utility retained</th>
+                <th style={{ padding: "10px 12px" }} title="injection tasks still succeeding after the gate, of those that succeed ungoverned — what survives is the false-negative rate">ASR retained</th>
+                <th style={{ padding: "10px 12px" }} title="how many calls the gate refused, and at which gate">denials</th>
+                <th style={{ padding: "10px 12px" }} title="a published o4-mini run, shown for comparison — not something this harness reproduces">reference</th>
               </tr>
             </thead>
             <tbody>
@@ -190,11 +245,14 @@ export default function Benchmark() {
                     <div style={{ fontSize: 9.5, color: C.mut }}>{row.note}</div>
                   </td>
                   <td style={{ padding: "10px 12px" }}>
-                    <Rate value={row.utility} of="benign" tone={C.text} />
+                    <span style={{ fontSize: 15, fontWeight: 700, color: C.text }}>{pct(row.utility)}</span>
+                    <span style={{ fontSize: 10, color: C.mut }}> of {row.utility.base}</span>
                   </td>
                   <td style={{ padding: "10px 12px" }}>
-                    <Rate value={row.asr} of="attacks"
-                          tone={row.asr.base && row.asr.governed ? C.red : C.green} />
+                    <span style={{ fontSize: 15, fontWeight: 700, color: row.asr.governed ? C.red : C.green }}>
+                      {pct(row.asr)}
+                    </span>
+                    <span style={{ fontSize: 10, color: C.mut }}> of {row.asr.base}</span>
                   </td>
                   <td style={{ padding: "10px 12px", color: C.text }}>
                     {row.denials}
@@ -215,25 +273,24 @@ export default function Benchmark() {
         </div>
       )}
 
-      {/* ── the sweep ──────────────────────────────────────────────────── */}
       <h2 style={{ fontSize: 14, fontWeight: 600, margin: "28px 0 6px" }}>
         What would each secret cost me?
       </h2>
-      <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.6, marginBottom: 12 }}>
-        Each row is that source declared <b>alone</b>, so the rows compare to each other.
-        They do not add up: sources read by the same tasks overlap, so the combined figure is
-        measured separately. A source marked <b style={{ color: C.green }}>free</b> is one no
-        benign task reads before an egress — declaring it is pure upside.
+      <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.65, marginBottom: 12 }}>
+        Each row is that source declared <b>alone</b>, so the rows compare to each other. They do
+        not add up — sources read by the same tasks overlap, so the combined figure is measured
+        separately. A source marked <b style={{ color: C.green }}>free</b> is one no benign task
+        reads before an egress: declaring it is pure upside, and you cannot tell which those are
+        without running this.
       </div>
       <div className="wrapline" style={{ gap: 8, marginBottom: 12 }}>
         <select
-          value={sweepSuite}
+          value={sweepSuite || chosenSuites[0] || ""}
           onChange={(e) => setSweepSuite(e.target.value)}
+          title="the sweep is per-suite: a source's cost depends on which tasks read it"
           style={{ fontFamily: MONO, fontSize: 11, padding: "5px 8px", background: C.panel, color: C.text, border: `1px solid ${C.line}`, borderRadius: 6 }}
         >
-          {(entry?.suites ?? []).map((s) => (
-            <option key={s.suite} value={s.suite}>{s.suite}</option>
-          ))}
+          {chosenSuites.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
         <button style={cta(!sweep.isPending)} onClick={() => sweep.mutate()} disabled={sweep.isPending}>
           <ShieldCheck size={14} /> {sweep.isPending ? "sweeping…" : "Sweep"}
@@ -245,11 +302,11 @@ export default function Benchmark() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11 }}>
             <thead>
               <tr style={{ color: C.mut, textAlign: "left" }}>
-                <th style={{ padding: "10px 12px" }}>declared secret source</th>
-                <th style={{ padding: "10px 12px" }}>utility</th>
-                <th style={{ padding: "10px 12px" }}>ASR</th>
+                <th style={{ padding: "10px 12px" }} title="the tool declared a secret read, on its own">declared secret source</th>
+                <th style={{ padding: "10px 12px" }} title="benign tasks retained with only this source declared">utility</th>
+                <th style={{ padding: "10px 12px" }} title="attacks retained — the floor rarely moves this, which is the point of showing it">ASR</th>
                 <th style={{ padding: "10px 12px" }}>denials</th>
-                <th style={{ padding: "10px 12px" }}>cost</th>
+                <th style={{ padding: "10px 12px" }} title="utility lost against the integrity-only baseline">cost</th>
               </tr>
             </thead>
             <tbody>
@@ -268,7 +325,9 @@ export default function Benchmark() {
                 );
               })}
               <tr style={{ borderTop: `1px solid ${C.line}`, background: "rgba(255,255,255,.02)" }}>
-                <td style={{ padding: "9px 12px", color: C.mut }}>all of the above together</td>
+                <td style={{ padding: "9px 12px", color: C.mut }} title="measured, not summed — the per-source costs overlap">
+                  all of the above together
+                </td>
                 <td style={{ padding: "9px 12px", color: C.text }}>{pct(sweep.data.combined.utility)}</td>
                 <td style={{ padding: "9px 12px", color: C.mut }}>{pct(sweep.data.combined.asr)}</td>
                 <td style={{ padding: "9px 12px", color: C.mut }}>{sweep.data.combined.denials}</td>
@@ -287,11 +346,10 @@ export default function Benchmark() {
           </span>
         </div>
         <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.7 }}>
-          Utility here is measured over the benchmark's own ground-truth call sequences, not over
-          a model's attempts — so it says what the gate would cost a <i>perfect</i> agent, and a
-          real one makes extra calls that widen the tainted set. Treat the denial counts as a
-          lower bound. The reference column is a published run on o4-mini and is shown for
-          comparison only; it is not something this harness reproduces.
+          Utility is measured over the benchmark's own ground-truth call sequences, not over a
+          model's attempts — so it says what the gate would cost a <i>perfect</i> agent, and a real
+          one makes extra calls that widen the tainted set. Treat the denial counts as a lower
+          bound. The reference column is a published o4-mini run shown for comparison only.
         </div>
       </div>
     </div>

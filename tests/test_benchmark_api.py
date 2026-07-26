@@ -117,6 +117,27 @@ class TestValidation(unittest.TestCase):
                 api.handle_run(bad)
 
 
+class TestSuiteSelection(unittest.TestCase):
+    """The constructor narrows what is measured; the result says what it measured."""
+
+    def test_a_narrowed_run_reports_only_the_chosen_suites(self) -> None:
+        _, body = api.handle_run({"suites": ["banking", "travel"]})
+        self.assertEqual([r["suite"] for r in body["rows"]], ["banking", "travel"])
+
+    def test_the_selection_travels_with_the_result(self) -> None:
+        """An experiment over three suites must not be read as four."""
+        _, body = api.handle_run({"suites": ["travel"]})
+        self.assertEqual(body["policy"]["suites"], ["travel"])
+        # and the full run says so explicitly rather than by omission
+        _, full = api.handle_run({})
+        self.assertEqual(len(full["policy"]["suites"]), 4)
+
+    def test_an_empty_or_unknown_selection_is_refused(self) -> None:
+        for bad in ({"suites": []}, {"suites": ["nope"]}, {"suites": "banking"}):
+            with self.assertRaises(PublishRejected):
+                api.handle_run(bad)
+
+
 class TestSweep(unittest.TestCase):
     def test_the_sweep_separates_free_declarations_from_costly_ones(self) -> None:
         _, body = api.handle_sweep({"suite": "banking"})

@@ -742,7 +742,7 @@ def make_runtime_server(
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             try:
-                if self.path in ("/benchmarks", "/agentdojo"):
+                if self.path == "/benchmarks":
                     # the governance benchmark: suites, and what an operator may
                     # declare a secret read. Read-only, so control-gated like
                     # the rest of this surface but nothing to spend.
@@ -925,8 +925,7 @@ def make_runtime_server(
                     except replay_api.ReplayRefused as exc:
                         raise RuntimeJobsError(exc.status, exc.message) from exc
                     return
-                if self.path in ("/benchmarks/run", "/benchmarks/sweep",
-                                 "/agentdojo/run", "/agentdojo/sweep"):
+                if self.path in ("/benchmarks/run", "/benchmarks/sweep"):
                     self._require_control()
                     from . import benchmark_api
 
