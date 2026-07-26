@@ -59,7 +59,7 @@ def _outcome(task: dict, denied_indices: list[int]) -> bool | None:
     return outcomes.get(",".join(map(str, sorted(denied_indices))))
 
 
-def run_suite(name: str, allowlist: bool) -> dict[str, object]:
+def run_suite(name: str, allowlist: bool, confidentiality: bool = False) -> dict[str, object]:
     data = json.loads((DATA / f"{name}.json").read_text())
     taxonomy = TAXONOMIES[name]
     policy: dict[str, object] = {"profile": "strict", "trust_model": "content-ledger"}
@@ -78,7 +78,8 @@ def run_suite(name: str, allowlist: bool) -> dict[str, object]:
         if task["calls"] is None:
             continue
         result = gate_sequence(task["calls"], taxonomy, data["tools"],
-                               policy=policy, inputs=inputs)
+                               policy=policy, inputs=inputs,
+                               confidentiality=confidentiality)
         if result.denied:
             denied_tasks.append(task["id"])
             denials += len(result.denials)
@@ -114,6 +115,7 @@ def run_suite(name: str, allowlist: bool) -> dict[str, object]:
                 user["calls"] + injection["calls"], taxonomy, data["tools"],
                 policy=policy, inputs=inputs,
                 injected=list((injection.get("attack_vectors") or {}).values()),
+                confidentiality=confidentiality,
             )
             # re-base the denied indices onto the injection task's own call list,
             # which is what its frozen security map is keyed by
@@ -133,6 +135,9 @@ def _rate(part: int, whole: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--confidentiality", action="store_true",
+                        help="arm the sensitive-read floor (the reference's rows are "
+                             "integrity-only, so this is OFF by default)")
     parser.add_argument("--allowlist", action="store_true",
                         help="declare the banking known-payee enum (App. D supersession)")
     args = parser.parse_args(argv)
@@ -140,13 +145,14 @@ def main(argv: list[str] | None = None) -> int:
     index = json.loads((DATA / "index.json").read_text())
     print(f"dataset: {index['dataset_version']} ({index['suite_version']})")
     print("policy:  strict/content-ledger"
-          f"{' + banking known-payee allowlist' if args.allowlist else ''}\n")
+          f"{' + banking known-payee allowlist' if args.allowlist else ''}"
+          f"{' + confidentiality floor' if args.confidentiality else ''}\n")
     header = (f"{'suite':<11}{'utility':>18}{'ASR':>16}{'denials':>9}  "
               f"{'reference':<32}")
     print(header)
     print("-" * len(header))
     for name in ("banking", "slack", "workspace", "travel"):
-        r = run_suite(name, args.allowlist)
+        r = run_suite(name, args.allowlist, args.confidentiality)
         u, a = r["utility"], r["asr"]
         util = f"{_rate(u['governed'], u['base'])} of {u['base']}"
         asr = f"{_rate(a['governed'], a['base'])} of {a['base']}"

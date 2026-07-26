@@ -29,6 +29,17 @@ class SuiteTaxonomy:
     untrusted_sources: frozenset[str]
     #: sink tool → the arguments that drive its effect beyond the perimeter
     egress_sinks: dict[str, tuple[str, ...]]
+    #: tools that read SECRETS. A separate axis from untrusted_sources: that one
+    #: is about what an attacker can WRITE (integrity), this is about what must
+    #: not LEAVE (confidentiality). A tool is often both, and often neither.
+    #:
+    #: The floor these arm is content-blind and sticky: once a secret has been
+    #: read, egress is refused for the rest of the session no matter what the
+    #: outgoing value looks like. That is what makes it paraphrase-proof — no
+    #: base64, homoglyph or restatement of the secret changes the verdict,
+    #: because the verdict never reads the outgoing value at all. It is also why
+    #: it is expensive, and why declaring it is a deliberate act.
+    sensitive_sources: frozenset[str] = frozenset()
     #: tools whose action class the operator raised; a consequence gate denies
     #: these independently of any taint
     consequence: dict[str, str] = field(default_factory=dict)
@@ -52,6 +63,12 @@ BANKING = SuiteTaxonomy(
     untrusted_sources=frozenset({
         "read_file", "get_most_recent_transactions", "get_scheduled_transactions",
     }),
+    # balances, the account IBAN, personal details and the transaction history
+    # are the customer's financial secrets
+    sensitive_sources=frozenset({
+        "get_balance", "get_iban", "get_user_info", "get_most_recent_transactions",
+        "get_scheduled_transactions",
+    }),
     egress_sinks={
         "send_money": ("recipient",),
         "schedule_transaction": ("recipient",),
@@ -68,6 +85,7 @@ SLACK = SuiteTaxonomy(
         "read_channel_messages", "read_inbox", "get_webpage",
         "get_channels", "get_users_in_channel",
     }),
+    sensitive_sources=frozenset({"read_inbox", "get_users_in_channel"}),
     egress_sinks={
         "send_channel_message": ("channel",),
         "send_direct_message": ("recipient",),
@@ -102,6 +120,8 @@ TRAVEL = SuiteTaxonomy(
         "check_restaurant_opening_hours", "get_car_types_available",
         "get_car_fuel_options", "get_flight_information",
     }),
+    # the traveller's own record — passport, credit card, address
+    sensitive_sources=frozenset({"get_user_information"}),
     egress_sinks={"send_email": ("recipients",)},
     note="the egress recipient comes from the prompt, not a read",
 )
@@ -120,6 +140,10 @@ WORKSPACE = SuiteTaxonomy(
         "get_file_by_id", "search_files", "search_files_by_filename", "list_files",
         "get_day_calendar_events", "search_calendar_events",
         "search_contacts_by_name", "search_contacts_by_email",
+    }),
+    sensitive_sources=frozenset({
+        "get_received_emails", "get_unread_emails", "get_sent_emails",
+        "get_draft_emails", "search_emails", "get_file_by_id", "search_files",
     }),
     egress_sinks={
         "send_email": ("recipients",),

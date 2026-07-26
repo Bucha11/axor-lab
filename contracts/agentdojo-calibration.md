@@ -354,3 +354,63 @@ is outside what this taxonomy catches — stated in `agentdojo_taxonomy.py` and 
 this reason, and the confidentiality floor, which is the mechanism for that
 class, is not wired into Lab. That is the next real piece of work, and it is
 named rather than hidden behind a number.
+
+## 10. The confidentiality floor, wired — and what it did not fix
+
+The floor is **opt-in** (`--confidentiality`, off by default). That is not
+timidity: the reference's per-suite rows are an INTEGRITY-only measurement — it
+states the confidentiality axis "was never engaged" in those runs and carries no
+row for it. Arming the floor by default would compare our two-axis run against
+their one-axis one and report the difference as a mismatch, which is how a
+calibration harness starts lying. Turning it on for the integrity targets is in
+fact what broke them first: banking went 5 → 11 denials and left the 3–5 band.
+
+`sensitive_sources` is declared per suite, a separate axis from
+`untrusted_sources`: that one is about what an attacker can WRITE (integrity),
+this is about what must not LEAVE. The floor they arm is content-blind and
+sticky — once a secret has been read, egress is refused for the rest of the
+session whatever the outgoing value looks like. That is what makes it
+paraphrase-proof: no base64, homoglyph or restatement changes a verdict that
+never reads the outgoing value at all.
+
+Measured, strict/content-ledger, against the integrity-only run of §9:
+
+| suite | utility before | utility after | denials | ASR before | ASR after |
+|---|---|---|---|---|---|
+| banking | 68.8% | **50.0%** | 5 → 11 | 11.1% | 11.1% |
+| slack | 80.0% | **60.0%** | 5 → 9 | 50.0% | 50.0% |
+| workspace | 79.5% | 79.5% | 10 | 16.7% | 16.7% |
+| travel | 100% | 100% | 0 | 50.0% | 50.0% |
+
+**It did not fix what I said it would fix.** In §9 I named the floor as the
+mechanism for travel's surviving 50% ASR. It is not: travel's numbers are
+identical with the floor armed, because the suite's ground-truth tasks never
+read a declared secret before an egress. That is not a surprise once stated —
+the reference says the same thing about its own run, that on the class of tasks
+which could trigger it "the tasks first of all do not read-secret-then-egress".
+I had read that sentence and still pointed at the floor.
+
+What the floor cost is real and immediate: banking loses another 18.8pp of
+utility and slack 20pp, for no ASR movement on these suites. That is the correct
+shape for a guarantee whose value is that it *cannot* be evaded rather than that
+it catches more on a fixed benchmark — but the benchmark cannot show the value,
+only the bill. Reporting the bill without the value would be as dishonest as the
+reverse, so both are stated.
+
+The surviving ASR is therefore still open. The exfiltration that gets through is
+content-carried to a prompt-given destination, and neither declared axis reaches
+it: integrity gates the destination, confidentiality gates the session after a
+declared secret read, and this path has an approved destination and no declared
+secret. Closing it means either declaring the read sources sensitive — which is
+the utility collapse above, applied to the suites where those tasks live — or a
+mechanism neither axis currently provides.
+
+### A gap that is named, not hidden
+
+`compiled_governor_config` has no sensitive-source field, so this declaration is
+passed to the governor directly by `lab_runner/sequence.py` and is **not covered
+by `executable_config_hash`**. Two runs with different confidentiality
+declarations therefore carry the same config fingerprint, which is exactly the
+drift the hash exists to prevent. It is wired this way to avoid changing a
+hashed canonical structure late in a session; moving it into the canonical
+config is the fix, and it is a contract change, not a patch.

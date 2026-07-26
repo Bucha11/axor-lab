@@ -99,6 +99,7 @@ def gate_sequence(
     policy: dict[str, object] | None = None,
     inputs: dict[str, object] | None = None,
     injected: list[str] | None = None,
+    confidentiality: bool = False,
 ) -> SequenceResult:
     """Run `calls` through one governor in order and return every verdict.
 
@@ -125,7 +126,22 @@ def gate_sequence(
     from axor_core.governor import ToolCallGovernor
 
     manifests = _manifests_for(taxonomy, tools)
-    governor = ToolCallGovernor(**governor_config(manifests, policy, inputs))
+    config = governor_config(manifests, policy, inputs)
+    # The confidentiality axis, declared separately from integrity. It is passed
+    # here rather than compiled into the canonical config because
+    # `compiled_governor_config` does not yet carry a sensitive-source field —
+    # see contracts/agentdojo-calibration.md §10. Until it does, this
+    # declaration is NOT covered by `executable_config_hash`, which is a real
+    # gap and is named as one rather than left to be discovered.
+    # OFF by default, because the reference's per-suite numbers are an
+    # INTEGRITY-only measurement: it states that the confidentiality axis "was
+    # never engaged" in those runs and carries no row for it. Arming the floor
+    # by default would compare our two-axis run against their one-axis one and
+    # call the difference a mismatch.
+    sensitive = getattr(taxonomy, "sensitive_sources", frozenset()) if confidentiality else ()
+    if sensitive:
+        config["sensitive_sources"] = set(sensitive)
+    governor = ToolCallGovernor(**config)
 
     verdicts: list[CallVerdict] = []
     for index, call in enumerate(calls):
