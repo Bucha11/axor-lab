@@ -7,7 +7,7 @@ import { C, MONO } from "./theme";
 import { useQuery } from "@tanstack/react-query";
 import { navigate, useRoute } from "./router";
 import { api } from "./api";
-import Landing from "./tabs/Landing";
+import Home from "./tabs/Home";
 import LiveModels from "./tabs/LiveModels";
 import AgentIngest from "./tabs/AgentIngest";
 import RunProgress from "./tabs/RunProgress";
@@ -20,29 +20,20 @@ import ImportIncident from "./tabs/ImportIncident";
 import IncidentView from "./tabs/IncidentView";
 import Incidents from "./tabs/Incidents";
 import Verify from "./tabs/Verify";
-import Experiments from "./tabs/Experiments";
+import Builder from "./tabs/Builder";
 import Workspace from "./tabs/Workspace";
 
-// The nav reads as words, not route ids. It used to render the raw segment, so
-// the bar said "home builder runs results published" while the overflow menu had
-// real labels — two vocabularies in one header.
+// The nav reads as words, not route ids, and lists only things that PERSIST and
+// that you come back to. Verbs — import an incident, bring an agent, author a
+// scenario, compare models — are ways to START something and live where you
+// start, on the home page.
 //
-// `incidents` is primary: importing a production incident is the path teams
-// actually pay for, and it was buried behind "more…".
-// Thirteen entries became seven, by asking of each one: is this a PLACE you
-// return to, or a verb you perform once?
-//
-// `runs` was a state, not a destination — the progress of a run already in
-// flight, reachable from the run it belongs to. `import an incident`,
-// `bring an agent`, `author a scenario` and `compare models` are all ways to
-// START something; they belong where you start, not in a bar you navigate by.
-// Four of them were linked from nowhere at all, so the nav was their only door,
-// which is what made removing them feel like hiding them.
-//
-// What is left is the set of things that persist and that you come back to.
+// There is no "experiments" entry any more. Home IS the experiment: the default
+// measurement is on screen before you click anything, so a tab that navigated to
+// "where you configure a run" was a tab pointing at the page you were already
+// on.
 const PRIMARY = [
-  { id: "home", label: "home" },
-  { id: "benchmark", label: "experiments" },
+  { id: "home", label: "measure" },
   { id: "results", label: "results" },
   { id: "published", label: "catalog" },
   { id: "incidents", label: "incidents" },
@@ -118,7 +109,7 @@ function TierBadge() {
 
 // which primary tab a route key highlights
 function activeTab(key: string): string {
-  if (key === "" ) return "home";
+  if (key === "" || key === "benchmark") return "home";
   if (key === "e") return "published";
   return key;
 }
@@ -151,9 +142,10 @@ export default function App() {
         <TierBadge />
       </div>
 
-      {(key === "home" || key === "") && <Landing />}
-      {/* one roof, two sources of tasks — both routes still resolve */}
-      {key === "builder" && <Experiments source="scenarios" />}
+      {/* `#/benchmark` was the constructor's route; it now lands on the live
+          measurement, so every existing link keeps working */}
+      {(key === "home" || key === "" || key === "benchmark") && <Home />}
+      {key === "builder" && <Builder />}
       {key === "runs" && <RunProgress runId={p1} />}
       {key === "results" && <Results runId={p1} />}
       {key === "published" && <Published />}
@@ -170,7 +162,6 @@ export default function App() {
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
       {key === "models" && <LiveModels />}
       {key === "verify" && <Verify />}
-      {key === "benchmark" && <Experiments source="benchmark" />}
       {key === "workspace" && <Workspace />}
     </div>
   );
