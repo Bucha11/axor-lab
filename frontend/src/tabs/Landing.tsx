@@ -8,7 +8,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ChevronRight, Compass, GitFork, Play, RefreshCw, Search, ShieldAlert, Upload,
+  Bot, ChevronRight, Compass, Gauge, GitFork, PenLine, Play, RefreshCw, Search,
+  ShieldAlert, Upload, Wrench,
 } from "lucide-react";
 import { C, MONO, cta } from "../theme";
 import { navigate } from "../router";
@@ -19,14 +20,38 @@ import EmptyState from "../components/EmptyState";
 // Three, not four. "Explore experiments" and "Reproduce a run" were two cards
 // on one route — two doors into the same room. The catalog IS where you reproduce
 // someone's run, so it says so once.
+// These are the WAYS TO START, and this is now their only door — they were
+// removed from the top nav because "bring an agent" is a verb, not a place you
+// return to. That makes this list load-bearing: an entry point linked from
+// nowhere is one that does not exist, so every route taken out of the bar has a
+// card here.
 const ENTRIES = [
   {
     icon: Compass, title: "Explore & reproduce", color: C.violet, tag: "no agent needed",
     desc: "browse published runs, replay their verdicts bit-for-bit, fork one", to: "published",
   },
   {
+    icon: Gauge, title: "Measure the governance cost", color: C.violet, tag: "start here",
+    desc: "four benchmark suites → what the gate costs in utility, what it buys in ASR",
+    to: "benchmark",
+  },
+  {
+    icon: Wrench, title: "Compose an experiment", color: C.steel, tag: "your scenarios",
+    desc: "pick suites and conditions → a validated .axl → run it", to: "builder",
+  },
+  {
     icon: Upload, title: "Bring your agent", color: C.steel, tag: "your setup",
     desc: "code · endpoint · traces → run your own", to: "agent-ingest",
+  },
+  {
+    icon: Bot, title: "Compare live models", color: C.amber, tag: "BYOK · costs money",
+    desc: "the only run where the ungoverned arm measures a model, not a stand-in",
+    to: "models",
+  },
+  {
+    icon: PenLine, title: "Author a scenario", color: C.steel, tag: "advanced",
+    desc: "write the task, the injection and the violation predicate by hand",
+    to: "scenario-author",
   },
   {
     // this card promises the incident path, so it goes to the incident

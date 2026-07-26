@@ -30,23 +30,26 @@ import Workspace from "./tabs/Workspace";
 //
 // `incidents` is primary: importing a production incident is the path teams
 // actually pay for, and it was buried behind "more…".
+// Thirteen entries became seven, by asking of each one: is this a PLACE you
+// return to, or a verb you perform once?
+//
+// `runs` was a state, not a destination — the progress of a run already in
+// flight, reachable from the run it belongs to. `import an incident`,
+// `bring an agent`, `author a scenario` and `compare models` are all ways to
+// START something; they belong where you start, not in a bar you navigate by.
+// Four of them were linked from nowhere at all, so the nav was their only door,
+// which is what made removing them feel like hiding them.
+//
+// What is left is the set of things that persist and that you come back to.
 const PRIMARY = [
   { id: "home", label: "home" },
-  { id: "builder", label: "build" },
+  { id: "benchmark", label: "experiments" },
   { id: "results", label: "results" },
   { id: "published", label: "catalog" },
   { id: "incidents", label: "incidents" },
-  // the governance benchmark is PRIMARY: "what does this cost me" is the first
-  // question a buyer asks, and it lived only in a CLI script until now
-  { id: "benchmark", label: "experiments" },
 ] as const;
 const MORE = [
-  { id: "agent-ingest", label: "bring an agent" },
-  { id: "import", label: "import an incident" },
   { id: "verify", label: "verify a package" },
-  { id: "models", label: "compare models" },
-  { id: "scenario-author", label: "author a scenario" },
-  { id: "runs", label: "run progress" },
   { id: "workspace", label: "workspace" },
 ] as const;
 

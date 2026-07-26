@@ -44,6 +44,14 @@ export default function Results({ runId }: { runId?: string }) {
         <EmptyState title="no run selected">
           Results live at <span style={{ color: C.mut }}>#/results/{"{run_id}"}</span>. Start a run in the
           builder; when it completes, its aggregates land here.
+          {/* run progress left the top nav — it is a STATE of a run, not a place
+              you navigate to — so this is its door. A route reachable from
+              nowhere is a route that does not exist. */}
+          <div style={{ marginTop: 10 }}>
+            <a href="#/runs" style={{ fontFamily: MONO, fontSize: 11, color: C.steel }}>
+              a run already in flight →
+            </a>
+          </div>
         </EmptyState>
       </div>
     );
