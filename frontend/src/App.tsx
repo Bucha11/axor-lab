@@ -10,7 +10,6 @@ import { api } from "./api";
 import Landing from "./tabs/Landing";
 import LiveModels from "./tabs/LiveModels";
 import AgentIngest from "./tabs/AgentIngest";
-import Builder from "./tabs/Builder";
 import RunProgress from "./tabs/RunProgress";
 import Results from "./tabs/Results";
 import Published from "./tabs/Published";
@@ -21,7 +20,7 @@ import ImportIncident from "./tabs/ImportIncident";
 import IncidentView from "./tabs/IncidentView";
 import Incidents from "./tabs/Incidents";
 import Verify from "./tabs/Verify";
-import Benchmark from "./tabs/Benchmark";
+import Experiments from "./tabs/Experiments";
 import Workspace from "./tabs/Workspace";
 
 // The nav reads as words, not route ids. It used to render the raw segment, so
@@ -153,7 +152,8 @@ export default function App() {
       </div>
 
       {(key === "home" || key === "") && <Landing />}
-      {key === "builder" && <Builder />}
+      {/* one roof, two sources of tasks — both routes still resolve */}
+      {key === "builder" && <Experiments source="scenarios" />}
       {key === "runs" && <RunProgress runId={p1} />}
       {key === "results" && <Results runId={p1} />}
       {key === "published" && <Published />}
@@ -170,7 +170,7 @@ export default function App() {
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
       {key === "models" && <LiveModels />}
       {key === "verify" && <Verify />}
-      {key === "benchmark" && <Benchmark />}
+      {key === "benchmark" && <Experiments source="benchmark" />}
       {key === "workspace" && <Workspace />}
     </div>
   );

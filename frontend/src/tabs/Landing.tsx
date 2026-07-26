@@ -31,13 +31,14 @@ const ENTRIES = [
     desc: "browse published runs, replay their verdicts bit-for-bit, fork one", to: "published",
   },
   {
-    icon: Gauge, title: "Measure the governance cost", color: C.violet, tag: "start here",
-    desc: "four benchmark suites → what the gate costs in utility, what it buys in ASR",
+    icon: Gauge, title: "Measure against a benchmark", color: C.violet, tag: "start here",
+    desc: "published suites with reference numbers → what the gate costs, what it buys",
     to: "benchmark",
   },
   {
-    icon: Wrench, title: "Compose an experiment", color: C.steel, tag: "your scenarios",
-    desc: "pick suites and conditions → a validated .axl → run it", to: "builder",
+    icon: Wrench, title: "Measure your own scenarios", color: C.steel, tag: "your tasks",
+    desc: "compose suites and conditions → a validated .axl → run it under the same gate",
+    to: "builder",
   },
   {
     icon: Upload, title: "Bring your agent", color: C.steel, tag: "your setup",
