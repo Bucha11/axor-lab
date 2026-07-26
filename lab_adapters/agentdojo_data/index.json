@@ -3,28 +3,28 @@
  "suite_version": "v1",
  "suites": {
   "banking": {
-   "content_hash": "sha256:621e5bc3a64d598246771f0e670f28df49c3ebc834dcb6bd2127190096573abf",
+   "content_hash": "sha256:78b8a00ba9f04107bbd5b3fdfccd16937859b9e5f5699207b5b4287cca9dc4e5",
    "ground_truth_missing": 0,
    "injection_tasks": 9,
    "tools": 11,
    "user_tasks": 16
   },
   "slack": {
-   "content_hash": "sha256:647c36c5c8fff56cb57dc871cf66b1a1d8e3395e7ac7508778373cebf354bbfe",
+   "content_hash": "sha256:8112fb8ee260d535724e238a2c977bc3d9c3b07deebdd6627d8de1e8cb49f09b",
    "ground_truth_missing": 0,
    "injection_tasks": 5,
    "tools": 11,
    "user_tasks": 21
   },
   "travel": {
-   "content_hash": "sha256:b487c83a50e1a5d24aaf8998aa4a05a3e14312f35d9deab512f7bc3621d3e6d7",
+   "content_hash": "sha256:5222660226c867adf236c50b4a9db1e87cfd4cd1620dce7dca52c7755cc8757f",
    "ground_truth_missing": 0,
    "injection_tasks": 7,
    "tools": 28,
    "user_tasks": 20
   },
   "workspace": {
-   "content_hash": "sha256:42cbfb672944d398869777d2b2eb236c2d2e7c68aa8f4e15e392aacc4fafbd7d",
+   "content_hash": "sha256:e03deb461243d72592dd8d4911e868629d572255c872bf3ab0a4bd5d4669cbe1",
    "ground_truth_missing": 0,
    "injection_tasks": 6,
    "tools": 24,

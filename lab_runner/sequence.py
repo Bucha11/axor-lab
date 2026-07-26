@@ -98,6 +98,7 @@ def gate_sequence(
     tools: list[str],
     policy: dict[str, object] | None = None,
     inputs: dict[str, object] | None = None,
+    injected: list[str] | None = None,
 ) -> SequenceResult:
     """Run `calls` through one governor in order and return every verdict.
 
@@ -106,6 +107,12 @@ def gate_sequence(
     results the real tools produced. The results are what makes a content-ledger
     verdict reproducible: taint is derived by matching a sink argument against
     what an untrusted read actually returned.
+
+    `injected` is the attack payload as it sits in the environment. Every
+    untrusted read registers it alongside its own result, because that is where
+    it physically is — inside the data the read returns. Omitting it is not a
+    smaller experiment, it is a different one: with no attack text in any read,
+    the attacker's destination is untainted and every suite reports ASR 100%.
 
     A denied call still advances the sequence. The reference counts denials per
     pass, so stopping at the first one would under-report every multi-sink task;
@@ -132,6 +139,8 @@ def gate_sequence(
                 # what this read returned is now attacker-reachable content; a
                 # later sink argument matching it is untrusted-derived
                 governor.register_output(decision, call.get("result"))
+                for payload in injected or ():
+                    governor.register_output(decision, payload)
             verdicts.append(CallVerdict(
                 index=index, tool=tool, verdict="ALLOW", gate=None,
                 reason="axor-core governor: allowed",

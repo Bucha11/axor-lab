@@ -210,7 +210,37 @@ def governor_config(
     predicates = _value_predicates(canon["value_policies"])  # type: ignore[arg-type]
     if predicates:
         config["value_policies"] = predicates
+    overrides = _consequence_overrides(manifests)
+    if overrides:
+        config["consequence_overrides"] = overrides
     return config
+
+
+def _consequence_overrides(manifests: dict[str, dict[str, object]]) -> dict[str, object]:
+    """Tools whose action class the operator RAISED, for the consequence gate.
+
+    A manifest can declare `delete_file` catastrophic, but the class never
+    reached the governor: `governor_config` emitted sinks, sources and driving
+    args and nothing else, so gate 2 had no overrides to consult and every
+    consequence declaration was inert. The taint floor still fired, which is why
+    this stayed invisible — the suites where it matters (a benign
+    delete-after-acting task) simply never showed a denial.
+
+    This is the operator's consequence axis, not the injection defense; the
+    reference reports the two separately for that reason.
+    """
+    if not HAS_AXOR_CORE:
+        return {}
+    from axor_core.contracts.canonical import ConsequenceClass
+
+    overrides: dict[str, object] = {}
+    for tool_id, manifest in manifests.items():
+        effect: dict[str, object] = manifest.get("effect") or {}  # type: ignore[assignment]
+        declared = str(effect.get("default_class", ""))
+        member = getattr(ConsequenceClass, declared, None)
+        if member is not None:
+            overrides[tool_id] = member
+    return overrides
 
 
 def _value_predicates(canonical: dict[str, object]) -> dict[str, list[object]]:

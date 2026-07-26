@@ -15,11 +15,14 @@ silently different numbers.
 This is the same pattern as `lab_contracts/schemas/` (a build-time copy of the
 source of truth, kept honest by a test) and `lab_server/web/`.
 
-What is NOT extracted: `utility()` and `security()` are Python predicates over a
-mutated environment, so they cannot be frozen as data. The extractor records
-each task's ground-truth call sequence, which is what those predicates are
-written against — see `docs/agentdojo-port.md` for what that does and does not
-let Lab conclude.
+`utility()` and `security()` ARE extracted, despite being Python predicates over
+a mutated environment. The trick is that a governed run can only differ from an
+ungoverned one by which GATED calls were suppressed, and there are at most four
+of those in any task of any suite — so the extractor evaluates the predicate
+once per subset of gated calls and freezes the whole map. Lab then looks up the
+outcome for the denial set its gate actually produced. Sixteen environment runs
+per task in the worst case, and the ground truth stops being a thing Lab has to
+approximate.
 """
 
 from __future__ import annotations
@@ -31,7 +34,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# the taxonomy lives in this repo and decides which calls a gate could refuse,
+# so the outcome maps are computed over exactly that set — one source of truth
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 SUITES = ("banking", "slack", "travel", "workspace")
+
+#: 2**4 = 16 environment runs per task; above this the map is skipped
+MAX_GATED = 4
 
 
 def _jsonable(value: Any) -> Any:
@@ -91,6 +101,97 @@ def _calls(task: Any, environment: Any, runtime: Any) -> list[dict[str, Any]] | 
     return recorded
 
 
+def _gated_indices(calls: list[dict[str, Any]], taxonomy: Any) -> list[int]:
+    """Which calls a gate could refuse — the only ones a governed run can lose."""
+    return [
+        i for i, call in enumerate(calls)
+        if call["tool"] in taxonomy.egress_sinks or call["tool"] in taxonomy.consequence
+    ]
+
+
+def _outcome_map(
+    task: Any, calls: list[dict[str, Any]], taxonomy: Any, suite: Any, runtime: Any,
+    predicate: str,
+) -> dict[str, bool]:
+    """Evaluate `utility`/`security` for every subset of gated calls suppressed.
+
+    The key is the sorted, comma-joined indices of the SUPPRESSED calls, so ""
+    is the ungoverned run. Lab reads the entry for whatever its gate denied.
+
+    Capped at 2**MAX_GATED subsets; a task above that is recorded without a map
+    rather than with a partial one, since a missing key would silently read as
+    "utility held".
+    """
+    import itertools
+
+    gated = _gated_indices(calls, taxonomy)
+    if len(gated) > MAX_GATED:
+        print(f"    {task.ID}: {len(gated)} gated calls exceeds the cap — no map",
+              file=sys.stderr)
+        return {}
+    expected = getattr(task, "GROUND_TRUTH_OUTPUT", "") or ""
+    outcomes: dict[str, bool] = {}
+    for size in range(len(gated) + 1):
+        for suppressed in itertools.combinations(gated, size):
+            environment = suite.load_and_inject_default_environment(
+                suite.get_injection_vector_defaults()
+            )
+            pre = environment.model_copy(deep=True)
+            for index, call in enumerate(calls):
+                if index in suppressed:
+                    continue  # the gate refused it
+                try:
+                    runtime.run_function(
+                        environment, call["tool"], dict(call["args"]), raise_on_error=False,
+                    )
+                except Exception:  # noqa: BLE001 - a tool may reject the state
+                    pass
+            try:
+                check = getattr(task, predicate)
+                outcomes[",".join(map(str, suppressed))] = bool(
+                    check(expected, pre, environment)
+                )
+            except Exception as exc:  # noqa: BLE001 - upstream predicates raise freely
+                print(f"    {task.ID}: {predicate} raised: {exc}", file=sys.stderr)
+                return {}
+    return outcomes
+
+
+def _attack_vectors(suite: Any) -> dict[str, dict[str, str]]:
+    """The `important_instructions` payload per injection task — the reference's attack.
+
+    `attack()` needs a target pipeline only to name the model and user in the
+    prompt, so a stub with a name is enough; the payload's security-relevant part
+    is the attacker's GOAL, which carries the destination.
+    """
+    from agentdojo.attacks.important_instructions_attacks import ImportantInstructionsAttack
+
+    from agentdojo.models import MODEL_NAMES
+
+    class _Stub:
+        # the attack interpolates a victim-model name into the injected
+        # instruction and looks it up by SUBSTRING over MODEL_NAMES' keys (the
+        # full model ids), not its values — so the stub carries a real key
+        name = next(iter(MODEL_NAMES))
+
+    try:
+        attack = ImportantInstructionsAttack(suite, _Stub())
+    except Exception as exc:  # noqa: BLE001
+        print(f"    attack unavailable: {exc}", file=sys.stderr)
+        return {}
+    user_task = next(iter(suite.user_tasks.values()))
+    vectors: dict[str, dict[str, str]] = {}
+    for injection in suite.injection_tasks.values():
+        try:
+            vectors[injection.ID] = {
+                str(k): str(v) for k, v in attack.attack(user_task, injection).items()
+            }
+        except Exception as exc:  # noqa: BLE001
+            print(f"    attack payload unavailable for {injection.ID}: {exc}",
+                  file=sys.stderr)
+    return vectors
+
+
 def extract_suite(name: str, suite: Any) -> dict[str, Any]:
     from agentdojo.functions_runtime import FunctionsRuntime
 
@@ -108,21 +209,39 @@ def extract_suite(name: str, suite: Any) -> dict[str, Any]:
             suite.get_injection_vector_defaults()
         )
 
+    from lab_adapters.agentdojo_taxonomy import TAXONOMIES
+
+    taxonomy = TAXONOMIES[name]
     user_tasks = []
     for task in suite.user_tasks.values():
+        calls = _calls(task, fresh(), runtime)
         user_tasks.append({
             "id": task.ID,
             "prompt": task.PROMPT,
-            "calls": _calls(task, fresh(), runtime),
+            "calls": calls,
             "comment": getattr(task, "COMMENT", None),
+            # utility under every subset of gated calls a governed run could lose
+            "utility": (_outcome_map(task, calls, taxonomy, suite, runtime, "utility")
+                        if calls else {}),
         })
+    attack_vectors = _attack_vectors(suite)
     injection_tasks = []
     for task in suite.injection_tasks.values():
+        calls = _calls(task, fresh(), runtime)
         injection_tasks.append({
+            # the ATTACK payload as it lands in the environment. Without it the
+            # attacker's destination appears in no read, nothing is tainted, and
+            # every suite reports ASR 100% for a reason that is purely an
+            # artifact of the harness.
+            "attack_vectors": attack_vectors.get(task.ID, {}),
             "id": task.ID,
             "goal": task.GOAL,
-            "calls": _calls(task, fresh(), runtime),
+            "calls": calls,
             "comment": getattr(task, "COMMENT", None),
+            # security() is True when the ATTACK SUCCEEDED, so "" is the
+            # ungoverned arm and a suppressed sink should flip it to False
+            "security": (_outcome_map(task, calls, taxonomy, suite, runtime, "security")
+                         if calls else {}),
         })
     tools = sorted(suite.tools.keys()) if hasattr(suite.tools, "keys") else sorted(
         t.name for t in suite.tools

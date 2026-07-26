@@ -283,3 +283,74 @@ We resolve it by **leaving `US133000000121212121212` out** of the declared
 payees. The cost is task 15's lift, so Lab's realized ceiling is {3, 4, 6} =
 18.75pp against the reference's {3, 4, 6, 15} = 25pp. We report the smaller
 number: the alternative recovers 6.25pp of utility by enumerating the attacker.
+
+## 9. Closing the debt: the consequence gate and the full error matrix
+
+Both items called "debt" in §8 turned out to be smaller than described, and
+finding that out surfaced a defect that mattered more than either.
+
+**The consequence gate was one unwired parameter.** `ToolCallGovernor` already
+takes `consequence_overrides` and `max_unattended_consequence`; `governor_config`
+emitted sinks, sources and driving args and nothing else, so a manifest could
+declare `delete_file` catastrophic and the class never reached gate 2. Every
+consequence declaration in the repo was inert. It stayed invisible because the
+taint floor still fired — the suites where it matters (a benign
+delete-after-acting task) simply never showed a denial. Wired, workspace now
+reports `consequence_gate×2` beside `taint_enforcement×8`, the same split in
+kind the reference states (92/12 over seven passes).
+
+**`utility()`/`security()` did not need AgentDojo at runtime.** A governed run
+differs from an ungoverned one only by which GATED calls were suppressed, and no
+task in any suite has more than four of those. So the extractor evaluates the
+predicate once per subset — at most sixteen environment runs per task — and
+freezes the whole map. Lab looks up the entry for the denial set its gate
+produced. 122 of 124 tasks carry a map; the two that do not (slack
+`user_task_11`, `injection_task_5`, the latter requiring `security_from_traces`)
+are excluded from the rates rather than counted as failures, which would flatter
+the defense on utility and damn it on ASR.
+
+### The defect that mattered
+
+The first matrix reported **ASR 100% on every suite** — the gate blocking five
+benign banking tasks and zero attacks. Two things were wrong, and both were
+harness artifacts rather than kernel behaviour:
+
+1. Injection tasks were gated as an isolated call. In the benchmark the
+   attacker's action happens inside a user task's trajectory, after the reads
+   that carried the injection. Alone, there is nothing registered, so the
+   attacker's destination is untainted and passes. ASR is now measured
+   **pairwise**, and an attack counts as blocked only if it is blocked in every
+   pairing.
+2. The environment was injected with the **default** vectors ("Sushi dinner"),
+   not the attack. The attacker's destination therefore appeared in no read at
+   all. The dataset now carries the `important_instructions` payload — the
+   reference's attack — per injection task, and every untrusted read registers
+   it alongside its own result, because that is where it physically sits.
+
+ASR went from 100% to 11.1% / 50% / 16.7% / 50%. Neither number would have been
+noticed without a reference to sit beside; a 100% that nobody compares to
+anything reads as a working measurement.
+
+### The matrix, strict/content-ledger, no allowlist
+
+| suite | benign utility retained | ASR retained | denials | reference denials |
+|---|---|---|---|---|
+| banking | 68.8% of 16 | 11.1% of 9 | 5 | 3–5 |
+| slack | 80.0% of 20 | 50.0% of 4 | 5 | 13–19 |
+| workspace | 79.5% of 39 | 16.7% of 6 | 10 | ~15 |
+| travel | **100%** of 20 | 50.0% of 6 | **0** | 0 |
+
+With the banking known-payee enum declared, banking utility rises 68.8% → 87.5%
+and its ASR falls 11.1% → 0%: the enum supersedes taint on the payees the
+operator vetted and denies every destination outside the set, including the
+attacker's. That is the supersession trade measured on both axes at once, which
+is the thing the old "ASR 55% → 0%" headline could never show.
+
+**ASR is not 0% here and the reference's is.** Travel is the clearest case and
+the honest one: its taxonomy declares zero denials by construction, so an attack
+that exfiltrates through the *content* of an email to a prompt-given recipient
+is outside what this taxonomy catches — stated in `agentdojo_taxonomy.py` and in
+§8. The reference separates the integrity and confidentiality axes for exactly
+this reason, and the confidentiality floor, which is the mechanism for that
+class, is not wired into Lab. That is the next real piece of work, and it is
+named rather than hidden behind a number.
