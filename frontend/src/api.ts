@@ -616,6 +616,12 @@ export interface BenchmarkEntry {
   description: string;
   suites: BenchSuite[];
 }
+export interface SweepReport {
+  suite: string;
+  baseline: { utility: BenchRates; asr: BenchRates; denials: number };
+  rows: SweepRow[];
+  combined: { utility: BenchRates; asr: BenchRates; denials: number };
+}
 export interface SweepRow {
   source: string;
   utility: BenchRates;
@@ -642,12 +648,7 @@ export const api = {
     ),
   benchSweep: (suite: string, allowlist = false, benchmark?: string) =>
     jf("/benchmarks/sweep", post({ suite, allowlist, benchmark })).then((r) =>
-      j<{
-        suite: string;
-        baseline: { utility: BenchRates; asr: BenchRates; denials: number };
-        rows: SweepRow[];
-        combined: { utility: BenchRates; asr: BenchRates; denials: number };
-      }>(r),
+      j<SweepReport>(r),
     ),
 
   // ── publications ──────────────────────────────────────────────────────────

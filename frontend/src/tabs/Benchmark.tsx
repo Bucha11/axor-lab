@@ -18,7 +18,7 @@ import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Copy, Play, ShieldCheck } from "lucide-react";
 import { C, MONO, cta } from "../theme";
-import { api, type BenchRates, type BenchRow, type SweepRow } from "../api";
+import { api, type BenchRates, type BenchRow, type SweepReport } from "../api";
 
 const pct = (r: BenchRates) =>
   r.base ? `${((100 * r.governed) / r.base).toFixed(1)}%` : "n/a";
@@ -41,24 +41,6 @@ function Field({ step, label, hint, children }: {
   );
 }
 
-function Chip({ on, onClick, children, title }: {
-  on: boolean; onClick: () => void; children: React.ReactNode; title?: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      style={{
-        fontFamily: MONO, fontSize: 10, padding: "3px 9px", borderRadius: 999,
-        cursor: "pointer", border: `1px solid ${on ? C.violet : C.line}`,
-        background: on ? C.violet : "transparent", color: on ? "#fff" : C.mut,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
 export default function Benchmark() {
   const index = useQuery({ queryKey: ["bench-index"], queryFn: api.benchIndex });
   const [benchmark, setBenchmark] = useState<string>("");
@@ -69,8 +51,23 @@ export default function Benchmark() {
   const [suites, setSuites] = useState<string[] | null>(null); // null = all
   const [allowlist, setAllowlist] = useState(false);
   const [secrets, setSecrets] = useState<Record<string, string[]>>({});
-  const [sweepSuite, setSweepSuite] = useState("");
+  // the per-suite cost table. It is the SAME data the standalone sweep used to
+  // show in its own section below — merged into the picker, because a chooser
+  // that hides the cost of each option asks you to choose blind and then learn
+  // what you should have chosen.
+  const [sweeps, setSweeps] = useState<Record<string, SweepReport>>({});
+  const [measuring, setMeasuring] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  const measure = async (suite: string) => {
+    setMeasuring(suite);
+    try {
+      const report = await api.benchSweep(suite, allowlist, entry?.benchmark);
+      setSweeps((prev) => ({ ...prev, [suite]: report }));
+    } finally {
+      setMeasuring(null);
+    }
+  };
 
   const chosenSuites = suites ?? (entry?.suites ?? []).map((s) => s.suite);
   const spec = {
@@ -81,10 +78,6 @@ export default function Benchmark() {
   };
 
   const run = useMutation({ mutationFn: () => api.benchRun(spec) });
-  const sweep = useMutation({
-    mutationFn: () =>
-      api.benchSweep(sweepSuite || chosenSuites[0], allowlist, entry?.benchmark),
-  });
 
   const toggleSuite = (suite: string) =>
     setSuites(() => {
@@ -130,14 +123,22 @@ export default function Benchmark() {
             : "loading the registered benchmarks…"
         }
       >
-        <div className="wrapline" style={{ gap: 6 }}>
-          {index.data?.benchmarks.map((b) => (
-            <Chip key={b.benchmark} on={b.benchmark === entry?.benchmark}
-                  onClick={() => setBenchmark(b.benchmark)} title={b.description}>
-              {b.title}
-            </Chip>
-          ))}
-        </div>
+        {(index.data?.benchmarks.length ?? 0) > 1 ? (
+          <select
+            value={entry?.benchmark ?? ""}
+            onChange={(e) => setBenchmark(e.target.value)}
+            style={{ fontFamily: MONO, fontSize: 11, padding: "5px 8px", background: C.bg,
+                     color: C.text, border: `1px solid ${C.line}`, borderRadius: 6 }}
+          >
+            {index.data?.benchmarks.map((b) => (
+              <option key={b.benchmark} value={b.benchmark}>{b.title}</option>
+            ))}
+          </select>
+        ) : (
+          <div style={{ fontFamily: MONO, fontSize: 11, color: C.mut }}>
+            only one benchmark is registered, so there is nothing to choose yet
+          </div>
+        )}
       </Field>
 
       <Field
@@ -148,14 +149,36 @@ export default function Benchmark() {
               from the prompt, not that the gate is idle. Narrowing the selection narrows the
               claim: an experiment over three suites must not be reported as four."
       >
-        <div className="wrapline" style={{ gap: 6 }}>
-          {(entry?.suites ?? []).map((s) => (
-            <Chip key={s.suite} on={chosenSuites.includes(s.suite)}
-                  onClick={() => toggleSuite(s.suite)}
-                  title={`${s.note} · ${s.user_tasks} benign / ${s.injection_tasks} attack · reference denials ${s.reference_denials}`}>
-              {s.suite} · {s.user_tasks}/{s.injection_tasks}
-            </Chip>
-          ))}
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11 }}>
+            <thead>
+              <tr style={{ color: C.mut, textAlign: "left" }}>
+                <th style={{ padding: "4px 8px", width: 28 }} />
+                <th style={{ padding: "4px 8px" }}>suite</th>
+                <th style={{ padding: "4px 8px" }} title="benign tasks the gate could break">benign</th>
+                <th style={{ padding: "4px 8px" }} title="injection tasks the gate could block">attacks</th>
+                <th style={{ padding: "4px 8px" }}>data flow</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(entry?.suites ?? []).map((s) => {
+                const on = chosenSuites.includes(s.suite);
+                return (
+                  <tr key={s.suite} onClick={() => toggleSuite(s.suite)}
+                      style={{ borderTop: `1px solid ${C.line}`, cursor: "pointer",
+                               opacity: on ? 1 : 0.45 }}>
+                    <td style={{ padding: "6px 8px" }}>
+                      <input type="checkbox" checked={on} readOnly tabIndex={-1} />
+                    </td>
+                    <td style={{ padding: "6px 8px", color: C.text }}>{s.suite}</td>
+                    <td style={{ padding: "6px 8px", color: C.mut }}>{s.user_tasks}</td>
+                    <td style={{ padding: "6px 8px", color: C.mut }}>{s.injection_tasks}</td>
+                    <td style={{ padding: "6px 8px", color: C.mut }}>{s.note}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </Field>
 
@@ -185,27 +208,95 @@ export default function Benchmark() {
               a secret read in a law firm and routine in a public wiki. Declaring one arms a floor
               that is content-blind and sticky: after that read, every egress in the session is
               refused whatever the outgoing value looks like. That is what makes it
-              paraphrase-proof, and why it can be expensive. Sweep first."
+              paraphrase-proof, and why it can be expensive. Measure the cost first — the column
+              is empty until you do, because guessing which sources are free is exactly the thing
+              nobody can do from first principles."
       >
         {(entry?.suites ?? [])
           .filter((s) => chosenSuites.includes(s.suite))
-          .map((suite) => (
-            <div key={suite.suite} style={{ marginBottom: 10 }}>
-              <div style={{ fontFamily: MONO, fontSize: 11, color: C.text, marginBottom: 4 }}>
-                {suite.suite}
-                <span style={{ color: C.mut }}> · {suite.secret_candidates.length} candidates</span>
+          .map((suite) => {
+            const costs = sweeps[suite.suite];
+            const rows = suite.secret_candidates.map((tool) => ({
+              tool, row: costs?.rows.find((r) => r.source === tool),
+            }));
+            // cheapest first once measured, so the free ones surface instead of
+            // hiding in an alphabetical wall
+            if (costs) rows.sort((a, b) => (a.row?.cost_pp ?? 0) - (b.row?.cost_pp ?? 0));
+            const busy = measuring === suite.suite;
+            return (
+              <div key={suite.suite} style={{ marginBottom: 14 }}>
+                <div className="wrapline" style={{ gap: 8, justifyContent: "space-between", marginBottom: 4 }}>
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.text }}>
+                    {suite.suite}
+                    <span style={{ color: C.mut }}>
+                      {" "}· {suite.secret_candidates.length} candidate reads
+                      {costs ? "" : " · cost unmeasured"}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => measure(suite.suite)}
+                    disabled={busy}
+                    title="declares each source ALONE and measures what it costs — the rows compare to each other but do not add up"
+                    style={{ fontFamily: MONO, fontSize: 10, padding: "3px 9px", borderRadius: 5,
+                             cursor: busy ? "default" : "pointer", background: "transparent",
+                             color: C.mut, border: `1px solid ${C.line}` }}
+                  >
+                    <ShieldCheck size={11} style={{ verticalAlign: -1 }} />{" "}
+                    {busy ? "measuring…" : costs ? "re-measure" : "measure cost"}
+                  </button>
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11 }}>
+                    <thead>
+                      <tr style={{ color: C.mut, textAlign: "left" }}>
+                        <th style={{ padding: "4px 8px", width: 28 }} />
+                        <th style={{ padding: "4px 8px" }}>candidate read</th>
+                        <th style={{ padding: "4px 8px" }} title="utility lost when this source ALONE is declared, against the integrity-only baseline">cost</th>
+                        <th style={{ padding: "4px 8px" }} title="attacks retained with this source declared — the floor rarely moves this, which is the point of showing it">ASR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map(({ tool, row }) => {
+                        const on = (secrets[suite.suite] ?? []).includes(tool);
+                        const free = row && row.cost_pp <= 0;
+                        return (
+                          <tr key={tool} onClick={() => toggleSecret(suite.suite, tool)}
+                              style={{ borderTop: `1px solid ${C.line}`, cursor: "pointer" }}>
+                            <td style={{ padding: "5px 8px" }}>
+                              <input type="checkbox" checked={on} readOnly tabIndex={-1} />
+                            </td>
+                            <td style={{ padding: "5px 8px", color: on ? C.text : C.mut }}>{tool}</td>
+                            <td style={{ padding: "5px 8px", fontWeight: 600,
+                                         color: !row ? C.dim : free ? C.green : C.red }}>
+                              {!row ? "—" : free ? "free" : `\u2212${row.cost_pp.toFixed(1)}pp`}
+                            </td>
+                            <td style={{ padding: "5px 8px", color: C.mut }}>
+                              {row ? pct(row.asr) : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {costs && (
+                        <tr style={{ borderTop: `1px solid ${C.line}`, background: "rgba(255,255,255,.02)" }}>
+                          <td />
+                          <td style={{ padding: "5px 8px", color: C.mut }}
+                              title="measured, not summed — sources read by the same tasks overlap">
+                            all together
+                          </td>
+                          <td style={{ padding: "5px 8px", color: C.mut }}>
+                            {pct(costs.combined.utility)} utility
+                          </td>
+                          <td style={{ padding: "5px 8px", color: C.mut }}>
+                            {pct(costs.combined.asr)}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-              <div className="wrapline" style={{ gap: 6 }}>
-                {suite.secret_candidates.map((tool) => (
-                  <Chip key={tool} on={(secrets[suite.suite] ?? []).includes(tool)}
-                        onClick={() => toggleSecret(suite.suite, tool)}
-                        title="declaring this arms the confidentiality floor after it is read">
-                    {tool}
-                  </Chip>
-                ))}
-              </div>
-            </div>
-          ))}
+            );
+          })}
       </Field>
 
       <div className="wrapline" style={{ gap: 8, marginBottom: 6 }}>
@@ -270,71 +361,6 @@ export default function Benchmark() {
       {run.isError && (
         <div className="mt-3 p-3" style={{ background: C.panel, border: `1px solid ${C.red}`, borderRadius: 8, fontFamily: MONO, fontSize: 11, color: C.red }}>
           {String(run.error)}
-        </div>
-      )}
-
-      <h2 style={{ fontSize: 14, fontWeight: 600, margin: "28px 0 6px" }}>
-        What would each secret cost me?
-      </h2>
-      <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.65, marginBottom: 12 }}>
-        Each row is that source declared <b>alone</b>, so the rows compare to each other. They do
-        not add up — sources read by the same tasks overlap, so the combined figure is measured
-        separately. A source marked <b style={{ color: C.green }}>free</b> is one no benign task
-        reads before an egress: declaring it is pure upside, and you cannot tell which those are
-        without running this.
-      </div>
-      <div className="wrapline" style={{ gap: 8, marginBottom: 12 }}>
-        <select
-          value={sweepSuite || chosenSuites[0] || ""}
-          onChange={(e) => setSweepSuite(e.target.value)}
-          title="the sweep is per-suite: a source's cost depends on which tasks read it"
-          style={{ fontFamily: MONO, fontSize: 11, padding: "5px 8px", background: C.panel, color: C.text, border: `1px solid ${C.line}`, borderRadius: 6 }}
-        >
-          {chosenSuites.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-        <button style={cta(!sweep.isPending)} onClick={() => sweep.mutate()} disabled={sweep.isPending}>
-          <ShieldCheck size={14} /> {sweep.isPending ? "sweeping…" : "Sweep"}
-        </button>
-      </div>
-
-      {sweep.data && (
-        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11 }}>
-            <thead>
-              <tr style={{ color: C.mut, textAlign: "left" }}>
-                <th style={{ padding: "10px 12px" }} title="the tool declared a secret read, on its own">declared secret source</th>
-                <th style={{ padding: "10px 12px" }} title="benign tasks retained with only this source declared">utility</th>
-                <th style={{ padding: "10px 12px" }} title="attacks retained — the floor rarely moves this, which is the point of showing it">ASR</th>
-                <th style={{ padding: "10px 12px" }}>denials</th>
-                <th style={{ padding: "10px 12px" }} title="utility lost against the integrity-only baseline">cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sweep.data.rows.map((row: SweepRow) => {
-                const free = row.cost_pp <= 0;
-                return (
-                  <tr key={row.source} style={{ borderTop: `1px solid ${C.line}` }}>
-                    <td style={{ padding: "9px 12px", color: C.text }}>{row.source}</td>
-                    <td style={{ padding: "9px 12px", color: C.text }}>{pct(row.utility)}</td>
-                    <td style={{ padding: "9px 12px", color: C.mut }}>{pct(row.asr)}</td>
-                    <td style={{ padding: "9px 12px", color: C.mut }}>{row.denials}</td>
-                    <td style={{ padding: "9px 12px", fontWeight: 600, color: free ? C.green : C.red }}>
-                      {free ? "free" : `−${row.cost_pp.toFixed(1)}pp`}
-                    </td>
-                  </tr>
-                );
-              })}
-              <tr style={{ borderTop: `1px solid ${C.line}`, background: "rgba(255,255,255,.02)" }}>
-                <td style={{ padding: "9px 12px", color: C.mut }} title="measured, not summed — the per-source costs overlap">
-                  all of the above together
-                </td>
-                <td style={{ padding: "9px 12px", color: C.text }}>{pct(sweep.data.combined.utility)}</td>
-                <td style={{ padding: "9px 12px", color: C.mut }}>{pct(sweep.data.combined.asr)}</td>
-                <td style={{ padding: "9px 12px", color: C.mut }}>{sweep.data.combined.denials}</td>
-                <td style={{ padding: "9px 12px", color: C.mut }}>—</td>
-              </tr>
-            </tbody>
-          </table>
         </div>
       )}
 
