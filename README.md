@@ -31,8 +31,16 @@ Nothing to configure and nothing to pay for at the default: the agent is a
 deterministic stand-in, the kernel is the stdlib reference kernel, and the tools
 are simulated, so the run happens in-process and offline. It is byte-identical
 to `axor-lab run` over the same file — the shortcut is not a lesser path.
-Bringing your own agent, a live model (BYOK), or the real `axor-core` kernel are
-steps up from there, not prerequisites.
+Bringing your own agent or the real `axor-core` kernel are steps up from there,
+not prerequisites.
+
+There are three agent sources, and a live model is deliberately not one of them.
+A model is a *component* of an agent; what gets tested is the harness — your
+loop, your prompts, your tools — and when you bring that, the model inside it is
+already yours. `#/models` still runs a model against the bundled scenarios
+(BYOK, priced before you hand over a key), and says on the screen that the
+harness is Lab's, so it measures a model in a toy agent rather than anyone's
+product.
 
 Working from a checkout instead? Build the UI once, then serve:
 

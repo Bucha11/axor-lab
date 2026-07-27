@@ -1,14 +1,22 @@
-// Run the same conditions against several models — the comparison the scripted
-// agent cannot make and the connected-runtime path does not answer.
+// A model check on the BUNDLED harness. Not a test of your agent.
 //
-// Worth being blunt about why this exists. The scripted agent's attack rate is a
-// PARAMETER (`scripted@0.6` means it follows the injection ~60% of the time), so
-// an ungoverned ASR from it is a dial, not a measurement. It proves the kernel
-// denies a tainted sink — real, and replayable — but nothing about any model.
-// Only a live model turns the ungoverned arm into a measurement, and only a
-// live model can answer "which of these models gets exfiltrated".
+// Be blunt about what this is, because the name it used to carry — "compare live
+// models" — claimed more. The loop here is Lab's own two-step read → sink
+// harness with Lab's own scenarios and Lab's own prompts. Swapping the model
+// inside it tells you how that model behaves in THIS harness. It is not a
+// measurement of anyone's product, and nobody evaluating an agent should mistake
+// it for one: what people test is the harness — their loop, their prompts, their
+// tools — and that path is "your agent, connected".
 //
-// Three things this screen refuses to blur:
+// It also no longer earns its old justification. That argument was: the scripted
+// agent's attack rate is a PARAMETER (`scripted@0.6` follows the injection ~60%
+// of the time), so an ungoverned ASR from it is a dial, and only a live model
+// turns the ungoverned arm into a measurement. True — but the headline that
+// needed it is gone, and gate behaviour is now measured by ground-truth replay
+// against a published benchmark, with no model in the loop at all.
+//
+// What remains true and useful: it is the one place a real model meets a
+// prompt-injected read here, and the money guards are honest —
 //   * you see the price before you hand over a key;
 //   * the approval binds to the run it priced — a token from a 6-trial estimate
 //     will not execute 120 trials;
@@ -109,11 +117,12 @@ export default function LiveModels() {
 
   return (
     <div style={{ maxWidth: 660, margin: "0 auto" }}>
-      <h1 style={{ fontSize: 21, fontWeight: 650, margin: "0 0 4px" }}>Compare models.</h1>
+      <h1 style={{ fontSize: 21, fontWeight: 650, margin: "0 0 4px" }}>A model in the bundled harness.</h1>
       <div style={{ fontFamily: MONO, fontSize: 11, color: C.mut, marginBottom: 16, lineHeight: 1.7 }}>
-        Same scenarios, same governance, several models — which one actually follows the injection.
-        This is the only run type where the ungoverned arm is a <b style={{ color: C.text }}>measurement</b>:
-        the scripted agent's attack rate is a parameter you set, so its ASR is a dial, not a finding.
+        Which model follows the injection — inside <b style={{ color: C.text }}>this</b> harness.
+        The loop, the prompts and the tools are Lab's, so this measures a model in a toy agent, not
+        anyone's product. To test <b style={{ color: C.text }}>your</b> agent, connect it: the model
+        inside it is already yours.
       </div>
 
       <div className="p-4" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10 }}>

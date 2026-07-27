@@ -28,13 +28,15 @@ export const AGENT_SOURCES: AgentSource[] = [
     runnable: true,
     cost: "your infra",
   },
-  {
-    id: "live",
-    label: "A live model",
-    hint: "your key, your spend",
-    route: "models",
-    cost: "costs money",
-  },
+  // "A live model" used to sit here, as a peer of the three real sources. It is
+  // not one. A model is a COMPONENT of an agent — the harness, the prompts and
+  // the tool set are the thing under test, and in that path they were ours, not
+  // yours. Offering it as a fourth agent told a newcomer that testing somebody
+  // else's model and testing their own product were the same kind of act.
+  //
+  // When you bring your own agent, the model inside it is already yours; there
+  // is nothing to choose here. The cross-model screen still exists at #/models
+  // and says plainly what it measures.
   {
     id: "byo",
     label: "Your code or traces",
