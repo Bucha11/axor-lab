@@ -9,7 +9,6 @@ import { navigate, useRoute } from "./router";
 import { api } from "./api";
 import Home from "./tabs/Home";
 import Governance from "./tabs/Governance";
-import LiveModels from "./tabs/LiveModels";
 import AgentIngest from "./tabs/AgentIngest";
 import RunProgress from "./tabs/RunProgress";
 import Results from "./tabs/Results";
@@ -181,7 +180,6 @@ export default function App() {
       {key === "import" && <ImportIncident />}
       {key === "incidents" && <Incidents />}
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
-      {key === "models" && <LiveModels />}
       {key === "verify" && <Verify />}
       {key === "workspace" && <Workspace />}
     </div>

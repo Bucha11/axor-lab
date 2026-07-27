@@ -358,37 +358,6 @@ export interface ReplayUploadReport {
   claim: string;
 }
 
-export interface LiveBudget {
-  max_usd?: number;
-  max_input_tokens?: number;
-  max_output_tokens?: number;
-}
-
-export interface LiveUsage {
-  input_tokens: number;
-  output_tokens: number;
-  usd: number;
-  stopped_reason?: string;
-}
-
-export interface LivePlan {
-  confirm_token: string;
-  model: string;
-  trials: number;
-  estimate: { trials: number; input_tokens: number; output_tokens: number; usd: number; line: string };
-  ceilings: {
-    max_usd: number | null;
-    max_input_tokens: number | null;
-    max_output_tokens: number | null;
-    // token ceilings are hard; max_usd comes from an illustrative price table,
-    // not your provider's billing, and the UI has to say so
-    usd_is_best_effort: boolean;
-    note: string;
-  };
-  comparison_design: string;
-  design_note: string;
-}
-
 export interface RunTraceEntry {
   trace_id: string;
   scenario_id: string;
@@ -791,20 +760,6 @@ export const api = {
   runComposed: (spec: ComposeSpec) =>
     jf("/runs/local", post({ compose: spec })).then((r) => j<LocalRunResult>(r)),
   catalog: () => jf("/catalog").then((r) => j<Catalog>(r)),
-  // A paid run, in two steps. Pricing needs no key — you should see what a run
-  // costs before handing anything over — and the token it returns authorises
-  // exactly that experiment, model and budget, nothing larger.
-  planLive: (spec: ComposeSpec, model: string, budget: LiveBudget) =>
-    jf("/runs/live/plan", post({ compose: spec, agent: { provider: "anthropic", model }, budget }))
-      .then((r) => j<LivePlan>(r)),
-  runLive: (
-    spec: ComposeSpec, model: string, budget: LiveBudget,
-    confirmToken: string, apiKey: string,
-  ) =>
-    jf("/runs/live", post({
-      compose: spec, agent: { provider: "anthropic", model }, budget,
-      confirm_token: confirmToken, api_key: apiKey,
-    })).then((r) => j<LocalRunResult & { usage: LiveUsage; model: string }>(r)),
   // Replay someone's bundle server-side. `outcome` separates the two answers a
   // bare bit_identical conflates: verdicts that differ, versus a bundle pinned to
   // a kernel this server does not have and therefore never replayed at all.

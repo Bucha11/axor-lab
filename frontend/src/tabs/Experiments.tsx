@@ -153,13 +153,12 @@ export default function Experiments({ catalog }: { catalog: Catalog }) {
       )}
 
       {/* the quieter doors. An entry point linked from nowhere is one that does
-          not exist, and these four are not on any other screen. */}
+          not exist, and these three are not on any other screen. */}
       <div className="wrapline" style={{ gap: 14, marginTop: 26, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
         {[
           { to: "builder", label: "as a file · CLI" },
           { to: "scenario-author", label: "write a scenario" },
           { to: "import", label: "import an incident" },
-          { to: "models", label: "a model in the bundled harness" },
         ].map((l) => (
           <button
             key={l.to}

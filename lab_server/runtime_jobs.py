@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import compose, cp_sign, evidence_api, live_run, local_run, replay_api
+from . import compose, cp_sign, evidence_api, local_run, replay_api
 from .errors import PublishRejected
 
 _MAX_BODY = 8 * 1024 * 1024
@@ -897,28 +897,6 @@ def make_runtime_server(
                         require_confirmation=bool(body.get("require_confirmation", False)),
                         estimate=estimate if isinstance(estimate, dict) else None,
                     ))
-                    return
-                if self.path in ("/runs/live/plan", "/runs/live"):
-                    # A paid run, in two steps. /runs/local refuses to spend at
-                    # all and keeps refusing; this surface spends only what an
-                    # estimate was explicitly confirmed for, under a required
-                    # budget, with a key that is never stored.
-                    self._require_control()
-                    body = self._read_json()
-                    try:
-                        if self.path.endswith("/plan"):
-                            self._send(200, live_run.plan(body))
-                            return
-                        outcome = live_run.execute(body)
-                    except live_run.LiveRunRefused as exc:
-                        raise RuntimeJobsError(exc.status, exc.message) from exc
-                    except compose.ComposeRefused as exc:
-                        raise RuntimeJobsError(exc.status, exc.message) from exc
-                    landed = jobs.create_local_run(outcome)
-                    landed["usage"] = outcome["usage"]
-                    landed["model"] = outcome["model"]
-                    landed["executed"] = "live"
-                    self._send(201, landed)
                     return
                 if self.path == "/replay":
                     # Reproduce someone's governance verdicts without an agent —

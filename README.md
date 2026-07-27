@@ -37,10 +37,8 @@ not prerequisites.
 There are three agent sources, and a live model is deliberately not one of them.
 A model is a *component* of an agent; what gets tested is the harness — your
 loop, your prompts, your tools — and when you bring that, the model inside it is
-already yours. `#/models` still runs a model against the bundled scenarios
-(BYOK, priced before you hand over a key), and says on the screen that the
-harness is Lab's, so it measures a model in a toy agent rather than anyone's
-product.
+already yours. Nothing in the web asks for an API key: bring a connected runtime,
+your code, or traces you already recorded.
 
 Working from a checkout instead? Build the UI once, then serve:
 
@@ -242,26 +240,19 @@ injection about 60% of the time — so an ungoverned ASR from it is a dial, not 
 finding. What it does prove is real and replayable: the kernel denies a tainted
 egress sink. But nothing about any model.
 
-`POST /runs/live/plan` → `POST /runs/live` is the run where the ungoverned arm
-becomes a measurement, and the only way to ask which of several models actually
-gets exfiltrated. `/runs/local` still refuses to spend anything; this is a
-separate surface carrying the CLI's safeguards rather than waiving them:
+There used to be a browser BYOK surface here — `POST /runs/live/plan` →
+`POST /runs/live` — to make that arm a measurement and to ask which of several
+models gets exfiltrated. It is gone, and the reason is worth stating: it ran
+**Lab's** harness. The loop, the prompts and the tools were ours, so a real model
+inside it measured a model in a toy agent, not anyone's product — and it asked
+someone to hand over an API key and spend their own money to learn that. Nobody
+evaluates a model in isolation; they evaluate a harness, and the paths for that
+are a connected runtime, uploaded code, or recorded traces, none of which need a
+key here.
 
-- **Two steps.** Pricing needs no key — see the cost before handing anything over
-  — and returns a confirm token derived from the exact experiment, model and
-  budget. A token from a 6-trial estimate will not execute 120 trials, raise the
-  ceiling, or switch models.
-- **A budget is required.** The CLI may run unbounded because a human is watching
-  the terminal; nothing in an HTTP request plays that role.
-- **The key is yours.** Per request, used, never stored, logged or echoed.
-- **Token ceilings are hard; `max_usd` is best-effort** — it comes from an
-  illustrative price table, not your provider's billing, so it stops the run
-  *near* the figure. The UI says this next to the field, not in a footnote.
-- **No fake pairing.** A live model samples each condition independently, so the
-  result is a two-proportion comparison and never a paired McNemar p-value —
-  stated at plan time, before the money moves.
-- **A run where every trial failed is a 502, not a completed run with no
-  traces.** A rejected key used to land as an empty success.
+Live models stay in the **CLI**, where a human is at the terminal watching the
+spend, and where the cassettes get recorded that make the offline replay path
+possible in the first place.
 
 ### Signing the CP export: vault custody, not a key in a form
 
@@ -306,8 +297,9 @@ file (same `bundle_id`, trials, traces, aggregates and environment — pinned by
 rather than the weaker reconstructed kind, so it is publishable evidence.
 
 Two things it refuses, on purpose: an experiment needing a **live model** (409 — a
-browser must not be able to spend money; the cost ceiling and estimate-confirm gate
-live in the CLI) and a suite over its **trial ceiling** (413).
+browser must not be able to spend money, and there is no longer any surface here
+that can; live models live in the CLI) and a suite over its **trial ceiling**
+(413).
 
 `POST /replay` is the other half — reproducing someone else's run without an agent
 at all. It returns a named `outcome` rather than a bare boolean, because

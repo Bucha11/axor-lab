@@ -33,7 +33,15 @@ Lab gateway / MCP proxy owned by Lab · black-box endpoint eval · arbitrary clo
 
 ## The First/Then/Later sequence (within the Vision, after MVP ships)
 
-- **Then:** full boolean predicate authoring UI · richer local tool binding · BYOK inference in-app · Control Plane export · cloud runner for *trusted templates* only.
+- **Then:** full boolean predicate authoring UI · richer local tool binding · Control Plane export · cloud runner for *trusted templates* only.
+
+  *BYOK inference in-app was on this list and is now dropped, not deferred.* It
+  shipped, and it was wrong: running a live model in the browser meant running it
+  in **Lab's** harness — Lab's loop, Lab's prompts, Lab's tools — so it measured a
+  model in a toy agent, at the user's expense, on their key. What is evaluated is
+  a harness, and the paths for that (connected runtime, uploaded code, recorded
+  traces) need no key on this side. Live models stay in the CLI, where a human
+  watches the spend and where cassettes get recorded for offline replay.
 - **Later:** instrumented-endpoint contract · arbitrary cloud code (with the full sandbox) · multi-agent games · arbitrary topology · population scale.
 
 ## Why this order
