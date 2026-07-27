@@ -26,6 +26,10 @@ Control surface (Lab operator / UI):
   GET  /runs/{id}/bundle     -> { bundle, traces }  (a bundle/v1 assembled from a
                                COMPLETED run — publishable; 409 while still running)
   GET  /runs/{id}/trials/{trial_id}/trace  -> the completed trial's trace
+  POST /incidents/reconstruct  a pre-Axor recording -> a scenario DRAFT (never a
+                               verdict; see contracts/incident-import.md). The
+                               sibling POST /api/incidents replays an Axor trace
+                               exactly — these are two paths, not two modes.
   POST /wrap/scan            scan uploaded agent code for tools (axor-wrap; wrap_api.py)
   POST /wrap/manifests       human-classified tools -> tool manifests + governance YAML
 
@@ -50,7 +54,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import compose, cp_sign, evidence_api, local_run, replay_api
+from . import compose, cp_sign, evidence_api, local_run, reconstruct_api, replay_api
 from .errors import PublishRejected
 
 _MAX_BODY = 8 * 1024 * 1024
@@ -898,6 +902,20 @@ def make_runtime_server(
                         estimate=estimate if isinstance(estimate, dict) else None,
                     ))
                     return
+                if self.path == "/incidents/reconstruct":
+                    # A pre-Axor incident becomes a scenario DRAFT. The sibling
+                    # route POST /api/incidents replays an Axor trace exactly;
+                    # this one cannot and does not pretend to — it reads a
+                    # foreign recording, proposes a scenario, and writes nothing.
+                    self._require_control()
+                    try:
+                        self._send(200, reconstruct_api.handle_reconstruct(self._read_json()))
+                    except PublishRejected as exc:
+                        # 422 for "understood it, cannot draft it" — an Axor trace
+                        # that should be replayed instead, a recording with no
+                        # tool calls. The reason is the actionable part.
+                        raise RuntimeJobsError(exc.status, str(exc)) from exc
+                    return
                 if self.path == "/replay":
                     # Reproduce someone's governance verdicts without an agent —
                     # the lowest-barrier path the landing page has always
@@ -942,8 +960,14 @@ def make_runtime_server(
                     body = self._read_json()
                     document = body.get("experiment")
                     selection = body.get("compose")
+                    confirmed = body.get("reconstructed")
                     try:
-                        if isinstance(selection, dict):
+                        if isinstance(confirmed, dict):
+                            # a CONFIRMED incident reconstruction. From here it is
+                            # an ordinary run: the draft stopped being a guess the
+                            # moment a human signed off on it.
+                            document = reconstruct_api.build_confirmed(confirmed)
+                        elif isinstance(selection, dict):
                             # one round trip for the common case: compose a
                             # selection and run it
                             document = compose.compose(selection)["document"]
@@ -956,6 +980,8 @@ def make_runtime_server(
                         outcome = local_run.run_local(document)
                     except compose.ComposeRefused as exc:
                         raise RuntimeJobsError(exc.status, exc.message) from exc
+                    except PublishRejected as exc:
+                        raise RuntimeJobsError(exc.status, str(exc)) from exc
                     except local_run.LocalRunRefused as exc:
                         raise RuntimeJobsError(exc.status, exc.message) from exc
                     self._send(201, jobs.create_local_run(outcome))

@@ -113,6 +113,33 @@ def _write_atomic(path: Path, text: str, *, durable: bool = False) -> None:
             os.close(dir_fd)
 
 
+def _limitations_for(bundle: dict[str, object]) -> tuple[str, ...]:
+    """The default limitations, plus any this bundle's scenarios force.
+
+    A scenario carrying `reconstructed_from` was drafted from a recording with no
+    value provenance — a pre-Axor incident — so the run measures a MODEL of that
+    incident. The run itself is genuine and its verdicts replay exactly; what
+    does not follow is that the incident would have gone the same way. The
+    scenario says so in a machine-readable field precisely so this does not
+    depend on anyone remembering to add it by hand.
+    """
+    from lab_contracts.publication import DEFAULT_LIMITATIONS
+
+    extra: list[str] = []
+    for scenario in bundle.get("scenarios", []):  # type: ignore[union-attr]
+        marker = scenario.get("reconstructed_from") if isinstance(scenario, dict) else None
+        if not isinstance(marker, dict):
+            continue
+        extra.append(
+            f"scenario {scenario.get('name')!r} was RECONSTRUCTED from a recording with no "
+            f"value provenance ({marker.get('fidelity')}): this run measures a model of that "
+            f"incident, not the incident — how well it holds depends on how well the scenario "
+            f"captures what happened"
+        )
+        break
+    return tuple(DEFAULT_LIMITATIONS) + tuple(extra)
+
+
 @dataclass
 class StoredPublication:
     publication: dict[str, object]
@@ -715,6 +742,7 @@ class PublicationStore:
             integrity=integrity,
             claims=claims,
             license_id=license_id,
+            limitations=_limitations_for(bundle),
             visibility=visibility,
             statistics_integrity=statistics_integrity,
         )

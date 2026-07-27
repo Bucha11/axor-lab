@@ -610,6 +610,38 @@ export interface SweepRow {
   cost_pp: number;
 }
 
+// ── incident RECONSTRUCTION (the pre-Axor path) ─────────────────────────────
+//
+// The sibling of importIncident, and deliberately a different thing. An Axor
+// trace/v1 carries the value ledger and arg_bindings a verdict is computed
+// from, so it REPLAYS exactly. A LangSmith / OTel / application-log export
+// carries neither, so nothing can be replayed from it — it is read to AUTHOR a
+// scenario, which is then run under Axor for a genuine trace.
+export interface ReconstructionFinding {
+  kind: string;   // task | untrusted_source | injection | sink | linked_value
+  detail: string;
+  where: string;
+  confidence: string;
+}
+
+export interface ObservedCall {
+  index: number;
+  tool: string;
+  args: Record<string, unknown>;
+  result: unknown;
+}
+
+export interface Reconstruction {
+  fidelity: string;  // always "heuristic_attribution" — never presented as sound
+  scenario: Record<string, unknown>;
+  manifests: Record<string, unknown>[];
+  observed_calls: ObservedCall[];
+  findings: ReconstructionFinding[];
+  unresolved: string[];
+  note: string;
+}
+
+
 export const api = {
   // ── the governance benchmark ──────────────────────────────────────────────
   benchIndex: () =>
@@ -648,6 +680,21 @@ export const api = {
   // ── incidents (Control Plane → Lab) ──────────────────────────────────────
   // POST is write-token-gated (--write-token on the publications server); the
   // token comes from the store like the runtime-jobs control token does.
+  // Draft a scenario from a NON-Axor recording. Nothing is stored, nothing is
+  // executed and no verdict is produced — the run happens later, from the
+  // CONFIRMED draft, through the ordinary local-run path below.
+  reconstructIncident: (trace: unknown, name?: string) =>
+    jf("/incidents/reconstruct", post({ trace, name })).then((r) => j<Reconstruction>(r)),
+  runReconstructed: (
+    scenario: Record<string, unknown>,
+    manifests: Record<string, unknown>[],
+    governed: boolean,
+    repeats: number,
+  ) =>
+    jf("/runs/local", post({
+      reconstructed: { scenario, manifests, repeats, governed },
+    })).then((r) => j<LocalRunResult>(r)),
+
   importIncident: async (pkg: IncidentPackage): Promise<IncidentImportResult> => {
     const token = useApp.getState().writeToken;
     const headers: Record<string, string> = { "content-type": "application/json" };

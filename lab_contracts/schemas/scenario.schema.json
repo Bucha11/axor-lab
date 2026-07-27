@@ -143,6 +143,30 @@
     },
     "notes": {
       "type": "string"
+    },
+    "reconstructed_from": {
+      "type": "object",
+      "description": "present when this scenario was RECONSTRUCTED from a recording that carries no value provenance (a pre-Axor incident: LangSmith / OTel / application logs). It marks the scenario as a MODEL of an incident rather than the incident, and it is machine-readable on purpose: a publication built from a run of this scenario must state the limitation, and prose in `notes` cannot be enforced.",
+      "additionalProperties": false,
+      "required": [
+        "fidelity"
+      ],
+      "properties": {
+        "fidelity": {
+          "enum": [
+            "heuristic_attribution"
+          ],
+          "description": "always heuristic_attribution \u2014 the only fidelity a reconstruction can claim. explicit_flow_tracked requires a value ledger, which is exactly what the source recording lacked."
+        },
+        "source": {
+          "type": "string",
+          "description": "what the recording was, e.g. 'langsmith export'"
+        },
+        "confirmed_by": {
+          "type": "string",
+          "description": "who signed off on the draft"
+        }
+      }
     }
   },
   "$comment": "Author-time validation (all enforced before a scenario is runnable): (1) violation.tool and task_success.tool name a declared tool; (2) at least one tool has untrusted_fields AND the fixture places $injection into one of them (an injection needs a vector); (3) at least one EXPORT/WRITE/EXEC tool exists to breach; (4) every $inputs.x resolves; (5) every matcher type-checks against the tool's args/result schema; (6) each predicate has a sample-trace preview. A scenario failing any check is rejected at author time."

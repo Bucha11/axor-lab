@@ -59,7 +59,7 @@ internet, not what makes it viewable.)
 
 - **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — the production-ready implementation plan (phases, reuse map, milestones, definition of done). The MVP spine is implemented; see its status block.
 - **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the post-MVP plan: BYOK model adapter, Control Plane export, full web app, production hardening, then the Later tier and the commercial track. Written before v0.3, so its Later tier still plans the gateway, sandbox, games and black-box evaluation that v0.3 retired — see "Retired in v0.3" below.
-- **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
+- **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, incident import (replay vs reconstruction), acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
 - **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3), packaging/economics, bench format guide, UI mocks.
 
 ## Maturity — subsystems are NOT equally production-ready
@@ -206,6 +206,36 @@ decides whether a run is worth publishing, so it cannot require publishing
 first), pinning a trace from your own run (pinning used to need an imported
 production incident to exist), the Control Plane handoff (the bridge into the
 paid contour sat behind a terminal), and running a hand-written `.axl`.
+
+### Two ways in from an incident, and only one of them is replay
+
+The funnel says "bring us your production incident"; replay says "I need an Axor
+trace". Both are true, and they are two paths — conflating them under one
+"trace import" mode was a real error, now fixed.
+
+Replay re-runs the **judge**, not the agent, and `decide(π(x), policy)` is pure —
+so a recording of its inputs is enough to recompute a verdict with no agent, no
+model and no tools. Those inputs are the value ledger and `arg_bindings`, and
+only an Axor adapter emits them. Your LangSmith / OTel / application logs record
+what was *called*, never where each value *came from*; guessing the difference
+over- and under-taints at once, so it must never yield a verdict.
+
+| you have | path | fidelity |
+|---|---|---|
+| an Axor `trace/v1` | `#/import` → **replayed exactly** | `explicit_flow_tracked` |
+| LangSmith / OTel / app logs | `#/reconstruct` → **a scenario draft you confirm, then run** | `heuristic_attribution` → then a real run |
+
+Reconstruction proposes the tools, the task, the injected content and where it
+entered, and the harmful call that followed; it refuses to invent `task_success`,
+because that would quietly define what "the agent did its job" means. You confirm
+the draft, run it, and the trace that comes out is genuine — real EvidenceCase,
+pinnable regression, publishable. The scenario carries `reconstructed_from` so
+every publication built from it states the limitation automatically: this
+measures a **model of** your incident, not the incident.
+
+So your first incident is reconstructed, and every one after it replays exactly,
+because by then Axor was there when it happened. Full contract:
+**[contracts/incident-import.md](contracts/incident-import.md)**.
 
 ### Verification moved to the browser, not to the server
 

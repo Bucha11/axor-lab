@@ -158,7 +158,7 @@ export default function Experiments({ catalog }: { catalog: Catalog }) {
         {[
           { to: "builder", label: "as a file · CLI" },
           { to: "scenario-author", label: "write a scenario" },
-          { to: "import", label: "import an incident" },
+          { to: "reconstruct", label: "reconstruct an incident" },
         ].map((l) => (
           <button
             key={l.to}

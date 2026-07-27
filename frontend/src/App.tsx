@@ -17,6 +17,7 @@ import PublicationView from "./tabs/PublicationView";
 import EvidenceView from "./tabs/EvidenceView";
 import ScenarioAuthor from "./tabs/ScenarioAuthor";
 import ImportIncident from "./tabs/ImportIncident";
+import Reconstruct from "./tabs/Reconstruct";
 import IncidentView from "./tabs/IncidentView";
 import Incidents from "./tabs/Incidents";
 import Verify from "./tabs/Verify";
@@ -177,7 +178,12 @@ export default function App() {
       {key === "scenario-author" && <ScenarioAuthor />}
       {/* Control Plane → Lab cross-link: "Open in Lab" deep-links to #/import;
           an imported incident lives at #/i/{incident_id} */}
+      {/* two paths, named apart. `import` REPLAYS an Axor trace exactly;
+          `reconstruct` reads a pre-Axor recording and drafts a scenario, because
+          a verdict cannot be recovered from a log that never recorded where each
+          value came from. Conflating them was the original error. */}
       {key === "import" && <ImportIncident />}
+      {key === "reconstruct" && <Reconstruct />}
       {key === "incidents" && <Incidents />}
       {key === "i" && p1 && <IncidentView incidentId={p1} />}
       {key === "verify" && <Verify />}
