@@ -9,17 +9,25 @@ pip install axor-lab
 axor-lab serve --open
 ```
 
-That is the whole product: the web UI, the catalog, and the run API. Click
-**Start with the worked example** and you have a real result in a few seconds —
-a banking agent under a prompt-injected exfiltration attempt, run 60 times
-ungoverned and governed, with every trial's trace kept and exactly replayable.
+That is the whole product: the web UI, the catalog, and the run API. The front
+page is a playground with three axes — **whose agent**, **what it is asked to
+do**, and **governance, which is optional**. Press Run and you have a real
+result in a second: a banking agent under a prompt-injected exfiltration
+attempt, with every trial's trace kept and exactly replayable.
 
-Nothing to configure and nothing to pay for: the agent is a deterministic
-stand-in, the kernel is the stdlib reference kernel, and the tools are
-simulated, so the run happens in-process and offline. It is byte-identical to
-`axor-lab run` over the same file — the shortcut is not a lesser path. Bringing
-your own agent, a live model (BYOK), or the real `axor-core` kernel are steps up
-from there, not prerequisites.
+Governance is something you can attach, not the price of entry. Leave the third
+axis off and the run has no gate in it anywhere — you get your agent's own
+attack-success and task-success rate, which is usually the thing you came to
+find out. Turn it on and the same trials run a second time under a gate, on the
+same seeds, so the two arms are a real matched pair. Either way nothing leaves
+the machine: no account, no deployment, no Control Plane.
+
+Nothing to configure and nothing to pay for at the default: the agent is a
+deterministic stand-in, the kernel is the stdlib reference kernel, and the tools
+are simulated, so the run happens in-process and offline. It is byte-identical
+to `axor-lab run` over the same file — the shortcut is not a lesser path.
+Bringing your own agent, a live model (BYOK), or the real `axor-core` kernel are
+steps up from there, not prerequisites.
 
 Working from a checkout instead? Build the UI once, then serve:
 

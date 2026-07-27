@@ -198,8 +198,16 @@ def build_experiment_document(
     conditions: list[dict[str, object]],
     repeats: int,
     agent_ref: str = "scripted@0.6",
+    run_mode: str = "compare",
 ) -> dict[str, object]:
-    """A complete `.axl` document for an imported suite."""
+    """A complete `.axl` document for an imported suite.
+
+    `run_mode` selects which of the declared conditions actually EXECUTE:
+    `ungoverned` runs the baseline alone. That is the plain "what does my agent
+    do" run — no gate anywhere in it — and it is a first-class use of this
+    format, not a degenerate comparison: the conditions stay declared (the axis
+    under study is still on the record) while only one of them runs.
+    """
     scenarios = import_suite(suite)
     return {
         "experiment": {
@@ -210,7 +218,7 @@ def build_experiment_document(
             "conditions": conditions,
             "repeats": repeats,
             "agent_ref": agent_ref,
-            "run_mode": "compare",
+            "run_mode": run_mode,
         },
         "scenarios": scenarios,
         "tool_manifests": list(manifests().values()),

@@ -331,6 +331,9 @@ export interface Catalog {
   suites: CatalogSuite[];
   conditions: { id: string; policy: Record<string, unknown> | null; baseline: boolean }[];
   kernel: string;
+  // the production governor, when the server has it installed. Absent on an
+  // older server, so every read of it must tolerate undefined.
+  real_kernel?: { available: boolean; version: string | null };
   agent: { ref: string; deterministic: boolean; note: string };
   repeats: { default: number; max: number; min_powered: number };
 }
@@ -433,6 +436,14 @@ export interface ComposeSpec {
   suite: string;
   conditions?: string[];
   repeats?: number;
+  // which of the declared conditions actually run. "ungoverned" is the run with
+  // no gate in it at all — governance is something you add here, so it has to be
+  // possible to leave out.
+  run_mode?: "compare" | "ungoverned" | "governed";
+  // repin every condition to the installed axor-core governor instead of the
+  // stdlib reference kernel — baseline included, so the compare isolates
+  // enforcement rather than mixing in a kernel change.
+  real_kernel?: boolean;
 }
 
 // A run the SERVER executed (POST /runs/local) rather than a runtime. It arrives

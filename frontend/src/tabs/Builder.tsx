@@ -13,6 +13,13 @@
 //   adjust    conditions and repeats, with the statistical floor made visible.
 //   advanced  a connected runtime instead of local, the composed .axl, the CLI.
 //
+// The first two levels now also live on the home page, where they are the whole
+// point rather than a level; this screen opens at ADVANCED because that is what
+// is only here — the composed document as a file, an .axl you wrote yourself,
+// and the CLI equivalent. The simple levels stay reachable above it so the file
+// you export is the selection you are looking at, not a second selection you
+// have to reproduce.
+//
 // The UI is the primary path. The CLI appears at the advanced level as the
 // equivalent command, for versioning an experiment and for what only it can do:
 // a live model with its hard cost ceiling, and --real-kernel.
@@ -80,7 +87,7 @@ function BuilderBody({ catalog }: { catalog: Catalog }) {
   const { runtimeRef, setRuntimeRef, setLastRun } = useApp();
   const baseline = catalog.conditions.find((c) => c.baseline)?.id ?? "ungoverned";
 
-  const [level, setLevel] = useState<Level>("simple");
+  const [level, setLevel] = useState<Level>("advanced");
   const [suiteId, setSuiteId] = useState(catalog.suites[0]?.id ?? "");
   const [conditions, setConditions] = useState<string[]>(
     catalog.conditions.map((c) => c.id),
@@ -179,10 +186,12 @@ function BuilderBody({ catalog }: { catalog: Catalog }) {
 
   return (
     <div style={{ maxWidth: 720, margin: "0 auto" }}>
-      <h1 style={{ fontSize: 21, fontWeight: 650, margin: "0 0 2px" }}>Compose an experiment.</h1>
+      <h1 style={{ fontSize: 21, fontWeight: 650, margin: "0 0 2px" }}>The experiment as a file.</h1>
       <div style={{ fontFamily: MONO, fontSize: 11, color: C.mut, marginBottom: 18, lineHeight: 1.6 }}>
-        One agent against a suite, defended vs undefended — the AgentDojo shape. It runs here:
-        the agent is a deterministic stand-in, so there is no key, no provider and no cost.
+        The playground runs a selection; this is where the selection becomes an{" "}
+        <span style={{ color: C.text }}>.axl</span> you can version, hand-edit, share or run from a
+        terminal — and where you bring one you wrote yourself. Everything above the fold is the same
+        composer, so the file you export is the selection you are looking at.
       </div>
 
       {/* ── level 1: pick a suite, run it ───────────────────────────────────── */}

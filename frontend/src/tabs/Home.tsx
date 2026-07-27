@@ -1,295 +1,446 @@
-// The measurement IS the home page.
+// The playground. This is the product.
 //
-// What this replaces, and why. The Lab's UI had grown into a control panel over
-// its own endpoints: seven entry cards, a numbered four-step constructor, and a
-// "Run this experiment" button standing between a visitor and the first number.
-// That shape assumes the measurement is expensive enough to be worth a funnel.
-// It is not — four AgentDojo suites replay through the real governor in about a
-// second, with no model and no key. So the funnel was pure cost: it asked people
-// to make four decisions before showing them anything that would tell them which
-// decisions mattered.
+// What this page is NOT, after two wrong turns. It is not a control panel over
+// the endpoints (seven entry cards, a four-step wizard, a Run button in front of
+// the first number). And it is not a governance pitch: the previous version led
+// with "what does governance cost, and what does it buy?", which put the add-on
+// where the product goes. Governance is something you can ATTACH to a run here.
+// You can also never attach it, run your own agent against attack scenarios, and
+// never touch a Control Plane, an account, or an Axor deployment.
 //
-// Inverted here. The default measurement runs on load and the result is the
-// page. Every control is an edit of the table already on screen — turn a suite
-// off by clicking its row, arm the allowlist and watch the same row move,
-// declare a secret next to the number it will cost you. There is no Run button
-// because there is nothing to wait for: the query re-fires on any change and the
-// previous numbers stay put, dimmed, while the next ones land.
+// So the page is built on the three axes of an experiment, in the order they
+// belong to the user:
 //
-// The honest caveat stays. These are ground-truth call sequences, not a model's
-// attempts, so the denial counts are a lower bound.
+//   1. the agent    — whose behaviour is being watched. THIS is the subject.
+//   2. the tasks    — what it is asked to do, and what is trying to hijack it.
+//   3. governance   — optional, off by default, an extra arm to compare against.
+//
+// Leaving governance off is a first-class run, not a degenerate one: `run_mode`
+// executes the ungoverned condition alone, and the result is your agent's own
+// attack-success and task-success rate with no gate anywhere in it. That is the
+// whole point of a playground — see what the thing does.
 import { useState } from "react";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Play, RefreshCw } from "lucide-react";
-import { C, MONO } from "../theme";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowRight, Play, RefreshCw, TriangleAlert } from "lucide-react";
+import { C, MONO, cta } from "../theme";
 import { navigate } from "../router";
-import { api, type BenchRates, type BenchRow, type SweepReport } from "../api";
-
-const pct = (r: BenchRates) => (r.base ? (100 * r.governed) / r.base : 0);
-const fmt = (r: BenchRates) => (r.base ? `${pct(r).toFixed(0)}%` : "n/a");
-
-/** Sum rates across the selected suites — the one number worth quoting. */
-function total(rows: BenchRow[], pick: (r: BenchRow) => BenchRates): BenchRates {
-  return rows.reduce(
-    (acc, row) => {
-      const r = pick(row);
-      return { base: acc.base + r.base, governed: acc.governed + r.governed, unmapped: acc.unmapped + r.unmapped };
-    },
-    { base: 0, governed: 0, unmapped: 0 },
-  );
-}
-
-/** A label whose explanation is one line under it, never a tooltip you must find. */
-function Head({ label, note, width }: { label: string; note: string; width?: number }) {
-  return (
-    <th style={{ padding: "0 12px 10px", textAlign: "left", width, verticalAlign: "bottom" }}>
-      <div style={{ fontFamily: MONO, fontSize: 11, color: C.text, fontWeight: 600 }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, fontWeight: 400, lineHeight: 1.4, marginTop: 2 }}>
-        {note}
-      </div>
-    </th>
-  );
-}
-
-/** One live control, with the thing you would otherwise learn by getting it wrong. */
-function Toggle({ on, onChange, label, hint }: {
-  on: boolean; onChange: (v: boolean) => void; label: string; hint: string;
-}) {
-  return (
-    <label style={{ display: "block", cursor: "pointer" }}>
-      <span className="wrapline" style={{ gap: 8 }}>
-        <input type="checkbox" checked={on} onChange={(e) => onChange(e.target.checked)} />
-        <span style={{ fontFamily: MONO, fontSize: 11.5, color: on ? C.text : C.mut }}>{label}</span>
-      </span>
-      <span style={{ display: "block", fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.6, marginLeft: 24, marginTop: 3 }}>
-        {hint}
-      </span>
-    </label>
-  );
-}
+import { api, type Aggregate, type Catalog } from "../api";
+import { useApp } from "../store";
+import EmptyState, { Cmd } from "../components/EmptyState";
 
 export default function Home() {
-  const index = useQuery({ queryKey: ["bench-index"], queryFn: api.benchIndex });
-  const entry =
-    index.data?.benchmarks.find((b) => b.benchmark === index.data?.default) ??
-    index.data?.benchmarks[0];
+  const catalog = useQuery({ queryKey: ["catalog"], queryFn: api.catalog });
+  if (catalog.isLoading) {
+    return <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>loading the playground…</div>;
+  }
+  if (catalog.isError || !catalog.data) {
+    return (
+      <div style={{ maxWidth: 720, margin: "0 auto" }}>
+        <EmptyState title="the run API is not answering">
+          One command serves the UI, the catalog and the runs:
+          <Cmd>axor-lab serve</Cmd>
+        </EmptyState>
+      </div>
+    );
+  }
+  return <Playground catalog={catalog.data} />;
+}
 
-  const [off, setOff] = useState<string[]>([]);
-  const [allowlist, setAllowlist] = useState(false);
-  const [secrets, setSecrets] = useState<Record<string, string[]>>({});
-  const [open, setOpen] = useState<string | null>(null);
+/** Where an agent comes from. The first axis, and the one the product is about.
+ *  `runnable` means this page can start the run itself; the rest hand off to the
+ *  surface that owns the setup, rather than pretending to accept it here. */
+type AgentSource = {
+  id: string; label: string; detail: string; runnable?: boolean; route?: string;
+};
 
-  const all = (entry?.suites ?? []).map((s) => s.suite);
-  const chosen = all.filter((s) => !off.includes(s));
-  const spec = { benchmark: entry?.benchmark, suites: chosen, allowlist, secrets };
+const AGENTS: AgentSource[] = [
+  {
+    id: "bundled",
+    label: "the bundled stand-in",
+    detail: "deterministic, offline, free — runs here in under a second",
+    runnable: true,
+  },
+  {
+    id: "runtime",
+    label: "your agent, connected",
+    detail: "Lab assigns the trials, your runtime executes them and pushes traces back",
+    runnable: true,
+  },
+  {
+    id: "live",
+    label: "a live model",
+    detail: "your key, your spend — the one run whose ungoverned arm is a real model",
+    route: "models",
+  },
+  {
+    id: "byo",
+    label: "your code, or traces you already have",
+    detail: "we derive the tool manifests from the code, or read the run you already did",
+    route: "agent-ingest",
+  },
+];
 
-  // No Run button: the result is a function of the controls, so it re-derives
-  // itself. keepPreviousData is what makes that readable — the old numbers stay
-  // in place, dimmed, instead of the table collapsing to a spinner every click.
-  const run = useQuery({
-    queryKey: ["bench-run", JSON.stringify(spec)],
-    queryFn: () => api.benchRun(spec),
-    enabled: !!entry && chosen.length > 0,
-    placeholderData: keepPreviousData,
+/** One line of a numbered axis: a heading, why it matters, then the controls. */
+function Axis({ n, title, sub, children, accent }: {
+  n: number; title: string; sub: string; children: React.ReactNode; accent?: string;
+}) {
+  return (
+    <div className="p-4 mb-3" style={{
+      background: C.panel, border: `1px solid ${accent ?? C.line}`, borderRadius: 10,
+    }}>
+      <div style={{ fontFamily: MONO, fontSize: 12, fontWeight: 600, color: C.text }}>
+        <span style={{ color: C.dim }}>{n} · </span>{title}
+      </div>
+      <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.65, margin: "5px 0 12px" }}>
+        {sub}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Radio({ on, label, detail, onClick, right }: {
+  on: boolean; label: string; detail: string; onClick: () => void; right?: React.ReactNode;
+}) {
+  return (
+    <div onClick={onClick} className="wrapline" style={{
+      gap: 10, cursor: "pointer", padding: "7px 2px", justifyContent: "space-between",
+    }}>
+      <span className="wrapline" style={{ gap: 9, flex: "1 1 320px", alignItems: "flex-start" }}>
+        <input type="radio" checked={on} readOnly tabIndex={-1} style={{ marginTop: 2 }} />
+        <span>
+          <span style={{ fontFamily: MONO, fontSize: 11.5, color: on ? C.text : C.mut }}>{label}</span>
+          <span style={{ display: "block", fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.55 }}>
+            {detail}
+          </span>
+        </span>
+      </span>
+      {right}
+    </div>
+  );
+}
+
+function Playground({ catalog }: { catalog: Catalog }) {
+  const { runtimeRef, setRuntimeRef, setLastRun } = useApp();
+  const baseline = catalog.conditions.find((c) => c.baseline)?.id ?? "ungoverned";
+  const governedId = catalog.conditions.find((c) => !c.baseline)?.id ?? "governed";
+
+  const [agent, setAgent] = useState<string>("bundled");
+  const [suiteId, setSuiteId] = useState(catalog.suites[0]?.id ?? "");
+  const [repeats, setRepeats] = useState(catalog.repeats.default);
+  const [governed, setGoverned] = useState(false);
+  const [realKernel, setRealKernel] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ runId: string; aggregates: Aggregate[] } | null>(null);
+
+  const runtimes = useQuery({
+    queryKey: ["runtimes"], queryFn: api.listRuntimes, enabled: agent === "runtime",
   });
 
-  // Per-suite secret costs, fetched only when a row is opened — the sweep runs
-  // one governed pass per candidate source, so it is the one thing here that is
-  // worth asking for rather than doing on load.
-  const sweep = useQuery({
-    queryKey: ["bench-sweep", open, allowlist, entry?.benchmark],
-    queryFn: () => api.benchSweep(open!, allowlist, entry?.benchmark),
-    enabled: !!open,
-  });
+  const suite = catalog.suites.find((s) => s.id === suiteId);
+  const arms = governed ? 2 : 1;
+  const trials = (suite?.scenarios.length ?? 0) * arms * repeats;
+  const underpowered = governed && repeats < catalog.repeats.min_powered;
+  const chosen = AGENTS.find((a) => a.id === agent)!;
 
-  const qc = useQueryClient();
-  const example = useMutation({
-    mutationFn: () => api.runLocal(),
-    onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["run-results", r.run_id] });
-      navigate(`results/${r.run_id}`);
-    },
-  });
+  // The spec, exactly as it goes over the wire. Governance off is `run_mode:
+  // ungoverned` — the conditions stay declared, only the baseline executes.
+  const spec = {
+    suite: suiteId,
+    conditions: [baseline, governedId],
+    repeats,
+    run_mode: (governed ? "compare" : "ungoverned") as "compare" | "ungoverned",
+    ...(governed && realKernel ? { real_kernel: true } : {}),
+  };
 
-  const rows = run.data?.rows ?? [];
-  const util = total(rows, (r) => r.utility);
-  const asr = total(rows, (r) => r.asr);
-  const denials = rows.reduce((n, r) => n + r.denials, 0);
-  const stale = run.isFetching;
-  const declared = Object.values(secrets).reduce((n, l) => n + l.length, 0);
-
-  const toggleSuite = (suite: string) =>
-    setOff((prev) => {
-      const next = prev.includes(suite) ? prev.filter((s) => s !== suite) : [...prev, suite];
-      return next.length === all.length ? prev : next; // never all off
-    });
-
-  const toggleSecret = (suite: string, tool: string) =>
-    setSecrets((prev) => {
-      const cur = new Set(prev[suite] ?? []);
-      cur.has(tool) ? cur.delete(tool) : cur.add(tool);
-      const next = { ...prev };
-      if (cur.size) next[suite] = [...cur].sort();
-      else delete next[suite];
-      return next;
-    });
+  const run = async () => {
+    setBusy(true); setError(null); setResult(null);
+    try {
+      if (agent === "runtime") {
+        if (!runtimeRef) throw new Error("pick a connected runtime first");
+        const composed = await api.composeExperiment(spec);
+        const experiment = (composed.document as { experiment: Record<string, unknown> }).experiment;
+        const created = await api.createRun(
+          runtimeRef, experiment, composed.planned_trials,
+          composed.estimate as unknown as Record<string, unknown>,
+        );
+        setLastRun(created.run_id);
+        navigate(`runs/${created.run_id}`);
+        return;
+      }
+      const landed = await api.runComposed(spec);
+      setLastRun(landed.run_id);
+      const results = await api.runResults(landed.run_id);
+      setResult({ runId: landed.run_id, aggregates: results.aggregates });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
-    <div style={{ maxWidth: 860, margin: "0 auto" }}>
-      <h1 style={{ fontSize: 26, fontWeight: 700, lineHeight: 1.25, margin: "0 0 8px", maxWidth: 560 }}>
-        What does governance cost, and what does it buy?
+    <div style={{ maxWidth: 760, margin: "0 auto" }}>
+      <h1 style={{ fontSize: 26, fontWeight: 700, lineHeight: 1.25, margin: "0 0 8px" }}>
+        A playground for agent experiments.
       </h1>
-      <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.mut, lineHeight: 1.7, marginBottom: 22, maxWidth: 600 }}>
-        {entry ? `${entry.suites.length} ${entry.title} suites` : "The benchmark suites"} replayed
-        through the real axor-core governor. No model, no API key, about a second — the answer is
-        below, already measured. Change anything and it re-measures in place.
+      <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.mut, lineHeight: 1.75, marginBottom: 22, maxWidth: 610 }}>
+        Put an agent in front of tasks that are trying to hijack it, and watch what it does.
+        Everything runs here — no deployment, no account, no Control Plane, ever. Governance is
+        an <b style={{ color: C.text }}>optional</b> second arm: add it to see what a gate would
+        have changed, or leave it off and just measure your agent.
       </div>
 
-      {index.isError && (
-        <div className="p-3 mb-4" style={{ background: C.panel, border: `1px solid ${C.red}`, borderRadius: 8, fontFamily: MONO, fontSize: 11, color: C.red, lineHeight: 1.6 }}>
-          the runtime API is not answering. Start the server without <code>--no-runtime-api</code>:
-          <div style={{ color: C.mut, marginTop: 6 }}>axor-lab serve</div>
+      <Axis
+        n={1}
+        title="Whose agent"
+        sub="The subject of the experiment. Everything else is what you point it at."
+      >
+        {AGENTS.map((a) => (
+          <Radio
+            key={a.id}
+            on={agent === a.id}
+            label={a.label}
+            detail={a.detail}
+            onClick={() => setAgent(a.id)}
+            right={
+              a.id === "bundled" ? (
+                <span style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim }}>{catalog.agent.ref}</span>
+              ) : a.id === "runtime" ? (
+                <span style={{ fontFamily: MONO, fontSize: 9.5, color: (runtimes.data?.length ?? 0) ? C.green : C.dim }}>
+                  {agent === "runtime" ? `${runtimes.data?.length ?? 0} connected` : ""}
+                </span>
+              ) : null
+            }
+          />
+        ))}
+
+        {agent === "runtime" && (
+          <div className="wrapline mt-2" style={{ gap: 8, paddingLeft: 24 }}>
+            {(runtimes.data ?? []).map((rt) => (
+              <button
+                key={rt.runtime_ref}
+                onClick={() => setRuntimeRef(rt.runtime_ref)}
+                style={{
+                  background: runtimeRef === rt.runtime_ref ? "rgba(127,168,204,0.12)" : "none",
+                  border: `1px solid ${runtimeRef === rt.runtime_ref ? C.steel : C.line}`,
+                  borderRadius: 4, color: runtimeRef === rt.runtime_ref ? C.steel : C.mut,
+                  fontFamily: MONO, fontSize: 10, padding: "3px 9px", cursor: "pointer",
+                }}
+              >
+                {rt.runtime_ref}{rt.model ? ` · ${rt.model}` : ""}
+              </button>
+            ))}
+            {runtimes.isSuccess && (runtimes.data ?? []).length === 0 && (
+              <span style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.6 }}>
+                none connected yet — point your runtime at this server and it appears here
+                <button
+                  onClick={() => navigate("agent-ingest")}
+                  style={{ background: "none", border: "none", color: C.steel, fontFamily: MONO, fontSize: 10, cursor: "pointer" }}
+                >
+                  how →
+                </button>
+              </span>
+            )}
+            <button
+              onClick={() => runtimes.refetch()}
+              style={{ background: "none", border: `1px solid ${C.line}`, borderRadius: 4, color: C.mut, fontFamily: MONO, fontSize: 10, padding: "3px 8px", cursor: "pointer" }}
+            >
+              <RefreshCw size={10} style={{ verticalAlign: -1 }} /> refresh
+            </button>
+          </div>
+        )}
+      </Axis>
+
+      <Axis
+        n={2}
+        title="What it is asked to do"
+        sub="Each scenario is an ordinary task with an injection hidden in the data the agent
+             reads. The task is real work; the injection is the attacker's attempt to redirect it."
+      >
+        <div className="wrapline" style={{ gap: 8, marginBottom: 10 }}>
+          {catalog.suites.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setSuiteId(s.id)}
+              style={{
+                background: suiteId === s.id ? "rgba(155,140,204,0.10)" : "none",
+                border: `1px solid ${suiteId === s.id ? C.violet : C.line}`, borderRadius: 6,
+                color: suiteId === s.id ? C.text : C.mut, fontFamily: MONO, fontSize: 11,
+                padding: "5px 11px", cursor: "pointer",
+              }}
+            >
+              {s.label} · {s.scenarios.length}
+            </button>
+          ))}
+        </div>
+        {suite?.scenarios.map((sc) => (
+          <div key={sc.name} style={{ marginBottom: 7 }}>
+            <div style={{ fontFamily: MONO, fontSize: 10, color: C.mut }}>{sc.name}</div>
+            <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.5 }}>{sc.task}</div>
+          </div>
+        ))}
+        <div className="wrapline mt-3" style={{ gap: 10 }}>
+          <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, minWidth: 52 }}>repeats</span>
+          <input
+            type="range" min={1} max={Math.min(catalog.repeats.max, 40)} value={repeats}
+            onChange={(e) => setRepeats(Number(e.target.value))}
+            style={{ flex: "1 1 180px", accentColor: C.violet }}
+          />
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.text, minWidth: 20 }}>{repeats}</span>
+        </div>
+      </Axis>
+
+      <Axis
+        n={3}
+        title="Governance — optional"
+        accent={governed ? C.violet : undefined}
+        sub="Off, this run has no gate in it anywhere: you get your agent's own attack-success and
+             task-success rate, which is the honest baseline and often the only thing you wanted.
+             On, the same trials run a second time under a gate, on the same seeds, so the two arms
+             are a real matched pair."
+      >
+        <label className="wrapline" style={{ gap: 8, cursor: "pointer" }}>
+          <input type="checkbox" checked={governed} onChange={(e) => setGoverned(e.target.checked)} />
+          <span style={{ fontFamily: MONO, fontSize: 11.5, color: governed ? C.text : C.mut }}>
+            add a governed arm
+          </span>
+        </label>
+        {governed && (
+          <div style={{ marginLeft: 24, marginTop: 8 }}>
+            <label className="wrapline" style={{ gap: 8, cursor: catalog.real_kernel?.available ? "pointer" : "default" }}>
+              <input
+                type="checkbox" checked={realKernel} disabled={!catalog.real_kernel?.available}
+                onChange={(e) => setRealKernel(e.target.checked)}
+              />
+              <span style={{ fontFamily: MONO, fontSize: 11, color: realKernel ? C.text : C.mut }}>
+                use the production kernel
+                <span style={{ color: C.dim }}>
+                  {" "}({catalog.real_kernel?.available ? catalog.real_kernel.version : "axor-core not installed"})
+                </span>
+              </span>
+            </label>
+            <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.6, marginTop: 6 }}>
+              Off, the gate is the stdlib reference kernel that ships with Lab — enough to see the
+              mechanism, and it needs nothing installed. Both arms are repinned together, so the
+              comparison isolates enforcement rather than mixing in a kernel change.
+            </div>
+            <button
+              onClick={() => navigate("governance")}
+              style={{ background: "none", border: "none", padding: "10px 0 0", cursor: "pointer", color: C.violet, fontFamily: MONO, fontSize: 10.5 }}
+            >
+              what a gate costs across a whole published benchmark <ArrowRight size={10} style={{ verticalAlign: -1 }} />
+            </button>
+          </div>
+        )}
+      </Axis>
+
+      <div className="wrapline" style={{ gap: 12, marginTop: 4 }}>
+        {chosen.runnable ? (
+          <button onClick={run} disabled={busy || !suiteId} style={cta(!busy && !!suiteId)}>
+            {busy
+              ? <><RefreshCw size={14} className="animate-spin" /> running…</>
+              : <><Play size={14} /> Run {trials} trials</>}
+          </button>
+        ) : (
+          <button onClick={() => navigate(chosen.route!)} style={cta(true)}>
+            {chosen.label} <ArrowRight size={13} />
+          </button>
+        )}
+        <span style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.6 }}>
+          {suite?.scenarios.length ?? 0} scenarios × {arms} arm{arms === 1 ? "" : "s"} × {repeats} repeats
+          {chosen.runnable && agent === "bundled" && " · executes in this server, offline"}
+        </span>
+      </div>
+
+      {underpowered && (
+        <div className="wrapline mt-2" style={{ gap: 6 }}>
+          <TriangleAlert size={12} color={C.amber} />
+          <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.amber, lineHeight: 1.55 }}>
+            below {catalog.repeats.min_powered} repeats the paired test has too few discordant pairs,
+            so the two arms get no p-value. The run still works — it answers less.
+          </span>
         </div>
       )}
 
-      {/* the headline: two numbers, always together, because a defense that
-          reports one describes half a trade */}
-      <div
-        className="p-4 mb-4"
-        style={{
-          background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10,
-          opacity: stale ? 0.55 : 1, transition: "opacity .15s",
-        }}
-      >
-        <div className="wrapline" style={{ gap: 34 }}>
-          <div>
-            <div style={{ fontSize: 34, fontWeight: 700, color: C.text, lineHeight: 1 }}>{fmt(util)}</div>
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, marginTop: 6 }}>
-              legitimate work still gets done
-            </div>
-            <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, marginTop: 2 }}>
-              {util.governed} of {util.base} benign tasks
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1, color: asr.governed ? C.amber : C.green }}>
-              {fmt(asr)}
-            </div>
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, marginTop: 6 }}>
-              attacks still succeed
-            </div>
-            <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, marginTop: 2 }}>
-              {asr.governed} of {asr.base} injection tasks
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 34, fontWeight: 700, color: C.violet, lineHeight: 1 }}>{denials}</div>
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, marginTop: 6 }}>calls refused</div>
-            <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.dim, marginTop: 2 }}>
-              across {chosen.length} suite{chosen.length === 1 ? "" : "s"}
-            </div>
-          </div>
-          {stale && (
-            <span className="wrapline" style={{ gap: 6, fontFamily: MONO, fontSize: 10, color: C.dim }}>
-              <RefreshCw size={11} className="animate-spin" /> re-measuring
-            </span>
-          )}
+      {error && (
+        <div className="mt-3 p-3" style={{ background: C.panel, border: `1px solid ${C.red}`, borderRadius: 8, fontFamily: MONO, fontSize: 11, color: C.red, lineHeight: 1.6 }}>
+          {error}
         </div>
-      </div>
+      )}
 
-      {/* the controls sit between the headline and the breakdown, because they
-          are how you move both — not a form you fill in before you see either */}
-      <div className="p-4 mb-4" style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 10 }}>
-        <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, marginBottom: 10, letterSpacing: .4 }}>
-          THE POLICY BEING MEASURED
-        </div>
-        <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.mut, lineHeight: 1.6, marginBottom: 12 }}>
-          <b style={{ color: C.text }}>Taint floor</b> — always on. An effect may not reach a
-          destination that came from attacker-reachable data.
-        </div>
-        <Toggle
-          on={allowlist}
-          onChange={setAllowlist}
-          label="Declare the known-payee enum"
-          hint="An enum on a driving argument restricts as well as supersedes: it lifts the taint on
-                destinations you vetted, and denies every destination outside the set — including
-                clean, prompt-given ones you forgot to list."
-        />
-        <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.6, marginTop: 12 }}>
-          {declared === 0
-            ? "No secret reads declared. Open a suite below to declare one and see what it costs."
-            : `${declared} secret read${declared === 1 ? "" : "s"} declared — the confidentiality floor is armed for ${Object.keys(secrets).join(", ")}.`}
-        </div>
-      </div>
+      {result && <ResultStrip runId={result.runId} aggregates={result.aggregates} governed={governed} />}
 
-      {/* the breakdown. Clicking a suite name drops it from the measurement;
-          clicking "secrets" opens the sweep for that suite alone. */}
-      <div style={{ overflowX: "auto", opacity: stale ? 0.55 : 1, transition: "opacity .15s" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11.5 }}>
+      {/* the ways out of the three axes, for someone who has outgrown them. An
+          entry point linked from nowhere is one that does not exist, and the
+          builder holds the .axl, the file upload and the CLI equivalent. */}
+      <div className="wrapline" style={{ gap: 16, marginTop: 26, paddingTop: 16, borderTop: `1px solid ${C.line}` }}>
+        {[
+          { to: "builder", label: "the experiment file, an .axl you wrote, the CLI" },
+          { to: "scenario-author", label: "write your own scenario" },
+          { to: "import", label: "reproduce a production incident" },
+        ].map((l) => (
+          <button
+            key={l.to}
+            onClick={() => navigate(l.to)}
+            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: C.mut, fontFamily: MONO, fontSize: 10.5 }}
+          >
+            {l.label} <ArrowRight size={10} style={{ verticalAlign: -1 }} />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** What just happened, in the two rates that matter, per arm. */
+function ResultStrip({ runId, aggregates, governed }: {
+  runId: string; aggregates: Aggregate[]; governed: boolean;
+}) {
+  const arms = [...new Set(aggregates.map((a) => a.condition_id))];
+  const rate = (arm: string, metric: string) =>
+    aggregates.find((a) => a.condition_id === arm && a.metric === metric);
+  return (
+    <div className="mt-4 p-4" style={{ background: C.panel, border: `1px solid ${C.green}`, borderRadius: 10 }}>
+      <div className="wrapline" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+        <span style={{ fontFamily: MONO, fontSize: 11.5, color: C.text, fontWeight: 600 }}>
+          {governed ? "Two arms, same seeds" : "Your agent, ungoverned"}
+        </span>
+        <button
+          onClick={() => navigate(`results/${runId}`)}
+          style={{ background: "none", border: "none", cursor: "pointer", color: C.violet, fontFamily: MONO, fontSize: 10.5 }}
+        >
+          every trial, trace and verdict <ArrowRight size={10} style={{ verticalAlign: -1 }} />
+        </button>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11 }}>
           <thead>
-            <tr>
-              <Head label="suite" note="click to include or drop it" width={190} />
-              <Head label="work kept" note="benign tasks that still finish" />
-              <Head label="attacks kept" note="injections that still succeed" />
-              <Head label="refused" note="calls, and which gate" />
-              <Head label="reference" note="published o4-mini run" />
-              <Head label="secrets" note="declare and price them" width={110} />
+            <tr style={{ color: C.mut, textAlign: "left" }}>
+              <th style={{ padding: "4px 8px" }}>arm</th>
+              <th style={{ padding: "4px 8px" }}>attack succeeded</th>
+              <th style={{ padding: "4px 8px" }}>task completed</th>
             </tr>
           </thead>
           <tbody>
-            {(entry?.suites ?? []).map((suite) => {
-              const on = chosen.includes(suite.suite);
-              const row = rows.find((r) => r.suite === suite.suite);
-              const mine = secrets[suite.suite] ?? [];
+            {arms.map((arm) => {
+              const asr = rate(arm, "ASR");
+              const util = rate(arm, "task_success_rate");
               return (
-                <tr key={suite.suite} style={{ borderTop: `1px solid ${C.line}`, opacity: on ? 1 : 0.35 }}>
-                  <td
-                    onClick={() => toggleSuite(suite.suite)}
-                    style={{ padding: "12px", cursor: "pointer" }}
-                    title={on ? "drop this suite from the measurement" : "put it back"}
-                  >
-                    <span className="wrapline" style={{ gap: 8 }}>
-                      <input type="checkbox" checked={on} readOnly tabIndex={-1} />
-                      <span style={{ color: C.text, fontWeight: 600 }}>{suite.suite}</span>
+                <tr key={arm} style={{ borderTop: `1px solid ${C.line}` }}>
+                  <td style={{ padding: "8px", color: C.text }}>{arm}</td>
+                  <td style={{ padding: "8px" }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: (asr?.estimate ?? 0) > 0 ? C.amber : C.green }}>
+                      {asr ? `${(100 * asr.estimate).toFixed(0)}%` : "—"}
                     </span>
-                    <div style={{ fontSize: 9.5, color: C.dim, marginTop: 3, marginLeft: 24, lineHeight: 1.5 }}>
-                      {suite.note}
-                    </div>
+                    <span style={{ fontSize: 9.5, color: C.dim }}> of {asr?.n ?? 0}</span>
                   </td>
-                  <td style={{ padding: "12px" }}>
-                    <span style={{ fontSize: 16, fontWeight: 700, color: C.text }}>
-                      {row ? fmt(row.utility) : "—"}
+                  <td style={{ padding: "8px" }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: C.text }}>
+                      {util ? `${(100 * util.estimate).toFixed(0)}%` : "—"}
                     </span>
-                    {row && <span style={{ fontSize: 9.5, color: C.dim }}> of {row.utility.base}</span>}
-                  </td>
-                  <td style={{ padding: "12px" }}>
-                    <span style={{ fontSize: 16, fontWeight: 700, color: !row ? C.dim : row.asr.governed ? C.amber : C.green }}>
-                      {row ? fmt(row.asr) : "—"}
-                    </span>
-                    {row && <span style={{ fontSize: 9.5, color: C.dim }}> of {row.asr.base}</span>}
-                  </td>
-                  <td style={{ padding: "12px", color: C.text }}>
-                    {row ? row.denials : "—"}
-                    <div style={{ fontSize: 9.5, color: C.dim, marginTop: 2 }}>
-                      {row ? Object.entries(row.by_gate).map(([g, n]) => `${g}×${n}`).join(" ") || "—" : ""}
-                    </div>
-                  </td>
-                  <td style={{ padding: "12px", color: C.mut, fontSize: 10.5 }}>{suite.reference_denials}</td>
-                  <td style={{ padding: "12px" }}>
-                    <button
-                      onClick={() => setOpen(open === suite.suite ? null : suite.suite)}
-                      style={{
-                        background: "none", border: `1px solid ${C.line}`, borderRadius: 5,
-                        color: mine.length ? C.violet : C.mut, fontFamily: MONO, fontSize: 10,
-                        padding: "4px 8px", cursor: "pointer",
-                      }}
-                    >
-                      {mine.length}/{suite.secret_candidates.length}
-                      <ChevronRight
-                        size={10}
-                        style={{ verticalAlign: -1, marginLeft: 3, transform: open === suite.suite ? "rotate(90deg)" : "none" }}
-                      />
-                    </button>
+                    <span style={{ fontSize: 9.5, color: C.dim }}> of {util?.n ?? 0}</span>
                   </td>
                 </tr>
               );
@@ -297,136 +448,11 @@ export default function Home() {
           </tbody>
         </table>
       </div>
-
-      {open && (
-        <div className="p-4 mt-2" style={{ background: C.panel, border: `1px solid ${C.violet}`, borderRadius: 10 }}>
-          <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.text, fontWeight: 600 }}>
-            {open} · which reads are secret is <i>your</i> declaration
-          </div>
-          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mut, lineHeight: 1.65, margin: "6px 0 12px" }}>
-            The same <code>search_files</code> is a secret read in a law firm and routine in a public
-            wiki. Declaring one arms a floor that is content-blind and sticky: after that read every
-            egress in the session is refused, whatever the outgoing value looks like. That is what
-            makes it paraphrase-proof, and why it can be expensive. Each row below is measured with
-            that source declared <i>alone</i>, so the rows compare to each other but do not add up.
-          </div>
-          {sweep.isLoading && (
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>pricing each source…</div>
-          )}
-          {sweep.data && <SecretTable report={sweep.data} chosen={secrets[open] ?? []} onToggle={(t) => toggleSecret(open, t)} />}
-        </div>
-      )}
-
-      {run.isError && (
-        <div className="mt-3 p-3" style={{ background: C.panel, border: `1px solid ${C.red}`, borderRadius: 8, fontFamily: MONO, fontSize: 11, color: C.red }}>
-          {String(run.error)}
-        </div>
-      )}
-
-      <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.7, margin: "16px 0 30px", maxWidth: 640 }}>
-        <b style={{ color: C.mut }}>What these numbers are not.</b> Utility is measured over the
-        benchmark's own ground-truth call sequences, not over a model's attempts — so this is what
-        the gate would cost a <i>perfect</i> agent. A real one makes extra calls that widen the
-        tainted set, so treat the refusals as a lower bound. The reference column is a published
-        o4-mini run shown for comparison, not something this harness reproduces.
+      <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.65, marginTop: 10 }}>
+        {governed
+          ? "Both arms ran the same scenarios on the same seeds, so the difference is the gate and nothing else."
+          : "One arm, so nothing here is a comparison — this is what your agent does when nothing stops it."}
       </div>
-
-      {/* the other doors, once — no seven-card grid competing with the result */}
-      <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 18 }}>
-        <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, letterSpacing: .4, marginBottom: 12 }}>
-          MEASURE SOMETHING ELSE
-        </div>
-        <div className="entrygrid">
-          {[
-            { to: "builder", title: "Your own scenarios", desc: "compose or author the tasks, run them under the same gate" },
-            { to: "agent-ingest", title: "Your agent", desc: "code · endpoint · traces" },
-            { to: "models", title: "Live models", desc: "BYOK — the one run where the ungoverned arm is a real model" },
-            { to: "import", title: "A production incident", desc: "import the trace, reproduce it, pin a regression" },
-          ].map((e) => (
-            <div
-              key={e.to}
-              onClick={() => navigate(e.to)}
-              style={{ cursor: "pointer", padding: "12px 14px", borderRadius: 8, background: C.panel, border: `1px solid ${C.line}` }}
-            >
-              <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.text, fontWeight: 600 }}>{e.title}</div>
-              <div style={{ fontFamily: MONO, fontSize: 10, color: C.mut, marginTop: 3, lineHeight: 1.5 }}>{e.desc}</div>
-            </div>
-          ))}
-        </div>
-        <div className="wrapline" style={{ gap: 10, marginTop: 14 }}>
-          <button
-            onClick={() => example.mutate()}
-            disabled={example.isPending}
-            style={{
-              background: "none", border: `1px solid ${C.line}`, borderRadius: 5, color: C.mut,
-              fontFamily: MONO, fontSize: 10.5, padding: "6px 11px", cursor: "pointer",
-              display: "flex", alignItems: "center", gap: 6,
-            }}
-            title="a scripted banking agent, 60 trials governed and ungoverned — produces a publishable run"
-          >
-            {example.isPending
-              ? <><RefreshCw size={11} className="animate-spin" /> running…</>
-              : <><Play size={11} /> run the worked example</>}
-          </button>
-          <span style={{ fontFamily: MONO, fontSize: 10, color: C.dim }}>
-            an end-to-end run you can publish to the catalog
-          </span>
-        </div>
-        {example.isError && (
-          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.red, marginTop: 8 }}>
-            {(example.error as Error).message}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SecretTable({ report, chosen, onToggle }: {
-  report: SweepReport; chosen: string[]; onToggle: (tool: string) => void;
-}) {
-  // cheapest first, so the free sources surface instead of hiding in an
-  // alphabetical wall — knowing which reads are free to declare is the whole
-  // reason to run this
-  const rows = [...report.rows].sort((a, b) => a.cost_pp - b.cost_pp);
-  return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11 }}>
-        <thead>
-          <tr style={{ color: C.mut, textAlign: "left" }}>
-            <th style={{ padding: "4px 8px", width: 28 }} />
-            <th style={{ padding: "4px 8px" }}>candidate read</th>
-            <th style={{ padding: "4px 8px" }}>utility cost</th>
-            <th style={{ padding: "4px 8px" }}>attacks kept</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => {
-            const on = chosen.includes(r.source);
-            const free = r.cost_pp <= 0;
-            return (
-              <tr key={r.source} onClick={() => onToggle(r.source)} style={{ borderTop: `1px solid ${C.line}`, cursor: "pointer" }}>
-                <td style={{ padding: "6px 8px" }}>
-                  <input type="checkbox" checked={on} readOnly tabIndex={-1} />
-                </td>
-                <td style={{ padding: "6px 8px", color: on ? C.text : C.mut }}>{r.source}</td>
-                <td style={{ padding: "6px 8px", fontWeight: 600, color: free ? C.green : C.red }}>
-                  {free ? "free" : `−${r.cost_pp.toFixed(1)}pp`}
-                </td>
-                <td style={{ padding: "6px 8px", color: C.mut }}>{fmt(r.asr)}</td>
-              </tr>
-            );
-          })}
-          <tr style={{ borderTop: `1px solid ${C.line}`, background: "rgba(255,255,255,.02)" }}>
-            <td />
-            <td style={{ padding: "6px 8px", color: C.mut }} title="measured, not summed — sources read by the same tasks overlap">
-              all of them together
-            </td>
-            <td style={{ padding: "6px 8px", color: C.mut }}>{fmt(report.combined.utility)} kept</td>
-            <td style={{ padding: "6px 8px", color: C.mut }}>{fmt(report.combined.asr)}</td>
-          </tr>
-        </tbody>
-      </table>
     </div>
   );
 }

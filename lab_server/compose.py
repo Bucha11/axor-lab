@@ -181,9 +181,20 @@ def compose(spec: dict[str, Any]) -> dict[str, Any]:
     if repeats < 1 or repeats > MAX_REPEATS:
         raise ComposeRefused(400, f"`repeats` must be in 1..{MAX_REPEATS}")
 
+    # Which of the declared conditions actually run. `ungoverned` is the run with
+    # no gate in it at all — the plain "what does my agent do on these tasks"
+    # experiment. Governance is something you ADD to a run here, so it has to be
+    # possible to leave it out; the .axl format already had run_mode for exactly
+    # this, and nothing was passing it.
+    run_mode = str(spec.get("run_mode") or "compare")
+    if run_mode not in ("compare", "ungoverned", "governed"):
+        raise ComposeRefused(
+            400, f"unknown run_mode {run_mode!r}; expected compare, ungoverned or governed"
+        )
+
     try:
         document = build_experiment_document(
-            suite, _conditions(list(condition_ids)), repeats=repeats,
+            suite, _conditions(list(condition_ids)), repeats=repeats, run_mode=run_mode,
         )
     except UnknownSuiteError as exc:
         raise ComposeRefused(404, str(exc)) from exc
@@ -201,7 +212,7 @@ def compose(spec: dict[str, Any]) -> dict[str, Any]:
             raise ComposeRefused(409, str(exc)) from exc
 
     try:
-        resolve(document)
+        resolved = resolve(document)
     except ExperimentFileError as exc:
         # A composed suite that will not resolve is a bug in this module, not user
         # error — surface it loudly instead of handing back a document that fails
@@ -210,7 +221,13 @@ def compose(spec: dict[str, Any]) -> dict[str, Any]:
             500, "composed a document that does not resolve: " + "; ".join(exc.errors)
         ) from exc
 
-    plan = plan_experiment(document["experiment"])
+    # plan over the conditions that will actually RUN, not the ones declared:
+    # under run_mode=ungoverned the governed arm is not executed, and planning it
+    # anyway would report every such run as half-missing.
+    plan = plan_experiment({
+        **document["experiment"],
+        "condition_ids": [str(c["id"]) for c in resolved.conditions],
+    })
     return {
         "document": document,
         "planned_trials": plan["trials"],

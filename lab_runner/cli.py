@@ -1330,7 +1330,11 @@ def _effective_design(resolved: ResolvedExperiment, agent: object) -> str:
 def _aggregates(
     resolved: ResolvedExperiment, result: "object", agent: object
 ) -> list[dict[str, object]]:
-    design = _effective_design(resolved, agent)
+    # A single executed condition has nothing to compare against, so it carries
+    # NO comparison design — `matched_pairs` on a one-arm run names pairs that
+    # were never formed. The field is optional in the bundle schema precisely so
+    # a run that compares nothing can say so by omission.
+    design = _effective_design(resolved, agent) if len(resolved.conditions) > 1 else None
     aggregates: list[dict[str, object]] = []
     baseline = next(
         (str(c["id"]) for c in resolved.conditions if c["enforcement"] == "off"), None

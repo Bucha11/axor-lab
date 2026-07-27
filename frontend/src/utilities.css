@@ -45,7 +45,7 @@ select { appearance: none; }
 /* the UA default is a saturated system blue, the one colour on these screens
    that belongs to no part of the palette — and checkboxes are now the primary
    control on the measurement page, so there are a lot of them */
-input[type="checkbox"] { accent-color: #9B8CCC; }
+input[type="checkbox"], input[type="radio"] { accent-color: #9B8CCC; }
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .animate-spin { animation: spin 1.2s linear infinite; }

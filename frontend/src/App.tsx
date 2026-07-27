@@ -2,12 +2,13 @@
 // accent) — NOT a Control Plane tab. Router-driven; every surface is reachable
 // by a deep link so runs (#/runs/{run_id}), publications (#/e/{publication_id})
 // and EvidenceCases (#/e/{publication_id}/evidence/{trace_id}) are addressable.
-// Five primary tabs; the rest behind "more…".
+// Four primary tabs; the rest behind "more…".
 import { C, MONO } from "./theme";
 import { useQuery } from "@tanstack/react-query";
 import { navigate, useRoute } from "./router";
 import { api } from "./api";
 import Home from "./tabs/Home";
+import Governance from "./tabs/Governance";
 import LiveModels from "./tabs/LiveModels";
 import AgentIngest from "./tabs/AgentIngest";
 import RunProgress from "./tabs/RunProgress";
@@ -28,17 +29,23 @@ import Workspace from "./tabs/Workspace";
 // scenario, compare models — are ways to START something and live where you
 // start, on the home page.
 //
-// There is no "experiments" entry any more. Home IS the experiment: the default
-// measurement is on screen before you click anything, so a tab that navigated to
-// "where you configure a run" was a tab pointing at the page you were already
-// on.
+// There is no "experiments" entry any more. Home IS the experiment — the
+// playground, where you pick an agent, point it at tasks and optionally attach a
+// gate — so a tab reading "experiments" pointed at the page you were already on.
+// Governance sits in the overflow for the same reason it is an optional third
+// axis rather than the headline: it is something you can add to a run here, not
+// what the Lab is for.
 const PRIMARY = [
-  { id: "home", label: "measure" },
+  { id: "home", label: "playground" },
   { id: "results", label: "results" },
   { id: "published", label: "catalog" },
   { id: "incidents", label: "incidents" },
 ] as const;
 const MORE = [
+  // the governance add-on, priced against a published benchmark. It is reached
+  // from the playground's governance axis, where the question comes up; the nav
+  // entry is for coming back to it, not for discovering it.
+  { id: "governance", label: "what a gate costs" },
   { id: "verify", label: "verify a package" },
   { id: "workspace", label: "workspace" },
 ] as const;
@@ -109,7 +116,8 @@ function TierBadge() {
 
 // which primary tab a route key highlights
 function activeTab(key: string): string {
-  if (key === "" || key === "benchmark") return "home";
+  if (key === "") return "home";
+  if (key === "benchmark") return "governance";
   if (key === "e") return "published";
   return key;
 }
@@ -142,9 +150,10 @@ export default function App() {
         <TierBadge />
       </div>
 
-      {/* `#/benchmark` was the constructor's route; it now lands on the live
-          measurement, so every existing link keeps working */}
-      {(key === "home" || key === "" || key === "benchmark") && <Home />}
+      {(key === "home" || key === "") && <Home />}
+      {/* `#/benchmark` was this page's route through two earlier shapes, so it
+          keeps resolving rather than 404ing someone's saved link */}
+      {(key === "governance" || key === "benchmark") && <Governance />}
       {key === "builder" && <Builder />}
       {key === "runs" && <RunProgress runId={p1} />}
       {key === "results" && <Results runId={p1} />}

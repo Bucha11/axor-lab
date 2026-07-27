@@ -471,8 +471,13 @@ def plan_experiment(experiment: dict[str, object]) -> dict[str, object]:
     the runtime later runs each unit and pushes its trace."""
     scenarios = [str(s) for s in (experiment.get("scenario_ids") or []) if s]
     conditions = experiment.get("condition_ids") or experiment.get("conditions") or []
+    # a condition/v1 object names itself `id`; `condition_id` is the flattened
+    # form callers pass. Reading only the flattened key turned every condition
+    # dict into the literal string "None", so a two-arm experiment planned two
+    # trials with the SAME id — the conditions were indistinguishable in the
+    # plan. Every test fed the flattened form, so only `compose` ever hit it.
     condition_ids = [
-        str(c.get("condition_id") if isinstance(c, dict) else c)
+        str(c.get("condition_id") or c.get("id") if isinstance(c, dict) else c)
         for c in conditions if c
     ]
     try:

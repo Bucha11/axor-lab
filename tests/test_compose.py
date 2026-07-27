@@ -116,6 +116,44 @@ class ComposeTest(unittest.TestCase):
                 compose({"suite": "banking", "repeats": bad})
             self.assertEqual(caught.exception.status, 400)
 
+    def test_governance_can_be_left_out_entirely(self) -> None:
+        # The Lab is a playground first: running your own agent against these
+        # scenarios with NO gate anywhere is a first-class experiment, not a
+        # degenerate comparison. run_mode executes the baseline alone.
+        from lab_runner.experiment_file import resolve
+
+        composed = compose({"suite": "banking", "repeats": 5, "run_mode": "ungoverned"})
+        experiment = composed["document"]["experiment"]
+        # the axis under study stays DECLARED — the document still records what
+        # the other arm would have been — while only the baseline runs
+        self.assertEqual(
+            [c["id"] for c in experiment["conditions"]], [BASELINE_CONDITION, "governed"],
+        )
+        self.assertEqual(
+            [c["id"] for c in resolve(composed["document"]).conditions], [BASELINE_CONDITION],
+        )
+
+    def test_the_plan_counts_only_the_conditions_that_run(self) -> None:
+        # Planning the governed arm for a run that never executes it would report
+        # every governance-free run as half-missing.
+        both = compose({"suite": "banking", "repeats": 5})
+        alone = compose({"suite": "banking", "repeats": 5, "run_mode": "ungoverned"})
+        self.assertEqual(len(both["planned_trials"]), 2 * len(alone["planned_trials"]))
+
+    def test_planned_trial_ids_name_their_condition(self) -> None:
+        # `plan_experiment` read `condition_id` off a condition/v1 object, whose
+        # field is `id` — so every condition planned as the literal "None" and a
+        # two-arm experiment produced each trial id TWICE.
+        planned = compose({"suite": "banking", "repeats": 2})["planned_trials"]
+        self.assertEqual(len(planned), len(set(planned)))
+        self.assertNotIn("None", " ".join(planned))
+        self.assertTrue(any(f":{BASELINE_CONDITION}:" in t for t in planned))
+
+    def test_an_unknown_run_mode_is_refused(self) -> None:
+        with self.assertRaises(ComposeRefused) as caught:
+            compose({"suite": "banking", "run_mode": "whatever"})
+        self.assertEqual(caught.exception.status, 400)
+
 
 class ComposedRunTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -174,6 +212,33 @@ class ComposedRunTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["document"]["experiment"]["type"], "benchmark")
         self.assertGreater(body["estimate"]["trials"], 0)
+
+    def test_a_governance_free_run_reports_the_agent_and_claims_no_comparison(self) -> None:
+        # The playground run: one arm, no gate, and therefore NO comparison
+        # design — `matched_pairs` on a single-arm result would name pairs that
+        # were never formed. What you get is what your agent does unimpeded.
+        status, run = self._call(
+            "/runs/local",
+            {"compose": {"suite": "banking", "repeats": 3, "run_mode": "ungoverned"}},
+        )
+        self.assertEqual(status, 201)
+        status, results = self._call(f"/runs/{run['run_id']}/results")
+        self.assertEqual(status, 200)
+        arms = {a["condition_id"] for a in results["aggregates"]}
+        self.assertEqual(arms, {BASELINE_CONDITION})
+        self.assertEqual(run["missingness"], "n=9/9")
+        for aggregate in results["aggregates"]:
+            self.assertNotIn("comparison_design", aggregate)
+            self.assertIsNone(aggregate.get("test"))
+
+    def test_a_two_arm_run_still_declares_its_comparison_design(self) -> None:
+        status, run = self._call(
+            "/runs/local", {"compose": {"suite": "banking", "repeats": 3}},
+        )
+        self.assertEqual(status, 201)
+        _, results = self._call(f"/runs/{run['run_id']}/results")
+        for aggregate in results["aggregates"]:
+            self.assertEqual(aggregate["comparison_design"], "matched_pairs")
 
 
 if __name__ == "__main__":
