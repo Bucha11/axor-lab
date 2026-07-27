@@ -9,11 +9,16 @@ pip install axor-lab
 axor-lab serve --open
 ```
 
-That is the whole product: the web UI, the catalog, and the run API. The front
-page is a playground with three axes — **whose agent**, **what it is asked to
-do**, and **governance, which is optional**. Press Run and you have a real
-result in a second: a banking agent under a prompt-injected exfiltration
-attempt, with every trial's trace kept and exactly replayable.
+That is the whole product: the web UI, the catalog, and the run API. First run
+walks you through three questions — **whose agent**, **what it should try to
+do**, and **a gate in front of it or not** — one at a time, and it is skippable.
+At the end you have a real result in a second: a banking agent under a
+prompt-injected exfiltration attempt, with every trial's trace kept and exactly
+replayable.
+
+After that the questions are settled and never asked again. The agent is chosen
+once on its own screen and everything runs against it; the experiment list is
+where you live.
 
 Governance is something you can attach, not the price of entry. Leave the third
 axis off and the run has no gate in it anywhere — you get your agent's own

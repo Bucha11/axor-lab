@@ -17,10 +17,18 @@ interface AppState {
   // AXOR_LAB_WRITE_TOKEN): publish, attest, POST /api/incidents. Empty when
   // the server runs open (local dev).
   writeToken: string;
+  // whose agent every experiment runs against, chosen once on the agent screen
+  // instead of re-asked on every screen that starts a run
+  agentSource: string;
+  // the first-run wizard is done (or was skipped). Persisted, so the setup
+  // questions are asked once and never again.
+  setupDone: boolean;
   setLastRun: (runId: string) => void;
   setRuntimeRef: (runtimeRef: string | null) => void;
   setControlToken: (token: string) => void;
   setWriteToken: (token: string) => void;
+  setAgentSource: (source: string) => void;
+  setSetupDone: (done: boolean) => void;
 }
 
 export const useApp = create<AppState>()(
@@ -30,10 +38,14 @@ export const useApp = create<AppState>()(
       runtimeRef: null,
       controlToken: "",
       writeToken: "",
+      agentSource: "bundled",
+      setupDone: false,
       setLastRun: (runId) => set({ lastRunId: runId }),
       setRuntimeRef: (runtimeRef) => set({ runtimeRef }),
       setControlToken: (token) => set({ controlToken: token }),
       setWriteToken: (token) => set({ writeToken: token }),
+      setAgentSource: (agentSource) => set({ agentSource }),
+      setSetupDone: (setupDone) => set({ setupDone }),
     }),
     { name: "axor-lab" },
   ),

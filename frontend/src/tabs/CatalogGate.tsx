@@ -1,21 +1,14 @@
-// The entry point: a wizard the first time, the experiment list after.
-//
-// Everything that used to be on this page — agent, tasks, gate, results, the
-// other doors — is now a screen of its own. What is left here is the one
-// decision this file is qualified to make: has this person been set up before?
-//
-// It also owns the single /catalog fetch that the setup screens share, so each
-// of them can take a resolved Catalog and contain no loading states.
+// One place that turns "the catalog might not be there" into "here is a
+// Catalog". The experiment screens are about experiments; none of them should
+// carry a spinner branch and an unreachable-server branch of its own.
 import { useQuery } from "@tanstack/react-query";
 import { C, MONO } from "../theme";
 import { api } from "../api";
-import { useApp } from "../store";
 import EmptyState, { Cmd } from "../components/EmptyState";
-import Welcome from "./Welcome";
 import Experiments from "./Experiments";
+import NewExperiment from "./NewExperiment";
 
-export default function Home() {
-  const setupDone = useApp((s) => s.setupDone);
+export default function CatalogGate({ screen }: { screen: "list" | "new" }) {
   const catalog = useQuery({ queryKey: ["catalog"], queryFn: api.catalog });
 
   if (catalog.isLoading) {
@@ -31,7 +24,7 @@ export default function Home() {
       </div>
     );
   }
-  return setupDone
-    ? <Experiments catalog={catalog.data} />
-    : <Welcome catalog={catalog.data} />;
+  return screen === "new"
+    ? <NewExperiment catalog={catalog.data} />
+    : <Experiments catalog={catalog.data} />;
 }

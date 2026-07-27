@@ -2,7 +2,7 @@
 // accent) — NOT a Control Plane tab. Router-driven; every surface is reachable
 // by a deep link so runs (#/runs/{run_id}), publications (#/e/{publication_id})
 // and EvidenceCases (#/e/{publication_id}/evidence/{trace_id}) are addressable.
-// Four primary tabs; the rest behind "more…".
+// Five primary tabs; the rest behind "more…".
 import { C, MONO } from "./theme";
 import { useQuery } from "@tanstack/react-query";
 import { navigate, useRoute } from "./router";
@@ -22,6 +22,8 @@ import IncidentView from "./tabs/IncidentView";
 import Incidents from "./tabs/Incidents";
 import Verify from "./tabs/Verify";
 import Builder from "./tabs/Builder";
+import AgentSetup from "./tabs/AgentSetup";
+import CatalogGate from "./tabs/CatalogGate";
 import Workspace from "./tabs/Workspace";
 
 // The nav reads as words, not route ids, and lists only things that PERSIST and
@@ -29,14 +31,17 @@ import Workspace from "./tabs/Workspace";
 // scenario, compare models — are ways to START something and live where you
 // start, on the home page.
 //
-// There is no "experiments" entry any more. Home IS the experiment — the
-// playground, where you pick an agent, point it at tasks and optionally attach a
-// gate — so a tab reading "experiments" pointed at the page you were already on.
-// Governance sits in the overflow for the same reason it is an optional third
-// axis rather than the headline: it is something you can add to a run here, not
-// what the Lab is for.
+// The three axes of a run used to be three stacked panels on one page. They are
+// screens now, in the order they depend on each other — `agent` is chosen once
+// and sticks, `experiments` runs against whatever it holds — because a page that
+// asks everything at once answers nothing. `home` is the entry point: the setup
+// wizard the first time, the experiment list ever after.
+//
+// Governance sits in the overflow because it is an optional axis rather than the
+// headline: something you can add to a run here, not what the Lab is for.
 const PRIMARY = [
-  { id: "home", label: "playground" },
+  { id: "experiments", label: "experiments" },
+  { id: "agent", label: "agent" },
   { id: "results", label: "results" },
   { id: "published", label: "catalog" },
   { id: "incidents", label: "incidents" },
@@ -116,7 +121,9 @@ function TierBadge() {
 
 // which primary tab a route key highlights
 function activeTab(key: string): string {
-  if (key === "") return "home";
+  // `/` is the entry point (wizard first time, list after), so it lights the
+  // same tab the list does rather than a "home" entry that does not exist
+  if (key === "" || key === "home") return "experiments";
   if (key === "benchmark") return "governance";
   if (key === "e") return "published";
   return key;
@@ -151,6 +158,11 @@ export default function App() {
       </div>
 
       {(key === "home" || key === "") && <Home />}
+      {key === "agent" && <AgentSetup />}
+      {/* the composer needs a resolved catalog; CatalogGate fetches it once so
+          the screen itself carries no loading or error branch */}
+      {key === "experiments" && p1 === "new" && <CatalogGate screen="new" />}
+      {key === "experiments" && p1 !== "new" && <CatalogGate screen="list" />}
       {/* `#/benchmark` was this page's route through two earlier shapes, so it
           keeps resolving rather than 404ing someone's saved link */}
       {(key === "governance" || key === "benchmark") && <Governance />}
