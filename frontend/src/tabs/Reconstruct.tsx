@@ -18,6 +18,19 @@
 //
 // So: your first incident is reconstructed. Every one after it replays exactly,
 // because by then Axor was there when it happened.
+//
+// The distinction this screen must never blur: reconstruction rebuilds the
+// incident's WORLD, not its AGENT. A trace records the decisions an agent made;
+// you cannot rebuild the decider from a recording of its decisions. So the agent
+// is still the thing under test and still has to be wrapped — what the customer
+// is spared is not the integration, it is having had Axor installed at the
+// moment the incident happened. What they DO save: every tool result is frozen
+// from the trace into a fixture, so none of their production tools, backends or
+// credentials are needed.
+//
+//     world       (tool results + the injection)   ← fixtures, from the trace
+//     agent       (the thing that decides)         ← live, wrapped, theirs
+//     governance  (labels, gates, decide)          ← the kernel
 import { ChangeEvent, useState } from "react";
 import { ArrowRight, FileJson, Play, RefreshCw, TriangleAlert, Upload } from "lucide-react";
 import { C, MONO, cta, inp } from "../theme";
@@ -27,7 +40,10 @@ import { useApp } from "../store";
 import Why from "../components/Why";
 
 export default function Reconstruct() {
-  const { setLastRun } = useApp();
+  const { setLastRun, agentSource: chosen, runtimeRef } = useApp();
+  // their agent, wrapped, is the actual deliverable; the stand-in only shows the
+  // mechanism firing on this world
+  const theirAgent = chosen === "runtime" && !!runtimeRef;
   const [draft, setDraft] = useState<Reconstruction | null>(null);
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +89,19 @@ export default function Reconstruct() {
           where: { "args.recipient": { equal: { input_ref: "legitimate_recipient" } } },
         },
       };
+      if (theirAgent) {
+        // assigned to the runtime: THEIR agent decides, on their infrastructure,
+        // in the world we rebuilt. That is the measurement worth having.
+        const composed = await api.composeReconstructed(scenario, draft.manifests, governed, 10);
+        const experiment = (composed.document as { experiment: Record<string, unknown> }).experiment;
+        const created = await api.createRun(
+          runtimeRef!, experiment, composed.planned_trials,
+          composed.estimate as unknown as Record<string, unknown>,
+        );
+        setLastRun(created.run_id);
+        navigate(`runs/${created.run_id}`);
+        return;
+      }
       const landed = await api.runReconstructed(scenario, draft.manifests, governed, 10);
       setLastRun(landed.run_id);
       navigate(`results/${landed.run_id}`);
@@ -89,7 +118,19 @@ export default function Reconstruct() {
       </h1>
       <div style={{ fontFamily: MONO, fontSize: 11, color: C.mut, lineHeight: 1.7, marginBottom: 8 }}>
         For an incident that happened <b style={{ color: C.text }}>before</b> Axor was installed.
-        Your logs become a scenario you confirm, then run.
+        We rebuild its <b style={{ color: C.text }}>world</b> from your logs and run an agent
+        through it. Your production tools and credentials are not needed — every tool result is
+        frozen from the trace.
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <Why label="what gets rebuilt, and what doesn't">
+          The task, the tools and their shapes, what each tool returned including the poisoned
+          field, and the harmful call that followed — all recoverable. The{" "}
+          <b style={{ color: C.text }}>agent</b> is not: a trace records the decisions an agent
+          made, and you cannot rebuild the decider from a recording of its decisions. So the agent
+          is still the thing under test and still has to be wrapped. What you are spared is not the
+          integration — it is having had Axor installed at the moment this happened.
+        </Why>
       </div>
       <div style={{ marginBottom: 20 }}>
         <Why label="why can't you just replay my logs?">
@@ -205,6 +246,32 @@ export default function Reconstruct() {
             </div>
           )}
 
+          <Section label="Who decides" />
+          <div
+            className="p-3"
+            style={{
+              background: C.panel, borderRadius: 8, marginBottom: 14,
+              border: `1px solid ${theirAgent ? C.green : C.amber}`,
+            }}
+          >
+            <div style={{ fontFamily: MONO, fontSize: 11, color: theirAgent ? C.green : C.amber, fontWeight: 600 }}>
+              {theirAgent ? `your agent · ${runtimeRef}` : "a stand-in, not your agent"}
+            </div>
+            <div style={{ fontFamily: MONO, fontSize: 10, color: C.mut, lineHeight: 1.7, marginTop: 5 }}>
+              {theirAgent
+                ? "Your runtime executes the trials in the world we rebuilt, so the result is a measurement of your agent under governance — the deliverable."
+                : "This shows the mechanism firing on this shape of incident. It says nothing about how your agent behaves, and the result carries that limitation wherever it goes."}
+              {!theirAgent && (
+                <button
+                  onClick={() => navigate("agent")}
+                  style={{ display: "block", background: "none", border: "none", padding: "8px 0 0", cursor: "pointer", color: C.violet, fontFamily: MONO, fontSize: 10.5 }}
+                >
+                  connect your agent to measure it →
+                </button>
+              )}
+            </div>
+          </div>
+
           <label className="wrapline" style={{ gap: 8, cursor: "pointer", marginBottom: 16 }}>
             <input type="checkbox" checked={governed} onChange={(e) => setGoverned(e.target.checked)} />
             <span style={{ fontFamily: MONO, fontSize: 11.5, color: governed ? C.text : C.mut }}>
@@ -229,8 +296,15 @@ export default function Reconstruct() {
           <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.7, marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
             The run is real — a genuine Axor trace, a real EvidenceCase, a pinnable regression case.
             What it is not is a replay: it measures a <b style={{ color: C.mut }}>model of</b> your
-            incident, and how well the model holds depends on how well the scenario above captures
-            what actually happened. That sentence travels with the result.
+            incident's world, and nothing of the agent is replayed. That sentence travels with the
+            result, in the publication's limitations, not just on this screen.
+            <div style={{ marginTop: 8 }}>
+              And this is why it is worth doing even though the agent still has to be wrapped: the
+              incident stops being a one-off event and becomes a repeatable test. Run it thirty
+              times for a rate with a confidence interval, run it under a different policy, pin it
+              as a regression, re-check it on every future kernel and policy change. You no longer
+              wait for the next incident to learn anything.
+            </div>
           </div>
         </>
       )}

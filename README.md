@@ -229,9 +229,31 @@ Reconstruction proposes the tools, the task, the injected content and where it
 entered, and the harmful call that followed; it refuses to invent `task_success`,
 because that would quietly define what "the agent did its job" means. You confirm
 the draft, run it, and the trace that comes out is genuine — real EvidenceCase,
-pinnable regression, publishable. The scenario carries `reconstructed_from` so
-every publication built from it states the limitation automatically: this
-measures a **model of** your incident, not the incident.
+pinnable regression, publishable.
+
+**It rebuilds the incident's *world*, never its agent.** A trace records the
+decisions an agent made; you cannot rebuild the decider from a recording of its
+decisions, so the agent stays the thing under test and still has to be wrapped.
+What you are spared is not the integration — it is having had Axor installed at
+the moment the incident happened. What you *do* save is your production tools:
+every tool result is frozen from the trace into a fixture, so no backends and no
+credentials are needed.
+
+```
+world      (tool results + the injection)  ← fixtures, from the incident trace
+agent      (the thing that decides)        ← live, wrapped, yours
+governance (labels, gates, decide)         ← the kernel
+```
+
+Run it on a connected runtime and the result measures **your** agent. Run it on
+the bundled stand-in and it shows the mechanism firing on your incident's world
+and nothing about your agent — a legitimate first-contact demo, and the
+publication says so in its limitations either way, derived from the artifacts
+rather than from whoever renders the number.
+
+Worth doing even though the agent must be wrapped: the incident stops being a
+one-off event and becomes a repeatable test — a rate with a CI, a different
+policy, a pinned regression, re-checked on every future kernel change.
 
 So your first incident is reconstructed, and every one after it replays exactly,
 because by then Axor was there when it happened. Full contract:

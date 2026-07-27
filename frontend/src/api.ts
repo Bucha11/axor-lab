@@ -694,6 +694,19 @@ export const api = {
     jf("/runs/local", post({
       reconstructed: { scenario, manifests, repeats, governed },
     })).then((r) => j<LocalRunResult>(r)),
+  // the same confirmed draft, assembled for a RUNTIME to execute. This is the
+  // path that makes the result a measurement of THEIR agent: reconstruction
+  // rebuilds the incident's world, never its agent, so who runs it decides what
+  // the number means.
+  composeReconstructed: (
+    scenario: Record<string, unknown>,
+    manifests: Record<string, unknown>[],
+    governed: boolean,
+    repeats: number,
+  ) =>
+    jf("/incidents/reconstruct/compose", post({
+      scenario, manifests, repeats, governed,
+    })).then((r) => j<ComposeResult>(r)),
 
   importIncident: async (pkg: IncidentPackage): Promise<IncidentImportResult> => {
     const token = useApp.getState().writeToken;

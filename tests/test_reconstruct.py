@@ -238,6 +238,36 @@ class PublicationHonestyTest(unittest.TestCase):
             tuple(DEFAULT_LIMITATIONS),
         )
 
+    def test_a_stand_in_result_is_never_presentable_as_their_agent(self) -> None:
+        # Reconstruction rebuilds the incident's WORLD; the agent is the thing
+        # under test and was never in the recording. A stand-in shows the
+        # mechanism firing on that world and nothing about anyone's agent, and
+        # presenting it as theirs is the worst claim this path can make — so the
+        # limitation is stamped on the artifact, not left to a screen.
+        from lab_server.store import _limitations_for
+
+        draft = reconstruct(FLAT, name="standin-test")
+        document = build_experiment(
+            _confirmed(draft), draft.manifests,
+            _conditions(["ungoverned", "governed"]), repeats=4,
+        )
+        bundle = run_local(document)["bundle"]
+        limitations = _limitations_for(bundle)
+        self.assertTrue(any("STAND-IN" in limit for limit in limitations))
+        self.assertTrue(any("cannot rebuild the decider" in limit for limit in limitations))
+
+    def test_the_agent_axis_reaches_the_document(self) -> None:
+        # which agent runs decides what the number MEANS, so it has to be a
+        # parameter of the confirmed draft rather than a constant in the builder
+        from lab_server.reconstruct_api import build_confirmed
+
+        draft = reconstruct(FLAT)
+        document = build_confirmed({
+            "scenario": _confirmed(draft), "manifests": draft.manifests,
+            "repeats": 2, "agent_ref": "scripted@0.9",
+        })
+        self.assertEqual(document["experiment"]["agent_ref"], "scripted@0.9")
+
     def test_the_marker_is_machine_readable_not_prose(self) -> None:
         # `notes` says it too, but a limitation that depends on someone reading
         # prose is not a limitation.
@@ -312,6 +342,25 @@ class EndpointTest(unittest.TestCase):
         }})
         self.assertEqual(status, 400)
         self.assertIn("task_success", body["error"])
+
+    def test_a_confirmed_draft_composes_for_a_runtime_to_execute(self) -> None:
+        # THEIR agent, on their infrastructure, in the world we rebuilt — the
+        # measurement worth having, and a different endpoint from the local run
+        _, draft = self._post("/incidents/reconstruct", {"trace": FLAT})
+        scenario = draft["scenario"]
+        scenario["inputs"] = {"landlord_iban": "GB29NWBK60161331926819"}
+        scenario["task_success"] = {
+            "event": "tool_call", "tool": "send_money",
+            "where": {"args.recipient": {"equal": {"input_ref": "landlord_iban"}}},
+        }
+        status, body = self._post("/incidents/reconstruct/compose", {
+            "scenario": scenario, "manifests": draft["manifests"],
+            "repeats": 3, "governed": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(body["document"]["experiment"]["run_mode"], "compare")
+        self.assertEqual(len(body["planned_trials"]), 6)
+        self.assertEqual(len(set(body["planned_trials"])), 6)
 
     def test_nothing_is_stored(self) -> None:
         self._post("/incidents/reconstruct", {"trace": FLAT})

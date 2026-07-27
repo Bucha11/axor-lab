@@ -77,6 +77,67 @@ Both are pinned by `tests/test_reconstruct.py`:
   would emit a violation predicate on an argument the runner never binds: the
   attack lands, the predicate never fires, ASR 0 for a reason nobody can see.
 
+## Where the agent comes from (reconstruction gives you a world, not an agent)
+
+The most important thing reconstruction does **not** recover: **the agent
+itself.** A trace records the decisions an agent made; you cannot rebuild the
+decider from a recording of its decisions. So the split is:
+
+| Piece | Recovered from the incident trace? |
+|---|---|
+| the task | ✅ → `task` |
+| tools that existed, their shapes | ✅ → draft `tool-manifest`s |
+| **what the tools returned, including the poisoned field** | ✅ → `fixtures` + `injection_placement` |
+| the harmful call that followed | ✅ → `violation` predicate |
+| **the agent that decided to make that call** | ❌ — it is the thing under test |
+
+Therefore the pitch must be exact:
+
+> ✅ "We rebuild the incident's **world** and run **your agent** through it."
+> ❌ "We replay your incident." — nothing of the agent is replayed.
+
+**Wrapping is still required.** What the customer is spared is not the
+integration — it is having had Axor installed *at the moment the incident
+happened*.
+
+### What they gain by not needing production tools
+
+Because tool results are frozen from the trace into fixtures, the reconstruction
+needs **none of their production tools, backends, or credentials**. The
+environment is deterministic; only the agent is live:
+
+```
+world      (tool results + the injection)  ← fixtures, from the incident trace
+agent      (the thing that decides)        ← live, wrapped, theirs
+governance (labels, gates, decide)         ← the kernel
+```
+
+This is the same property that keeps an attack scenario from creating a real
+incident (`threat-model.md`): side-effecting tools are simulated by default, and
+a reconstructed sink gets `noop_stub` — the attempt is recorded, nothing is
+pretended.
+
+### Fidelity ladder for the agent
+
+| Agent used | What it proves | Honest label |
+|---|---|---|
+| **Their agent, wrapped** (`POST /incidents/reconstruct/compose` → assign to a connected runtime) | governance behaviour on *their* agent — the actual deliverable | the real result |
+| **A stand-in** (`POST /runs/local {reconstructed}`, `scripted@…`) | that the *mechanism* fires on this shape of incident | must be marked "not your agent — a stand-in on your incident's world" |
+
+The stand-in is legitimate for a first-contact demo before any integration
+exists, and it is the honest bridge from "we cannot touch your agent yet" to a
+real run. It must never be presented as a measurement of their agent — so the
+label is **not** left to whichever screen renders the number:
+`store._limitations_for` stamps it onto the publication whenever a reconstructed
+scenario ran against a scripted provider.
+
+### Why bother, if the agent has to be wrapped anyway
+
+Because the incident stops being a one-off event and becomes a **repeatable
+test**: run it 30 times and get a rate with a CI, run it under a different
+policy, pin it as a regression, re-check it on every future kernel and policy
+change. You no longer wait for the next incident to learn anything.
+
 ## What this means for claims
 
 - The run itself is real: its trace is conformant and its verdicts replay
@@ -88,6 +149,9 @@ Both are pinned by `tests/test_reconstruct.py`:
 - Any EvidenceCase rendered from `heuristic_attribution` data carries the
   non-soundness warning (`provenance-semantics.md` §5) and is labeled
   *indicative*, not authoritative.
+- A run of a reconstructed scenario against a **stand-in** carries a second
+  mandatory limitation naming that fact. Both are derived from the artifacts, so
+  neither depends on a renderer remembering them.
 
 ## The commercial story (stronger, not weaker)
 
@@ -98,7 +162,9 @@ Both are pinned by `tests/test_reconstruct.py`:
 That is a reason to install, not an excuse.
 
 ```
-incident (pre-Axor) → import logs → assisted scenario reconstruction → governed/ungoverned run
+incident (pre-Axor) → import logs → assisted scenario reconstruction (the WORLD)
+                                          + wrap their agent (the DECIDER)
+                                          → governed/ungoverned run
                                                                               ↓
                                                                   EvidenceCase + regression
                                                                               ↓
@@ -117,7 +183,8 @@ validating → importing → replaying → analyzing → completed
 pipeline that ends in a scenario:
 
 ```
-importing → extracting → scenario draft → user confirms → (then a normal run)
+importing → extracting → scenario draft → user confirms → (then a normal run:
+                                                          demo | connected_runtime)
 ```
 
 Modeling it as a "run" was part of the confusion: nothing is executed during
@@ -130,9 +197,15 @@ and decides nothing; it is a pure function of its input.
   exactly."
 - ✅ "We can reconstruct a pre-Axor incident as a scenario and measure governance
   on it."
-- ❌ "Import your incident and replay it" — not if Axor was not there.
+- ✅ "We rebuild your incident's world from the trace and run *your* agent
+  through it — wrapped, governed vs ungoverned."
+- ✅ "You do not need your production tools or credentials for this — the tool
+  results are frozen from the incident."
+- ❌ "Import your incident and replay it" — not if Axor was not there, and never
+  for the agent's behaviour.
 - ❌ "We infer provenance from your existing traces" — heuristic attribution is
   never presented as sound.
+- ❌ Showing a stand-in agent's result as their agent's result.
 
 ## Refusals, and why each one is a refusal
 

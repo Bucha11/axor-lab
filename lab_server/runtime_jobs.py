@@ -30,6 +30,11 @@ Control surface (Lab operator / UI):
                                verdict; see contracts/incident-import.md). The
                                sibling POST /api/incidents replays an Axor trace
                                exactly — these are two paths, not two modes.
+  POST /incidents/reconstruct/compose  a CONFIRMED draft -> {document, planned_trials,
+                               estimate} for a runtime to execute. Reconstruction
+                               rebuilds the incident's WORLD, never its agent, so
+                               running it on the customer's own wrapped agent is
+                               what makes the result a measurement of that agent.
   POST /wrap/scan            scan uploaded agent code for tools (axor-wrap; wrap_api.py)
   POST /wrap/manifests       human-classified tools -> tool manifests + governance YAML
 
@@ -914,6 +919,16 @@ def make_runtime_server(
                         # 422 for "understood it, cannot draft it" — an Axor trace
                         # that should be replayed instead, a recording with no
                         # tool calls. The reason is the actionable part.
+                        raise RuntimeJobsError(exc.status, str(exc)) from exc
+                    return
+                if self.path == "/incidents/reconstruct/compose":
+                    # the same confirmed draft, assembled for a runtime to run:
+                    # their agent on their infrastructure is what makes the
+                    # result a measurement of THEIR agent rather than a demo
+                    self._require_control()
+                    try:
+                        self._send(200, reconstruct_api.handle_compose(self._read_json()))
+                    except PublishRejected as exc:
                         raise RuntimeJobsError(exc.status, str(exc)) from exc
                     return
                 if self.path == "/replay":

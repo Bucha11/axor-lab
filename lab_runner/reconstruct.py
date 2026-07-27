@@ -30,6 +30,29 @@ regression case, and claims that describe THAT run rather than the incident.
 So the generic trace's job is to author a scenario, not to be replayed. Nothing
 in this module executes anything or decides anything; it reads, proposes, and
 says what it could not find.
+
+WHAT IS AND IS NOT RECOVERED — the distinction the whole product rests on. This
+rebuilds the incident's WORLD, never its AGENT:
+
+    task                                    ✅ → `task`
+    tools that existed, their shapes        ✅ → draft manifests
+    what the tools RETURNED, poison and all ✅ → `fixtures` + injection_placement
+    the harmful call that followed          ✅ → `violation`
+    the agent that decided to make it       ❌ — it is the thing under test
+
+You cannot rebuild a decider from a recording of its decisions. So the honest
+sentence is "we rebuild the incident's world and run YOUR agent through it", and
+never "we replay your incident" — nothing of the agent is replayed.
+
+What the customer is spared is therefore not the integration; their agent still
+has to be wrapped. What they are spared is having had Axor installed at the
+moment the incident happened. And because every tool result is frozen from the
+trace into a fixture, the reconstruction needs none of their production tools,
+backends or credentials:
+
+    world       (tool results + the injection)   ← fixtures, from the trace
+    agent       (the thing that decides)         ← live, wrapped, theirs
+    governance  (labels, gates, decide)          ← the kernel
 """
 
 from __future__ import annotations
@@ -654,6 +677,18 @@ def build_experiment(
     From here on nothing is reconstructed: this is an ordinary Lab experiment
     that happens to have been authored from an incident, and the trace it
     produces is a real one.
+
+    `agent_ref` is the axis that decides what the result MEANS. The scenario is
+    the incident's world; the agent is the thing under test, and it was never in
+    the recording:
+
+      * their agent, wrapped (a connected runtime) — governance behaviour on
+        THEIR agent, which is the actual deliverable;
+      * `scripted@…`, the stand-in — proves the MECHANISM fires on this shape of
+        incident, and nothing about their agent. Legitimate for first contact
+        before any integration exists; never presentable as their result, which
+        is why `store._limitations_for` stamps it on the publication rather than
+        leaving it to the screen that happened to render it.
     """
     return {
         "experiment": {

@@ -136,6 +136,22 @@ def _limitations_for(bundle: dict[str, object]) -> tuple[str, ...]:
             f"incident, not the incident — how well it holds depends on how well the scenario "
             f"captures what happened"
         )
+        # A reconstruction rebuilds the incident's WORLD. The agent is the thing
+        # under test and was never in the recording, so which agent ran decides
+        # what the number means. A stand-in shows the MECHANISM fires on this
+        # shape of incident and says nothing about anyone's agent — and a
+        # stand-in result presented as theirs is the single worst claim this
+        # path can make, so it is stamped here rather than left to a screen.
+        provider = str(
+            bundle.get("environment", {}).get("model", {}).get("provider", "")  # type: ignore[union-attr]
+        )
+        if provider in ("", "scripted"):
+            extra.append(
+                "the agent was a STAND-IN, not the agent from the incident — a trace records "
+                "the decisions an agent made and cannot rebuild the decider, so this shows the "
+                "mechanism firing on the incident's world, never how that agent behaves. Wrap "
+                "the real agent and re-run to measure it"
+            )
         break
     return tuple(DEFAULT_LIMITATIONS) + tuple(extra)
 
