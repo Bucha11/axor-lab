@@ -1,11 +1,14 @@
 # axor-lab
 
-Axor Lab — standalone research surface for the Axor governance stack: bring an agent, run attack scenarios ungoverned/governed on simulated tools, investigate single trials (EvidenceCase), replay governance verdicts exactly, and publish reproducible bundles.
+Axor Lab — a reproducible experiment platform for AI agents: bring an agent, bring or author an experiment suite, run it, inspect any trial, curate EvidenceCases, pin executable regressions, and export reproducible artifacts. **Governance is an optional capability** that suites may use, not the spine.
 
+**Today the code is narrower than that.** What is implemented is the governance capability end-to-end (paired ungoverned/governed runs on simulated tools, exact verdict replay, injection EvidenceCases, verdict-pin regressions, publishable bundles). The path from here to the platform above is written down:
+
+- **[docs/spec-suite-platform/](docs/spec-suite-platform/)** — the **governing** product spec (Experiment Suite Platform RFC + Web UX RFC + design boards) and **[INTEGRATION_PLAN.md](docs/spec-suite-platform/INTEGRATION_PLAN.md)** — the gap analysis and phased plan for getting there. Read this first; it supersedes the v0.3 narrative.
 - **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — the production-ready implementation plan (phases, reuse map, milestones, definition of done). The MVP spine is implemented; see its status block.
 - **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the post-MVP plan: BYOK model adapter, Control Plane export, full web app, production hardening, then the Later tier (instrumented endpoints, sandbox + cloud code, multi-agent games, population scale) and the commercial track.
 - **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
-- **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3), packaging/economics, bench format guide, UI mocks.
+- **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3 — superseded as narrative by `docs/spec-suite-platform/`), packaging/economics, bench format guide, UI mocks.
 
 ## Maturity — subsystems are NOT equally production-ready
 
