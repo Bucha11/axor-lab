@@ -1,6 +1,8 @@
 # Axor Lab — Suite Platform Integration Plan
 
-**Status:** plan, not yet implemented.
+**Status:** Phase 0 done (spec adopted, conflicts resolved). Phase 1 schema layer
+landed and green; the rest of Phase 1 (lifecycle / ui-backend / mvp contract docs)
+and Phases 2-6 are not implemented.
 **Authority:** the Experiment Suite Platform RFC in this directory is the
 governing spec. Where it and `docs/spec-v0.3/` disagree, **the new spec wins**.
 Where it and `contracts/` disagree, the new spec sets the *target* and
@@ -89,14 +91,14 @@ Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 
 | Spec concept | Repo today | Gap |
 |---|---|---|
-| Experiment Suite | `.axl` file + `experiment/v1` + implicit bench | **large** — no evaluators/metrics/aggregations/artifact-layout/regression-rules; no SDK; `conditions` mandatory |
+| Experiment Suite | `suite/v1` **landed**; `.axl` + `experiment/v1` still the executed path | **medium** — the manifest exists and validates; no SDK and no runner support yet (Phase 2) |
 | Experiment Run | `Run` / `run_experiment_suite()` | small — rename + drop governance assumptions |
-| Trial | `trial` record in `bundle/v1` | **medium** — carries no metrics (no latency, tokens, cost, steps) |
+| Trial | `trial` record in `bundle/v1`, now with a `metrics` block | **small** — schema **landed**; the runner does not populate it yet (Phase 2) |
 | Observation / Trace | `trace/v1` + value ledger | **none** — richer than the spec asks |
-| EvidenceCase | `lab_runner/evidence.py`, 3 governance modes | **large** — hardwired to the injection chain; no `kind` |
-| Regression | `lab_runner/regression.py`, pinned verdict sequence | **large** — only gate verdicts; no metric/predicate invariants |
-| Artifact | `bundle/v1` + `publication/v1` | **medium** — missing suite ref, agent identity block, metrics, embedded evidence/regressions, reproduce instructions |
-| Governance (optional) | the spine | **inversion** — see §4.1 |
+| EvidenceCase | `evidence-case/v1` **landed**; `lab_runner/evidence.py` still governance-only | **medium** — generic schema exists; extraction is still hardwired to the injection chain (Phase 2) |
+| Regression | `regression/v1` **landed** (4 rule kinds); `lab_runner/regression.py` pins verdicts only | **medium** — schema exists; only `verdict_sequence` is executable today (Phase 2) |
+| Artifact | `artifact/v1` **landed** as a wrapper over `bundle/v1` | **small** — schema exists and preserves bundle hashes; nothing emits one yet (Phase 2) |
+| Governance (optional) | optional in the **schemas**; still the spine in the **code** | **inversion, half done** — see §4.1; the code split is Phase 2 |
 | Suite SDK | — | **absent** |
 | Suite Builder | `docs/**/mocks/lab-builder.jsx` | **absent** (no frontend) |
 | Home / Launchpad | server-rendered publication catalog | **absent** — different concept (past vs next action) |
