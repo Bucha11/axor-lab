@@ -24,6 +24,8 @@ packages = [
     "lab_adapters",
     "lab_server",
     "lab_agent",
+    "lab_suite",
+    "lab_suite.builtin",
 ]
 
 # ship the contract schemas as package data so an installed wheel is
