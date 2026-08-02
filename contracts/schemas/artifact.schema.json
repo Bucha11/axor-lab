@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/artifact.schema.json",
+  "title": "Axor Lab Artifact",
+  "description": "The portable, reproducible output of a Run (Suite Platform RFC §14) and the platform's user-facing noun — the UI says Artifact, never 'bundle'. It carries the suite, configuration, environment, agent identity, observations, traces, metrics, EvidenceCases, regressions, reproduce instructions, signatures and hashes.\n\nDELIBERATELY A WRAPPER, not a superset: an artifact EMBEDS a bundle/v1 body verbatim rather than restating its fields. bundle/v1 is content-addressed and its hashes are already published, so restating its fields in a new shape would invalidate every existing hash; nesting it keeps `content_hash(artifact.bundle)` equal to the hash the bundle always had. A pre-Suite-Platform bundle therefore upgrades losslessly: wrap it, leave suite/evidence_cases/regressions empty, and every prior hash still verifies.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "created",
+    "bundle"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "artifact/v1"
+    },
+    "artifact_id": {
+      "type": "string"
+    },
+    "created": {
+      "type": "string",
+      "description": "RFC3339"
+    },
+    "bundle": {
+      "$ref": "bundle.schema.json",
+      "description": "the reproducible core, embedded byte-for-byte: scenarios, conditions, tool manifests, environment, trials (with their metrics), aggregates, content hashes"
+    },
+    "suite": {
+      "$ref": "suite.schema.json",
+      "description": "the RESOLVED suite manifest that produced this run — scenario_refs already resolved to bodies, so a later registry change cannot retroactively alter what this artifact says was run. Absent for an artifact produced from a hand-authored experiment with no suite."
+    },
+    "agent_identity": {
+      "type": "object",
+      "description": "the fingerprint of what actually ran. bundle.environment records the execution environment; this records the AGENT, which the RFC names as its own artifact component.",
+      "additionalProperties": false,
+      "properties": {
+        "agent_ref": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "content hash over the agent's identity-bearing configuration"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "params_hash": {
+          "type": "string",
+          "description": "hash of the inference params; a temperature change is an identity change"
+        },
+        "determinism": {
+          "enum": [
+            "deterministic",
+            "stochastic"
+          ],
+          "description": "whether the agent's behaviour is fixed by (scenario, seed). A matched-pairs design requires 'deterministic'; a stochastic agent's arms are independent samples."
+        }
+      }
+    },
+    "evidence_cases": {
+      "type": "array",
+      "items": {
+        "$ref": "evidence-case.schema.json"
+      },
+      "description": "investigations curated from this run's trials, travelling WITH the artifact so a reader gets the findings, not just the data"
+    },
+    "regressions": {
+      "type": "array",
+      "items": {
+        "$ref": "regression.schema.json"
+      },
+      "description": "invariants pinned from this run, each carrying its own outcome history"
+    },
+    "reproduce": {
+      "type": "object",
+      "description": "how to re-run this. The RFC lists reproduce instructions as a first-class artifact component precisely so reproduction is not folklore.",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "the exact CLI invocation, e.g. 'axor-lab run suite.axl --out ./bundle'"
+        },
+        "tool_version": {
+          "type": "string"
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "what a reproducer must supply that the artifact cannot contain — model API credentials, a specific kernel build, a private dataset. An empty list is a CLAIM that the artifact is self-contained."
+        },
+        "reproducibility": {
+          "enum": [
+            "exact_replay",
+            "statistically_reproducible",
+            "not_reproducible"
+          ],
+          "description": "the honest ceiling. exact_replay = frozen traces recompute bit-identically; statistically_reproducible = a fresh live run should agree within CI; not_reproducible = traces were excluded (artifact.include_traces=false) or the environment cannot be recreated. A behavioural delta can never claim exact_replay (claims.md)."
+        }
+      }
+    },
+    "content_hashes": {
+      "type": "object",
+      "description": "hashes over the artifact's own parts, including `bundle` as a whole. The embedded bundle keeps its own internal content_hashes untouched.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "signature": {
+      "type": "object",
+      "description": "optional author signature over the canonical artifact body",
+      "additionalProperties": false,
+      "properties": {
+        "alg": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "signed_ref": {
+          "type": "string",
+          "description": "the content hash actually signed — a signature that does not name what it covers proves nothing"
+        }
+      }
+    }
+  }
+}

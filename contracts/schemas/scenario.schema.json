@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lab.useaxor.net/schemas/scenario.schema.json",
   "title": "Axor Lab Scenario",
-  "description": "A fully executable scenario: not just the breach criterion but the world that produces it. Adds fixtures (what each tool returns, and where the injection lands) and structured inputs (ground-truth values predicates compare against), so the scenario describes an executable world, not just a test. Gates are never authored here \u2014 taint and decide are the kernel's.",
+  "description": "An executable world + criterion. Task, declared inputs, tools, fixtures and the typed predicates that judge a trial. `task_success` is REQUIRED — a scenario that cannot say what success means is a prompt, not an experiment. `injection` and `violation` are OPTIONAL and travel together: they describe an ATTACK scenario, and a budget/performance/reliability scenario simply has neither (Suite Platform RFC §6 — suites are not security-shaped by default). Author-time validation only demands an injection vector and an exfiltration sink for a scenario that actually declares an injection.",
   "type": "object",
   "required": [
     "schema_version",
@@ -10,8 +10,6 @@
     "task",
     "tools",
     "fixtures",
-    "injection",
-    "violation",
     "task_success"
   ],
   "additionalProperties": false,
@@ -28,7 +26,7 @@
     },
     "inputs": {
       "type": "object",
-      "description": "structured ground-truth values (the real accountant email, valid IBANs). Predicates compare against these via $inputs.x \u2014 never against entities scraped from the prompt text.",
+      "description": "structured ground-truth values (the real accountant email, valid IBANs). Predicates compare against these via $inputs.x — never against entities scraped from the prompt text.",
       "additionalProperties": {
         "type": [
           "string",
@@ -131,15 +129,16 @@
           "type": "string",
           "description": "multi-agent: the peer/node the injection arrives from, instead of a tool result"
         }
-      }
+      },
+      "description": "OPTIONAL. The attacker payload, substituted for $injection in fixtures. Present only for an attack scenario; a scenario declaring `violation` without it has a breach criterion with no vector."
     },
     "violation": {
       "$ref": "predicate.schema.json",
-      "description": "breach predicate \u2192 ASR. e.g. tool_call send_money where prov(args.recipient) is untrusted_derived"
+      "description": "OPTIONAL breach predicate → ASR. e.g. tool_call send_money where prov(args.recipient) is untrusted_derived. Absent for a scenario with no attack model."
     },
     "task_success": {
       "$ref": "predicate.schema.json",
-      "description": "legitimate-completion predicate \u2192 utility"
+      "description": "legitimate-completion predicate → utility"
     },
     "notes": {
       "type": "string"

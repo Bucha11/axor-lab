@@ -206,6 +206,50 @@
             "type": "string",
             "description": "the ACTUAL resolved kernel backend's behavior identity (incl. behavior-changing flags), recorded at execution — distinct from the declared condition.kernel string (review r20)"
           },
+          "metrics": {
+            "type": "object",
+            "description": "what this trial COST and how it behaved, recorded at execution. The named properties below are platform-level; a suite contributes its own metrics under any other key (Suite Platform RFC §6 — suites define metrics). These are per-TRIAL observations, never aggregates: bundle.aggregates are recomputed from here and never trusted from an uploader. A metric_threshold regression (regression/v1) reads this object, which is why an unmeasured metric must be ABSENT rather than 0 — a missing measurement is not a measurement of zero.",
+            "additionalProperties": {
+              "type": [
+                "number",
+                "string",
+                "boolean"
+              ]
+            },
+            "properties": {
+              "duration_ms": {
+                "type": "number",
+                "minimum": 0,
+                "description": "wall-clock for the whole trial"
+              },
+              "steps": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "agent loop iterations"
+              },
+              "tool_calls": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "model_calls": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "type": "number",
+                "minimum": 0,
+                "description": "actual spend for this trial where the backend reports it; absent for a scripted/simulated agent that spends nothing measurable"
+              }
+            }
+          },
           "execution_order": {
             "type": "integer",
             "minimum": 0,

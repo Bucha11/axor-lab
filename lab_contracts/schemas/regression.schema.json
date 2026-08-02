@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/regression.schema.json",
+  "title": "Axor Lab Regression",
+  "description": "An EXECUTABLE INVARIANT derived from a trial (Suite Platform RFC §9). Not a governance concept: 'latency < threshold', 'budget <= limit', 'task_success == true', 'forbidden_tool_calls == 0', a gate verdict sequence and a custom evaluator outcome are all the same kind of object. A regression never carries natural language as its rule — `expectation` is prose FOR HUMANS and is never evaluated; `rule` is the machine-checked part. Superseded the governance-only pin: a pinned verdict sequence is now one rule kind among several.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "rule"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "regression/v1"
+    },
+    "id": {
+      "type": "string",
+      "description": "e.g. 'RG-42'"
+    },
+    "name": {
+      "type": "string"
+    },
+    "created": {
+      "type": "string",
+      "description": "RFC3339"
+    },
+    "author": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "active",
+        "paused",
+        "retired"
+      ],
+      "default": "active",
+      "description": "paused = kept but not run; retired = intentionally no longer an invariant. A regression is never DELETED on failure — a failing invariant is a finding, not a bug in the invariant."
+    },
+    "source": {
+      "type": "object",
+      "description": "the trial this invariant was extracted FROM. Present for a pinned regression, absent for one that ships with a suite.",
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "trial_id": {
+          "type": "string"
+        },
+        "trace_ref": {
+          "type": "string",
+          "description": "content hash of the frozen trace the pin was taken from"
+        },
+        "scenario_id": {
+          "type": "string",
+          "description": "the pin replays under ITS OWN scenario's inputs — a multi-scenario bundle must not evaluate a pin against the wrong scenario"
+        },
+        "condition_id": {
+          "type": "string"
+        },
+        "evidence_case_id": {
+          "type": "string",
+          "description": "set when the regression was pinned from an EvidenceCase (the RFC's evidence → regression path)"
+        }
+      }
+    },
+    "rule": {
+      "description": "the machine-checked invariant. Exactly one kind.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/predicate_rule"
+        },
+        {
+          "$ref": "#/$defs/metric_threshold_rule"
+        },
+        {
+          "$ref": "#/$defs/verdict_sequence_rule"
+        },
+        {
+          "$ref": "#/$defs/evaluator_rule"
+        }
+      ]
+    },
+    "expectation": {
+      "type": "string",
+      "description": "prose shown in the Regression screen's Expectation panel. Documentation ONLY — never parsed, never evaluated. If it disagrees with `rule`, `rule` is what runs."
+    },
+    "scope": {
+      "type": "object",
+      "description": "which trials the invariant applies to. Absent = every trial in the run.",
+      "additionalProperties": false,
+      "properties": {
+        "scenario_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "condition_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "quantifier": {
+          "enum": [
+            "all",
+            "any"
+          ],
+          "default": "all",
+          "description": "all = every in-scope trial must satisfy the rule (the safe default); any = at least one must"
+        }
+      }
+    },
+    "history": {
+      "type": "array",
+      "description": "append-only outcome log — the Regression screen's History panel",
+      "items": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "error",
+              "skipped"
+            ],
+            "description": "error = the invariant could not be EVALUATED (a malformed trace, a missing metric, an unresolvable kernel). Never collapsed into 'failed': not knowing is not the same as knowing it broke."
+          },
+          "detail": {
+            "type": "string"
+          },
+          "observed": {
+            "description": "the value actually seen, for a threshold rule"
+          },
+          "trials_checked": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "trials_failed": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "predicate_rule": {
+      "type": "object",
+      "description": "a typed predicate/v1 evaluated over the trial's trace. This is the general case — the predicate language already expresses 'forbidden_tool_calls == 0' and 'task succeeded'.",
+      "required": [
+        "kind",
+        "predicate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "predicate"
+        },
+        "predicate": {
+          "$ref": "predicate.schema.json"
+        },
+        "expect": {
+          "type": "boolean",
+          "default": true,
+          "description": "the required truth value of the predicate"
+        }
+      }
+    },
+    "metric_threshold_rule": {
+      "type": "object",
+      "description": "a bound on a metric — 'latency < threshold', 'budget <= limit'. Reads trial.metrics (bundle/v1) or a suite-declared metric. An ABSENT metric yields history.status = 'error', never a silent pass: an unmeasured latency is not a fast one.",
+      "required": [
+        "kind",
+        "metric",
+        "op",
+        "value"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "metric_threshold"
+        },
+        "metric": {
+          "type": "string",
+          "description": "a trial.metrics key or a suite metric name"
+        },
+        "aggregate": {
+          "enum": [
+            "value",
+            "mean",
+            "median",
+            "sum",
+            "min",
+            "max",
+            "p50",
+            "p95",
+            "p99"
+          ],
+          "default": "value",
+          "description": "'value' checks each in-scope trial individually (with scope.quantifier); anything else checks ONE number computed across the in-scope trials"
+        },
+        "op": {
+          "enum": [
+            "lt",
+            "lte",
+            "gt",
+            "gte",
+            "eq",
+            "neq"
+          ]
+        },
+        "value": {
+          "type": "number"
+        }
+      }
+    },
+    "verdict_sequence_rule": {
+      "type": "object",
+      "description": "GOVERNANCE CAPABILITY. The pinned (trace, expected verdict sequence) that used to be the only regression kind. The WHOLE ordered sequence is pinned, not just the presence of a DENY, so a changed verdict order is still a change.",
+      "required": [
+        "kind",
+        "verdicts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "verdict_sequence"
+        },
+        "verdicts": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ALLOW",
+              "DENY"
+            ]
+          },
+          "description": "the ordered gate verdicts the frozen trace must reproduce"
+        },
+        "kernel": {
+          "type": "string",
+          "description": "the kernel the pin was taken under. Replaying under a different kernel is a counterfactual, and the result is reported as such rather than as a regression."
+        }
+      }
+    },
+    "evaluator_rule": {
+      "type": "object",
+      "description": "the outcome of a suite-declared evaluator (suite/v1 evaluation.evaluators)",
+      "required": [
+        "kind",
+        "evaluator"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "evaluator_outcome"
+        },
+        "evaluator": {
+          "type": "string",
+          "description": "the evaluator id"
+        },
+        "expect": {
+          "description": "the required result; any JSON value, compared by canonical equality"
+        }
+      }
+    }
+  }
+}

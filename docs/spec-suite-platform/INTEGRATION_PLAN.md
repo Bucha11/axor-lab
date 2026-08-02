@@ -105,9 +105,9 @@ Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 | Multi-agent topologies | `lab_games` deleted | deferred — see §4.7 |
 | Open core split | design-only; `lab_entitlement` deleted | deferred — see §4.8 |
 
-### 2.3 The two hard blockers
+### 2.3 The hard blockers *(all three cleared in Phase 1)*
 
-Everything else is additive. These two are structural and gate the rest:
+Everything else is additive. These are structural and gated the rest:
 
 - **`experiment.schema.json` → `conditions: minItems 2`.** The schema makes a
   single-arm, no-governance experiment *unrepresentable*. Nothing in the spec's
@@ -118,6 +118,10 @@ Everything else is additive. These two are structural and gate the rest:
   spec's regression examples are `latency < threshold` and `budget <= limit`.
   The trial record has none of them. This blocks three screens and half the
   regression kinds.
+- **`scenario.schema.json` requires `injection` and `violation`.** Found while
+  writing the first governance-free example: a scenario with no attack model —
+  every Budget, Performance and Reliability scenario — could not be expressed
+  either. Same inversion, one level down.
 
 ---
 
@@ -347,7 +351,22 @@ Each phase is independently shippable and leaves the test suite green.
 
 **Exit:** a reader knows which document wins. No code change.
 
-### Phase 1 — Domain re-model (contracts first) · ~1 week
+### Phase 1 — Domain re-model (contracts first) · ~1 week — **schemas landed**
+
+**Status: the schema + contract layer is done and green** (626 tests, both
+validators, 14/14 slice examples). What remains in this phase is the
+`lifecycle.md` / `ui-backend-contract.md` / `mvp-contract.md` rewrites, which
+describe surfaces Phase 3 builds.
+
+A third blocker of the same family surfaced while writing the first
+governance-free example and is fixed: **`scenario/v1` required `injection` and
+`violation`**, so a Budget or Performance scenario — one with no attack model at
+all — was as unrepresentable as a run with no conditions. Both are now optional
+and travel together; `task_success` stays required (a scenario that cannot say
+what success means is a prompt, not an experiment), and declaring a `violation`
+with no `injection` is now an explicit authoring error rather than a breach
+criterion that can never fire.
+
 
 This repo is contract-first; schemas lead, code follows.
 

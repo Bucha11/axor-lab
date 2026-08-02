@@ -2,14 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lab.useaxor.net/schemas/experiment.schema.json",
   "title": "Axor Lab Experiment",
-  "description": "Binds what runs to how it's compared: a scenario/bench set, the conditions to compare, repeats, the agent artifact, and the experiment type. Conditions live HERE, not in a scenario \u2014 the same scenario is reused across conditions.",
+  "description": "Binds what runs to how it's observed: a scenario/bench set, repeats, the agent artifact, the experiment type, and OPTIONALLY the conditions to compare. Conditions live HERE, not in a scenario \u2014 the same scenario is reused across conditions. An experiment with no `conditions` is a single-arm run (just execute the agent and observe); governance is a capability an experiment opts into by declaring conditions, never a requirement (Suite Platform RFC \u00a710).",
   "type": "object",
   "required": [
     "schema_version",
     "id",
     "type",
     "scenario_ids",
-    "conditions",
     "repeats",
     "agent_ref"
   ],
@@ -38,13 +37,17 @@
       "type": "string",
       "description": "optional: an ordered bench instead of a loose scenario set"
     },
+    "suite_ref": {
+      "type": "string",
+      "description": "the suite/v1 manifest this experiment was resolved from (id or content hash). Absent for a hand-authored experiment that no suite produced."
+    },
     "conditions": {
       "type": "array",
       "items": {
         "$ref": "condition.schema.json"
       },
-      "minItems": 2,
-      "description": "\u22652 to compare; each differs in exactly the axis under study"
+      "minItems": 1,
+      "description": "OPTIONAL. Omit for a single-arm run (the agent is executed and observed, no enforcement axis). 1 condition pins one configuration explicitly; \u22652 compares, and each must differ in exactly the axis under study. A comparison claim (comparison_design, a paired test, the Control Plane bridge) requires \u22652 \u2014 that is enforced where the claim is made, not here."
     },
     "repeats": {
       "type": "integer",

@@ -36,11 +36,26 @@ def validate_scenario(scenario: dict[str, object], manifests: dict[str, dict[str
     tool_ids = _declared_tool_ids(scenario, manifests, errors)
     inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
 
+    # task_success is required by the schema; violation is optional — a
+    # budget/performance/reliability scenario has no attack model and therefore
+    # no breach predicate (Suite Platform RFC §6).
     for name in ("violation", "task_success"):
-        _check_predicate(scenario[name], name, tool_ids, inputs, errors, manifests)  # type: ignore[arg-type]
+        predicate = scenario.get(name)
+        if predicate is None:
+            continue
+        _check_predicate(predicate, name, tool_ids, inputs, errors, manifests)  # type: ignore[arg-type]
 
-    _check_injection_vector(scenario, manifests, errors)
-    _check_sink_exists(scenario, manifests, errors)
+    # An injection vector and an exfiltration sink are only meaningful for a
+    # scenario that actually declares an injection. Demanding them of every
+    # scenario is what made a non-security suite unrepresentable.
+    if scenario.get("injection") is not None:
+        _check_injection_vector(scenario, manifests, errors)
+        _check_sink_exists(scenario, manifests, errors)
+    elif scenario.get("violation") is not None:
+        errors.append(
+            "[validating] scenario declares a 'violation' breach predicate but no 'injection' — "
+            "a breach criterion with no attack vector can never fire"
+        )
     _check_manifest_input_refs(scenario, manifests, inputs, errors)
 
     if errors:

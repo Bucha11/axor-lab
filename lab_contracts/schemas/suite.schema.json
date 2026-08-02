@@ -1,0 +1,547 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/suite.schema.json",
+  "title": "Axor Lab Experiment Suite",
+  "description": "The executable specification of an experiment, and the CORE abstraction of the platform (Suite Platform RFC §6). One suite defines scenarios, agents, environment/tools, execution strategy, evaluators, metrics, aggregations, artifact layout and regression rules. THIS IS THE PORTABLE MANIFEST: the Builder's Basic, Advanced and YAML modes all edit this one document (RFC §13), so any field a Builder screen can set MUST have a home here — a field that exists only in Basic mode is state the YAML mode cannot see, and is a bug. Governance is opt-in via `capabilities` + `execution.conditions`, never assumed.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "execution"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "suite/v1"
+    },
+    "id": {
+      "type": "string",
+      "description": "stable suite identity, e.g. 'agentdojo' or 'acme.refund-policy'"
+    },
+    "name": {
+      "type": "string",
+      "description": "display name — the Suite Catalog card title"
+    },
+    "version": {
+      "type": "string",
+      "description": "the suite's own version, e.g. '2.1'. Distinct from schema_version."
+    },
+    "description": {
+      "type": "string",
+      "description": "one line; the catalog card subtitle"
+    },
+    "origin": {
+      "enum": [
+        "built_in",
+        "workspace",
+        "community",
+        "imported"
+      ],
+      "description": "catalog provenance. Drives the Suite Catalog's filter tabs (All / Built-in / My Suites / Community); it is NOT a trust statement."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "optional platform capabilities this suite opts into. Deliberately an open string list, not an enum — a third-party suite may register its own (RFC §17). Known: 'governance' (policy gates + verdict replay; requires execution.conditions), 'provenance', 'control_plane_export'. A suite that declares nothing here runs with no governance machinery at all — that is the default, per RFC §10."
+    },
+    "agents": {
+      "type": "array",
+      "description": "the agents under test. A list from day one so the platform stays agent-count agnostic (RFC §11); a single-agent suite has exactly one entry. Executing more than one is a later phase, but the manifest must already be able to SAY it.",
+      "items": {
+        "type": "object",
+        "required": [
+          "ref"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "ref": {
+            "type": "string",
+            "description": "the AgentRef this entry binds"
+          },
+          "role": {
+            "type": "string",
+            "description": "the agent's role in the topology, e.g. 'planner', 'worker', 'reviewer', 'attacker', 'defender'. Absent for a single-agent suite."
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "system_prompt": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "description": "inference params (temperature, top_p, max_tokens, …). Part of the agent's identity for reproducibility."
+          },
+          "tool_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "which of environment.tools this agent may call; absent means all of them"
+          }
+        }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "description": "how the agents relate. Only the suite changes to go multi-agent (RFC §11) — the artifact, evidence and regression formats are already agent-count agnostic. Accepted and validated now; only 'single' is executed before the multi-agent phase.",
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "single",
+            "planner_workers",
+            "reviewer_pipeline",
+            "negotiation",
+            "swarm",
+            "attacker_defender"
+          ]
+        },
+        "edges": {
+          "type": "array",
+          "description": "directed role-to-role links for the topologies that need them",
+          "items": {
+            "type": "object",
+            "required": [
+              "from",
+              "to"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "$ref": "scenario.schema.json"
+      },
+      "description": "scenarios carried INLINE, so the manifest is self-contained and portable. A suite may instead (or additionally) name registry scenarios via scenario_refs; semantics require at least one of the two to be non-empty."
+    },
+    "scenario_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "scenarios resolved from a registry by name. Resolution happens at plan time; the resolved bodies are frozen into the artifact so a registry change cannot retroactively alter a finished run."
+    },
+    "environment": {
+      "type": "object",
+      "description": "the world the scenarios run in — Builder section 3 (Environment & Tools).",
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "tool-manifest.schema.json"
+          },
+          "description": "tool manifests available to the agents. tool-manifest/v1 is axor-core-shared — Lab consumes it, does not own it."
+        },
+        "simulation": {
+          "type": "object",
+          "description": "simulated-tool settings; the default input mode (RFC §5). A simulated environment produces observations without any live side effect.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "strict_manifest": {
+              "type": "boolean",
+              "description": "reject a simulated result that does not conform to the tool's result_schema"
+            }
+          }
+        },
+        "fixtures": {
+          "type": "object",
+          "description": "suite-level fixtures merged under each scenario's own fixtures; a scenario's own value wins on conflict"
+        },
+        "variables": {
+          "type": "object",
+          "description": "named values scenarios may reference via $inputs"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "description": "how trials are produced — Builder section 4 (Execution). The only REQUIRED block besides identity, because a suite that cannot say how it runs is not executable.",
+      "required": [
+        "repeats"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "enum": [
+            "matrix",
+            "sequential"
+          ],
+          "default": "matrix",
+          "description": "matrix = the full scenario × condition × repeat cross product (the default); sequential = scenarios in declared order, no cross product"
+        },
+        "repeats": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "n per (scenario, condition). statistics.md governs the unit of analysis."
+        },
+        "seed_policy": {
+          "enum": [
+            "fixed",
+            "per_repeat",
+            "random"
+          ],
+          "default": "per_repeat",
+          "description": "'random' forfeits exact reproducibility and is refused by a suite that also declares a matched-pairs aggregation"
+        },
+        "seeds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "explicit seeds when seed_policy is 'fixed'"
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        },
+        "timeout_s": {
+          "type": "number",
+          "minimum": 0,
+          "description": "per-trial wall-clock ceiling; an exceeded trial is recorded failed, never silently dropped"
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "a retry REPLACES its trial (same coordinate), never adds a second experimental unit"
+        },
+        "budgets": {
+          "type": "object",
+          "description": "HARD run-wide ceilings, checked before the run and before every provider call. A stopped run is labelled completed_partial / stopped_cost_ceiling — never completed.",
+          "additionalProperties": false,
+          "properties": {
+            "max_usd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "max_input_tokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "max_output_tokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "max_trials": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "condition.schema.json"
+          },
+          "minItems": 1,
+          "description": "GOVERNANCE CAPABILITY ONLY. Omit for a plain single-arm run — that is the default and the common case. Present only when the suite declares 'governance' in capabilities."
+        }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "description": "how a trial is judged and summarised — Builder section 5 (Evaluation).",
+      "additionalProperties": false,
+      "properties": {
+        "evaluators": {
+          "type": "array",
+          "description": "per-trial judgements. Each produces a named value that metrics and regressions can read.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "produces"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "predicate",
+                  "trial_metric",
+                  "suite_hook"
+                ],
+                "description": "predicate = a typed predicate/v1 evaluated over the trace (never natural language); trial_metric = read a value straight off trial.metrics; suite_hook = the suite's own code via the Suite SDK"
+              },
+              "predicate": {
+                "$ref": "predicate.schema.json"
+              },
+              "metric": {
+                "type": "string",
+                "description": "for kind=trial_metric: the trial.metrics key to read"
+              },
+              "hook": {
+                "type": "string",
+                "description": "for kind=suite_hook: the SDK entry point"
+              },
+              "produces": {
+                "type": "string",
+                "description": "the name this evaluator's result is published under"
+              }
+            }
+          }
+        },
+        "metrics": {
+          "type": "array",
+          "description": "the named quantities this suite reports. A metric DECLARES what it measures; aggregations say how it is summarised.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string",
+                "description": "display label for the Run Report tile"
+              },
+              "kind": {
+                "enum": [
+                  "boolean",
+                  "count",
+                  "duration_ms",
+                  "tokens",
+                  "usd",
+                  "ratio",
+                  "number"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "evaluator",
+                  "trial_metric"
+                ],
+                "default": "trial_metric"
+              },
+              "from": {
+                "type": "string",
+                "description": "the evaluator id or trial.metrics key this metric reads"
+              },
+              "unit": {
+                "type": "string"
+              },
+              "direction": {
+                "enum": [
+                  "higher_is_better",
+                  "lower_is_better",
+                  "neutral"
+                ],
+                "description": "drives the Run Report's delta arrow colour; 'neutral' renders no judgement"
+              }
+            }
+          }
+        },
+        "aggregations": {
+          "type": "array",
+          "description": "how metrics are summarised across trials. THIS is where a comparison test becomes part of a suite rather than a platform default (RFC §10): a paired McNemar is something a governance-comparison suite ASKS for, and a single-arm suite simply never declares it.",
+          "items": {
+            "type": "object",
+            "required": [
+              "metric",
+              "fn"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "metric": {
+                "type": "string"
+              },
+              "fn": {
+                "enum": [
+                  "rate",
+                  "mean",
+                  "median",
+                  "sum",
+                  "count",
+                  "min",
+                  "max",
+                  "p50",
+                  "p95",
+                  "p99"
+                ]
+              },
+              "unit_of_analysis": {
+                "enum": [
+                  "trial",
+                  "run"
+                ],
+                "default": "trial",
+                "description": "per statistics.md this is the Run or the Trial, never a round"
+              },
+              "group_by": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "scenario_id",
+                    "condition_id",
+                    "agent_ref"
+                  ]
+                }
+              },
+              "interval": {
+                "enum": [
+                  "wilson",
+                  "bootstrap",
+                  "none"
+                ],
+                "default": "none"
+              },
+              "test": {
+                "enum": [
+                  "mcnemar",
+                  "two_proportion",
+                  "none"
+                ],
+                "default": "none",
+                "description": "a test other than 'none' requires ≥2 conditions and a comparison design; declaring one on a single-arm suite is a validation error, not a silently-skipped field"
+              }
+            }
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "description": "what the run packages up — Builder section 6 (Artifact).",
+      "additionalProperties": false,
+      "properties": {
+        "include_traces": {
+          "type": "boolean",
+          "default": true,
+          "description": "false yields a metrics-only artifact that can NOT support EvidenceCases or exact replay; the artifact records the limitation rather than implying reproducibility it cannot deliver"
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "overview",
+              "metrics",
+              "scenarios",
+              "failures",
+              "evidence",
+              "artifacts"
+            ]
+          },
+          "description": "the Run Report tabs this suite renders, in order"
+        },
+        "renderer": {
+          "type": "string",
+          "description": "'default', or a Suite SDK renderer id for a suite-specific artifact view"
+        },
+        "redact": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "field paths redacted before the artifact leaves the runtime"
+        }
+      }
+    },
+    "regressions": {
+      "type": "array",
+      "items": {
+        "$ref": "regression.schema.json"
+      },
+      "description": "invariants that ship WITH the suite and are checked on every run. Regressions pinned later from a specific trial are stored against the workspace, not written back here."
+    },
+    "config_schema": {
+      "type": "object",
+      "description": "Suite SDK: JSON Schema for the suite's own configuration knobs (RFC §12). The Builder renders it; a value that fails it is rejected at author time, not at run time."
+    },
+    "ui_schema": {
+      "type": "object",
+      "description": "Suite SDK: how the Builder should lay out config_schema — field order, grouping, widget hints, which section each field belongs to. Presentation only; it can never introduce a field config_schema does not define.",
+      "additionalProperties": false,
+      "properties": {
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "enum": [
+                  "agents",
+                  "scenarios",
+                  "environment",
+                  "execution",
+                  "evaluation",
+                  "artifact"
+                ],
+                "description": "the six Builder sections (RFC §13)"
+              },
+              "title": {
+                "type": "string"
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "advanced": {
+                "type": "boolean",
+                "description": "true = hidden in Basic mode, shown in Advanced. It is still the same manifest field either way."
+              }
+            }
+          }
+        }
+      }
+    },
+    "documentation_url": {
+      "type": "string",
+      "description": "the catalog card's Documentation link"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

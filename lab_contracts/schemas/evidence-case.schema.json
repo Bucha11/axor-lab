@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lab.useaxor.net/schemas/evidence-case.schema.json",
+  "title": "Axor Lab EvidenceCase",
+  "description": "A curated investigation of ONE trial (Suite Platform RFC §8). EvidenceCases are GENERIC — prompt injection, hallucination, latency spike, planner failure, budget overflow, consensus failure, secret leakage, unexpected recovery. They are explicitly not limited to security. The governance chain (injection → provenance → gated call → verdict) that used to BE the EvidenceCase is now one `kind` among many, contributed by the governance capability and carried in `governance`.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "kind",
+    "title",
+    "trial_ref"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "evidence-case/v1"
+    },
+    "id": {
+      "type": "string",
+      "description": "e.g. 'EC-124'"
+    },
+    "kind": {
+      "type": "string",
+      "description": "what KIND of investigation this is. Deliberately an open string, not an enum — a suite may register its own kind (RFC §17) and the platform must not have to ship a schema change for it. Known built-ins: prompt_injection, hallucination, latency_spike, planner_failure, budget_overflow, consensus_failure, secret_leakage, unexpected_recovery."
+    },
+    "title": {
+      "type": "string"
+    },
+    "created": {
+      "type": "string",
+      "description": "RFC3339"
+    },
+    "author": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "open",
+        "investigating",
+        "resolved",
+        "dismissed"
+      ],
+      "default": "open"
+    },
+    "severity": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "trial_ref": {
+      "type": "object",
+      "description": "the single trial under investigation. An EvidenceCase is a VIEW over a recorded trace — it never carries its own copy of the events, so it cannot drift from what actually ran.",
+      "required": [
+        "trial_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "trial_id": {
+          "type": "string"
+        },
+        "trace_ref": {
+          "type": "string",
+          "description": "content hash of the frozen trace"
+        },
+        "scenario_id": {
+          "type": "string"
+        },
+        "condition_id": {
+          "type": "string"
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "description": "what happened, in prose — the Overview panel"
+    },
+    "impact": {
+      "type": "object",
+      "description": "the Quick Stats panel",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "affected_trials": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "how many trials in the run show this pattern. A COUNT of trials matching, not a claim that each was individually reviewed."
+        },
+        "first_seen": {
+          "type": "string"
+        },
+        "last_seen": {
+          "type": "string"
+        }
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "description": "the ordered narrative rendered in the Timeline tab. Each entry POINTS AT a trace event by sequence rather than restating it, so the case cannot contradict the trace.",
+      "items": {
+        "type": "object",
+        "required": [
+          "seq"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "the trace event sequence this step refers to"
+          },
+          "t": {
+            "type": "string",
+            "description": "display offset, e.g. '00:03'"
+          },
+          "actor": {
+            "enum": [
+              "user",
+              "agent",
+              "tool",
+              "gate",
+              "system"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string",
+            "description": "the investigator's annotation — the one place prose is ADDED rather than referenced"
+          },
+          "highlight": {
+            "type": "boolean",
+            "description": "the step the case turns on; the Timeline renders it emphasised"
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "the trial metrics worth surfacing on this case (duration_ms, steps, tokens, cost_usd, or a suite metric). Copied for display; trial.metrics in the artifact stays authoritative.",
+      "additionalProperties": {
+        "type": [
+          "number",
+          "string",
+          "boolean"
+        ]
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "trace_excerpt",
+              "tool_result",
+              "model_output",
+              "screenshot",
+              "file",
+              "link"
+            ]
+          },
+          "ref": {
+            "type": "string",
+            "description": "content hash or URL"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "string",
+      "description": "free-form investigator notes — the Notes tab"
+    },
+    "linked_regressions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "regression/v1 ids pinned FROM this case (the RFC's evidence → regression path)"
+    },
+    "governance": {
+      "type": "object",
+      "description": "GOVERNANCE CAPABILITY ONLY. The provenance chain and verdict modes that used to be the whole EvidenceCase. Present only for a governance-capable run; absent for every other kind of investigation, which is the common case.",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "observed_ungoverned",
+            "counterfactual_policy_replay",
+            "observed_governed_twin"
+          ]
+        },
+        "chain": {
+          "type": "object",
+          "description": "injection → provenance → gated call → verdict, resolved from the trace's value ledger",
+          "additionalProperties": true
+        },
+        "twin_trial_id": {
+          "type": "string",
+          "description": "the paired trial for the twin/counterfactual modes"
+        },
+        "replay_status": {
+          "type": "string",
+          "description": "the replay outcome backing this case; an EvidenceCase claims exactly_replayable ONLY for a replayable status"
+        },
+        "explicit_flow_tracked": {
+          "type": "boolean",
+          "description": "VERIFIED flow tracking, not a self-report. An untrusted client's own labels are heuristic_attribution and must not set this."
+        }
+      }
+    }
+  }
+}
