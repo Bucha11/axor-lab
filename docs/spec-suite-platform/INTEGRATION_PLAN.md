@@ -8,6 +8,10 @@ Where it and `contracts/` disagree, the new spec sets the *target* and
 code does *today* — a schema is only "wrong" once its replacement is landed and
 green).
 
+**One deliberate deviation from the spec:** the "remote endpoint" input (spec
+§5) is **not adopted** — see §4.6. Every other spec-vs-repo conflict resolves in
+the spec's favour.
+
 Sources this plan reconciles:
 
 | Source | Role |
@@ -97,7 +101,7 @@ Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 | Suite Builder | `docs/**/mocks/lab-builder.jsx` | **absent** (no frontend) |
 | Home / Launchpad | server-rendered publication catalog | **absent** — different concept (past vs next action) |
 | Nav: Home/Suites/Runs/Evidence/Regressions/Artifacts/Settings | 3 HTML pages | **absent** |
-| Inputs: live / remote endpoint / uploaded traces / recorded bundles / simulated envs | connected-runtime + local simulated runner; import partial; endpoint removed | **medium** — see §4.6 |
+| Inputs: live / uploaded traces / recorded bundles / simulated envs (remote endpoint **dropped**, §4.6) | connected-runtime + local simulated runner; import partial | **small** — finish trace import; endpoint stays out |
 | Multi-agent topologies | `lab_games` deleted | deferred — see §4.7 |
 | Open core split | design-only; `lab_entitlement` deleted | deferred — see §4.8 |
 
@@ -153,10 +157,12 @@ contract:
 - **Rendered, never computed.** A screen renders what an endpoint returns; the
   server recomputes statistics from traces and never trusts an uploaded
   aggregate.
-- **Lab assigns, the runtime executes.** Lab does not dispatch tools or hold
-  tool credentials (`contracts/architecture-boundary.md`). The new spec's
-  "remote endpoint" input is satisfied as an *observation source*, not as Lab
-  becoming an enforcement proxy (§4.6).
+- **Lab assigns, the runtime executes.** Lab does not dispatch tools, hold tool
+  credentials, or act as a synchronous enforcement boundary
+  (`contracts/architecture-boundary.md`). This is why the spec's "remote
+  endpoint" input is dropped rather than reconciled (§4.6) — an agent behind an
+  HTTP endpoint is reached by a runtime adapter beside it, never by Lab calling
+  out.
 - **One word per concept.** The terminology lint stays; its vocabulary widens.
 
 ---
@@ -234,17 +240,30 @@ in the manifest, or the Basic mode silently owns state the YAML mode can't see.
 This is the main design constraint on Phase 1 and the reason the schema must
 land before any Builder work.
 
-### 4.6 "Remote endpoint" as an input vs the removed gateway **(reconciled, not overridden)**
+### 4.6 "Remote endpoint" as an input — **not adopted** *(owner decision, deviates from the spec)*
 
-Spec §5 lists "remote endpoint" among inputs; v0.3 deliberately deleted
-`lab_endpoint` because *Lab must not dispatch tools, hold tool credentials, or
-be a synchronous enforcement boundary*.
+Spec §5 lists "remote endpoint" among the inputs an experiment may consume.
+**Dropped from scope by owner decision.** This is the one place this plan
+knowingly does not follow the spec, recorded here so the deviation is traceable
+rather than silent.
 
-Resolution: a remote endpoint is an **observation source** — it pushes traces
-via the same runtime-adapter contract, exactly like a connected runtime. Lab
-still never dispatches. This satisfies the spec's input list without
-resurrecting the gateway. **Flagged as an open question** (§10) — if the intent
-was genuinely "Lab calls my HTTP agent", that is a different, larger decision.
+Rationale: v0.3 deleted `lab_endpoint` because *Lab must not dispatch tools,
+hold tool credentials, or be a synchronous enforcement boundary*
+(`contracts/architecture-boundary.md`). Reinstating an endpoint input reopens
+that boundary along with its SSRF and credential-custody surface, and buys
+nothing the four supported inputs don't already cover.
+
+**Supported inputs are therefore four, not five:** live agent execution (via a
+connected runtime), uploaded traces, recorded bundles, simulated environments.
+An agent that lives behind an HTTP endpoint is reached the same way any other
+agent is — a runtime adapter runs beside it and pushes traces. Lab never calls
+it.
+
+Consequences to hold to:
+- `suite/v1` must **not** grow an endpoint/URL field in Phase 1.
+- `TraceSource` stays `runtime | import | demo | offline_runner` — no `endpoint`
+  member.
+- If this is revisited, it is a separate RFC, not a schema patch.
 
 ### 4.7 Multi-agent **(spec wins, deferred)**
 
@@ -361,9 +380,14 @@ a v1 bundle still loads.
 - New `lab_suite/`: the `Suite` protocol per spec §12 (config schema, ui schema,
   validators, execution hooks, metrics, artifact renderer, regression extractor,
   evidence helpers) + a registry + manifest load/save/round-trip.
-- Built-in suites from the design's catalog: **AgentDojo** (port
-  `lab_adapters/agentdojo.py`), **Prompt Injection**, **Budget**,
-  **Performance**, **Reliability**, **Blank**.
+- Built-in suites — **launch set is three** (owner decision): **Blank**
+  (proves the SDK is authorable from nothing), **AgentDojo** (port
+  `lab_adapters/agentdojo.py` — proves an import path), **Budget** (proves the
+  new metrics layer, since it is nothing *but* metrics). Together they exercise
+  every SDK surface once. **Prompt Injection**, **Performance** and
+  **Reliability** trail into Phase 4/5 — the design's catalog shows six cards,
+  so the Suite Catalog screen must render a "coming soon" state rather than
+  pretend the other three exist.
 - New `lab_capabilities/governance/`: move `kernel.py`, condition resolution,
   the gate EvidenceCase extractor, verdict pins, `cp_export.py`, and the
   McNemar/earned-bridge path out of the spine. Public behaviour unchanged.
@@ -477,18 +501,27 @@ agnostic if Phase 1 does its job.
 | **Governance extraction regresses hardened behaviour** — 21 rounds of correctness work moves packages | Move code, don't rewrite it; the full existing suite must stay green at every commit of Phase 2 |
 | **Frontend is the largest single line item and has no prior art in-repo** | Phase 3 fixes the API contract first; screens ship one at a time against real endpoints |
 | **Spec is a v0.1 concept draft** — it is thinner than the contracts it's overriding (no schemas, no statistics semantics, no threat model) | Adopt its *structure* literally; keep the repo's field-level rigour as the extension layer, same interpretation rule v0.3 used |
-| **Six built-in suites is a lot of surface for Phase 2** | Blank + AgentDojo + Budget are the minimum for the catalog to be real; Performance/Reliability/Prompt Injection can trail |
+| **Catalog shows six suites, three exist** | Resolved: launch set of three (§6 Phase 2); the Suite Catalog renders an explicit unavailable state for the other three — never a card that runs nothing |
 
-## 10. Open questions
+## 10. Decisions taken and questions still open
 
-1. **Remote endpoint (§4.6)** — observation source (recommended, preserves the
-   architecture boundary), or does Lab genuinely call the agent's HTTP endpoint?
-   The second reopens the deleted gateway and its SSRF/credential surface.
-2. **Frontend location** — `web/` inside `axor-lab`, or a separate repo? The
+### Settled
+
+- **Remote endpoint — not adopted (§4.6).** Four inputs, not five; no endpoint
+  field in `suite/v1`, no `endpoint` member on `TraceSource`. Deviates from
+  spec §5 by owner decision.
+- **Built-in suites — three at launch (§6 Phase 2):** Blank, AgentDojo, Budget.
+  Prompt Injection / Performance / Reliability trail; the catalog shows them as
+  unavailable rather than faking them.
+
+### Still open — none of these block Phase 1
+
+1. **Frontend location** — `web/` inside `axor-lab`, or a separate repo? The
    open-core split (§4.8) argues for separate once the Builder is commercial.
-3. **Six built-in suites** — which three are the launch set?
-4. **Statistical defaults for single-arm suites** — descriptive + Wilson only,
-   or does a suite get to declare its own aggregation from day one?
-5. **Governance capability naming in the UI** — the boards show no governance
-   screens at all. Is governance a suite capability surfaced only inside a
-   suite's own config, or does it keep a top-level nav presence?
+   Decidable at Phase 4.
+2. **Statistical defaults for single-arm suites** — descriptive + Wilson only,
+   or does a suite get to declare its own aggregation from day one? Decidable
+   at Phase 2; Phase 1 only needs the manifest to have somewhere to put it.
+3. **Governance capability in the UI** — the boards show no governance screens
+   at all. Is governance surfaced only inside a suite's own config, or does it
+   keep a top-level nav presence? Decidable at Phase 3.
