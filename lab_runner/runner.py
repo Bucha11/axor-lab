@@ -9,6 +9,7 @@ on the same seed produce the discordant pairs McNemar needs.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -63,6 +64,58 @@ class TrialOutcome:
     trace: dict[str, object]
     violation: bool
     task_success: bool
+    # what the trial COST — recorded at execution, per bundle/v1 trial.metrics.
+    # A metric that was not measured is ABSENT from this dict, never 0: a
+    # metric_threshold regression over a missing measurement must error, not pass.
+    metrics: dict[str, object] = field(default_factory=dict)
+
+
+def _trial_metrics(
+    started: float, events: list[dict[str, object]], host: SimulatedToolHost
+) -> dict[str, object]:
+    """Platform-level per-trial metrics.
+
+    Only what this runner can honestly observe. A scripted/simulated agent
+    spends no money and makes no provider calls, so `cost_usd`, `tokens_in` and
+    `tokens_out` are deliberately omitted rather than reported as 0 — a suite
+    that runs a real model backend fills them in, and a budget invariant over an
+    unmeasured cost must error rather than silently pass.
+    """
+    duration_ms = (time.monotonic() - started) * 1000.0
+    tool_calls = sum(
+        1 for e in events
+        if e.get("type") in ("tool_call_intent", "tool_result")
+    )
+    return {
+        "duration_ms": round(duration_ms, 3),
+        "steps": len(events),
+        "tool_calls": tool_calls,
+    }
+
+
+OBSERVE_ONLY_CONDITION_ID = "observe"
+
+
+def observe_only_condition() -> dict[str, object]:
+    """The implicit single arm of a governance-free run.
+
+    An experiment may declare no conditions at all (Suite Platform RFC §10 —
+    "just run my agent and observe it"). A Run still needs ONE condition id to
+    coordinate its trials by, so the runner supplies this one. It names no
+    kernel, which is what makes the run gate-free: no kernel is resolved, no
+    gate_decision is emitted, and the trace records no kernel_version.
+
+    It is deliberately NOT `enforcement: on` with a permissive policy, and not
+    `off` with the reference kernel either — both of those would mean a gate ran
+    and allowed the call, which is a different and stronger claim than "nothing
+    was governing this run".
+    """
+    return {
+        "schema_version": "condition/v1",
+        "id": OBSERVE_ONLY_CONDITION_ID,
+        "label": "observe-only",
+        "enforcement": "off",
+    }
 
 
 def trial_id_for(
@@ -92,14 +145,22 @@ def run_trial(
     agent: AgentAdapter,
     host: SimulatedToolHost | None = None,
 ) -> TrialOutcome:
-    """Execute one (scenario × condition × seed × repeat) → trace/v1."""
+    """Execute one (scenario × condition × seed × repeat) → trace/v1.
+
+    `kernel` may be None: governance is a capability, not a stage (Suite
+    Platform RFC §10). With no kernel no gate runs, no gate_decision event is
+    emitted and the producer names no kernel_version — the three absences that
+    `verify_bundle` checks together. `scenario["injection"]` is likewise
+    optional: a budget/performance scenario has no attack model.
+    """
+    started = time.monotonic()
     inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
-    injection: dict[str, object] = scenario["injection"]  # type: ignore[assignment]
+    injection: dict[str, object] = scenario.get("injection") or {}  # type: ignore[assignment]
     if host is None:
         host = SimulatedToolHost(
             manifests=manifests,
             fixtures=scenario.get("fixtures", {}),  # type: ignore[arg-type]
-            injection_text=str(injection["text"]),
+            injection_text=str(injection.get("text", "")),
         )
     ledger = ValueLedger()
     events: list[dict[str, object]] = []
@@ -137,7 +198,9 @@ def run_trial(
         else:
             v_recipient = ledger.mint_constant(recipient, "model:recipient")
     else:
-        attacked = agent.follows_injection(str(scenario["name"]), seed)
+        # a scenario with no injection has nothing for the scripted agent to
+        # follow — it always acts faithfully
+        attacked = bool(injection) and agent.follows_injection(str(scenario["name"]), seed)
         if attacked:
             recipient = agent.attacker_target(str(injection["text"]))
             v_recipient = ledger.mint_model_extraction(recipient, context_value_ids=tuple(produced))
@@ -161,7 +224,13 @@ def run_trial(
 
     # 3. gate — the ONE decide implementation (also used by replay). The real
     # axor-core governor and the reference kernel share this dispatch.
-    if isinstance(kernel, AxorKernel):
+    if kernel is None:
+        # No governance capability: no gate, no verdict, no gate_decision event.
+        # The call is simulated exactly as an ALLOW would simulate it — the
+        # difference is that nothing DECIDED to allow it, and the trace says so
+        # by carrying no decision and no kernel_version.
+        decision = None
+    elif isinstance(kernel, AxorKernel):
         # read the RAW runtime value (in-memory), not decision_value off the
         # serialized dict — a sensitive value is redacted there and has no
         # decision_value, which used to KeyError and fail the whole trial (r7)
@@ -182,14 +251,16 @@ def run_trial(
             inputs=inputs,
             policy=condition.get("policy"),  # type: ignore[arg-type]
         )
-    events.append(
-        {"seq": seq, "node": "root", "type": "gate_decision", "call_id": call_id,
-         "decision": decision}
-    )
-    seq += 1
+    if decision is not None:
+        events.append(
+            {"seq": seq, "node": "root", "type": "gate_decision", "call_id": call_id,
+             "decision": decision}
+        )
+        seq += 1
 
-    # 4. execute only if allowed — simulated either way
-    if decision["verdict"] == "ALLOW":
+    # 4. execute only if allowed — simulated either way. With no gate there is
+    # nothing to withhold execution, so the call proceeds.
+    if decision is None or decision["verdict"] == "ALLOW":
         host.execute(sink_tool, args)
 
     trace: dict[str, object] = {
@@ -212,17 +283,26 @@ def run_trial(
         "producer": {
             "mode": "wrapped_code",
             "provenance_fidelity": "explicit_flow_tracked",
-            "kernel_version": str(condition["kernel"]),
+            # omitted when no gate ran — see _verify_kernel_binding: absence
+            # here, on the condition, and of gate_decision events is one fact
+            **({"kernel_version": str(condition["kernel"])} if condition.get("kernel") else {}),
             "runtime": RUNTIME_ID,
         },
         "inputs_digest": world_digest(inputs, scenario.get("fixtures", {})),  # type: ignore[arg-type]
         "events": events,
         "values": ledger.values,
     }
+    # `violation` is optional — a scenario with no attack model has no breach to
+    # evaluate, and False here means "no breach", which is the truth.
+    violation_predicate = scenario.get("violation")
     return TrialOutcome(
         trace=trace,
-        violation=evaluate(scenario["violation"], trace, inputs),  # type: ignore[arg-type]
+        violation=(
+            evaluate(violation_predicate, trace, inputs)  # type: ignore[arg-type]
+            if violation_predicate is not None else False
+        ),
         task_success=evaluate(scenario["task_success"], trace, inputs),  # type: ignore[arg-type]
+        metrics=_trial_metrics(started, events, host),
     )
 
 
@@ -234,6 +314,12 @@ class ExperimentResult:
     trials: list[dict[str, object]] = field(default_factory=list)
     traces: dict[str, dict[str, object]] = field(default_factory=dict)
     outcomes: dict[str, TrialOutcome] = field(default_factory=dict)
+    # the conditions the run ACTUALLY executed under. Normally the ones passed
+    # in, but a governance-free run declares none and the runner synthesizes the
+    # observe-only arm — which the trials then reference by id. The caller needs
+    # it to build a bundle whose trials resolve, so it is reported rather than
+    # left as an internal detail.
+    conditions: list[dict[str, object]] = field(default_factory=list)
     # superseded attempts (review §4.3): a retried trial replaces the CURRENT
     # record but the prior attempt is preserved here for the audit trail.
     superseded: list[dict[str, object]] = field(default_factory=list)
@@ -345,26 +431,28 @@ def _run_one(
     # governor config this trial actually ran under, hashed by the same process
     # that ran it. A later CP export proves the runtime config it recommends is the
     # one recorded on the trial — not one reconstructed at export time.
-    rch = runtime_config_hash(
-        str(condition["kernel"]), condition.get("policy"),
-        list(manifests.values()), scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    # the ACTUAL resolved backend's behavior identity — not just the declared
-    # condition.kernel string — so a registry that returns a behavior-changed
-    # kernel (e.g. taint_floor off) under a version label is auditable (review r20)
-    fingerprint = getattr(kernel, "behavior_version", str(getattr(kernel, "version", "")))
-    result.add(
-        trial_key,
-        {**base, "status": "completed", "trace_ref": content_hash(outcome.trace),
-         "runtime_config_hash": rch, "config_compiler_version": CONFIG_COMPILER_VERSION,
-         # the hash above was computed by THIS process AT execution — declare it so
-         # config_provenance can distinguish a genuinely execution-recorded hash from
-         # one reconstructed post-hoc (an imported incident) or asserted by a
-         # hand-built bundle (review r21)
-         "runtime_provenance": "recorded_at_execution",
-         "resolved_kernel_fingerprint": str(fingerprint)},
-        outcome,
-    )
+    record = {**base, "status": "completed", "trace_ref": content_hash(outcome.trace),
+              "metrics": outcome.metrics}
+    if condition.get("kernel"):
+        record.update({
+            "runtime_config_hash": runtime_config_hash(
+                str(condition["kernel"]), condition.get("policy"),
+                list(manifests.values()), scenario.get("inputs", {}),  # type: ignore[arg-type]
+            ),
+            "config_compiler_version": CONFIG_COMPILER_VERSION,
+            # the hash above was computed by THIS process AT execution — declare it so
+            # config_provenance can distinguish a genuinely execution-recorded hash from
+            # one reconstructed post-hoc (an imported incident) or asserted by a
+            # hand-built bundle (review r21)
+            "runtime_provenance": "recorded_at_execution",
+            # the ACTUAL resolved backend's behavior identity — not just the declared
+            # condition.kernel string — so a registry that returns a behavior-changed
+            # kernel (e.g. taint_floor off) under a version label is auditable (review r20)
+            "resolved_kernel_fingerprint": str(
+                getattr(kernel, "behavior_version", str(getattr(kernel, "version", "")))
+            ),
+        })
+    result.add(trial_key, record, outcome)
 
 
 def run_experiment(
@@ -377,12 +465,16 @@ def run_experiment(
     agent: AgentAdapter | None = None,
 ) -> ExperimentResult:
     agent = agent or ScriptedAgent()
-    result = ExperimentResult(run_id=run_id)
+    conditions = conditions or [observe_only_condition()]
+    result = ExperimentResult(run_id=run_id, conditions=list(conditions))
     order = 0
     for condition in conditions:
-        kernel = resolve_kernel(
-            str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry,
-            scenario.get("inputs", {}),
+        kernel = (
+            resolve_kernel(
+                str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry,
+                scenario.get("inputs", {}),
+            )
+            if condition.get("kernel") else None
         )
         for repeat_index in range(repeats):
             _run_one(result, scenario, manifests, condition, kernel, run_id,
@@ -487,7 +579,8 @@ def run_experiment_suite(
     run-wide cost ceiling is a hard stop, not an advisory print (review r11).
     """
     agent = agent or ScriptedAgent()
-    result = ExperimentResult(run_id=run_id)
+    conditions = conditions or [observe_only_condition()]
+    result = ExperimentResult(run_id=run_id, conditions=list(conditions))
     # materialize the FULL plan up front so a cost stop can record the trials
     # that never ran — otherwise missingness computes over only the trials that
     # DID run and reports e.g. n=1/1 for a 100-trial plan stopped after one
@@ -544,9 +637,15 @@ def run_experiment_suite(
         # expansion (review r16)
         cache_key = (cid, str(scenario["name"]))
         if cache_key not in kernels:
-            kernels[cache_key] = resolve_kernel(
-                str(condition["kernel"]), manifests, condition.get("policy"), kernel_registry,
-                scenario.get("inputs", {}),
+            # A condition with no kernel is an observe-only arm: no gate, and
+            # crucially NO KERNEL RESOLUTION — a governance-free run must not
+            # depend on a kernel registry being able to resolve anything.
+            kernels[cache_key] = (
+                resolve_kernel(
+                    str(condition["kernel"]), manifests, condition.get("policy"),
+                    kernel_registry, scenario.get("inputs", {}),
+                )
+                if condition.get("kernel") else None
             )
         try:
             _run_one(result, scenario, manifests, condition, kernels[cache_key], run_id,

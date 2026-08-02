@@ -110,6 +110,13 @@ class TestFailClosedEvidenceRoundtrips(unittest.TestCase):
             "condition_id": str(trace["trial"]["condition_id"]), "seed": str(trace["trial"]["seed"]),
             "repeat_index": int(trace["trial"]["repeat_index"]), "status": "completed",
             "trace_ref": content_hash(trace),
+            # this trial ran under a KERNEL-bearing condition, so it must carry the
+            # governor config it ran under. The fixture always owed this (the schema
+            # required it on a completed trial); verify_bundle now checks it against
+            # the trial's actual condition rather than leaving it to the schema.
+            "runtime_config_hash": "sha256:" + "0" * 64,
+            "config_compiler_version": "govcfg/1",
+            "runtime_provenance": "recorded_at_execution",
         }
         bundle = build_bundle(
             bundle_id="b_fc", created="2026-07-20T12:00:00+00:00",

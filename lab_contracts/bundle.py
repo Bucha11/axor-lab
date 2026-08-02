@@ -22,10 +22,15 @@ def config_provenance(
     conditions: list[dict[str, object]],
     tool_manifests: list[dict[str, object]],
     trials: list[dict[str, object]],
-) -> dict[str, object]:
+) -> dict[str, object] | None:
     """The governor-config provenance for each (scenario, condition) pair that has
     a COMPLETED trial: the concrete runtime_config_hash — so a later export can
     verify the config it reproduces matches what actually ran (review r18/r19).
+
+    Returns None when NO governed trial ran at all. A governance-free run has no
+    governor config, so it has no provenance to report; emitting an empty
+    `reconstructed_legacy` block would misread as a governed run that lost its
+    provenance rather than a run that never had a governor.
 
     The hash is READ from the trial where the runner RECORDED it at execution time
     (`trial.runtime_config_hash`); only a trial that never recorded one (a legacy
@@ -50,6 +55,12 @@ def config_provenance(
         sid, cid = str(trial.get("scenario_id")), str(trial.get("condition_id"))
         scenario, condition = scen_by_id.get(sid), cond_by_id.get(cid)
         if scenario is None or condition is None:
+            continue
+        if not condition.get("kernel"):
+            # A gate-free condition has no governor config, so there is nothing
+            # whose provenance could be recorded or reconstructed. It is skipped
+            # rather than graded: calling it `reconstructed_legacy` would invent
+            # a weakness in a run that simply never had a governor.
             continue
         recorded = trial.get("runtime_config_hash")
         marker = str(trial.get("runtime_provenance", ""))
@@ -91,6 +102,12 @@ def config_provenance(
         status = "recorded_at_execution"
     elif statuses and statuses <= {"reconstructed_incident"}:
         status = "reconstructed_incident"
+    elif not statuses:
+        # No governed trial at all — a governance-free run. There is no
+        # governor-config provenance to report, and reporting an empty
+        # `reconstructed_legacy` block would read as a graded-down governed run
+        # rather than an ungoverned one. The caller omits the block entirely.
+        return None
     else:
         status = "reconstructed_legacy"
     return {
@@ -126,7 +143,10 @@ def build_bundle(
             "trials; it is not caller-assertable — omit it and let build_bundle derive it, "
             "or make it exactly equal the trial-derived provenance"
         )
-    environment = {**environment, "config_provenance": derived}
+    environment = (
+        {**environment, "config_provenance": derived} if derived is not None
+        else {k: v for k, v in environment.items() if k != "config_provenance"}
+    )
     hashes: dict[str, str] = {}
     for scenario in scenarios:
         hashes[f"scenario:{scenario['name']}"] = content_hash(scenario)
@@ -403,6 +423,57 @@ def _verify_trial_trace_graph(
             errors.append(f"orphan trace {trace.get('trace_id')} is not cited by any completed trial")
 
 
+def _verify_kernel_binding(
+    trace: dict[str, object],
+    producer: dict[str, object],
+    condition: dict[str, object],
+    errors: list[str],
+) -> None:
+    """A gate-free trial is proven gate-free, not merely asserted.
+
+    Governance is optional (Suite Platform RFC §10), so a condition may omit
+    `kernel`, meaning NO GATE RAN. That absence has to be trustworthy, because
+    the alternative reading — "a gate ran and allowed everything" — is a
+    completely different claim about the run. So the three signals travel
+    together and are checked as one:
+
+        condition.kernel absent  ⟺  producer.kernel_version absent
+                                 ⟺  the trace carries no gate_decision events
+
+    Any mismatch is an error. In particular a trace that records verdicts while
+    claiming no kernel produced them is refused outright: verdicts with no
+    attributable `decide` are unreplayable and unfalsifiable.
+    """
+    trace_id = trace.get("trace_id")
+    declared = condition.get("kernel")
+    recorded = producer.get("kernel_version")
+    decisions = [
+        e for e in trace.get("events", [])  # type: ignore[union-attr]
+        if isinstance(e, dict) and e.get("type") == "gate_decision"
+    ]
+
+    if declared is None and recorded is None:
+        if decisions:
+            errors.append(
+                f"trace {trace_id}: {len(decisions)} gate_decision event(s) but neither the "
+                f"condition {condition.get('id')!r} nor the producer names a kernel — a verdict "
+                f"with no attributable kernel cannot be replayed or falsified"
+            )
+        return
+    if declared is None or recorded is None:
+        errors.append(
+            f"trace {trace_id}: kernel presence disagrees — condition "
+            f"{condition.get('id')!r} kernel {declared!r} vs producer.kernel_version "
+            f"{recorded!r}; a gate-free run must omit BOTH"
+        )
+        return
+    if str(recorded) != str(declared):
+        errors.append(
+            f"trace {trace_id}: producer.kernel_version {recorded!r} does not match "
+            f"condition {condition.get('id')!r} kernel {declared!r}"
+        )
+
+
 def _verify_trace_metadata(
     bundle: dict[str, object], traces: dict[str, dict[str, object]], errors: list[str]
 ) -> None:
@@ -432,12 +503,20 @@ def _verify_trace_metadata(
             continue  # missing-trace already reported by the graph check
         producer: dict[str, object] = trace.get("producer", {})  # type: ignore[assignment]
         cond = conditions.get(str(trial.get("condition_id")))
-        if cond is not None and str(producer.get("kernel_version")) != str(cond.get("kernel")):
-            errors.append(
-                f"trace {trace.get('trace_id')}: producer.kernel_version "
-                f"{producer.get('kernel_version')!r} does not match condition "
-                f"{cond.get('id')!r} kernel {cond.get('kernel')!r}"
-            )
+        if cond is not None:
+            _verify_kernel_binding(trace, producer, cond, errors)
+            # The schema used to require runtime_config_hash on EVERY completed
+            # trial, which made a gate-free trial unrepresentable. The rule is
+            # not dropped, it moves here and gets sharper: it now keys off the
+            # trial's actual CONDITION (which JSON Schema cannot cross-
+            # reference) instead of trusting a sibling field on the trial.
+            if cond.get("kernel") and "runtime_config_hash" not in trial:
+                errors.append(
+                    f"trial {trial.get('trial_id')}: ran under condition "
+                    f"{cond.get('id')!r} with kernel {cond.get('kernel')!r} but records no "
+                    f"runtime_config_hash — a governed trial must carry the governor config "
+                    f"it actually ran under"
+                )
         scen = scenarios.get(str(trial.get("scenario_id")))
         # inputs_digest is REQUIRED for a producer that claims to track the world
         # it ran in (wrapped_code, instrumented_endpoint) — otherwise a caller
