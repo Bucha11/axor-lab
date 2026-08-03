@@ -1,0 +1,244 @@
+"""Suite → runtime assignment → collected run.
+
+The **main entry point**, and the one the architecture boundary mandates
+(`contracts/architecture-boundary.md`): the user wraps their own agent with the
+Axor runtime (axor-wrap), it runs on THEIR machine against THEIR tools under
+THEIR governor, and pushes traces outward. Lab hands out assignments and reads
+what comes back. Lab never connects to, executes, or proxies the agent.
+
+That is what distinguishes this from `execute.run_suite`, which runs the agent
+locally against simulated tools. Both are legitimate — `lifecycle.md` lists demo
+and offline_runner alongside connected_runtime — but only this one is "bring
+your own agent". The other is "bring your own model key".
+
+Because the traces now come from a machine Lab does not control, the collection
+side is written as if the runtime were untrusted:
+
+  - a trace for a trial that was never planned is REFUSED, not absorbed;
+  - a trace whose trial coordinate disagrees with the plan is refused;
+  - aggregates are RECOMPUTED here from the returned traces — a runtime-supplied
+    aggregate is never adopted, because a result nobody can recheck is not a
+    result;
+  - invariants are evaluated by Lab, for the same reason.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from lab_contracts import content_hash, validate_artifact
+from lab_runner.invariants import check_invariant
+from lab_runner.runner import observe_only_condition
+
+from .errors import SuiteError
+from .execute import SuiteRun, _aggregate
+from .manifest import ResolvedSuite, resolve_suite
+
+
+class DispatchError(SuiteError):
+    """The runtime returned something the plan does not account for."""
+
+
+@dataclass(frozen=True)
+class SuiteAssignment:
+    """What Lab handed to a runtime, and what it expects back."""
+
+    run_id: str
+    runtime_ref: str
+    resolved: ResolvedSuite
+    conditions: tuple[dict[str, object], ...]
+    planned: tuple[str, ...]
+    assignment: dict[str, object]
+
+
+def plan_trials(
+    resolved: ResolvedSuite, conditions: list[dict[str, object]]
+) -> list[str]:
+    """The trial units this suite expands to, deterministically.
+
+    Same shape as `runtime_jobs.plan_experiment` — `scenario:condition:repeat` —
+    so a runtime that already speaks the runtime-jobs protocol needs no new
+    vocabulary to execute a suite.
+    """
+    return [
+        f"{scenario['name']}:{condition['id']}:{index}"
+        for scenario in resolved.scenarios
+        for condition in conditions
+        for index in range(resolved.repeats)
+    ]
+
+
+def build_assignment(
+    manifest: dict[str, object],
+    runtime_ref: str,
+    scenario_registry: dict[str, dict[str, object]] | None = None,
+    tool_manifests: dict[str, dict[str, object]] | None = None,
+) -> SuiteAssignment:
+    """Resolve a suite into an assignment a connected runtime can execute.
+
+    The assignment carries the RESOLVED suite — scenario bodies, tool manifests
+    and conditions, not references — because the runtime has no access to Lab's
+    registries, and because freezing them here is what stops a later registry
+    edit from changing what a finished run claims to have executed.
+    """
+    resolved = resolve_suite(manifest, scenario_registry, tool_manifests)
+    conditions = list(resolved.conditions) or [observe_only_condition()]
+    planned = plan_trials(resolved, conditions)
+    assignment: dict[str, object] = {
+        "schema_version": "experiment/v1",
+        "id": f"exp_{resolved.id}",
+        "type": "benchmark",
+        "suite_ref": resolved.id,
+        "scenario_ids": [str(s["name"]) for s in resolved.scenarios],
+        "repeats": resolved.repeats,
+        "agent_ref": _agent_ref(resolved),
+        # the executable payload — everything the runtime needs to run locally
+        "suite": resolved.manifest,
+        "scenarios": list(resolved.scenarios),
+        "tool_manifests": list(resolved.manifests.values()),
+        "planned_trials": planned,
+    }
+    if resolved.conditions:
+        assignment["conditions"] = list(resolved.conditions)
+    return SuiteAssignment(
+        run_id="", runtime_ref=runtime_ref, resolved=resolved,
+        conditions=tuple(conditions), planned=tuple(planned), assignment=assignment,
+    )
+
+
+def assign_suite(
+    manifest: dict[str, object],
+    runtime_ref: str,
+    store: object,
+    scenario_registry: dict[str, dict[str, object]] | None = None,
+    tool_manifests: dict[str, dict[str, object]] | None = None,
+    require_confirmation: bool = False,
+) -> SuiteAssignment:
+    """Register the assignment with a RuntimeJobStore; the runtime claims it."""
+    built = build_assignment(manifest, runtime_ref, scenario_registry, tool_manifests)
+    created = store.create_run(  # type: ignore[attr-defined]
+        runtime_ref, built.assignment, list(built.planned),
+        require_confirmation=require_confirmation,
+        estimate={"trials": len(built.planned),
+                  "scenarios": len(built.resolved.scenarios),
+                  "conditions": len(built.conditions),
+                  "repeats": built.resolved.repeats},
+    )
+    return SuiteAssignment(
+        run_id=str(created["run_id"]), runtime_ref=runtime_ref,
+        resolved=built.resolved, conditions=built.conditions,
+        planned=built.planned, assignment=built.assignment,
+    )
+
+
+def collect_suite_run(assignment: SuiteAssignment, store: object) -> SuiteRun:
+    """Assemble a SuiteRun from what the runtime pushed back.
+
+    Treats the runtime as untrusted: every trace is schema-checked and matched
+    against the plan before it is admitted, and every number Lab reports is
+    recomputed here rather than accepted.
+    """
+    results: dict[str, object] = store.results(assignment.run_id)  # type: ignore[attr-defined]
+    run = SuiteRun(
+        run_id=assignment.run_id, resolved=assignment.resolved,
+        conditions=list(assignment.conditions),
+    )
+    planned = set(assignment.planned)
+    by_unit = {
+        f"{s['name']}:{c['id']}:{i}": (s, c, i)
+        for s in assignment.resolved.scenarios
+        for c in assignment.conditions
+        for i in range(assignment.resolved.repeats)
+    }
+
+    reported = {str(t["trial_id"]): t for t in results.get("trials", [])}  # type: ignore[union-attr]
+    traces_by_unit: dict[str, dict[str, object]] = {}
+    for trace in results.get("traces", []):  # type: ignore[union-attr]
+        unit = _unit_of(trace)
+        if unit not in planned:
+            raise DispatchError(
+                f"runtime returned a trace for {unit!r}, which is not in the plan — "
+                "a run may only contain trials Lab assigned"
+            )
+        errors = validate_artifact(trace, "trace")
+        if errors:
+            raise DispatchError(f"runtime returned an invalid trace for {unit!r}: {errors[:3]}")
+        traces_by_unit[unit] = trace
+
+    for unit in assignment.planned:
+        scenario, condition, index = by_unit[unit]
+        trial_record = _trial_record(assignment, unit, scenario, condition, index)
+        trace = traces_by_unit.get(unit)
+        if trace is None:
+            # a planned trial with no trace is MISSING, and recorded as such —
+            # dropping it would shrink the denominator and flatter the result
+            status = str(reported.get(unit, {}).get("status", "failed"))  # type: ignore[union-attr]
+            run.trials.append({
+                **trial_record, "status": "failed" if status != "excluded" else "excluded",
+                "failure_reason": "no trace returned by the runtime",
+            })
+            continue
+        trace_ref = content_hash(trace)
+        run.trials.append({
+            **trial_record, "status": "completed", "trace_ref": trace_ref,
+            "metrics": _metrics_of(reported.get(unit, {})),  # type: ignore[arg-type]
+        })
+        run.traces[trace_ref] = trace
+
+    # Lab recomputes. A runtime-supplied aggregate would be a number nobody can
+    # recheck, and `results["aggregates"]` is deliberately ignored here.
+    run.aggregates = _aggregate(run)
+    run.invariants = [
+        check_invariant(regression, run.trials, run.traces,
+                        {str(s["name"]): s for s in assignment.resolved.scenarios})
+        for regression in assignment.resolved.regressions
+    ]
+    return run
+
+
+def _agent_ref(resolved: ResolvedSuite) -> str:
+    agents = list(resolved.manifest.get("agents") or [])
+    return str(agents[0].get("ref", "runtime")) if agents else "runtime"
+
+
+def _unit_of(trace: dict[str, object]) -> str:
+    trial: dict[str, object] = trace.get("trial", {})  # type: ignore[assignment]
+    return (
+        f"{trial.get('scenario_id')}:{trial.get('condition_id')}:"
+        f"{trial.get('repeat_index')}"
+    )
+
+
+def _trial_record(
+    assignment: SuiteAssignment, unit: str, scenario: dict[str, object],
+    condition: dict[str, object], index: int,
+) -> dict[str, object]:
+    from lab_runner.runner import trial_id_for
+
+    seed = f"s{index:03d}"
+    return {
+        "trial_id": trial_id_for(
+            assignment.run_id, str(scenario["name"]), str(condition["id"]), seed, index,
+        ),
+        "scenario_id": str(scenario["name"]), "condition_id": str(condition["id"]),
+        "seed": seed, "repeat_index": index, "execution_id": assignment.run_id,
+        "execution_order": assignment.planned.index(unit),
+    }
+
+
+def _metrics_of(reported: dict[str, object]) -> dict[str, object]:
+    """Per-trial metrics the RUNTIME measured, reported BESIDE the trace.
+
+    Not inside it: trace/v1 is axor-core-owned and describes what happened,
+    while cost and latency are Lab's experiment metadata. Lab did not execute
+    the trial so it cannot time it; what it can do is refuse to invent numbers.
+    Only scalars the runtime actually reported are kept, and a missing one stays
+    missing so an invariant over it errors instead of passing.
+    """
+    raw = reported.get("metrics")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key): value for key, value in raw.items()
+        if isinstance(value, (int, float, str, bool))
+    }

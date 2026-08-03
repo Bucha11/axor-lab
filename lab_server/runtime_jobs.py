@@ -73,6 +73,12 @@ class _Trial:
     trial_id: str
     events: list[dict[str, object]] = field(default_factory=list)
     trace: dict[str, object] | None = None
+    # per-trial metrics the RUNTIME measured (duration, tokens, cost). Carried
+    # BESIDE the trace, never inside it: trace/v1 is axor-core-owned and
+    # describes what happened, while cost and latency are Lab's experiment
+    # metadata. Widening a shared schema for one consumer's bookkeeping is how
+    # a "shared" schema stops being shared.
+    metrics: dict[str, object] = field(default_factory=dict)
     status: str = "pending"  # pending | completed | failed
     attempt: int = 1     # the current TrialAttempt ordinal (retries supersede)
     superseded: int = 0  # how many prior attempts this trial superseded
@@ -200,7 +206,7 @@ class RuntimeJobStore:
             "trials": [
                 {"trial_id": t.trial_id, "status": t.status, "attempt": t.attempt,
                  "superseded": t.superseded, "events": len(t.events),
-                 "has_trace": t.trace is not None}
+                 "has_trace": t.trace is not None, "metrics": dict(t.metrics)}
                 for t in job.trials.values()
             ],
             "traces": [t.trace for t in job.trials.values() if t.trace is not None],
@@ -253,7 +259,8 @@ class RuntimeJobStore:
             return {"trial_id": trial_id, "events": len(trial.events), "attempt": trial.attempt}
 
     def complete_trial(self, job_id: str, trial_id: str, runtime_ref: str,
-                       trace: dict[str, object] | None, status: str = "completed") -> dict[str, object]:
+                       trace: dict[str, object] | None, status: str = "completed",
+                       metrics: dict[str, object] | None = None) -> dict[str, object]:
         with self._lock:
             job = self._require_owned(job_id, runtime_ref)
             trial = job.trials.setdefault(trial_id, _Trial(trial_id=trial_id))
@@ -270,6 +277,11 @@ class RuntimeJobStore:
                 trial.superseded += 1
             trial.trace = trace
             trial.status = new_status
+            if metrics:
+                trial.metrics = {
+                    str(k): v for k, v in metrics.items()
+                    if isinstance(v, (int, float, str, bool))
+                }
             self._maybe_finish(job)
             return {"trial_id": trial_id, "status": trial.status, "run_state": job.state,
                     "attempt": trial.attempt, "superseded": trial.superseded}
@@ -302,8 +314,12 @@ def plan_experiment(experiment: dict[str, object]) -> dict[str, object]:
     the runtime later runs each unit and pushes its trace."""
     scenarios = [str(s) for s in (experiment.get("scenario_ids") or []) if s]
     conditions = experiment.get("condition_ids") or experiment.get("conditions") or []
+    # condition/v1 names the arm `id`; `condition_id` is accepted as the
+    # already-flattened form. Reading only `condition_id` collapsed every real
+    # condition to "None", so a 2-arm plan produced two PAIRS of identical trial
+    # ids and the runtime's second arm overwrote the first.
     condition_ids = [
-        str(c.get("condition_id") if isinstance(c, dict) else c)
+        str(c.get("id") or c.get("condition_id")) if isinstance(c, dict) else str(c)
         for c in conditions if c
     ]
     try:

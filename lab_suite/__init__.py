@@ -13,13 +13,25 @@ what makes such a manifest EXECUTABLE.
 
 from __future__ import annotations
 
+from .dispatch import (
+    DispatchError,
+    SuiteAssignment,
+    assign_suite,
+    build_assignment,
+    collect_suite_run,
+)
 from .errors import SuiteError, SuiteValidationError
 from .execute import SuiteRun, run_suite
 from .manifest import ResolvedSuite, load_manifest, resolve_suite, validate_manifest
 from .sdk import Suite, SuiteRegistry, builtin_registry
 
 __all__ = [
+    "DispatchError",
     "ResolvedSuite",
+    "SuiteAssignment",
+    "assign_suite",
+    "build_assignment",
+    "collect_suite_run",
     "Suite",
     "SuiteError",
     "SuiteRegistry",
