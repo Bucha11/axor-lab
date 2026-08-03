@@ -25,7 +25,7 @@ from lab_runner.errors import CostCeilingReached
 from lab_runner.invariants import InvariantResult, check_invariant
 from lab_runner.kernel import KernelRegistry
 from lab_runner.loop import LoopOutcome, run_loop_trial
-from lab_runner.runner import observe_only_condition, trial_id_for
+from lab_runner.runner import trial_id_for, unwrapped_condition
 
 from .manifest import ResolvedSuite, resolve_suite
 from .sdk import BaseSuite, SuiteRegistry, builtin_registry
@@ -106,7 +106,11 @@ def run_suite(
     if suite is None:
         suite = (registry or builtin_registry()).get(resolved.id)
 
-    conditions = list(resolved.conditions) or [observe_only_condition()]
+    # run_suite executes locally against SIMULATED tools — no wrapped agent
+    # exists, so the arm says `unwrapped` rather than claiming a kernel
+    # observed the run. The connected-runtime path (dispatch.py) defaults to
+    # `ungoverned` instead, because there the agent IS wrapped.
+    conditions = list(resolved.conditions) or [unwrapped_condition()]
     run = SuiteRun(run_id=run_id, resolved=resolved, conditions=conditions)
 
     gates: dict[tuple[str, str], object] = {}

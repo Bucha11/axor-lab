@@ -83,6 +83,13 @@ def build_assignment(
     edit from changing what a finished run claims to have executed.
     """
     resolved = resolve_suite(manifest, scenario_registry, tool_manifests)
+    # A connected runtime IS the wrap: the agent runs under axor-core whether
+    # or not gates enforce. So a suite that declares no conditions gets the
+    # UNGOVERNED arm — enforcement off, kernel present — and never a
+    # kernel-free one. Otherwise the agent would not be observed, switching
+    # governance on later would mean re-integrating rather than flipping
+    # `enforcement`, and an ungoverned/governed comparison would contrast two
+    # different machines instead of one machine under two policies.
     conditions = list(resolved.conditions) or [observe_only_condition()]
     planned = plan_trials(resolved, conditions)
     assignment: dict[str, object] = {
@@ -99,8 +106,11 @@ def build_assignment(
         "tool_manifests": list(resolved.manifests.values()),
         "planned_trials": planned,
     }
-    if resolved.conditions:
-        assignment["conditions"] = list(resolved.conditions)
+    # ALWAYS the arms actually planned, including a synthesized ungoverned one.
+    # Sending only suite-declared conditions left the runtime with trial units
+    # naming an arm the assignment never described — it could not know which
+    # kernel to wrap under or whether to enforce, and would have to guess.
+    assignment["conditions"] = list(conditions)
     return SuiteAssignment(
         run_id="", runtime_ref=runtime_ref, resolved=resolved,
         conditions=tuple(conditions), planned=tuple(planned), assignment=assignment,
@@ -164,6 +174,7 @@ def collect_suite_run(assignment: SuiteAssignment, store: object) -> SuiteRun:
         errors = validate_artifact(trace, "trace")
         if errors:
             raise DispatchError(f"runtime returned an invalid trace for {unit!r}: {errors[:3]}")
+        _require_wrapped(unit, trace, by_unit[unit][1])
         traces_by_unit[unit] = trace
 
     for unit in assignment.planned:
@@ -204,6 +215,44 @@ def collect_suite_run(assignment: SuiteAssignment, store: object) -> SuiteRun:
         for regression in assignment.resolved.regressions
     ]
     return run
+
+
+def _require_wrapped(
+    unit: str, trace: dict[str, object], condition: dict[str, object]
+) -> None:
+    """The trace must agree with the arm about whether a kernel observed it.
+
+    An arm that names a kernel — including the UNGOVERNED one, whose enforcement
+    is off but whose observation is not — can only be satisfied by a runtime
+    that actually wrapped the agent. A trace coming back with no
+    producer.kernel_version means the agent ran unwrapped, and accepting it
+    would report an unobserved run as an ungoverned one: no value ledger, no
+    replayable verdicts, and no way to turn governance on later without
+    re-integrating.
+
+    verify_bundle applies the same rule when a bundle is assembled. Checking it
+    HERE means the mismatch is attributed to the runtime that sent it, at the
+    moment it arrives, instead of surfacing later as an integrity error on a
+    bundle nobody can attribute.
+    """
+    producer: dict[str, object] = trace.get("producer", {})  # type: ignore[assignment]
+    declared, recorded = condition.get("kernel"), producer.get("kernel_version")
+    if declared and not recorded:
+        raise DispatchError(
+            f"trial {unit!r} was assigned to arm {condition.get('id')!r} under kernel "
+            f"{declared!r}, but the returned trace names no kernel_version — the agent "
+            f"ran unwrapped. An ungoverned arm is still observed by the kernel; a run "
+            f"nothing observed cannot be reported as one governance merely permitted"
+        )
+    if recorded and not declared:
+        raise DispatchError(
+            f"trial {unit!r} returned a trace claiming kernel {recorded!r}, but arm "
+            f"{condition.get('id')!r} declares none"
+        )
+    if declared and recorded and str(declared) != str(recorded):
+        raise DispatchError(
+            f"trial {unit!r} ran under kernel {recorded!r} but was assigned {declared!r}"
+        )
 
 
 def _evaluated(scenario: dict[str, object], trace: dict[str, object]) -> dict[str, object]:

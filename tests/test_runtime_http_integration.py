@@ -20,6 +20,7 @@ import unittest
 import urllib.error
 import urllib.request
 
+from lab_capabilities.governance import gate_for_condition
 from lab_contracts import validate_artifact
 from lab_runner.loop import Finish, ScriptedProgram, ToolCall, run_loop_trial
 from lab_server.runtime_jobs import RuntimeJobStore, make_runtime_server
@@ -100,13 +101,21 @@ class RuntimeHttpTestCase(unittest.TestCase):
                  *, send_metrics: bool = True) -> None:
         scenarios = {str(s["name"]): s for s in claimed["assignment"]["scenarios"]}  # type: ignore[index,union-attr]
         manifests = {str(m["id"]): m for m in claimed["assignment"]["tool_manifests"]}  # type: ignore[index,union-attr]
+        arms = {str(c["id"]): c for c in claimed["assignment"].get("conditions", [])}  # type: ignore[index,union-attr]
         for unit in claimed["planned_trials"]:  # type: ignore[union-attr]
             scenario_id, condition_id, index = str(unit).rsplit(":", 2)
+            condition = arms.get(condition_id, {
+                "schema_version": "condition/v1", "id": condition_id,
+                "enforcement": "off",
+            })
+            # a wrapped runtime gates through the kernel even with enforcement
+            # OFF — ungoverned is not unwrapped
+            gate = gate_for_condition(
+                condition, manifests, scenarios[scenario_id].get("inputs", {}),
+            )
             outcome = run_loop_trial(
-                scenarios[scenario_id], manifests,
-                {"schema_version": "condition/v1", "id": condition_id,
-                 "enforcement": "off"},
-                None, "runtime", f"s{int(index):03d}", int(index),
+                scenarios[scenario_id], manifests, condition, gate,
+                "runtime", f"s{int(index):03d}", int(index),
                 ScriptedProgram([ToolCall("read_txns", {}), Finish("summary")]),
             )
             trace = dict(outcome.trace)
@@ -194,8 +203,11 @@ class TestFullRoundTrip(RuntimeHttpTestCase):
             "art_http", CREATED, {"model": {"provider": "byo", "id": "acme/support-bot"}},
         )
         self.assertEqual(validate_artifact(artifact, "artifact"), [])
+        # the ungoverned arm still ran THROUGH the kernel, so its recorded
+        # verdicts replay bit-identically — one of the concrete things a wrapped
+        # ungoverned run buys that an unwrapped one cannot
         self.assertEqual(
-            artifact["reproduce"]["reproducibility"], "statistically_reproducible",  # type: ignore[index]
+            artifact["reproduce"]["reproducibility"], "exact_replay",  # type: ignore[index]
         )
 
 

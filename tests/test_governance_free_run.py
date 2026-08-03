@@ -24,7 +24,7 @@ from lab_contracts.errors import BundleIntegrityError
 from lab_runner import run_experiment_suite
 from lab_runner.kernel import KernelRegistry
 from lab_runner.predicates import TraceView
-from lab_runner.runner import observe_only_condition, run_experiment
+from lab_runner.runner import run_experiment, unwrapped_condition
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "contracts" / "examples" / "slice-examples.json"
 
@@ -62,14 +62,14 @@ class TestGovernanceFreeExecution(unittest.TestCase):
         trials resolve. Leaving it internal made valid runs unbundleable."""
         _, _, result = _run()
         self.assertEqual(len(result.conditions), 1)
-        self.assertEqual(str(result.conditions[0]["id"]), "observe")
+        self.assertEqual(str(result.conditions[0]["id"]), "unwrapped")
         self.assertEqual(
-            {str(t["condition_id"]) for t in result.trials}, {"observe"},
+            {str(t["condition_id"]) for t in result.trials}, {"unwrapped"},
         )
 
     def test_no_kernel_is_named_anywhere(self) -> None:
         _, _, result = _run()
-        self.assertNotIn("kernel", observe_only_condition())
+        self.assertNotIn("kernel", unwrapped_condition())
         for trace in result.traces.values():
             producer: dict[str, object] = trace["producer"]  # type: ignore[assignment]
             self.assertNotIn("kernel_version", producer)
@@ -97,11 +97,11 @@ class TestGovernanceFreeExecution(unittest.TestCase):
         )
         self.assertEqual(len(result.trials), 2)
 
-    def test_run_experiment_also_defaults_to_observe_only(self) -> None:
+    def test_run_experiment_also_defaults_to_unwrapped(self) -> None:
         scenario, manifests = _budget_scenario()
         result = run_experiment(scenario, manifests, [], KernelRegistry({}), 2, "r_exp")
         self.assertEqual(len(result.trials), 2)
-        self.assertEqual(str(result.conditions[0]["id"]), "observe")
+        self.assertEqual(str(result.conditions[0]["id"]), "unwrapped")
 
 
 class TestPredicatesWithoutAGate(unittest.TestCase):
@@ -136,7 +136,7 @@ class TestPredicatesWithoutAGate(unittest.TestCase):
     def test_the_same_trace_without_a_kernel_counts_the_call(self) -> None:
         trace = {
             "schema_version": "trace/v1", "trace_id": "t", "values": [],
-            "trial": {"run_id": "r", "scenario_id": "s", "condition_id": "observe",
+            "trial": {"run_id": "r", "scenario_id": "s", "condition_id": "unwrapped",
                       "seed": "s0", "repeat_index": 0},
             "producer": {"mode": "wrapped_code",
                          "provenance_fidelity": "explicit_flow_tracked"},

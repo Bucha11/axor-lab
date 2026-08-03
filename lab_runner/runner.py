@@ -93,29 +93,71 @@ def _trial_metrics(
     }
 
 
-OBSERVE_ONLY_CONDITION_ID = "observe"
+UNGOVERNED_CONDITION_ID = "ungoverned"
+UNWRAPPED_CONDITION_ID = "unwrapped"
 
 
-def observe_only_condition() -> dict[str, object]:
-    """The implicit single arm of a governance-free run.
+def observe_only_condition(kernel: str | None = None) -> dict[str, object]:
+    """The default single arm: UNGOVERNED — wrapped, observed, not enforced.
 
-    An experiment may declare no conditions at all (Suite Platform RFC §10 —
-    "just run my agent and observe it"). A Run still needs ONE condition id to
-    coordinate its trials by, so the runner supplies this one. It names no
-    kernel, which is what makes the run gate-free: no kernel is resolved, no
-    gate_decision is emitted, and the trace records no kernel_version.
+    `enforcement: "off"` means the gates do not deny. It does NOT mean no kernel
+    ran: condition/v1 says so outright — "off = observe-only (proxy records,
+    enforces nothing). Observation is always on regardless." The kernel still
+    evaluates every call and registers its outputs, which is what builds the
+    value ledger an EvidenceCase is read from.
 
-    It is deliberately NOT `enforcement: on` with a permissive policy, and not
-    `off` with the reference kernel either — both of those would mean a gate ran
-    and allowed the call, which is a different and stronger claim than "nothing
-    was governing this run".
+    That distinction is the whole reason this carries a kernel. If an ungoverned
+    run bypassed the core, the agent would not be wrapped, and switching
+    governance on later would be a re-integration rather than flipping
+    `enforcement` — and the ungoverned/governed comparison would be measuring
+    two different machines rather than one machine under two policies.
+
+    `unwrapped_condition()` is the genuinely kernel-free case; it is a different
+    claim and is named differently on purpose.
+    """
+    resolved = kernel or _default_kernel_version()
+    condition: dict[str, object] = {
+        "schema_version": "condition/v1",
+        "id": UNGOVERNED_CONDITION_ID,
+        "label": "ungoverned",
+        "enforcement": "off",
+    }
+    if resolved:
+        condition["kernel"] = resolved
+    return condition
+
+
+def unwrapped_condition() -> dict[str, object]:
+    """No kernel at all — nothing observed this run.
+
+    Honest only where there is genuinely nothing wrapped: a Lab-local scripted
+    run over simulated tools. It is NOT "ungoverned": an ungoverned run is
+    wrapped and observed with enforcement off, and conflating the two is how a
+    run that nothing was watching gets reported as one that governance simply
+    permitted.
     """
     return {
         "schema_version": "condition/v1",
-        "id": OBSERVE_ONLY_CONDITION_ID,
-        "label": "observe-only",
+        "id": UNWRAPPED_CONDITION_ID,
+        "label": "unwrapped (no kernel)",
         "enforcement": "off",
     }
+
+
+def _default_kernel_version() -> str | None:
+    """The installed real kernel, else the reference one.
+
+    Never None in practice — axor-core is the ecosystem's spine and the
+    reference kernel backs a local run — but typed as optional so a stripped
+    environment degrades to `unwrapped_condition()`'s meaning rather than
+    pretending a kernel observed the run.
+    """
+    from .axor_backend import real_kernel_version
+
+    return real_kernel_version() or REFERENCE_KERNEL_VERSION
+
+
+REFERENCE_KERNEL_VERSION = "reference_taint_floor_kernel"
 
 
 def trial_id_for(
@@ -465,7 +507,9 @@ def run_experiment(
     agent: AgentAdapter | None = None,
 ) -> ExperimentResult:
     agent = agent or ScriptedAgent()
-    conditions = conditions or [observe_only_condition()]
+    # a Lab-local scripted run over simulated tools: nothing is wrapped, so
+    # the honest arm is `unwrapped`, not `ungoverned`
+    conditions = conditions or [unwrapped_condition()]
     result = ExperimentResult(run_id=run_id, conditions=list(conditions))
     order = 0
     for condition in conditions:
@@ -579,7 +623,9 @@ def run_experiment_suite(
     run-wide cost ceiling is a hard stop, not an advisory print (review r11).
     """
     agent = agent or ScriptedAgent()
-    conditions = conditions or [observe_only_condition()]
+    # a Lab-local scripted run over simulated tools: nothing is wrapped, so
+    # the honest arm is `unwrapped`, not `ungoverned`
+    conditions = conditions or [unwrapped_condition()]
     result = ExperimentResult(run_id=run_id, conditions=list(conditions))
     # materialize the FULL plan up front so a cost stop can record the trials
     # that never ran — otherwise missingness computes over only the trials that

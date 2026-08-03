@@ -41,19 +41,34 @@ class KernelGate:
                 for vid in ledger.untrusted_ids()
                 if ledger.has_runtime_value(vid)
             ]
-            # The real governor decides about ONE driving value. Pick the first
-            # argument bound to an untrusted value — that is what a taint gate
-            # would be deciding about. With no untrusted argument there is
-            # nothing to drive on, so any binding serves as the subject.
-            untrusted = set(ledger.untrusted_ids())
-            driving = next(
-                (vid for vid in arg_bindings.values() if vid in untrusted),
-                next(iter(arg_bindings.values()), ""),
-            )
-            return gate_with_governor(
+            # The driving value is the one the MANIFEST declares drives this
+            # tool's effect — the same rule the reference kernel applies. An
+            # earlier version guessed "first untrusted binding", which invented a
+            # subject the manifest never nominated and, for a no-argument tool,
+            # produced an empty driving id that failed trace validation outright.
+            driving_args: list[str] = list(manifest["effect"].get("driving_args", []))  # type: ignore[union-attr]
+            unresolved: dict[str, object] | None = None
+            if driving_args and driving_args[0] in arg_bindings:
+                driving: str | None = arg_bindings[driving_args[0]]
+            elif not driving_args:
+                # nothing about this call can be driven by tainted data
+                driving, unresolved = None, {"kind": "no_driving_args"}
+            else:
+                driving = None
+                unresolved = {"kind": "unresolved_argument", "arg": driving_args[0]}
+
+            decision = gate_with_governor(
                 self.kernel.config, str(self.condition["enforcement"]), registrations,
-                str(manifest["id"]), args, driving,
+                str(manifest["id"]), args, driving or "",
             )
+            if driving is None:
+                # never a fabricated `v_none` ledger id: a fail-closed decision
+                # that invents a value makes the most interesting incidents
+                # unpublishable (review r14). The typed reason goes instead.
+                decision["driving_value_id"] = None
+                if unresolved is not None:
+                    decision["driving_unresolved"] = unresolved
+            return decision
         return self.kernel.decide(
             enforcement=str(self.condition["enforcement"]),
             manifest=manifest,
