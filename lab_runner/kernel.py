@@ -134,15 +134,22 @@ class Kernel:
             d: dict[str, object] = {
                 "verdict": verdict, "gate": GATE_TAINT_FLOOR,
                 "driving_value_id": driving_value_id if dv is ... else dv,
-                "reason": reason, **extra,
+                "reason": reason, "enforced": enforcement != "off", **extra,
             }
             u = unresolved if unres is ... else unres
             if d["driving_value_id"] is None and u is not None:
                 d["driving_unresolved"] = u
             return d
 
-        if enforcement == "off":
-            return _decision("ALLOW", "enforcement off (observe-only); observation stays on")
+        # NOTE: `enforcement` deliberately does not appear below. It selects
+        # whether the caller OBEYS this verdict, never what the verdict is.
+        # Returning an unconditional ALLOW here — as this did, under a comment
+        # claiming "observation stays on" — meant nothing observed: an
+        # ungoverned arm recorded ALLOW for the exact call the governed arm
+        # denied, so the two arms disagreed on every verdict and the comparison
+        # contrasted two different machines instead of one machine under two
+        # policies. The DENY is recorded with `enforced: false` and the call
+        # runs anyway.
         effect_class = resolve_effect_class(manifest, args, inputs)
         allowlist = _resolve_allowlist(policy, inputs)
         if self.taint_floor_enabled and effect_class in EGRESS_CLASSES:

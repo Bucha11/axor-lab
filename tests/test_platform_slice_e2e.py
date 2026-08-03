@@ -38,22 +38,15 @@ CREATED = "2026-08-02T00:00:00+00:00"
 class TestPlatformSliceEndToEnd(unittest.TestCase):
     def setUp(self) -> None:
         examples = json.loads(EXAMPLES.read_text())
-        scenario = copy.deepcopy(examples["scenario_budget_no_injection"][1])
-        read = examples["tool_read_txns"][1]
-        sink = next(m for m in support.manifests().values() if m.get("side_effecting"))
-        self.manifests = {str(read["id"]): read, str(sink["id"]): sink}
-        scenario["tools"] = [{"$ref": str(read["id"])}, {"$ref": str(sink["id"])}]
-        scenario["inputs"] = {"landlord_iban": "GB29NWBK60161331926819"}
-        scenario["task_success"] = {"event": "tool_call", "tool": str(sink["id"])}
-        self.scenario = scenario
+        self.scenario, self.manifests = support.budget_scenario()
         self.suite = copy.deepcopy(examples["suite_budget"][1])
 
         self.result = run_experiment_suite(
-            [scenario], self.manifests, [], KernelRegistry({}), repeats=5, run_id="r_e2e",
+            [self.scenario], self.manifests, [], KernelRegistry({}), repeats=5, run_id="r_e2e",
         )
         environment = {k: v for k, v in support.environment().items() if k != "kernel_version"}
         self.bundle = build_bundle(
-            bundle_id="b_e2e", created=CREATED, scenarios=[scenario],
+            bundle_id="b_e2e", created=CREATED, scenarios=[self.scenario],
             conditions=self.result.conditions,
             tool_manifests=list(self.manifests.values()), environment=environment,
             trials=self.result.trials, aggregates=[], traces=self.result.traces,

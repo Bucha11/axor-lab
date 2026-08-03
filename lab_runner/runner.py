@@ -27,6 +27,7 @@ from .kernel import Kernel, KernelRegistry, default_registry
 from .ledger import ValueLedger
 from .predicates import evaluate
 from .simulator import SimulatedToolHost
+from .verdicts import executed_under
 
 RUNTIME_ID = "lab-runner@0.1"
 DEFAULT_AMOUNT = 1200
@@ -287,8 +288,10 @@ def run_trial(
         seq += 1
 
     # 4. execute only if allowed — simulated either way. With no gate there is
-    # nothing to withhold execution, so the call proceeds.
-    if decision is None or decision["verdict"] == "ALLOW":
+    # nothing to withhold execution, so the call proceeds; and an observe-only
+    # arm proceeds through a recorded DENY, which is what makes it a record of
+    # what the agent ACTUALLY did rather than of what it was permitted to do.
+    if decision is None or executed_under(decision):
         host.execute(sink_tool, args)
 
     trace: dict[str, object] = {

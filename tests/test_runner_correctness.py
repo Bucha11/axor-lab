@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import KernelRegistry, ScriptedAgent, run_experiment, run_trial
+from lab_runner import ScriptedAgent, run_experiment, run_trial
 from lab_runner.experiment_file import resolve
 from lab_runner.ledger import ValueLedger
 
@@ -171,7 +171,6 @@ class TestSensitiveFieldRedaction(unittest.TestCase):
     """§7.4 — a manifest-declared sensitive field is redacted in the trace."""
 
     def test_sensitive_untrusted_field_is_redacted(self) -> None:
-        from lab_runner import ValueLedger
         from lab_runner.ledger import REDACTED_PREVIEW
 
         mans = support.manifests()

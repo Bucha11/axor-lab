@@ -16,7 +16,6 @@ import unittest
 from lab_runner import (
     REPLAY_MATCH,
     REPLAY_REDACTED_INPUT_UNAVAILABLE,
-    Kernel,
     ScriptedAgent,
     default_registry,
     replay_trace_status,
@@ -83,21 +82,31 @@ class TestRedactedInputUnavailable(unittest.TestCase):
         self.assertEqual(cf["claim_kind"], "not_exactly_replayable")
         self.assertEqual(cf["replay_status"], REPLAY_REDACTED_INPUT_UNAVAILABLE)
 
-    def test_redacted_value_under_enforcement_off_still_replays_match(self) -> None:
-        # an UNGOVERNED (enforcement off) trace's verdict is an unconditional ALLOW
-        # that never inspects the args, so redacting the bound recipient does NOT
-        # make replay unavailable — flagging it there was over-conservative (r16 P2)
+    def test_a_redacted_value_is_unavailable_in_the_ungoverned_arm_too(self) -> None:
+        """This was exempt while the observe-only path returned an unconditional
+        ALLOW without inspecting its arguments: a redacted argument could not
+        change a verdict that ignored arguments, so replay was trivially exact.
+
+        That path is gone. The ungoverned arm now runs the same decision the
+        governed arm runs, so a redacted bound value is exactly as load-bearing
+        here — and claiming exact replay over a hash sentinel would be claiming
+        to have reproduced a verdict that turned on a value replay never had."""
         ungoverned = support.conditions()[0]
         kernel = default_registry((str(ungoverned["kernel"]),)).get(str(ungoverned["kernel"]))
         clean = run_trial(
             support.banking_scenario(), support.manifests(), ungoverned, kernel,
             run_id="r", seed="s000", repeat_index=0, agent=ScriptedAgent(attack_rate=1.0),
         ).trace
-        redacted = _redact_bound_recipient(clean)
-        _, status = replay_trace_status(
-            redacted, ungoverned, kernel, support.manifests(), self.inputs
+        _, clean_status = replay_trace_status(
+            clean, ungoverned, kernel, support.manifests(), self.inputs
         )
-        self.assertEqual(status, REPLAY_MATCH)
+        self.assertEqual(clean_status, REPLAY_MATCH, "unredacted, it replays exactly")
+
+        _, status = replay_trace_status(
+            _redact_bound_recipient(clean), ungoverned, kernel,
+            support.manifests(), self.inputs,
+        )
+        self.assertEqual(status, REPLAY_REDACTED_INPUT_UNAVAILABLE)
 
 
 class TestDrivingUnresolvedInCore(unittest.TestCase):

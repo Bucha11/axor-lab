@@ -10,7 +10,6 @@ exploratory; the stats engine validates its inputs.
 
 from __future__ import annotations
 
-import json
 import unittest
 from pathlib import Path
 
@@ -25,7 +24,6 @@ from lab_runner import ScriptedAgent, run_experiment_suite
 from lab_runner.cli import _aggregates, _effective_design
 from lab_runner.errors import RunnerError
 from lab_runner.experiment_file import load_axl, resolve
-from tests import support
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "banking-exfil-01.axl"
 

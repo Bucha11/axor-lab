@@ -44,6 +44,7 @@ from lab_contracts.canonical import world_digest
 from .ledger import ValueLedger
 from .predicates import evaluate
 from .simulator import SimulatedToolHost
+from .verdicts import executed_under
 
 RUNTIME_ID = "lab-runner@0.1"
 DEFAULT_MAX_STEPS = 24
@@ -258,7 +259,7 @@ def run_loop_trial(
             })
             seq += 1
 
-        allowed = decision is None or decision["verdict"] == "ALLOW"
+        allowed = decision is None or executed_under(decision)
         result: object = None
         if allowed:
             result = host.execute(action.tool, action.args)

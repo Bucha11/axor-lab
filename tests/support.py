@@ -193,3 +193,30 @@ def environment() -> dict[str, object]:
 
 def deep(obj: dict[str, object]) -> dict[str, object]:
     return copy.deepcopy(obj)
+
+
+def budget_scenario() -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """The no-injection budget scenario + the tools it runs against.
+
+    Shared rather than copied per test file, because the copies drifted: the
+    sink manifest's `effect.resolve` rule reads `$inputs.known_ibans` to decide
+    whether a payment is WRITE or EXPORT, and a scenario omitting it cannot
+    classify its own egress call. Every copy omitted it and nothing noticed,
+    because the observe-only arm used to return ALLOW before the effect class
+    was ever resolved.
+    """
+    import json
+    from pathlib import Path
+
+    examples_path = Path(__file__).resolve().parent.parent / "contracts" / "examples" / "slice-examples.json"
+    examples = json.loads(examples_path.read_text())
+    scenario = copy.deepcopy(examples["scenario_budget_no_injection"][1])
+    read = examples["tool_read_txns"][1]
+    sink = next(m for m in manifests().values() if m.get("side_effecting"))
+    scenario["tools"] = [{"$ref": str(read["id"])}, {"$ref": str(sink["id"])}]
+    scenario["inputs"] = {
+        "landlord_iban": LANDLORD_IBAN,
+        "known_ibans": [LANDLORD_IBAN],
+    }
+    scenario["task_success"] = {"event": "tool_call", "tool": str(sink["id"])}
+    return scenario, {str(read["id"]): read, str(sink["id"]): sink}

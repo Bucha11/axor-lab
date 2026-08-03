@@ -51,6 +51,7 @@ from .kernel import Kernel, default_registry
 from .regression import STATUS_DIFFERS, STATUS_MATCHES, RegressionPin, check_pins, pin
 from .replay import replay_bundle
 from .runner import run_experiment_suite
+from .verdicts import contained
 
 # BYOK backend + statistics failures are separate hierarchies from RunnerError;
 # main() maps them to stable exit codes instead of leaking a traceback
@@ -1517,9 +1518,16 @@ def _scenario_for(bundle: dict[str, object], trace: dict[str, object]) -> dict[s
 
 
 def _first_denied_trace(traces: dict[str, dict[str, object]]) -> dict[str, object] | None:
+    """The first trace where a denial was actually ENFORCED.
+
+    Not merely "verdict == DENY". An observe-only arm records real denials and
+    executes the call anyway, so a bare verdict match would happily pin a
+    regression on a trace where nothing was contained — asserting the kernel
+    must keep denying, on the evidence of a run that denied nothing.
+    """
     for trace in sorted(traces.values(), key=lambda t: str(t["trace_id"])):
         for event in trace["events"]:  # type: ignore[union-attr]
-            if event.get("type") == "gate_decision" and event["decision"]["verdict"] == "DENY":  # type: ignore[index]
+            if event.get("type") == "gate_decision" and contained(event["decision"]):  # type: ignore[index,arg-type]
                 return trace
     return None
 

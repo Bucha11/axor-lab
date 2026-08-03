@@ -18,8 +18,6 @@ which is stdlib and always resolvable; a connected runtime carries its own.
 
 from __future__ import annotations
 
-import copy
-import json
 import unittest
 from pathlib import Path
 
@@ -27,7 +25,7 @@ from tests import support
 from lab_contracts import build_bundle, validate_artifact, verify_bundle
 from lab_contracts.errors import BundleIntegrityError
 from lab_runner import run_experiment_suite
-from lab_runner.kernel import KernelRegistry, default_registry
+from lab_runner.kernel import KernelRegistry
 from lab_runner.predicates import TraceView
 from lab_runner.runner import (
     REFERENCE_KERNEL_VERSION,
@@ -38,16 +36,7 @@ from lab_runner.runner import (
 EXAMPLES = Path(__file__).resolve().parent.parent / "contracts" / "examples" / "slice-examples.json"
 
 
-def _budget_scenario() -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-    examples = json.loads(EXAMPLES.read_text())
-    scenario = copy.deepcopy(examples["scenario_budget_no_injection"][1])
-    read = examples["tool_read_txns"][1]
-    sink = next(m for m in support.manifests().values() if m.get("side_effecting"))
-    manifests = {str(read["id"]): read, str(sink["id"]): sink}
-    scenario["tools"] = [{"$ref": str(read["id"])}, {"$ref": str(sink["id"])}]
-    scenario["inputs"] = {"landlord_iban": "GB29NWBK60161331926819"}
-    scenario["task_success"] = {"event": "tool_call", "tool": str(sink["id"])}
-    return scenario, manifests
+_budget_scenario = support.budget_scenario
 
 
 def _run(repeats: int = 3):

@@ -15,7 +15,7 @@ import unittest
 
 from tests import support
 from lab_agent import CassetteBackend, ModelProgram
-from lab_agent.backends import FINAL, TOOL_CALL, ModelAction
+from lab_agent.backends import TOOL_CALL, ModelAction
 from lab_agent.cost import CostBudget
 from lab_contracts import validate_artifact
 from lab_contracts.semantics import trace_semantics

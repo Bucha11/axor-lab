@@ -12,6 +12,7 @@ Three modes, per claims.md — never two, because "governed" is ambiguous:
 from __future__ import annotations
 
 from .kernel import Kernel
+from .verdicts import contained, was_enforced
 from .replay import (
     REPLAY_MALFORMED_TRACE,
     REPLAY_REDACTED_INPUT_UNAVAILABLE,
@@ -82,21 +83,11 @@ def build_evidence_case(
             ),
         }
     modes: dict[str, object] = {
-        "observed": {
-            "kind": "observed",
-            "condition_id": str(trace["trial"]["condition_id"]),  # type: ignore[index]
-            "trace_id": str(trace["trace_id"]),
-            "verdicts": _recorded_verdicts(trace),
-        },
+        "observed": _observed_mode(trace),
         "counterfactual_policy_replay": counterfactual,
     }
     if governed_twin is not None:
-        modes["observed_governed_twin"] = {
-            "kind": "observed",
-            "condition_id": str(governed_twin["trial"]["condition_id"]),  # type: ignore[index]
-            "trace_id": str(governed_twin["trace_id"]),
-            "verdicts": _recorded_verdicts(governed_twin),
-        }
+        modes["observed_governed_twin"] = _observed_mode(governed_twin)
     case: dict[str, object] = {
         "trace_id": str(trace["trace_id"]),
         "chain": chain,
@@ -234,9 +225,32 @@ def _chain(trace: dict[str, object], scenario: dict[str, object]) -> dict[str, o
     }
 
 
-def _recorded_verdicts(trace: dict[str, object]) -> list[str]:
+def _recorded_decisions(trace: dict[str, object]) -> list[dict[str, object]]:
     return [
-        str(e["decision"]["verdict"])  # type: ignore[index]
+        e["decision"]  # type: ignore[misc]
         for e in trace["events"]  # type: ignore[union-attr]
         if e.get("type") == "gate_decision"
     ]
+
+
+def _recorded_verdicts(trace: dict[str, object]) -> list[str]:
+    return [str(d["verdict"]) for d in _recorded_decisions(trace)]
+
+
+def _observed_mode(trace: dict[str, object]) -> dict[str, object]:
+    """An `observed` mode: what the kernel decided AND whether it was obeyed.
+
+    Both are needed. An observe-only arm now records the real DENY, so a reader
+    given only `verdicts` would see DENY and conclude governance contained the
+    incident — in the arm where nothing was enforcing and the call went through.
+    `contained` is the honest headline: a denial that actually stopped something.
+    """
+    decisions = _recorded_decisions(trace)
+    return {
+        "kind": "observed",
+        "condition_id": str(trace["trial"]["condition_id"]),  # type: ignore[index]
+        "trace_id": str(trace["trace_id"]),
+        "verdicts": [str(d["verdict"]) for d in decisions],
+        "enforced": [was_enforced(d) for d in decisions],
+        "contained": any(contained(d) for d in decisions),
+    }

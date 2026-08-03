@@ -225,12 +225,15 @@ def gate_with_governor(
     ``registrations`` is the ordered list of (read_tool, untrusted_value) the
     governor should taint before the sink call; both live and replay pass the
     same reconstructed values, so the governor's verdict is deterministic.
+
+    `enforcement` does NOT select the verdict — it is recorded as `enforced` so
+    the caller knows whether to obey it. This used to return an unconditional
+    ALLOW when enforcement was off, without constructing a governor at all: the
+    ungoverned arm never reached axor-core, so it recorded ALLOW for the very
+    call the governed arm denied. Two arms that disagree on every verdict are
+    not one machine under two policies, and there was no "governance would have
+    blocked this" evidence to show for an ungoverned run.
     """
-    if enforcement == "off":
-        return {
-            "verdict": "ALLOW", "gate": "taint_floor", "driving_value_id": driving_value_id,
-            "reason": "enforcement off (observe-only); observation stays on",
-        }
     if not HAS_AXOR_CORE:  # pragma: no cover
         raise UnknownKernelError("axor-core is not installed; cannot use the real kernel backend")
 
@@ -239,10 +242,11 @@ def gate_with_governor(
         read_decision = governor.evaluate(read_tool, {})
         governor.register_output(read_decision, value)
     decision = governor.evaluate(sink_tool, sink_args)
+    enforced = enforcement != "off"
     if decision.allowed:
         return {
             "verdict": "ALLOW", "gate": "taint_floor", "driving_value_id": driving_value_id,
-            "reason": "axor-core governor: allowed",
+            "reason": "axor-core governor: allowed", "enforced": enforced,
         }
     return {
         "verdict": "DENY",
@@ -250,4 +254,5 @@ def gate_with_governor(
         "driving_value_id": driving_value_id,
         "projection": "untrusted-derived",
         "reason": f"axor-core governor [{decision.category}]: {decision.reason}",
+        "enforced": enforced,
     }

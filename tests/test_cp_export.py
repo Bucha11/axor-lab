@@ -62,10 +62,19 @@ def _bundle(governance_helps: bool = True) -> dict[str, object]:
 
 
 def _denied_trace(traces: dict) -> dict:
+    """A trace whose denial was ENFORCED — i.e. from the governed arm.
+
+    Matching on `verdict == "DENY"` alone used to be equivalent, because only a
+    governed arm produced denials. It no longer is: the observe-only arm records
+    the same verdicts and executes anyway, so a bare verdict match picks an
+    ungoverned trace and pins a CP regression on a run that contained nothing.
+    """
+    from lab_runner.verdicts import contained
+
     return next(
         t for t in traces.values()
         if any(
-            e.get("type") == "gate_decision" and e["decision"]["verdict"] == "DENY"
+            e.get("type") == "gate_decision" and contained(e["decision"])
             for e in t["events"]
         )
     )

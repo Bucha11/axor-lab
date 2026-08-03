@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from lab_contracts.canonical import canonical_json
 
 from .kernel import Kernel
+from .verdicts import was_enforced
 
 # Replay outcome per trace — a single bool conflated "the recomputed verdict
 # differs" with "the trace is structurally broken" (an intent with no decision,
@@ -135,13 +136,17 @@ def replay_trace_status(
                 if "untrusted_derived" in value.get("labels", []):
                     if "decision_value" in value:
                         registrations.append((str(event.get("tool")), value["decision_value"]))
-                    elif isinstance(kernel, AxorKernel) and str(condition["enforcement"]) == "on":
+                    elif isinstance(kernel, AxorKernel):
                         # an untrusted source the real governor would taint-register
-                        # is redacted → its taint state can't be reconstructed. This
-                        # only matters under ENFORCEMENT: with enforcement off the
-                        # governor returns ALLOW without consulting taint at all, so
-                        # a redacted untrusted read cannot change the verdict and must
-                        # not block the (trivially reproducible) replay (review r16 P2)
+                        # is redacted → its taint state can't be reconstructed, so
+                        # this trace cannot be replayed exactly.
+                        #
+                        # This used to be exempt under `enforcement: off`, on the
+                        # premise that the off-path returned ALLOW without ever
+                        # consulting taint. That premise is gone: an observe-only
+                        # arm now runs the same decision the governed arm runs and
+                        # records the real verdict, so its taint state is just as
+                        # load-bearing and a redacted source is just as fatal.
                         redacted_required = True
         elif etype == "tool_call_intent":
             pending.setdefault(node, []).append(event)
@@ -156,24 +161,21 @@ def replay_trace_status(
                 malformed = True
                 continue
             bindings: dict[str, str] = pending_call.get("arg_bindings", {})  # type: ignore[assignment]
-            enforcement = str(condition["enforcement"])
             # if any BOUND value is redacted (sensitive, no decision_value), the
             # gate's concrete inputs cannot be reconstructed — exact replay is
             # unavailable, so do NOT recompute this decision over a hash sentinel
             # (which the kernel can't even evaluate); flag it and move on (r15).
-            # EXCEPT under enforcement off: the verdict is an unconditional ALLOW
-            # that never inspects the args, so it replays exactly WITHOUT the
-            # redacted value — flagging it there is over-conservative (review r16 P2).
-            bound_redacted = any(
+            #
+            # `enforcement: off` used to be exempt here for the same now-false
+            # reason as above — the off-path no longer ignores its arguments, it
+            # reaches the same verdict the governed arm reaches.
+            if any(
                 (values.get(str(vid)) or {}).get("decision_value", _MISSING) is _MISSING
                 for vid in bindings.values()
-            )
-            if bound_redacted and enforcement != "off":
+            ):
                 redacted_required = True
                 continue
-            # a redacted bound value under enforcement off cannot be resolved, but
-            # the off-path ignores args entirely, so pass empty args to it
-            args = {} if bound_redacted else resolve_args(bindings, values)
+            args = resolve_args(bindings, values)
             if isinstance(kernel, AxorKernel):
                 driving = pending_call.get("arg_bindings", {}).get("recipient", "v_none")  # type: ignore[union-attr]
                 decision = gate_with_governor(
@@ -322,11 +324,17 @@ def _verdict_core(decision: dict[str, object]) -> dict[str, object]:
     fail-closed DENY has driving_value_id=null and a typed `driving_unresolved`
     that the schema/semantics treat as load-bearing — so it belongs in the core,
     or replay would call two different fail-closed reasons (no_driving_args vs
-    unresolved_argument on a specific arg) bit-identical (review r15)."""
+    unresolved_argument on a specific arg) bit-identical (review r15).
+
+    `enforced` is in the core because it is a claim about the run, not prose: a
+    trace asserting a verdict was obeyed when its condition says nothing was
+    enforcing is a divergence worth reporting. Absent normalizes to True, which
+    is what every trace recorded before the field existed meant."""
     core: dict[str, object] = {
         "verdict": decision["verdict"],
         "gate": decision["gate"],
         "driving_value_id": decision["driving_value_id"],
+        "enforced": was_enforced(decision),
     }
     if decision.get("driving_value_id") is None:
         core["driving_unresolved"] = decision.get("driving_unresolved")

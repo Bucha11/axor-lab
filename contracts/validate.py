@@ -2,7 +2,7 @@
 """Minimal validator for Axor Lab contracts: JSON-Schema subset (type/required/enum/oneOf/const/pattern)
 plus semantic checks (referential integrity) that plain JSON Schema can't express.
 No network deps. Run: python3 validate.py"""
-import json, re, sys, glob, os
+import json, re, glob, os
 
 def load(p): return json.load(open(p))
 SCHEMAS = {os.path.basename(f).replace('.schema.json',''): load(f) for f in glob.glob('schemas/*.json')}
