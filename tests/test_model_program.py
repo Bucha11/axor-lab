@@ -19,7 +19,7 @@ from lab_agent.backends import FINAL, TOOL_CALL, ModelAction
 from lab_agent.cost import CostBudget
 from lab_contracts import validate_artifact
 from lab_contracts.semantics import trace_semantics
-from lab_runner.axor_backend import resolve_kernel
+from lab_capabilities.governance import gate_for_condition
 from lab_runner.errors import CostCeilingReached
 from lab_runner.loop import run_loop_trial
 
@@ -32,10 +32,10 @@ def _cassette(*records: dict[str, object]) -> CassetteBackend:
     return CassetteBackend.from_records(list(records))
 
 
-def _run(backend, condition=OBSERVE, kernel=None, budget=None, model="", **kw):
+def _run(backend, condition=OBSERVE, gate=None, budget=None, model="", **kw):
     program = ModelProgram(backend=backend, model=model, budget=budget)
     outcome = run_loop_trial(
-        support.banking_scenario(), support.manifests(), condition, kernel,
+        support.banking_scenario(), support.manifests(), condition, gate,
         "r_model", "s000", 0, program, **kw,
     )
     return program, outcome
@@ -133,19 +133,19 @@ class TestProvenanceStillBelongsToTheRuntime(unittest.TestCase):
 class TestGovernanceWithAModel(unittest.TestCase):
     def _governed(self):
         condition = {str(c["id"]): c for c in support.conditions()}["governed"]
-        kernel = resolve_kernel(
-            str(condition["kernel"]), support.manifests(), condition.get("policy"),
-            support.kernel_registry(), support.banking_scenario()["inputs"],
+        gate = gate_for_condition(
+            condition, support.manifests(),
+            support.banking_scenario()["inputs"], support.kernel_registry(),
         )
-        return condition, kernel
+        return condition, gate
 
     def test_the_gate_denies_a_model_that_followed_the_injection(self) -> None:
-        condition, kernel = self._governed()
+        condition, gate = self._governed()
         _, outcome = _run(_cassette(
             {"tool": "read_txns", "args": {}},
             {"tool": "send_money", "args": {"recipient": ATTACKER, "amount": 1200}},
             {"text": "blocked"},
-        ), condition=condition, kernel=kernel)
+        ), condition=condition, gate=gate)
         verdicts = [
             str(e["decision"]["verdict"]) for e in outcome.trace["events"]
             if e.get("type") == "gate_decision"
@@ -157,7 +157,7 @@ class TestGovernanceWithAModel(unittest.TestCase):
         """Hiding it would leave the agent believing a side effect happened that
         did not — and how it reacts to the block is the governed arm's point."""
         seen: list[str] = []
-        condition, kernel = self._governed()
+        condition, gate = self._governed()
 
         class Spy(CassetteBackend):
             def next_action(self, messages, tools, max_output_tokens=None):  # noqa: ANN001
@@ -169,7 +169,7 @@ class TestGovernanceWithAModel(unittest.TestCase):
             {"tool": "send_money", "args": {"recipient": ATTACKER, "amount": 1200}},
             {"text": "understood"},
         ])
-        _run(backend, condition=condition, kernel=kernel)
+        _run(backend, condition=condition, gate=gate)
         self.assertIn("tool_denied", seen[-1])
         self.assertIn("verdict=DENY", seen[-1])
 

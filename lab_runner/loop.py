@@ -41,8 +41,6 @@ from typing import Protocol, Union
 
 from lab_contracts.canonical import world_digest
 
-from .axor_backend import AxorKernel, gate_with_governor
-from .kernel import Kernel
 from .ledger import ValueLedger
 from .predicates import evaluate
 from .simulator import SimulatedToolHost
@@ -102,6 +100,29 @@ class LoopContext:
     seed: str
 
 
+class Gate(Protocol):
+    """Decides whether a proposed tool call may execute.
+
+    The loop knows this much and no more. It does not know what a kernel is,
+    what a policy is, or that governance exists — a gate is simply something
+    that may return a decision. That is what makes governance a capability
+    rather than a stage: with no gate there is no gate_decision event, no
+    kernel_version on the producer, and nothing to strip out.
+
+    Returning None means "no opinion", which the loop treats as allowed.
+    """
+
+    def decide(
+        self,
+        tool: str,
+        manifest: dict[str, object],
+        args: dict[str, object],
+        arg_bindings: dict[str, str],
+        ledger: ValueLedger,
+        inputs: dict[str, object],
+    ) -> dict[str, object] | None: ...
+
+
 class AgentProgram(Protocol):
     """Chooses the next action. A scripted plan, or a model backend.
 
@@ -158,7 +179,7 @@ def run_loop_trial(
     scenario: dict[str, object],
     manifests: dict[str, dict[str, object]],
     condition: dict[str, object],
-    kernel: Kernel | None,
+    gate: "Gate | None",
     run_id: str,
     seed: str,
     repeat_index: int,
@@ -169,7 +190,7 @@ def run_loop_trial(
 ) -> LoopOutcome:
     """Run one trial as a general multi-step loop → trace/v1.
 
-    `kernel` may be None (no governance capability): no gate runs, no
+    `gate` may be None (no governance capability): nothing decides, no
     gate_decision is emitted, and the producer names no kernel_version.
     """
     started = time.monotonic()
@@ -225,9 +246,10 @@ def run_loop_trial(
         seq += 1
         tool_calls += 1
 
-        decision = _gate(
-            kernel, condition, manifests[action.tool], action.args,
-            arg_bindings, ledger, inputs,
+        decision = (
+            gate.decide(action.tool, manifests[action.tool], action.args,
+                        arg_bindings, ledger, inputs)
+            if gate is not None else None
         )
         if decision is not None:
             events.append({
@@ -337,46 +359,3 @@ def _mint_untrusted(
     return _mint_untrusted_fields(ledger, manifest, tool_id, result)
 
 
-def _gate(
-    kernel: Kernel | None,
-    condition: dict[str, object],
-    manifest: dict[str, object],
-    args: dict[str, object],
-    arg_bindings: dict[str, str],
-    ledger: ValueLedger,
-    inputs: dict[str, object],
-) -> dict[str, object] | None:
-    """Gate one call, or None when no governance capability is active."""
-    if kernel is None:
-        return None
-    if isinstance(kernel, AxorKernel):
-        registrations = [
-            (str(vid), ledger.runtime_value(vid))
-            for vid in ledger.untrusted_ids()
-            if ledger.has_runtime_value(vid)
-        ]
-        # The real governor needs ONE driving value. Pick the first argument
-        # whose binding is untrusted — that is the value the gate would be
-        # deciding about. With no untrusted argument there is nothing for a
-        # taint gate to drive on, so any binding serves as the subject.
-        driving = next(
-            (vid for vid in arg_bindings.values() if _is_untrusted(ledger, vid)),
-            next(iter(arg_bindings.values()), ""),
-        )
-        return gate_with_governor(
-            kernel.config, str(condition["enforcement"]), registrations,
-            str(manifest["id"]), args, driving,
-        )
-    return kernel.decide(
-        enforcement=str(condition["enforcement"]),
-        manifest=manifest,
-        args=args,
-        arg_labels={name: ledger.labels_of(vid) for name, vid in arg_bindings.items()},
-        arg_bindings=arg_bindings,
-        inputs=inputs,
-        policy=condition.get("policy"),  # type: ignore[arg-type]
-    )
-
-
-def _is_untrusted(ledger: ValueLedger, value_id: str) -> bool:
-    return value_id in set(ledger.untrusted_ids())

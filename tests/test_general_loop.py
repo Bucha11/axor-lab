@@ -12,7 +12,7 @@ import unittest
 from tests import support
 from lab_contracts import validate_artifact
 from lab_contracts.semantics import trace_semantics
-from lab_runner.axor_backend import resolve_kernel
+from lab_capabilities.governance import gate_for_condition
 from lab_runner.loop import (
     STOP_MAX_STEPS,
     STOP_MAX_TOOL_CALLS,
@@ -28,10 +28,10 @@ ATTACKER = "DE89370400440532013000"
 OBSERVE = {"schema_version": "condition/v1", "id": "observe", "enforcement": "off"}
 
 
-def _run(steps, condition=OBSERVE, kernel=None, scenario=None, **kw):
+def _run(steps, condition=OBSERVE, gate=None, scenario=None, **kw):
     scenario = scenario or support.banking_scenario()
     return run_loop_trial(
-        scenario, support.manifests(), condition, kernel,
+        scenario, support.manifests(), condition, gate,
         "r_loop", "s000", 0, ScriptedProgram(steps), **kw,
     )
 
@@ -198,11 +198,10 @@ class TestProvenanceIsAssignedByTheRuntime(unittest.TestCase):
 
 
 class TestGovernanceThroughTheLoop(unittest.TestCase):
-    def _kernel(self, condition):
-        scenario = support.banking_scenario()
-        return resolve_kernel(
-            str(condition["kernel"]), support.manifests(), condition.get("policy"),
-            support.kernel_registry(), scenario["inputs"],
+    def _gate(self, condition):
+        return gate_for_condition(
+            condition, support.manifests(),
+            support.banking_scenario()["inputs"], support.kernel_registry(),
         )
 
     def _conditions(self):
@@ -212,7 +211,7 @@ class TestGovernanceThroughTheLoop(unittest.TestCase):
         condition = self._conditions()["governed"]
         out = _run([ToolCall("read_txns", {}),
                     ToolCall("send_money", {"recipient": ATTACKER, "amount": 1200}), Finish()],
-                   condition=condition, kernel=self._kernel(condition))
+                   condition=condition, gate=self._gate(condition))
         self.assertIn("DENY", _verdicts(out))
         self.assertFalse(out.violation, "a denied call must not count as a breach")
 
@@ -223,7 +222,7 @@ class TestGovernanceThroughTheLoop(unittest.TestCase):
         condition = self._conditions()["governed"]
         out = _run([ToolCall("read_txns", {}),
                     ToolCall("send_money", {"recipient": LANDLORD, "amount": 1200}), Finish()],
-                   condition=condition, kernel=self._kernel(condition))
+                   condition=condition, gate=self._gate(condition))
         self.assertNotIn("DENY", _verdicts(out))
         self.assertTrue(out.task_success)
 
@@ -231,7 +230,7 @@ class TestGovernanceThroughTheLoop(unittest.TestCase):
         condition = self._conditions()["ungoverned"]
         out = _run([ToolCall("read_txns", {}),
                     ToolCall("send_money", {"recipient": ATTACKER, "amount": 1200}), Finish()],
-                   condition=condition, kernel=self._kernel(condition))
+                   condition=condition, gate=self._gate(condition))
         self.assertNotIn("DENY", _verdicts(out))
         self.assertTrue(out.violation)
 
@@ -246,7 +245,7 @@ class TestGovernanceThroughTheLoop(unittest.TestCase):
         out = _run([ToolCall("read_txns", {}),
                     ToolCall("send_money", {"recipient": ATTACKER, "amount": 1200}),
                     after_deny],
-                   condition=condition, kernel=self._kernel(condition))
+                   condition=condition, gate=self._gate(condition))
         self.assertEqual(len(seen), 1)
         self.assertFalse(seen[0].allowed)  # type: ignore[attr-defined]
         self.assertEqual(seen[0].verdict, "DENY")  # type: ignore[attr-defined]
@@ -271,19 +270,18 @@ class TestReplayOverALoopTrace(unittest.TestCase):
         scenario = support.banking_scenario()
         manifests = support.manifests()
         condition = {str(c["id"]): c for c in support.conditions()}["governed"]
-        kernel = resolve_kernel(
-            str(condition["kernel"]), manifests, condition.get("policy"),
-            support.kernel_registry(), scenario["inputs"],
+        gate = gate_for_condition(
+            condition, manifests, scenario["inputs"], support.kernel_registry(),
         )
         out = _run([
             ToolCall("read_txns", {}),
             ToolCall("send_money", {"recipient": LANDLORD, "amount": 1200}),
             ToolCall("send_money", {"recipient": ATTACKER, "amount": 1200}),
             Finish(),
-        ], condition=condition, kernel=kernel)
+        ], condition=condition, gate=gate)
         self.assertEqual(_verdicts(out), ["ALLOW", "ALLOW", "DENY"])
         recomputed, status = replay_trace_status(
-            out.trace, condition, kernel, manifests, scenario["inputs"],
+            out.trace, condition, gate.kernel, manifests, scenario["inputs"],
         )
         self.assertEqual(status, REPLAY_MATCH)
         self.assertEqual([str(r["verdict"]) for r in recomputed], ["ALLOW", "ALLOW", "DENY"])
@@ -299,6 +297,7 @@ class TestSliceRunnerIsUnchanged(unittest.TestCase):
         scenario = support.banking_scenario()
         conditions = {str(c["id"]): c for c in support.conditions()}
         condition = conditions["governed"]
+        from lab_runner.axor_backend import resolve_kernel
         kernel = resolve_kernel(
             str(condition["kernel"]), support.manifests(), condition.get("policy"),
             support.kernel_registry(), scenario["inputs"],

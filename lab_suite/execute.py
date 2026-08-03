@@ -20,10 +20,10 @@ from dataclasses import dataclass, field
 
 from lab_analysis import binary_aggregate
 from lab_contracts import build_artifact, build_bundle, content_hash, reproducibility_of
-from lab_runner.axor_backend import resolve_kernel
+from lab_capabilities.governance import gate_for_condition
 from lab_runner.errors import CostCeilingReached
 from lab_runner.invariants import InvariantResult, check_invariant
-from lab_runner.kernel import KernelRegistry, default_registry
+from lab_runner.kernel import KernelRegistry
 from lab_runner.loop import LoopOutcome, run_loop_trial
 from lab_runner.runner import observe_only_condition, trial_id_for
 
@@ -109,7 +109,7 @@ def run_suite(
     conditions = list(resolved.conditions) or [observe_only_condition()]
     run = SuiteRun(run_id=run_id, resolved=resolved, conditions=conditions)
 
-    kernels: dict[tuple[str, str], object] = {}
+    gates: dict[tuple[str, str], object] = {}
     execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
     max_steps = int(execution.get("max_steps", 24))  # type: ignore[arg-type]
 
@@ -125,18 +125,17 @@ def run_suite(
     for order, (scenario, condition, repeat_index) in enumerate(plan):
         seed = _seed_for(execution, repeat_index)
         cache_key = (str(condition["id"]), str(scenario["name"]))
-        if cache_key not in kernels:
-            kernels[cache_key] = (
-                resolve_kernel(
-                    str(condition["kernel"]), resolved.manifests,
-                    condition.get("policy"),
-                    kernel_registry or default_registry((str(condition["kernel"]),)),
-                    scenario.get("inputs", {}),  # type: ignore[arg-type]
-                )
-                if condition.get("kernel") else None
+        if cache_key not in gates:
+            # keyed by (condition, scenario): an input-backed allowlist resolves
+            # against THIS scenario's inputs, so two scenarios under one
+            # condition must not share a gate with a stale expansion
+            gates[cache_key] = gate_for_condition(
+                condition, resolved.manifests,
+                scenario.get("inputs", {}),  # type: ignore[arg-type]
+                kernel_registry,
             )
         try:
-            _run_one(run, suite, scenario, condition, kernels[cache_key],
+            _run_one(run, suite, scenario, condition, gates[cache_key],
                      seed, repeat_index, order, max_steps, backend)
         except CostCeilingReached as stop:
             run.stopped_reason = str(stop)
@@ -192,7 +191,7 @@ def _run_one(
     suite: BaseSuite,
     scenario: dict[str, object],
     condition: dict[str, object],
-    kernel: object,
+    gate: object,
     seed: str,
     repeat_index: int,
     order: int,
@@ -209,7 +208,7 @@ def _run_one(
     }
     try:
         outcome = run_loop_trial(
-            scenario, run.resolved.manifests, condition, kernel,  # type: ignore[arg-type]
+            scenario, run.resolved.manifests, condition, gate,  # type: ignore[arg-type]
             run.run_id, seed, repeat_index,
             suite.program_for(scenario, seed, run.resolved, backend),
             max_steps=max_steps,
@@ -247,13 +246,21 @@ def _run_one(
             ),
             "config_compiler_version": CONFIG_COMPILER_VERSION,
             "runtime_provenance": "recorded_at_execution",
-            "resolved_kernel_fingerprint": str(
-                getattr(kernel, "behavior_version", str(getattr(kernel, "version", "")))
-            ),
+            "resolved_kernel_fingerprint": _fingerprint(gate),
         })
     run.trials.append(record)
     run.traces[trace_ref] = outcome.trace
     run.outcomes[trial_key] = outcome
+
+
+def _fingerprint(gate: object) -> str:
+    """The ACTUAL resolved backend's behaviour identity, not the declared
+    condition.kernel string — so a registry returning a behaviour-changed kernel
+    under a version label stays auditable (review r20)."""
+    kernel = getattr(gate, "kernel", None)
+    if kernel is None:
+        return ""
+    return str(getattr(kernel, "behavior_version", getattr(kernel, "version", "")))
 
 
 def _aggregate(run: SuiteRun) -> list[dict[str, object]]:
