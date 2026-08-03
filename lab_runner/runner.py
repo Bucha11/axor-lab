@@ -23,7 +23,7 @@ from lab_contracts.canonical import (
 from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
 from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
 from .errors import CostCeilingReached
-from .kernel import Kernel, KernelRegistry
+from .kernel import Kernel, KernelRegistry, default_registry
 from .ledger import ValueLedger
 from .predicates import evaluate
 from .simulator import SimulatedToolHost
@@ -94,7 +94,6 @@ def _trial_metrics(
 
 
 UNGOVERNED_CONDITION_ID = "ungoverned"
-UNWRAPPED_CONDITION_ID = "unwrapped"
 
 
 def observe_only_condition(kernel: str | None = None) -> dict[str, object]:
@@ -112,8 +111,12 @@ def observe_only_condition(kernel: str | None = None) -> dict[str, object]:
     `enforcement` — and the ungoverned/governed comparison would be measuring
     two different machines rather than one machine under two policies.
 
-    `unwrapped_condition()` is the genuinely kernel-free case; it is a different
-    claim and is named differently on purpose.
+    There is deliberately no kernel-free variant. A run nothing observed cannot
+    produce a conformant trace anyway — trace/v1 rules out black-box producers
+    precisely because they "cannot emit value lineage" — and locally the
+    reference kernel is stdlib and always available, so choosing it costs
+    nothing and buys the value ledger, recorded verdicts and exact replay that a
+    kernel-free arm threw away.
     """
     resolved = kernel or _default_kernel_version()
     condition: dict[str, object] = {
@@ -127,34 +130,17 @@ def observe_only_condition(kernel: str | None = None) -> dict[str, object]:
     return condition
 
 
-def unwrapped_condition() -> dict[str, object]:
-    """No kernel at all — nothing observed this run.
-
-    Honest only where there is genuinely nothing wrapped: a Lab-local scripted
-    run over simulated tools. It is NOT "ungoverned": an ungoverned run is
-    wrapped and observed with enforcement off, and conflating the two is how a
-    run that nothing was watching gets reported as one that governance simply
-    permitted.
-    """
-    return {
-        "schema_version": "condition/v1",
-        "id": UNWRAPPED_CONDITION_ID,
-        "label": "unwrapped (no kernel)",
-        "enforcement": "off",
-    }
-
-
 def _default_kernel_version() -> str | None:
-    """The installed real kernel, else the reference one.
+    """The reference kernel: stdlib, always resolvable, no axor-core needed.
 
-    Never None in practice — axor-core is the ecosystem's spine and the
-    reference kernel backs a local run — but typed as optional so a stripped
-    environment degrades to `unwrapped_condition()`'s meaning rather than
-    pretending a kernel observed the run.
+    Deliberately NOT the installed real kernel. A locally-synthesized arm must
+    be resolvable on any machine, and pinning `axor-core@X` here would make a
+    default arm unrunnable wherever that exact build is absent — resolve_kernel
+    refuses to substitute under a real-kernel label, and rightly so. A caller
+    that wants the real kernel names it (as the connected-runtime path does,
+    where the runtime carries it).
     """
-    from .axor_backend import real_kernel_version
-
-    return real_kernel_version() or REFERENCE_KERNEL_VERSION
+    return REFERENCE_KERNEL_VERSION
 
 
 REFERENCE_KERNEL_VERSION = "reference_taint_floor_kernel"
@@ -507,9 +493,11 @@ def run_experiment(
     agent: AgentAdapter | None = None,
 ) -> ExperimentResult:
     agent = agent or ScriptedAgent()
-    # a Lab-local scripted run over simulated tools: nothing is wrapped, so
-    # the honest arm is `unwrapped`, not `ungoverned`
-    conditions = conditions or [unwrapped_condition()]
+    if not conditions:
+        # a synthesized arm must be resolvable on ANY machine, so it names the
+        # reference kernel and brings a registry that knows it
+        conditions = [observe_only_condition()]
+        kernel_registry = default_registry((REFERENCE_KERNEL_VERSION,))
     result = ExperimentResult(run_id=run_id, conditions=list(conditions))
     order = 0
     for condition in conditions:
@@ -623,9 +611,11 @@ def run_experiment_suite(
     run-wide cost ceiling is a hard stop, not an advisory print (review r11).
     """
     agent = agent or ScriptedAgent()
-    # a Lab-local scripted run over simulated tools: nothing is wrapped, so
-    # the honest arm is `unwrapped`, not `ungoverned`
-    conditions = conditions or [unwrapped_condition()]
+    if not conditions:
+        # a synthesized arm must be resolvable on ANY machine, so it names the
+        # reference kernel and brings a registry that knows it
+        conditions = [observe_only_condition()]
+        kernel_registry = default_registry((REFERENCE_KERNEL_VERSION,))
     result = ExperimentResult(run_id=run_id, conditions=list(conditions))
     # materialize the FULL plan up front so a cost stop can record the trials
     # that never ran — otherwise missingness computes over only the trials that

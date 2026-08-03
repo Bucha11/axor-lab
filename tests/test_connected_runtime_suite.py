@@ -304,15 +304,17 @@ class TestUngovernedStillGoesThroughTheCore(unittest.TestCase):
         )
         self.assertEqual(ungoverned.assignment["scenarios"], governed.assignment["scenarios"])
 
-    def test_the_local_simulated_path_says_unwrapped_instead(self) -> None:
-        """run_suite executes against SIMULATED tools with nothing wrapped, so
-        claiming a kernel observed it would be a lie. The two paths differ, and
-        the arm id is where a reader sees which one produced a bundle."""
+    def test_the_local_path_defaults_the_same_way(self) -> None:
+        """One default everywhere. The local path used to synthesize a
+        kernel-free arm, which closed no user story and forfeited the ledger,
+        the verdicts and exact replay — locally the reference kernel is stdlib
+        and always resolvable, so observing costs nothing."""
         from lab_suite import run_suite
         suite = builtin_registry().get("budget")
         run = run_suite(suite.manifest(), run_id="r_local", suite=suite)
-        self.assertEqual(str(run.conditions[0]["id"]), "unwrapped")
-        self.assertNotIn("kernel", run.conditions[0])
+        self.assertEqual(str(run.conditions[0]["id"]), "ungoverned")
+        self.assertEqual(str(run.conditions[0]["enforcement"]), "off")
+        self.assertIn("kernel", run.conditions[0])
 
     def test_an_unwrapped_trace_is_refused_for_a_kernel_bearing_arm(self) -> None:
         """The enforcement behind the rule. If a runtime returns a trace naming

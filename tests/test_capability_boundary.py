@@ -153,29 +153,30 @@ class TestDependencyDirectionIsOneWay(unittest.TestCase):
         self.assertTrue(hasattr(KernelGate, "decide"))
 
 
-class TestAGovernanceFreeRunTouchesNoKernel(unittest.TestCase):
-    def test_no_kernel_is_resolved_for_a_conditionless_suite(self) -> None:
-        """The runtime proof behind the static checks: run a suite that declares
-        no governance and assert the kernel resolver is never called."""
-        import lab_capabilities.governance.gate as gate_module
+class TestAGovernanceFreeRunEnforcesNothing(unittest.TestCase):
+    """What "governance-free" means is NO ENFORCEMENT, not no kernel.
+
+    An earlier version asserted the kernel resolver was never called. That
+    encoded the wrong goal: an unobserved run has no value ledger, no
+    replayable verdicts, and describes an agent that was never wrapped. The
+    kernel observes; only the gates are off.
+    """
+
+    def test_a_conditionless_suite_observes_but_never_denies(self) -> None:
         from lab_suite import builtin_registry, run_suite
 
-        calls: list[object] = []
-        original = gate_module.resolve_kernel
-
-        def spy(*args: object, **kwargs: object) -> object:
-            calls.append(args)
-            return original(*args, **kwargs)
-
-        gate_module.resolve_kernel = spy  # type: ignore[assignment]
-        try:
-            suite = builtin_registry().get("budget")
-            run = run_suite(suite.manifest(), run_id="r_free", suite=suite)
-        finally:
-            gate_module.resolve_kernel = original  # type: ignore[assignment]
-
+        suite = builtin_registry().get("budget")
+        run = run_suite(suite.manifest(), run_id="r_free", suite=suite)
         self.assertTrue(run.trials)
-        self.assertEqual(calls, [], "a governance-free run resolved a kernel")
+        self.assertEqual(str(run.conditions[0]["enforcement"]), "off")
+
+        verdicts = [
+            str(e["decision"]["verdict"]) for trace in run.traces.values()
+            for e in trace["events"]  # type: ignore[union-attr]
+            if e.get("type") == "gate_decision"
+        ]
+        self.assertTrue(verdicts, "the kernel still observes every call")
+        self.assertNotIn("DENY", verdicts, "enforcement is off — nothing is denied")
 
     def test_a_governed_suite_does_resolve_one(self) -> None:
         """The converse, so the test above cannot pass by the capability simply

@@ -82,11 +82,12 @@ class TestPlatformSliceEndToEnd(unittest.TestCase):
         self.assertEqual(validate_artifact(artifact, "artifact"), [])
         self.assertEqual(content_hash(artifact["bundle"]), content_hash(self.bundle))
 
-    def test_a_gate_free_artifact_does_not_claim_exact_replay(self) -> None:
-        """There are no verdicts to recompute, so bit-identical reproduction is
-        not on offer. Claiming exact_replay would promise something nothing in
-        the artifact can deliver."""
-        self.assertEqual(reproducibility_of(self.bundle, True), "statistically_reproducible")
+    def test_an_observed_ungoverned_artifact_claims_exact_replay(self) -> None:
+        """The ungoverned arm still ran THROUGH the kernel, so its recorded
+        verdicts recompute bit-identically. An artifact with no traces at all
+        still claims nothing."""
+        self.assertEqual(reproducibility_of(self.bundle, True), "exact_replay")
+        self.assertEqual(reproducibility_of(self.bundle, False), "not_reproducible")
 
     def test_latency_invariant_passes(self) -> None:
         regression = {

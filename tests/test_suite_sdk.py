@@ -213,11 +213,13 @@ class TestExecution(unittest.TestCase):
         }
         self.assertEqual(statuses["RG-budget-latency"], STATUS_PASSED)
 
-    def test_a_governance_free_suite_claims_no_exact_replay(self) -> None:
+    def test_an_ungoverned_suite_still_claims_exact_replay(self) -> None:
+        """Enforcement is off, but the kernel observed — so the verdicts it
+        recorded replay bit-identically."""
         _, run = self._run("budget")
         artifact = run.artifact("a", CREATED, ENVIRONMENT)
         self.assertEqual(
-            artifact["reproduce"]["reproducibility"], "statistically_reproducible",  # type: ignore[index]
+            artifact["reproduce"]["reproducibility"], "exact_replay",  # type: ignore[index]
         )
 
     def test_a_governed_suite_claims_exact_replay(self) -> None:
