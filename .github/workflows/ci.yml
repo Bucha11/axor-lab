@@ -100,13 +100,16 @@ jobs:
         # here — not just test_real_kernel — so a real-kernel regression on the
         # endpoint or replay surfaces cannot hide behind a stdlib-job skip.
         run: |
-          # PIN the kernel to an EXACT version (review r20): a floating ">=0.9"
+          # PIN the kernel to an EXACT version (review r20): a floating range
           # lets a future axor-core release drift into the integration job, so a
           # green run no longer proves the SAME kernel the evidence was measured
           # against still behaves. Bump this deliberately, with the suites re-run.
-          pip install "axor-core==0.9.2"
+          # Bumped 0.9.2 -> 0.10.0: axor-wrap requires >=0.10,<0.11, so pinning
+          # 0.9.2 here meant Lab's real-kernel evidence was measured against a
+          # kernel nobody in the ecosystem actually runs. Full suite re-run green.
+          pip install "axor-core==0.10.0"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
-          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.9.2' else 'axor-core version drift: expected 0.9.2, got ' + axor_core.__version__)"
+          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.10.0' else 'axor-core version drift: expected 0.10.0, got ' + axor_core.__version__)"
           python -c "from lab_runner import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.

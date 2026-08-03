@@ -44,7 +44,10 @@ byok = ["anthropic>=0.40"]
 crypto = ["pynacl>=1.5"]
 # the REAL production kernel: govern with axor_core.ToolCallGovernor instead of
 # the reference taint_floor. Without it, Lab falls back to the reference kernel.
-kernel = ["axor-core>=0.9"]
+# Bounded, and aligned with the rest of the ecosystem: axor-wrap requires
+# >=0.10,<0.11, so an unbounded ">=0.9" here let one environment resolve a
+# kernel Lab's own integration job had never run against.
+kernel = ["axor-core>=0.10,<0.11"]
 
 [tool.ruff]
 target-version = "py311"
