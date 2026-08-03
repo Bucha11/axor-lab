@@ -557,7 +557,8 @@ def _mint_untrusted_fields(
         for concrete, value in _expand_field(result, path):
             produced.append(
                 ledger.mint_external_read(
-                    value, f"tool_result:{tool_id}:{concrete}", sensitive=is_sensitive
+                    value, f"tool_result:{tool_id}:{concrete}",
+                    sensitive=is_sensitive, produced_by=tool_id,
                 )
             )
     return produced

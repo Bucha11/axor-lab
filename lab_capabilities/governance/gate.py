@@ -36,10 +36,19 @@ class KernelGate:
         inputs: dict[str, object],
     ) -> dict[str, object] | None:
         if isinstance(self.kernel, AxorKernel):
+            # The producing TOOL, never the value id. axor-core's governor roots
+            # taint from the tool name — `register_output` looks it up in
+            # `untrusted_sources` and registers nothing for a name it does not
+            # recognise. This passed `str(vid)`, so every registration was a
+            # no-op, the governor's taint ledger stayed empty, and the governed
+            # arm of the general loop ALLOWED the exfiltration it exists to
+            # deny. A root whose producer is unknown is dropped rather than
+            # registered under a wrong name.
             registrations = [
-                (str(vid), ledger.runtime_value(vid))
+                (producer, ledger.runtime_value(vid))
                 for vid in ledger.untrusted_ids()
                 if ledger.has_runtime_value(vid)
+                and (producer := ledger.producing_tool(vid)) is not None
             ]
             # The driving value is the one the MANIFEST declares drives this
             # tool's effect — the same rule the reference kernel applies. An

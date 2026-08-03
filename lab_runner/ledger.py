@@ -62,6 +62,11 @@ class ValueLedger:
     values: list[dict[str, object]] = field(default_factory=list)
     _counter: int = 0
     _runtime: dict[str, object] = field(default_factory=dict)
+    # which TOOL produced each external_read root. In-memory only, like
+    # `_runtime`: the real axor-core governor roots taint from the tool NAME
+    # (`register_output` looks it up in `untrusted_sources`), so a caller that
+    # cannot name the producing tool cannot taint anything through it.
+    _producer: dict[str, str] = field(default_factory=dict)
 
     def _next_id(self, hint: str) -> str:
         self._counter += 1
@@ -80,6 +85,17 @@ class ValueLedger:
 
     def has_runtime_value(self, value_id: str) -> bool:
         return value_id in self._runtime
+
+    def producing_tool(self, value_id: str) -> str | None:
+        """The tool whose result rooted this value, if it was an external read.
+
+        Needed because axor-core's governor derives a value's taint root from
+        the tool name, not from the value: `register_output` on a name absent
+        from `untrusted_sources` registers nothing at all. Passing anything
+        else — a value id, say — silently produces an EMPTY taint ledger and a
+        governor that allows every egress.
+        """
+        return self._producer.get(value_id)
 
     def labels_of(self, value_id: str) -> tuple[str, ...]:
         return tuple(self.get(value_id)["labels"])  # type: ignore[arg-type]
@@ -110,11 +126,15 @@ class ValueLedger:
         self._runtime[value_id] = value
         return value_id
 
-    def mint_external_read(self, value: object, origin_ref: str, sensitive: bool = False) -> str:
+    def mint_external_read(
+        self, value: object, origin_ref: str, sensitive: bool = False,
+        produced_by: str | None = None,
+    ) -> str:
         """`external_read` constructor: roots a taint (untrusted tool field).
 
         A ``sensitive`` field additionally arms the confidentiality floor and
-        is redacted in the trace (review §7.4)."""
+        is redacted in the trace (review §7.4). ``produced_by`` names the tool
+        whose result rooted the value — see :meth:`producing_tool`."""
         value_id = self._next_id("ext")
         labels = [LABEL_UNTRUSTED, LABEL_SENSITIVE] if sensitive else [LABEL_UNTRUSTED]
         self.values.append(
@@ -126,6 +146,8 @@ class ValueLedger:
             }
         )
         self._runtime[value_id] = value  # raw value stays in memory for the kernel
+        if produced_by is not None:
+            self._producer[value_id] = produced_by
         return value_id
 
     def mint_model_extraction(self, value: object, context_value_ids: tuple[str, ...] | None = None) -> str:
