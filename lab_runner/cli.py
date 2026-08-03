@@ -1248,10 +1248,12 @@ def _repin_to_real_kernel(document: dict[str, object]) -> None:
     `kernel_version` that `verify_bundle` rejects — meaning the command ran every
     trial (paid model calls included) and only THEN failed at save (review r13).
 
-    The real backend handles `enforcement == "off"` as observe-only (an ALLOW
-    with observation still on, no gates applied), so a baseline on the real
-    kernel behaves identically to one on the reference kernel — but now both
-    arms share one kernel, and the bundle has a single kernel_version."""
+    Repinning the baseline is load-bearing, not cosmetic. `enforcement: off` is
+    observe-only, not gate-free: the kernel evaluates every call and records the
+    verdict it would have enforced. So the baseline's verdicts are the REAL
+    kernel's verdicts, and a baseline left on the reference kernel would report
+    a different kernel's opinion of the same calls. Both arms share one kernel,
+    and the bundle has a single kernel_version."""
     from lab_contracts import condition_config_hash
     from lab_runner import axor_available, real_kernel_version
 

@@ -37,8 +37,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Run acceptance tests (stdlib only, no dependencies)
+      # axor-core is a REQUIRED dependency, so the acceptance suite must run
+      # with it present. It ran without it, which meant every real-kernel test
+      # SKIPPED here — and a bug on the loop's real-kernel gate that let the
+      # governed arm allow an exfiltration was invisible to this job.
+      - name: Install (pulls axor-core, the required kernel)
+        run: pip install -e .
+      - name: Run acceptance tests
         run: python -m unittest discover -s tests -t . -v
+      # No hand-maintained module list. Every @skipUnless(axor_available()) test
+      # is found by discovery, so a NEW real-kernel test is covered the moment it
+      # is written — a list is what let `test_general_loop_real_kernel` not exist
+      # for as long as it didn't.
+      - name: No axor-core test may skip with axor-core installed
+        run: |
+          python - <<'PY'
+          import io, sys, unittest
+          from lab_runner import axor_available
+          assert axor_available(), "axor-core is a required dependency but did not import"
+          result = unittest.TextTestRunner(stream=io.StringIO()).run(
+              unittest.TestLoader().discover("tests", top_level_dir=".")
+          )
+          missing = [(t, r) for t, r in result.skipped if "axor-core" in r]
+          for test, reason in missing:
+              print(f"::error::skipped {test}: {reason}", file=sys.stderr)
+          sys.exit(bool(missing) and "a real-kernel test skipped with axor-core installed")
+          PY
       - name: Smoke-check the shipped example resolves
         run: python -m lab_runner validate examples/banking-exfil-01.axl
 
@@ -113,28 +137,35 @@ jobs:
           python -c "from lab_runner import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.
+          # the WHOLE suite, not a hand-listed subset. The list here named three
+          # modules and silently excluded every real-kernel test written after it
+          # was last edited — which is how the general loop went unexercised
+          # against axor-core while this job stayed green.
           set +e
-          python -m unittest -v \
-            tests.test_real_kernel \
-            tests.test_replay_capability \
-            tests.test_regress_candidate_kernel > real_kernel.log 2>&1
+          python -m unittest discover -s tests -t . -v > real_kernel.log 2>&1
           rc=$?
           set -e
           cat real_kernel.log
           test "$rc" -eq 0 || { echo "::error::real-kernel suites failed"; exit "$rc"; }
-          # FAIL on an unexpected skip: with axor-core installed, none of these
-          # real-kernel-gated tests may skip. A silent skip here would hide a
+          # FAIL on an unexpected skip: with axor-core installed, no
+          # real-kernel-gated test may skip. A silent skip here would hide a
           # regression behind a green job, exactly what this job exists to prevent
-          # (review r19). (The stdlib job legitimately skips them; this one must not.)
+          # (review r19).
+          #
+          # Matched on the skip REASON, not on a total count: now that the whole
+          # suite runs here, unrelated skips (the PyNaCl-absent path) are expected
+          # and a bare count would either fail on them or have to be tuned to a
+          # magic number that drifts.
           python - <<'PY'
           import re, sys
           log = open("real_kernel.log").read()
-          m = re.search(r"skipped=(\d+)", log)
-          skipped = int(m.group(1)) if m else 0
-          if skipped:
-              print(f"::error::{skipped} real-kernel test(s) skipped with axor-core installed", file=sys.stderr)
-              sys.exit(1)
-          print("no unexpected skips in the real-kernel suites")
+          offenders = [line for line in log.splitlines()
+                       if "skipped" in line and "axor-core" in line]
+          for line in offenders:
+              print(f"::error::{line}", file=sys.stderr)
+          if offenders:
+              sys.exit("real-kernel test(s) skipped with axor-core installed")
+          print("no real-kernel skips")
           PY
 
   crypto:

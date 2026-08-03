@@ -9,9 +9,16 @@ description = "Axor Lab — reproducible governance experiments for AI agents: l
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
-# deliberately dependency-free: the contract validator, runner, replay and
-# statistics engine are stdlib-only (see contracts/ and the acceptance suite)
-dependencies = []
+# axor-core is REQUIRED, not an extra. Lab exists to measure what the Axor
+# kernel does; a Lab that installs without it can still run, but every number it
+# produces describes the one-gate reference reimplementation rather than the
+# product — and which of the two you got depended on whether an optional extra
+# happened to be installed. Bounded to one minor line, matching axor-wrap, so an
+# environment cannot resolve a kernel Lab's integration job never ran against.
+#
+# Everything else stays stdlib: the contract validator, replay and the
+# statistics engine pull in nothing.
+dependencies = ["axor-core>=0.10,<0.11"]
 
 [project.scripts]
 axor-lab = "lab_runner.cli:main"
@@ -42,12 +49,10 @@ lab_contracts = ["schemas/*.schema.json"]
 byok = ["anthropic>=0.40"]
 # Ed25519 license + bundle signing (same crypto as the Control Plane license)
 crypto = ["pynacl>=1.5"]
-# the REAL production kernel: govern with axor_core.ToolCallGovernor instead of
-# the reference taint_floor. Without it, Lab falls back to the reference kernel.
-# Bounded, and aligned with the rest of the ecosystem: axor-wrap requires
-# >=0.10,<0.11, so an unbounded ">=0.9" here let one environment resolve a
-# kernel Lab's own integration job had never run against.
-kernel = ["axor-core>=0.10,<0.11"]
+# `kernel` is retired: axor-core moved to [project.dependencies]. Kept as an
+# empty alias so `pip install axor-lab[kernel]` in an existing script keeps
+# working instead of erroring on an unknown extra.
+kernel = []
 
 [tool.ruff]
 target-version = "py311"
