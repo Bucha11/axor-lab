@@ -541,10 +541,12 @@ def make_runtime_server(
                     ref = self._runtime_ref()
                     body = self._read_json()
                     trace = body.get("trace")
+                    metrics = body.get("metrics")
                     self._send(200, jobs.complete_trial(
                         m.group(1), m.group(2), ref,
                         trace if isinstance(trace, dict) else None,
                         status=str(body.get("status", "completed")),
+                        metrics=metrics if isinstance(metrics, dict) else None,
                     ))
                     return
                 self._send(404, {"error": "not found"})

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 from lab_contracts import content_hash, validate_artifact
 from lab_runner.invariants import check_invariant
+from lab_runner.predicates import evaluate
 from lab_runner.runner import observe_only_condition
 
 from .errors import SuiteError
@@ -181,7 +182,16 @@ def collect_suite_run(assignment: SuiteAssignment, store: object) -> SuiteRun:
         trace_ref = content_hash(trace)
         run.trials.append({
             **trial_record, "status": "completed", "trace_ref": trace_ref,
-            "metrics": _metrics_of(reported.get(unit, {})),  # type: ignore[arg-type]
+            # the runtime's MEASUREMENTS (duration, tokens, cost) it alone could
+            # take, plus Lab's own EVALUATION of the scenario's predicates over
+            # the returned trace. The split is the point: Lab cannot time a run
+            # on someone else's machine, but it must never take a verdict about
+            # success or breach on trust — that is the whole claim the artifact
+            # publishes, and it has to be recomputable from the trace.
+            "metrics": {
+                **_metrics_of(reported.get(unit, {})),  # type: ignore[arg-type]
+                **_evaluated(scenario, trace),
+            },
         })
         run.traces[trace_ref] = trace
 
@@ -194,6 +204,24 @@ def collect_suite_run(assignment: SuiteAssignment, store: object) -> SuiteRun:
         for regression in assignment.resolved.regressions
     ]
     return run
+
+
+def _evaluated(scenario: dict[str, object], trace: dict[str, object]) -> dict[str, object]:
+    """Lab's own evaluation of the scenario's typed predicates over the trace.
+
+    Not taken from the runtime. A runtime reporting its own task_success would
+    be grading its own homework, and the aggregate that ends up in a published
+    artifact has to be reproducible by anyone holding the trace.
+    """
+    inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
+    evaluated: dict[str, object] = {}
+    success = scenario.get("task_success")
+    if success is not None:
+        evaluated["task_success"] = bool(evaluate(success, trace, inputs))  # type: ignore[arg-type]
+    violation = scenario.get("violation")
+    if violation is not None:
+        evaluated["ASR"] = bool(evaluate(violation, trace, inputs))  # type: ignore[arg-type]
+    return evaluated
 
 
 def _agent_ref(resolved: ResolvedSuite) -> str:

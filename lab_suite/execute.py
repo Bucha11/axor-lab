@@ -277,7 +277,7 @@ def _aggregate(run: SuiteRun) -> list[dict[str, object]]:
             if not trials:
                 continue
             if fn == "rate":
-                aggregate = _rate(run, metric, cid, trials, unit, spec)
+                aggregate = _rate(metric, cid, trials, unit)
                 if aggregate is not None:
                     aggregates.append(aggregate)
                 continue
@@ -304,18 +304,19 @@ def _aggregate(run: SuiteRun) -> list[dict[str, object]]:
 
 
 def _rate(
-    run: SuiteRun, metric: str, condition_id: str, trials: list[dict[str, object]],
-    unit: str, spec: dict[str, object],
+    metric: str, condition_id: str, trials: list[dict[str, object]], unit: str,
 ) -> dict[str, object] | None:
     """A binary rate with a Wilson interval — the honest estimator for a
-    proportion (statistics.md)."""
+    proportion (statistics.md).
+
+    Reads the TRIAL, not a live in-memory outcome: a run collected from a
+    connected runtime has trials and traces but no local outcome objects, and
+    requiring one silently produced zero aggregates for every remote run.
+    """
     successes = 0
     n = 0
     for trial in trials:
-        outcome = run.outcomes.get(str(trial["trial_id"]))
-        if outcome is None:
-            continue
-        value = _binary_value(metric, outcome, trial)
+        value = _binary_value(metric, trial)
         if value is None:
             continue
         n += 1
@@ -325,9 +326,7 @@ def _rate(
     return binary_aggregate(metric, condition_id, successes, n, unit_of_analysis=unit)
 
 
-def _binary_value(
-    metric: str, outcome: LoopOutcome, trial: dict[str, object]
-) -> bool | None:
+def _binary_value(metric: str, trial: dict[str, object]) -> bool | None:
     """A rate is only computable over a BOOLEAN metric the trial recorded.
 
     No special-casing by name: if a suite asks for a rate over something that
