@@ -58,9 +58,20 @@ class BaseSuite:
 
     # --- execution -------------------------------------------------------
     def program_for(
-        self, scenario: dict[str, object], seed: str, resolved: ResolvedSuite
+        self,
+        scenario: dict[str, object],
+        seed: str,
+        resolved: ResolvedSuite,
+        backend: object | None = None,
     ) -> AgentProgram:
-        """The agent behaviour for one trial. Default: do nothing."""
+        """The agent behaviour for one trial. Default: do nothing.
+
+        `backend` is a `ModelBackend` when the caller supplied one. A suite that
+        can drive a real model should return a ModelProgram then, and its own
+        scripted stand-in otherwise — the scripted path keeps the suite testable
+        offline, and the model path is what actually answers the experiment's
+        question.
+        """
         return _NullProgram()
 
     # --- observation -----------------------------------------------------

@@ -195,12 +195,23 @@ class TestExecution(unittest.TestCase):
         _, run = self._run("budget")
         self.assertIn("reads", run.trials[0]["metrics"])  # type: ignore[operator]
 
-    def test_the_suites_own_regression_is_checked(self) -> None:
+    def test_the_suites_own_regressions_are_checked(self) -> None:
+        """Budget ships two invariants. The latency one passes; the COST one
+        errors, because a scripted stand-in calls no provider and so nothing
+        measured cost — which is the honest answer, not a pass."""
         _, run = self._run("budget")
-        self.assertEqual([r.status for r in run.invariants], [STATUS_PASSED])
+        by_id = {
+            str(regression["id"]): result
+            for regression, result in zip(run.resolved.regressions, run.invariants)
+        }
+        self.assertEqual(by_id["RG-budget-latency"].status, STATUS_PASSED)
+        self.assertEqual(by_id["RG-budget-cost"].status, "error")
         artifact = run.artifact("a", CREATED, ENVIRONMENT)
-        history = artifact["regressions"][0]["history"]  # type: ignore[index]
-        self.assertEqual(history[0]["status"], STATUS_PASSED)
+        statuses = {
+            str(r["id"]): r["history"][0]["status"]  # type: ignore[index]
+            for r in artifact["regressions"]  # type: ignore[union-attr]
+        }
+        self.assertEqual(statuses["RG-budget-latency"], STATUS_PASSED)
 
     def test_a_governance_free_suite_claims_no_exact_replay(self) -> None:
         _, run = self._run("budget")

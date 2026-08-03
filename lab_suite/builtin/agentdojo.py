@@ -70,7 +70,11 @@ class AgentDojoSuite(BaseSuite):
         }
 
     def program_for(
-        self, scenario: dict[str, object], seed: str, resolved: ResolvedSuite
+        self,
+        scenario: dict[str, object],
+        seed: str,
+        resolved: ResolvedSuite,
+        backend: object | None = None,
     ) -> AgentProgram:
         """A deterministic stand-in for the model: the seed decides whether the
         agent follows the injection, which is what produces the discordant pairs

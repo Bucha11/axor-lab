@@ -103,9 +103,27 @@ class LoopContext:
 
 
 class AgentProgram(Protocol):
-    """Chooses the next action. A scripted plan, or a model backend."""
+    """Chooses the next action. A scripted plan, or a model backend.
+
+    A program MAY also expose `metrics() -> dict`, which the loop calls once the
+    trial ends and merges beneath the platform's own measurements. That is how
+    tokens and spend reach a trial: only the program talks to a provider, so
+    only the program can measure what the call cost. The loop stays agnostic —
+    it asks, it does not assume.
+    """
 
     def next_action(self, ctx: LoopContext) -> Action: ...
+
+
+def program_metrics(program: AgentProgram) -> dict[str, object]:
+    """What the program measured, or nothing. Never invents a key: a program
+    that reports no cost means the cost is UNMEASURED, and an invariant over it
+    must error rather than pass on a zero nobody observed."""
+    hook = getattr(program, "metrics", None)
+    if not callable(hook):
+        return {}
+    measured = hook()
+    return dict(measured) if measured else {}
 
 
 @dataclass
@@ -265,7 +283,11 @@ def run_loop_trial(
             if violation_predicate is not None else False
         ),
         task_success=evaluate(scenario["task_success"], trace, inputs),  # type: ignore[arg-type]
+        # the program's measurements first, the platform's over them: a program
+        # may report what only it can see (tokens, spend), never overwrite what
+        # the runtime observed about its own execution
         metrics={
+            **program_metrics(program),
             "duration_ms": round((time.monotonic() - started) * 1000.0, 3),
             "steps": len(events),
             "tool_calls": tool_calls,

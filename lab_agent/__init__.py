@@ -15,6 +15,7 @@ from .backends import (
     ModelAction,
     ModelBackend,
 )
+from .program import ModelProgram
 from .cost import CostEstimate, estimate_cost
 from .errors import AgentError, BackendUnavailable, CassetteExhausted, ProtocolViolation
 from .wrapped import FileCassetteAgent, WrappedModelAgent
@@ -30,6 +31,7 @@ __all__ = [
     "FINAL",
     "ModelAction",
     "ModelBackend",
+    "ModelProgram",
     "ProtocolViolation",
     "TOOL_CALL",
     "WrappedModelAgent",

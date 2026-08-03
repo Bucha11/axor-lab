@@ -54,7 +54,11 @@ class BlankSuite(BaseSuite):
         }
 
     def program_for(
-        self, scenario: dict[str, object], seed: str, resolved: ResolvedSuite
+        self,
+        scenario: dict[str, object],
+        seed: str,
+        resolved: ResolvedSuite,
+        backend: object | None = None,
     ) -> AgentProgram:
         inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
         return ScriptedProgram([

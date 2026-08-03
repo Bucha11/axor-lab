@@ -27,7 +27,7 @@ class BudgetSuite(BaseSuite):
             "version": "1.0",
             "description": "Cost and token efficiency",
             "origin": "built_in",
-            "agents": [{"ref": "scripted@0.6"}],
+            "agents": [{"ref": "scripted@0.6", "model": "claude-opus-4-8"}],
             "topology": {"kind": "single"},
             "scenarios": [{
                 "schema_version": "scenario/v1",
@@ -70,6 +70,14 @@ class BudgetSuite(BaseSuite):
                          "sections": ["overview", "metrics", "scenarios", "failures"]},
             "regressions": [{
                 "schema_version": "regression/v1",
+                "id": "RG-budget-cost",
+                "name": "A trial costs under $0.05",
+                "rule": {"kind": "metric_threshold", "metric": "cost_usd",
+                         "op": "lt", "value": 0.05},
+                "expectation": ("No single trial may cost more than 5 cents. Errors "
+                                "rather than passes when the run had no model to bill."),
+            }, {
+                "schema_version": "regression/v1",
                 "id": "RG-budget-latency",
                 "name": "Trial latency stays under 10s",
                 "rule": {"kind": "metric_threshold", "metric": "duration_ms",
@@ -80,8 +88,18 @@ class BudgetSuite(BaseSuite):
         }
 
     def program_for(
-        self, scenario: dict[str, object], seed: str, resolved: ResolvedSuite
+        self,
+        scenario: dict[str, object],
+        seed: str,
+        resolved: ResolvedSuite,
+        backend: object | None = None,
     ) -> AgentProgram:
+        if backend is not None:
+            from lab_agent.program import ModelProgram
+
+            agents = list(resolved.manifest.get("agents") or [])
+            model = str(agents[0].get("model", "")) if agents else ""
+            return ModelProgram(backend=backend, model=model)  # type: ignore[arg-type]
         return ScriptedProgram([ToolCall(READ_TOOL, {}), Finish("summary")])
 
     def metrics_for(
