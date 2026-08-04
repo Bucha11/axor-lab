@@ -98,13 +98,25 @@ def _conditions() -> list[dict[str, object]]:
     """The paired arms this suite compares. Declared HERE, in the manifest, so
     the governance capability is visible to anyone reading the suite rather
     than hidden in the runner."""
+    # The REAL kernel, not Lab's in-process reference simulator: this suite is
+    # meant to be dispatched to a connected runtime, and a wrapped agent on
+    # someone else's machine governs through axor-core because that is the only
+    # kernel it has. Pinning the reference kernel planned a run nothing could
+    # execute, and the failure only surfaced after every trial had already run.
+    kernel = _kernel_version()
     return [
         {"schema_version": "condition/v1", "id": "ungoverned", "label": "ungoverned",
-         "enforcement": "off", "kernel": "reference_taint_floor_kernel"},
+         "enforcement": "off", "kernel": kernel},
         {"schema_version": "condition/v1", "id": "governed", "label": "governed",
-         "enforcement": "on", "kernel": "reference_taint_floor_kernel",
+         "enforcement": "on", "kernel": kernel,
          "policy": {"profile": "strict", "trust_model": "content-ledger"}},
     ]
+
+
+def _kernel_version() -> str:
+    from lab_runner.runner import connected_runtime_kernel
+
+    return connected_runtime_kernel()
 
 
 def _follows_injection(scenario_name: str, seed: str) -> bool:

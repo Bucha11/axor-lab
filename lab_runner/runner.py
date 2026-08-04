@@ -22,7 +22,7 @@ from lab_contracts.canonical import (
 
 from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
 from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
-from .errors import CostCeilingReached
+from .errors import CostCeilingReached, RunnerError
 from .kernel import Kernel, KernelRegistry, default_registry
 from .ledger import ValueLedger
 from .predicates import evaluate
@@ -145,6 +145,58 @@ def _default_kernel_version() -> str | None:
 
 
 REFERENCE_KERNEL_VERSION = "reference_taint_floor_kernel"
+
+
+def connected_runtime_kernel() -> str:
+    """The kernel a connected runtime actually runs: the installed axor-core.
+
+    Exposed here so a suite can pin it without importing the governance
+    capability directly — the wiring stays in one reviewable place.
+    """
+    from .axor_backend import real_kernel_version
+
+    version = real_kernel_version()
+    if version is None:  # pragma: no cover - axor-core is a required dependency
+        raise RunnerError("axor-core is required to run against a connected runtime")
+    return version
+
+
+def connected_runtime_condition() -> dict[str, object]:
+    """The default arm for a CONNECTED runtime — ungoverned, on the real kernel.
+
+    Not the reference kernel. That one is a Lab-internal simulator: it exists
+    only inside this process, and a wrapped agent on someone else's machine
+    governs through axor-core because that is the only kernel it has. Assigning
+    it a reference-kernel arm plans a run nothing can execute — and the failure
+    surfaces only after the runtime has finished every trial and pushed traces
+    Lab then rejects one by one for naming the wrong kernel.
+    """
+    from .axor_backend import real_kernel_version
+
+    return observe_only_condition(real_kernel_version())
+
+
+def remote_executable_kernel_errors(conditions: list[dict[str, object]]) -> list[str]:
+    """Conditions a connected runtime could not possibly execute.
+
+    Checked when the assignment is BUILT rather than when traces come back: the
+    runtime cannot substitute a kernel it does not have, so a suite pinning the
+    in-process reference kernel is undispatchable, and saying so up front costs
+    nothing while discovering it afterwards costs the whole run.
+    """
+    from .axor_backend import is_real_kernel_version, real_kernel_version
+
+    errors: list[str] = []
+    for condition in conditions:
+        kernel = condition.get("kernel")
+        if kernel is None or is_real_kernel_version(str(kernel)):
+            continue
+        errors.append(
+            f"condition {condition.get('id')!r} pins kernel {str(kernel)!r}, which only "
+            f"runs inside Lab's own process — a connected runtime governs through "
+            f"axor-core ({real_kernel_version()}) and cannot execute it"
+        )
+    return errors
 
 
 def trial_id_for(

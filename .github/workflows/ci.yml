@@ -213,6 +213,44 @@ jobs:
           print("no unexpected skips in the crypto suites")
           PY
 
+  wrap-integration:
+    name: A trace built by axor-wrap is one Lab accepts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Lab is the CONSUMER of the trace a wrapped runtime pushes. Without this
+      # job the seam is untested from both sides: wrap checks the shape it emits
+      # against its own expectations, and Lab checks traces it produced itself.
+      # A schema change on either side would pass both suites and break the one
+      # path that matters — bring your own agent.
+      - name: Install Lab + axor-wrap
+        run: |
+          pip install -e .
+          pip install "axor-wrap>=0.1"
+          python -c "import axor_wrap, axor_core; print('axor-wrap', axor_wrap.__version__, '| axor-core', axor_core.__version__)"
+      - name: The cross-repo acceptance test must RUN, not skip
+        run: |
+          set +e
+          python -m unittest -v tests.test_wrap_produced_trace > wrap.log 2>&1
+          rc=$?
+          set -e
+          cat wrap.log
+          test "$rc" -eq 0 || { echo "::error::wrap integration failed"; exit "$rc"; }
+          python - <<'PY'
+          import re, sys
+          log = open("wrap.log").read()
+          skipped = int((re.search(r"skipped=(\d+)", log) or [0, 0])[1] or 0)
+          ran = int((re.search(r"^Ran (\d+) test", log, re.M) or [0, 0])[1] or 0)
+          if skipped or not ran:
+              print(f"::error::{skipped} skipped / {ran} run — axor-wrap did not import",
+                    file=sys.stderr)
+              sys.exit(1)
+          print(f"{ran} cross-repo test(s) ran, none skipped")
+          PY
+
   packaging:
     name: Wheel installs and runs outside the checkout
     runs-on: ubuntu-latest

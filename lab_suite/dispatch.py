@@ -29,7 +29,10 @@ from dataclasses import dataclass
 from lab_contracts import content_hash, validate_artifact
 from lab_runner.invariants import check_invariant
 from lab_runner.predicates import evaluate
-from lab_runner.runner import observe_only_condition
+from lab_runner.runner import (
+    connected_runtime_condition,
+    remote_executable_kernel_errors,
+)
 
 from .errors import SuiteError
 from .execute import SuiteRun, _aggregate
@@ -90,7 +93,14 @@ def build_assignment(
     # governance on later would mean re-integrating rather than flipping
     # `enforcement`, and an ungoverned/governed comparison would contrast two
     # different machines instead of one machine under two policies.
-    conditions = list(resolved.conditions) or [observe_only_condition()]
+    conditions = list(resolved.conditions) or [connected_runtime_condition()]
+    # ...and whatever the suite declared has to be executable THERE, not here.
+    unrunnable = remote_executable_kernel_errors(conditions)
+    if unrunnable:
+        raise DispatchError(
+            "this suite cannot be dispatched to a connected runtime: "
+            + "; ".join(unrunnable)
+        )
     planned = plan_trials(resolved, conditions)
     assignment: dict[str, object] = {
         "schema_version": "experiment/v1",
