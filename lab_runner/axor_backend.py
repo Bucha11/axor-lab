@@ -205,6 +205,13 @@ def governor_config(
     config: dict[str, object] = {
         "egress_sinks": set(canon["egress_sinks"]),  # type: ignore[arg-type]
         "untrusted_sources": set(canon["untrusted_sources"]),  # type: ignore[arg-type]
+        # a sensitive source ARMS THE CONFIDENTIALITY FLOOR, which restricts
+        # egress for the rest of the session whether or not the sink argument
+        # derives from the secret. Never passing it meant Lab's real-kernel runs
+        # ran with that gate switched off: a secret read followed by an egress
+        # to an attacker URL was ALLOWED here and DENIED by the same kernel under
+        # axor-wrap, which does declare it.
+        "sensitive_sources": set(canon["sensitive_sources"]),  # type: ignore[arg-type]
         "driving_args": canon["driving_args"],
     }
     if canon["value_policies"]:

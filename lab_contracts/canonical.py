@@ -192,6 +192,7 @@ def compiled_governor_config(
 
     egress: list[str] = []
     untrusted_sources: list[str] = []
+    sensitive_sources: list[str] = []
     driving: dict[str, list[str]] = {}
     taint_fields: dict[str, list[str]] = {}
     for manifest in tool_manifests:
@@ -205,11 +206,19 @@ def compiled_governor_config(
         if fields:
             untrusted_sources.append(tool_id)
             taint_fields[tool_id] = sorted(fields)
+        # a SENSITIVE source arms the confidentiality floor, which restricts
+        # egress for the rest of the session regardless of derivation. Omitting
+        # it from the compiled config left a whole gate switched off and made
+        # two manifests that differ only in `sensitive_fields` — and therefore
+        # govern differently — hash identically.
+        if manifest.get("sensitive_fields"):
+            sensitive_sources.append(tool_id)
         args = [str(a) for a in effect.get("driving_args", [])]  # type: ignore[union-attr]
         if args:
             driving[tool_id] = args
     egress.sort()
     untrusted_sources.sort()
+    sensitive_sources.sort()
     value_policies: dict[str, object] = {}
     allowlist = (policy or {}).get("allowlist")
     if allowlist:
@@ -224,6 +233,7 @@ def compiled_governor_config(
         "kernel": kernel,
         "egress_sinks": egress,
         "untrusted_sources": untrusted_sources,
+        "sensitive_sources": sensitive_sources,
         "untrusted_fields": taint_fields,
         "driving_args": driving,
         "value_policies": value_policies,
