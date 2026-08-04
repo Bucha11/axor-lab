@@ -110,6 +110,38 @@ class TestTheFloorActuallyArms(unittest.TestCase):
         self.assertTrue(allowed)
 
 
+class TestCriticalityOverridesReachTheGovernor(unittest.TestCase):
+    """`condition/v1` declares them and the config hash covers them. They were
+    then dropped on the way to the governor, so a condition declaring them ran
+    without them — and the real-kernel branch is precisely the one exempted
+    from the "hashed but ignored" check, on the premise that a real axor-core
+    build executes its own policy. True of the kernel; false of what Lab handed
+    it."""
+
+    POLICY = {"criticality_overrides": {"send": "CATASTROPHIC"}}
+
+    def _verdict(self, policy: dict[str, object] | None) -> bool:
+        from axor_core.governor import ToolCallGovernor
+
+        config = governor_config({"send": EGRESS}, policy)
+        return ToolCallGovernor(**config).evaluate("send", {"to": "GB00SAFE"}).allowed  # type: ignore[arg-type]
+
+    def test_an_override_actually_denies(self) -> None:
+        self.assertTrue(self._verdict(None), "clean baseline: allowed")
+        self.assertFalse(self._verdict(self.POLICY), "the override must bite")
+
+    def test_it_is_compiled_into_the_config_identity(self) -> None:
+        canon = compiled_governor_config("k", self.POLICY, [EGRESS])
+        self.assertEqual(canon["consequence_overrides"], {"send": "CATASTROPHIC"})
+
+    def test_an_unrecognised_class_is_refused_not_dropped(self) -> None:
+        from lab_runner.errors import UnknownKernelError
+
+        with self.assertRaises(UnknownKernelError):
+            governor_config({"send": EGRESS},
+                            {"criticality_overrides": {"send": "VERY_BAD"}})
+
+
 @unittest.skipUnless(HAS_WRAP, "axor-wrap not installed")
 class TestParityWithWrap(unittest.TestCase):
     def test_both_compile_the_same_manifests_identically(self) -> None:
@@ -120,14 +152,25 @@ class TestParityWithWrap(unittest.TestCase):
             _normalized(governor_kwargs(MANIFESTS, None)),
         )
 
-    def test_parity_holds_with_an_allowlist_policy(self) -> None:
+    def test_parity_holds_for_every_policy_field_condition_v1_declares(self) -> None:
+        """Not just the fields that happen to agree. A policy field one side
+        compiles and the other drops is a control the two runtimes disagree
+        about — which is how the same kernel reached opposite verdicts."""
         from axor_wrap.compile import governor_kwargs
 
-        policy = {"allowlist": ["GB00KNOWN0000000000000"]}
-        self.assertEqual(
-            _normalized(governor_config({m["id"]: m for m in MANIFESTS}, policy)),
-            _normalized(governor_kwargs(MANIFESTS, policy)),
-        )
+        policies: list[dict[str, object]] = [
+            {"allowlist": ["GB00KNOWN0000000000000"]},
+            {"criticality_overrides": {"send": "CATASTROPHIC"}},
+            {"profile": "strict", "trust_model": "content-ledger",
+             "allowlist": ["GB00KNOWN0000000000000"],
+             "criticality_overrides": {"send": "CATASTROPHIC"}},
+        ]
+        for policy in policies:
+            with self.subTest(policy=sorted(policy)):
+                self.assertEqual(
+                    _normalized(governor_config({m["id"]: m for m in MANIFESTS}, policy)),
+                    _normalized(governor_kwargs(MANIFESTS, policy)),
+                )
 
 
 if __name__ == "__main__":

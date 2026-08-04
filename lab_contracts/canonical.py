@@ -219,6 +219,14 @@ def compiled_governor_config(
     egress.sort()
     untrusted_sources.sort()
     sensitive_sources.sort()
+    # per-sink consequence-class overrides. condition/v1 declares these and they
+    # enter this hash, so a config that hashed them and never applied them was
+    # fingerprinting a control it did not execute — the exact failure the
+    # reference kernel rejects them for.
+    overrides = {
+        str(sink).lower(): str(value)
+        for sink, value in ((policy or {}).get("criticality_overrides") or {}).items()
+    }
     value_policies: dict[str, object] = {}
     allowlist = (policy or {}).get("allowlist")
     if allowlist:
@@ -237,6 +245,7 @@ def compiled_governor_config(
         "untrusted_fields": taint_fields,
         "driving_args": driving,
         "value_policies": value_policies,
+        "consequence_overrides": dict(sorted(overrides.items())),
     }
 
 

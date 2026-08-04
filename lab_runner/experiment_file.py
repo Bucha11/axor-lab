@@ -227,7 +227,15 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
             )
         # policy/runtime parity: reject a policy field the reference kernel does
         # not execute (would be hashed but ignored) unless the condition pins a
-        # real axor-core build that executes its own policy (review r4)
+        # real axor-core build that executes its own policy (review r4).
+        #
+        # The exemption is only sound while Lab actually HANDS the real kernel
+        # every policy field it compiles. It did not: `criticality_overrides`
+        # entered the config hash and was then dropped on the way to the
+        # governor, so the one branch that skips this check was running the
+        # exact failure the check exists to catch. Now compiled and passed
+        # through (`_consequence_classes`), which is what makes this exemption
+        # true rather than merely stated.
         if str(entry.get("enforcement")) == "on" and not _pins_real_kernel(entry):
             errors += [
                 f"[validating] condition '{entry.get('id')}': {e}"

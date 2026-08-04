@@ -216,7 +216,34 @@ def governor_config(
     }
     if canon["value_policies"]:
         config["value_policies"] = canon["value_policies"]
+    if canon["consequence_overrides"]:
+        config["consequence_overrides"] = _consequence_classes(
+            canon["consequence_overrides"],  # type: ignore[arg-type]
+        )
     return config
+
+
+def _consequence_classes(overrides: dict[str, str]) -> dict[str, object]:
+    """`policy.criticality_overrides` → the governor's consequence table.
+
+    These were compiled into the config hash and then dropped, so a condition
+    declaring them ran without them. The reference kernel rejects them outright
+    as "hashed but ignored"; the real-kernel branch skipped that check on the
+    premise that a real axor-core build executes its own policy — which was
+    true of the kernel and false of what Lab handed it.
+    """
+    from axor_core.contracts.canonical import ConsequenceClass
+
+    classes: dict[str, object] = {}
+    for sink, name in overrides.items():
+        try:
+            classes[sink] = ConsequenceClass[str(name).upper()]
+        except KeyError:
+            raise UnknownKernelError(
+                f"policy.criticality_overrides[{sink!r}] is {name!r}, which is not a "
+                f"consequence class ({[c.name for c in ConsequenceClass]})"
+            ) from None
+    return classes
 
 
 def gate_with_governor(
