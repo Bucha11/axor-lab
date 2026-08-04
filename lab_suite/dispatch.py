@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lab_contracts import content_hash, validate_artifact
+from lab_contracts.canonical import CONFIG_COMPILER_VERSION, runtime_config_hash
 from lab_runner.invariants import check_invariant
 from lab_runner.predicates import evaluate
 from lab_runner.runner import (
@@ -203,6 +204,9 @@ def collect_suite_run(assignment: SuiteAssignment, store: object) -> SuiteRun:
         trace_ref = content_hash(trace)
         run.trials.append({
             **trial_record, "status": "completed", "trace_ref": trace_ref,
+            **_config_fingerprint(
+                unit, scenario, condition, assignment, reported.get(unit, {}),  # type: ignore[arg-type]
+            ),
             # the runtime's MEASUREMENTS (duration, tokens, cost) it alone could
             # take, plus Lab's own EVALUATION of the scenario's predicates over
             # the returned trace. The split is the point: Lab cannot time a run
@@ -329,3 +333,58 @@ def _metrics_of(reported: dict[str, object]) -> dict[str, object]:
         str(key): value for key, value in raw.items()
         if isinstance(value, (int, float, str, bool))
     }
+
+
+def _config_fingerprint(
+    unit: str,
+    scenario: dict[str, object],
+    condition: dict[str, object],
+    assignment: SuiteAssignment,
+    reported: dict[str, object],
+) -> dict[str, object]:
+    """The governor config this trial ran under, RECOMPUTED and then checked.
+
+    A completed trial has to carry this, or the bundle it lands in fails
+    `verify_bundle` — "ran under condition X with a kernel but records no
+    runtime_config_hash". Dispatch produced trials without one, so a run could
+    be collected, aggregated and packaged as an artifact that could never be
+    verified. That surfaced only when someone tried to verify it.
+
+    Lab recomputes the hash from the assignment it ISSUED — the frozen manifests
+    and the arm's policy, with the scenario's `$inputs` expanded — which is the
+    same "recompute, never adopt" rule this module applies to aggregates. The
+    runtime's own hash is then COMPARED, not accepted: a mismatch means it
+    governed a different contract than the one it was handed, and a bundle
+    asserting "this is the config that produced this evidence" must not absorb
+    that quietly.
+
+    A runtime that reports nothing gets the hash without the
+    `recorded_at_execution` marker: the value is right, but nothing proves it
+    was the config in force at execution, and an evidence-backed Control-Plane
+    export is entitled to refuse it on exactly that ground.
+    """
+    kernel = condition.get("kernel")
+    if not kernel:
+        # a gate-free arm has no governor config to fingerprint
+        return {}
+    expected = runtime_config_hash(
+        str(kernel), condition.get("policy"),
+        list(assignment.resolved.manifests.values()),
+        scenario.get("inputs", {}),  # type: ignore[arg-type]
+    )
+    declared = reported.get("runtime_config_hash")
+    if declared and str(declared) != expected:
+        raise DispatchError(
+            f"trial {unit!r} reports runtime_config_hash {str(declared)!r} but the "
+            f"assignment compiles to {expected!r} — the runtime governed a different "
+            f"contract than the one it was assigned, so this run cannot be reported "
+            f"as evidence for the assigned config"
+        )
+    record: dict[str, object] = {
+        "runtime_config_hash": expected,
+        "config_compiler_version": CONFIG_COMPILER_VERSION,
+        "runtime_provenance": (
+            "recorded_at_execution" if declared else "reconstructed_legacy"
+        ),
+    }
+    return record

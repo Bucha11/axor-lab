@@ -79,6 +79,10 @@ class _Trial:
     # metadata. Widening a shared schema for one consumer's bookkeeping is how
     # a "shared" schema stops being shared.
     metrics: dict[str, object] = field(default_factory=dict)
+    # the fingerprint of the config the RUNTIME actually governed under. Lab
+    # recomputes it from the assignment it issued and refuses a mismatch — it is
+    # reported, never trusted.
+    runtime_config_hash: str | None = None
     status: str = "pending"  # pending | completed | failed
     attempt: int = 1     # the current TrialAttempt ordinal (retries supersede)
     superseded: int = 0  # how many prior attempts this trial superseded
@@ -206,7 +210,8 @@ class RuntimeJobStore:
             "trials": [
                 {"trial_id": t.trial_id, "status": t.status, "attempt": t.attempt,
                  "superseded": t.superseded, "events": len(t.events),
-                 "has_trace": t.trace is not None, "metrics": dict(t.metrics)}
+                 "has_trace": t.trace is not None, "metrics": dict(t.metrics),
+                 "runtime_config_hash": t.runtime_config_hash}
                 for t in job.trials.values()
             ],
             "traces": [t.trace for t in job.trials.values() if t.trace is not None],
@@ -260,7 +265,8 @@ class RuntimeJobStore:
 
     def complete_trial(self, job_id: str, trial_id: str, runtime_ref: str,
                        trace: dict[str, object] | None, status: str = "completed",
-                       metrics: dict[str, object] | None = None) -> dict[str, object]:
+                       metrics: dict[str, object] | None = None,
+                       runtime_config_hash: str | None = None) -> dict[str, object]:
         with self._lock:
             job = self._require_owned(job_id, runtime_ref)
             trial = job.trials.setdefault(trial_id, _Trial(trial_id=trial_id))
@@ -277,6 +283,8 @@ class RuntimeJobStore:
                 trial.superseded += 1
             trial.trace = trace
             trial.status = new_status
+            if runtime_config_hash:
+                trial.runtime_config_hash = str(runtime_config_hash)
             if metrics:
                 trial.metrics = {
                     str(k): v for k, v in metrics.items()
@@ -542,11 +550,13 @@ def make_runtime_server(
                     body = self._read_json()
                     trace = body.get("trace")
                     metrics = body.get("metrics")
+                    rch = body.get("runtime_config_hash")
                     self._send(200, jobs.complete_trial(
                         m.group(1), m.group(2), ref,
                         trace if isinstance(trace, dict) else None,
                         status=str(body.get("status", "completed")),
                         metrics=metrics if isinstance(metrics, dict) else None,
+                        runtime_config_hash=str(rch) if isinstance(rch, str) else None,
                     ))
                     return
                 self._send(404, {"error": "not found"})

@@ -198,6 +198,16 @@ def export_cp(
         "runtime_config_hashes": runtime_hashes,
         "tool_manifests": bundle["tool_manifests"],
         "regressions": carried_pins,
+        # the frozen trace BODY behind each carried pin. Without it the Control
+        # Plane can only record a pin's hash: `deploy_plans` needs the body to
+        # convert the trace to kernel events, replay it under the package's own
+        # manifests and confirm the pinned verdict reproduces. Every pin landed
+        # `skipped: "package carries no trace body for this pin"` — the whole
+        # replayable-pin path on the receiving side had no producer.
+        #
+        # Keyed by trace_id and embedded verbatim, so the body still hashes to
+        # the pin's `trace_ref` the CP re-checks.
+        "regression_traces": _pinned_trace_bodies(carried_pins, traces or {}),
         "source": source,
     }
     return CPExport(
@@ -356,6 +366,24 @@ def _verify_recorded_runtime_hashes(
                 f"runtime_config_hash for {scenario_id!r}/{condition_id!r} recomputes to {rhash} "
                 f"but the bundle recorded {recorded} at run time — does not match what ran"
             )
+
+
+def _pinned_trace_bodies(
+    carried_pins: list[dict[str, object]],
+    traces: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """The frozen trace body for every carried pin, keyed by trace_id.
+
+    Only the pinned traces: a package carries the evidence its pins need, not
+    the whole bundle. `_validate_pins` has already proven each one exists and
+    content-hashes to the pin's `trace_ref`, so this is a lookup, not a check.
+    """
+    by_id = {str(t["trace_id"]): t for t in traces.values()}
+    return {
+        str(pin["trace_id"]): by_id[str(pin["trace_id"])]
+        for pin in carried_pins
+        if str(pin["trace_id"]) in by_id
+    }
 
 
 def _validate_pins(
