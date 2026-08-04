@@ -2,8 +2,9 @@
 
 The MVP runner is local-only and the model layer is pluggable via a small
 protocol. `scripted` is the deterministic stand-in used by the acceptance
-suite and the shipped example; a BYOK model-backed adapter slots in behind
-the same protocol (plan: Phase 1 "BYOK inference", Then-tier for in-app).
+suite and the shipped example. It is a FIXTURE, not a product entry: a real
+agent is wrapped in axor-core and pushes its own traces (axor-wrap), which is
+what an experiment measures.
 
 agent_ref grammar: `scripted` | `scripted@<attack_rate>` (e.g. scripted@0.6).
 """
@@ -111,5 +112,5 @@ def resolve_agent(agent_ref: str) -> AgentAdapter:
         return ScriptedAgent(attack_rate=rate)
     raise UnknownAgentError(
         f"unknown agent_ref {agent_ref!r}; supported: scripted[@rate] "
-        "(model-backed BYOK adapters are the next plan phase)"
+        "(a real agent is wrapped and pushes its own traces)"
     )

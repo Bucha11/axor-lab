@@ -92,14 +92,7 @@ class BudgetSuite(BaseSuite):
         scenario: dict[str, object],
         seed: str,
         resolved: ResolvedSuite,
-        backend: object | None = None,
     ) -> AgentProgram:
-        if backend is not None:
-            from lab_agent.program import ModelProgram
-
-            agents = list(resolved.manifest.get("agents") or [])
-            model = str(agents[0].get("model", "")) if agents else ""
-            return ModelProgram(backend=backend, model=model)  # type: ignore[arg-type]
         return ScriptedProgram([ToolCall(READ_TOOL, {}), Finish("summary")])
 
     def metrics_for(

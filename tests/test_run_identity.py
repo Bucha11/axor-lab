@@ -15,7 +15,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests import support
 from lab_runner import trial_id_for
 
 REPO = Path(__file__).resolve().parent.parent
@@ -64,19 +63,26 @@ class TestTrialIdIsRunScoped(unittest.TestCase):
 
 
 class TestDifferentAgentsAreDifferentRuns(unittest.TestCase):
-    def _run_with_cassette(self, root: Path, name: str, recipient: str) -> dict:
-        cassette = root / f"{name}.json"
-        cassette.write_text(json.dumps(
-            [{"tool": "send_money", "args": {"recipient": recipient, "amount": 1200}}]
-        ))
+    """Run identity folds in the agent, so two runs under different agents are
+    distinct executions rather than retries of one.
+
+    It used to vary `--agent cassette:<file>`. That flag is gone with the
+    bring-your-own-key path — a run drove a model against SIMULATED tools, so
+    the number described neither the caller's agent nor their tools. The
+    property it was checking is unchanged and still worth pinning, so the agent
+    now varies where it actually belongs: in the experiment file.
+    """
+
+    def _run_with_agent(self, root: Path, name: str, agent_ref: str) -> dict:
         axl = root / f"{name}.axl"
         document = json.loads((REPO / "examples" / "banking-exfil-01.axl").read_text())
         document["experiment"]["repeats"] = 4
+        document["experiment"]["agent_ref"] = agent_ref
         axl.write_text(json.dumps(document))
         out = root / f"bundle_{name}"
         run = subprocess.run(
             [sys.executable, "-m", "lab_runner", "run", str(axl), "--out", str(out),
-             "--yes", "--created", CREATED, "--agent", f"cassette:{cassette}"],
+             "--yes", "--created", CREATED],
             capture_output=True, text=True, cwd=REPO, stdin=subprocess.DEVNULL,
         )
         self.assertEqual(run.returncode, 0, run.stderr)
@@ -85,8 +91,8 @@ class TestDifferentAgentsAreDifferentRuns(unittest.TestCase):
     def test_two_agents_produce_disjoint_trial_and_trace_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            a = self._run_with_cassette(root, "attacker", support.ATTACKER_IBAN)
-            b = self._run_with_cassette(root, "faithful", support.LANDLORD_IBAN)
+            a = self._run_with_agent(root, "attacker", "scripted@0.9")
+            b = self._run_with_agent(root, "faithful", "scripted@0.1")
 
             trials_a = {t["trial_id"] for t in a["trials"]}
             trials_b = {t["trial_id"] for t in b["trials"]}

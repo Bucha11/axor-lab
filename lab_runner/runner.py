@@ -10,7 +10,6 @@ on the same seed produce the discordant pairs McNemar needs.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from lab_contracts.canonical import (
@@ -22,7 +21,7 @@ from lab_contracts.canonical import (
 
 from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
 from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
-from .errors import CostCeilingReached, RunnerError
+from .errors import RunnerError
 from .kernel import Kernel, KernelRegistry, default_registry
 from .ledger import ValueLedger
 from .predicates import evaluate
@@ -416,7 +415,6 @@ class ExperimentResult:
     superseded: list[dict[str, object]] = field(default_factory=list)
     # set when a run-wide cost ceiling stopped the run early (review r11); the
     # partial result flows through missingness/analysis honestly
-    stopped_reason: str | None = None
 
     def add(self, trial_key: str, trial_record: dict[str, object], outcome: TrialOutcome) -> None:
         # idempotency: a retried trial with the same key replaces, never
@@ -510,11 +508,6 @@ def _run_one(
     }
     try:
         outcome = run_trial(scenario, manifests, condition, kernel, run_id, seed, repeat_index, agent)  # type: ignore[arg-type]
-    except CostCeilingReached:
-        # a budget stop halts the WHOLE run — it is NOT a per-trial failure to
-        # capture-and-continue (that would keep spending past the ceiling). Let
-        # it propagate to run_experiment_suite, which records stopped_reason.
-        raise
     except Exception as exc:  # noqa: BLE001 — a bad trial must not sink the run
         result.add_failure(trial_key, {**base, "status": "failed", "failure_reason": f"{type(exc).__name__}: {exc}"})
         return
@@ -666,16 +659,11 @@ def run_experiment_suite(
     repeats: int,
     run_id: str,
     agent: AgentAdapter | None = None,
-    budget_check: "Callable[[], str | None] | None" = None,
 ) -> ExperimentResult:
     """Benchmark-suite run: every scenario × condition × repeat, one result.
 
     Pooled per statistics.md: unit = one task attempt; n = repeats × scenarios.
     Pairing stays per (scenario, seed, repeat) across conditions.
-
-    `budget_check` (optional) is called AFTER each trial; if it returns a reason
-    string, the run stops immediately — before the next provider call — so a
-    run-wide cost ceiling is a hard stop, not an advisory print (review r11).
     """
     agent = agent or ScriptedAgent()
     if not conditions:
@@ -687,11 +675,6 @@ def run_experiment_suite(
             (str(c.get("kernel")) for c in conditions if c.get("kernel")),
         )
     result = ExperimentResult(run_id=run_id, conditions=list(conditions))
-    # materialize the FULL plan up front so a cost stop can record the trials
-    # that never ran — otherwise missingness computes over only the trials that
-    # DID run and reports e.g. n=1/1 for a 100-trial plan stopped after one
-    # (review r13). Every not-yet-run trial is recorded status=excluded with
-    # failure_reason=cost_ceiling, so the denominator stays honest.
     # BLOCK-BALANCED + COUNTERBALANCED order (review r14/r15): iterate
     # scenario → repeat → condition, so each (scenario, repeat) block runs ALL its
     # conditions back to back (a cost stop then leaves at most one block
@@ -707,33 +690,6 @@ def run_experiment_suite(
         for condition in (conditions if repeat_index % 2 == 0 else list(reversed(conditions)))
     ]
 
-    def _exclude_remaining(from_index: int, reason: str) -> None:
-        recorded = {str(t["trial_id"]) for t in result.trials}
-        for offset, (scenario, condition, repeat_index) in enumerate(plan[from_index:]):
-            seed = f"s{repeat_index:03d}"
-            trial_key = trial_id_for(
-                run_id, str(scenario["name"]), str(condition["id"]), seed, repeat_index
-            )
-            if trial_key in recorded:
-                continue  # a mid-trial stop may have partially recorded this one
-            result.add_failure(trial_key, {
-                "trial_id": trial_key, "scenario_id": str(scenario["name"]),
-                "condition_id": str(condition["id"]), "seed": seed,
-                "repeat_index": repeat_index, "status": "excluded",
-                "execution_id": run_id,
-                "execution_order": from_index + offset,
-                "failure_reason": f"cost_ceiling: {reason}",
-            })
-
-    # cost check BEFORE the first trial — if usage already sits at a ceiling we
-    # must not run even one paid trial (review r12); with a fresh run this is a
-    # no-op, but it makes "before the first call" true rather than aspirational
-    if budget_check is not None:
-        reason = budget_check()
-        if reason is not None:
-            result.stopped_reason = reason
-            _exclude_remaining(0, reason)  # NOTHING ran → n=0/total, not n=0/0
-            return result
     kernels: dict[tuple[str, str], object] = {}
     for index, (scenario, condition, repeat_index) in enumerate(plan):
         cid = str(condition["id"])
@@ -753,20 +709,6 @@ def run_experiment_suite(
                 )
                 if condition.get("kernel") else None
             )
-        try:
-            _run_one(result, scenario, manifests, condition, kernels[cache_key], run_id,
-                     f"s{repeat_index:03d}", repeat_index, agent, execution_order=index)
-        except CostCeilingReached as stop:
-            # the guard fired mid-trial, BEFORE a provider call — stop the whole
-            # run and exclude THIS trial plus every remaining one (review r12/r13)
-            result.stopped_reason = str(stop)
-            _exclude_remaining(index, stop.reason)
-            return result
-        if budget_check is not None:
-            reason = budget_check()
-            if reason is not None:
-                # this trial completed; exclude only the ones AFTER it
-                result.stopped_reason = reason
-                _exclude_remaining(index + 1, reason)
-                return result
+        _run_one(result, scenario, manifests, condition, kernels[cache_key], run_id,
+                 f"s{repeat_index:03d}", repeat_index, agent, execution_order=index)
     return result

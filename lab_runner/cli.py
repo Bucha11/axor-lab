@@ -23,7 +23,6 @@ from pathlib import Path
 
 from lab_analysis import binary_aggregate, mcnemar_test, missingness, two_proportion_test
 from lab_analysis.errors import AnalysisError
-from lab_agent.errors import AgentError
 from lab_contracts import (
     BundleIntegrityError,
     ContractsError,
@@ -53,9 +52,9 @@ from .replay import replay_bundle
 from .runner import run_experiment_suite
 from .verdicts import contained
 
-# BYOK backend + statistics failures are separate hierarchies from RunnerError;
+# Statistics failures are a separate hierarchy from RunnerError;
 # main() maps them to stable exit codes instead of leaking a traceback
-_AGENT_ANALYSIS_ERRORS = (AgentError, AnalysisError)
+_AGENT_ANALYSIS_ERRORS = (RunnerError, AnalysisError)
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -88,10 +87,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAILURE
     except _AGENT_ANALYSIS_ERRORS as exc:
-        # BYOK backend / analysis failures (BackendUnavailable, CassetteExhausted,
+        # analysis failures (
         # ProtocolViolation, AnalysisError, InsufficientDataError) are their own
         # hierarchies, not RunnerError — catch them so the user gets a stable
-        # message + exit code instead of a Python traceback (review r2 §BYOK)
+        # message + exit code instead of a Python traceback
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAILURE
     except ContractsError as exc:
@@ -113,15 +112,6 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _terminal_label(stopped_reason: str | None, n_completed: int) -> str:
-    """The honest terminal status line for a run (review r14). A run stopped by
-    the cost ceiling is never `[completed]`: it is `[completed_partial]` if it
-    produced any completed trials, else `[stopped_cost_ceiling]` (nothing ran)."""
-    if not stopped_reason:
-        return "[completed]"
-    return "[completed_partial]" if n_completed > 0 else "[stopped_cost_ceiling]"
-
-
 def _cmd_run(args: argparse.Namespace) -> int:
     print("[validating]")
     document = load_axl(Path(args.file))
@@ -130,7 +120,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     resolved = resolve(document)
 
     print("[estimate]")
-    _print_estimate(resolved, _estimate_model(args, resolved))
+    _print_estimate(resolved)
     if not _confirmed(args):
         print(
             "not confirmed — pass --yes (or answer y) to execute; nothing ran",
@@ -139,13 +129,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return EXIT_UNCONFIRMED
 
     print("[running_local]")
-    # run identity includes the ACTUAL agent — otherwise two runs of the same
-    # experiment with different --agent get the same run_id (and, before, the
-    # same trial/trace ids), so different executions looked like retries of one
-    # trial (review r3). The fingerprint is the agent's CONTENT (cassette bytes /
-    # model id), so identical agents reproduce the same id and different ones don't.
-    agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
-    fingerprint = _agent_fingerprint(args, resolved)
+    agent = resolved.agent
+    # run identity folds in the agent, so two runs of the same experiment under
+    # different agents are different runs rather than retries of one (review r3).
+    fingerprint = str(resolved.experiment["agent_ref"])
     # 128-bit id (32 hex chars) from the experiment+agent fingerprint — the old
     # 8-char (32-bit) slice was birthday-collision-searchable, so two unrelated
     # runs could share a run_id and look like retries of one trial (review r7).
@@ -155,32 +142,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         args.run_id, resolved.experiment, fingerprint,
         deterministic=bool(getattr(agent, "is_deterministic", True)),
     )
-    model = _estimate_model(args, resolved)
-    # a HARD run-wide cost ceiling: checked against ACTUAL usage between trials,
-    # so the run stops before the next provider call (review r11). Unset → no bind.
-    from lab_agent.cost import CostBudget
-
-    try:
-        budget = CostBudget(
-            max_usd=getattr(args, "max_usd", None),
-            max_input_tokens=getattr(args, "max_input_tokens", None),
-            max_output_tokens=getattr(args, "max_output_tokens", None),
-        )
-    except ValueError as exc:
-        raise RunnerError(str(exc)) from exc
-
-    # thread the ceiling INTO the agent so its multi-turn loop is guarded before
-    # every provider call — the between-trials check below only bounds overshoot
-    # to whole trials, not to a single trial's fan-out of calls (review r12)
-    if budget.is_set() and hasattr(agent, "budget"):
-        agent.budget = budget  # type: ignore[attr-defined]
-        agent.model = model  # type: ignore[attr-defined]
-
-    def _budget_check() -> str | None:
-        if not budget.is_set() or not hasattr(agent, "usage"):
-            return None
-        return budget.exceeded(agent.usage(), model)  # type: ignore[attr-defined]
-
     result = run_experiment_suite(
         list(resolved.scenarios),
         resolved.manifests,
@@ -189,7 +150,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         repeats=resolved.repeats,
         run_id=run_id,
         agent=agent,
-        budget_check=_budget_check,
     )
     # report the plan outcome by status separately — "N trials completed" over
     # result.trials was misleading, since result.trials also holds failed and
@@ -204,9 +164,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         f"  planned {len(result.trials)}: {n_completed} completed, "
         f"{n_failed} failed, {n_excluded} excluded"
     )
-    if result.stopped_reason:
-        print(f"  [cost_ceiling] run stopped early: {result.stopped_reason}", file=sys.stderr)
-
     print("[analyzing]")
     # missingness FIRST (denominator honesty) — it must be reported even if a
     # whole condition has no completed trials, so it never depends on aggregates
@@ -218,24 +175,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     print("[uploading_artifacts]  (local: writing bundle directory)")
     created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    # record ACTUAL usage + spend when the agent tracks it (BYOK); scripted/
-    # cassette report zero, which is correct (no paid inference)
+    # no paid inference: the agent is scripted, so there is no spend to record.
     usage = None
-    if hasattr(agent, "usage"):
-        from lab_agent.cost import actual_usd
-        u = agent.usage()  # type: ignore[attr-defined]
-        in_tok, out_tok = int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
-        usage = {"input_tokens": in_tok, "output_tokens": out_tok,
-                 "usd": actual_usd(in_tok, out_tok, model)}
-        if result.stopped_reason:
-            usage["stopped_reason"] = result.stopped_reason
     bundle = build_bundle(
         bundle_id=f"b_{run_id}",
         created=created,
         scenarios=list(resolved.scenarios),
         conditions=list(resolved.conditions),
         tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved, model, usage, agent=agent),
+        environment=_environment(resolved, usage=usage, agent=agent),
         trials=result.trials,
         aggregates=aggregates,
         traces=result.traces,
@@ -250,11 +198,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     attempt_log = write_superseded_attempts(out, result.superseded)
     if attempt_log is not None:
         print(f"  superseded attempts: {attempt_log} ({len(result.superseded)})")
-    # an honest terminal label: a cost-stopped run is NOT "[completed]" — it
-    # either produced a usable partial (some completed trials) or nothing
-    # (review r14). The bundle is still written for the partial evidence.
-    label = _terminal_label(result.stopped_reason, n_completed)
-    print(f"{label}  bundle: {out}/bundle.json ({len(result.traces)} traces)")
+    print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
     print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")
     return EXIT_OK
@@ -1267,18 +1211,6 @@ def _repin_to_real_kernel(document: dict[str, object]) -> None:
     print(f"  repinned ALL conditions (baseline + governed) to the real kernel: {version}")
 
 
-def _resolve_agent_override(spec: str) -> object:
-    """Build a BYOK agent from --agent (cassette:<file> | anthropic:<model>)."""
-    from lab_agent import AnthropicBackend, FileCassetteAgent, WrappedModelAgent
-
-    kind, _, param = spec.partition(":")
-    if kind == "cassette":
-        return FileCassetteAgent(path=Path(param))
-    if kind == "anthropic":
-        return WrappedModelAgent(backend=AnthropicBackend(model=param or "claude-opus-4-8"))
-    raise RunnerError(f"unknown --agent {spec!r}; use cassette:<file> or anthropic:<model>")
-
-
 def _derive_run_id(
     explicit: str | None,
     experiment: dict[str, object],
@@ -1302,38 +1234,16 @@ def _derive_run_id(
     return "r_" + content_hash(body).removeprefix("sha256:")[:32]
 
 
-def _agent_fingerprint(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
-    """A content fingerprint of the agent that will actually run — folded into
-    run identity so different agents are different runs (review r3)."""
-    if not args.agent:
-        return str(resolved.experiment["agent_ref"])
-    kind, _, param = args.agent.partition(":")
-    if kind == "cassette":
-        try:
-            return "cassette:" + content_hash({"cassette": Path(param).read_text()})
-        except OSError:
-            return f"cassette:{param}"
-    return args.agent  # e.g. anthropic:<model>
-
-
-def _estimate_model(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
-    if args.agent:
-        kind, _, param = args.agent.partition(":")
-        if kind == "cassette":
-            return "cassette (recorded transcript)"
-        return param or kind
-    return str(resolved.experiment["agent_ref"])
-
-
-def _print_estimate(resolved: ResolvedExperiment, model: str) -> None:
-    from lab_agent import estimate_cost
-
+def _print_estimate(resolved: ResolvedExperiment) -> None:
+    """The plan's size. There is no cost line: the agent is scripted, so a run
+    makes no provider calls and spends nothing. A confirmation prompt that
+    always said "$0.00" was asking the operator to approve a number that could
+    not be anything else."""
     print(
         f"  {len(resolved.scenarios)} scenario(s) x {len(resolved.conditions)} condition(s) "
         f"x {resolved.repeats} repeat(s) = {resolved.trial_count} trials"
     )
-    estimate = estimate_cost(resolved.trial_count, model)
-    print(f"  agent: {model} -> {estimate.line()}")
+    print(f"  agent: {resolved.experiment['agent_ref']}")
 
 
 def _confirmed(args: argparse.Namespace) -> bool:
@@ -1445,22 +1355,21 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
 
 
 def _environment(
-    resolved: ResolvedExperiment, model: str, usage: dict[str, object] | None = None,
+    resolved: ResolvedExperiment, model: str | None = None,
+    usage: dict[str, object] | None = None,
     agent: object | None = None,
 ) -> dict[str, object]:
-    """Record the ACTUAL agent that ran — not always 'scripted' (review §6.1).
-    The bundle stays self-describing: kernel, the real model provider/id, the
-    experiment id, the ACTUAL token usage + spend (review r11), and (when
-    imported) the dataset version."""
+    """Record the ACTUAL agent that ran (review §6.1). The bundle stays
+    self-describing: kernel, the agent id, and (when imported) the dataset
+    version."""
     kernels = sorted({str(c["kernel"]) for c in resolved.conditions})
+    model = model or str(resolved.experiment["agent_ref"])
     provider = model.split(":", 1)[0] if ":" in model else (
-        "scripted" if model.startswith("scripted") else
-        "anthropic" if model.startswith("claude") else
-        "cassette" if model.startswith("cassette") else "unknown"
+        "scripted" if model.startswith("scripted") else "unknown"
     )
     inference_params: dict[str, object] = {"experiment_id": str(resolved.experiment["id"])}
     if usage is not None:
-        inference_params["usage"] = usage  # actual tokens + spend, recorded in the bundle
+        inference_params["usage"] = usage
     env: dict[str, object] = {
         "model": {"provider": provider, "id": model, "inference_params": inference_params},
     }
@@ -1551,24 +1460,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--run-id", default=None)
     p_run.add_argument("--created", default=None, help="override bundle timestamp (RFC3339)")
     p_run.add_argument(
-        "--agent", default=None,
-        help="BYOK agent override: cassette:<file> (offline) or anthropic:<model>",
-    )
-    p_run.add_argument(
         "--real-kernel", action="store_true",
         help="govern with the installed axor-core kernel (not the reference)",
     )
-    # run-wide cost ceilings (review r11): checked against ACTUAL usage between
-    # trials, so the run stops before the next provider call. Token ceilings are
-    # HARD; the USD ceiling is BEST-EFFORT (illustrative prices, projected input),
-    # not a provider-guaranteed dollar cap (review r16 P2)
-    p_run.add_argument("--max-usd", type=float, default=None,
-                       help="stop near this USD figure (BEST-EFFORT: illustrative prices, "
-                            "not a provider-guaranteed cap — pair with --max-*-tokens for a hard bound)")
-    p_run.add_argument("--max-input-tokens", type=int, default=None,
-                       help="hard ceiling: stop once actual input tokens reach this")
-    p_run.add_argument("--max-output-tokens", type=int, default=None,
-                       help="hard ceiling: stop once actual output tokens reach this")
     p_run.add_argument(
         "--overwrite", action="store_true",
         help="replace a non-empty --out directory (clears stale traces first)",

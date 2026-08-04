@@ -14,7 +14,6 @@ import unittest
 from pathlib import Path
 
 from tests import support
-from lab_agent.cost import CostBudget
 from lab_contracts import build_bundle, load_schemas, validate_artifact, verify_bundle
 from lab_runner import ScriptedAgent, run_experiment_suite
 from lab_runner.bundle_io import write_bundle_dir
@@ -67,26 +66,6 @@ class TestPreWriteSchemaValidation(unittest.TestCase):
             with self.assertRaises(RunnerError) as ctx:
                 write_bundle_dir(Path(tmp) / "out", bundle, {})
             self.assertIn("schema-invalid", str(ctx.exception))
-
-
-class TestUsdOutputCap(unittest.TestCase):
-    def test_usd_only_budget_caps_provider_output(self) -> None:
-        b = CostBudget(max_usd=0.10)  # USD only, no output ceiling
-        usage = {"input_tokens": 0, "output_tokens": 0}
-        # no output ceiling → remaining_output_tokens is None (the old, uncapped path)
-        self.assertIsNone(b.remaining_output_tokens(usage))
-        # but output_cap returns a REAL finite cap bounded by the remaining USD
-        cap = b.output_cap(usage, projected_input_tokens=100, model="claude-opus-4-8")
-        self.assertIsNotNone(cap)
-        # opus output is $75/Mtok → $0.10 buys < ~1350 tokens; definitely finite/bounded
-        self.assertLess(cap, 1400)
-        self.assertGreater(cap, 0)
-
-    def test_output_cap_is_zero_when_usd_already_spent(self) -> None:
-        b = CostBudget(max_usd=0.001)
-        cap = b.output_cap({"input_tokens": 1_000_000, "output_tokens": 0},
-                           projected_input_tokens=0, model="claude-opus-4-8")
-        self.assertEqual(cap, 0)
 
 
 class TestConditionCounterbalancing(unittest.TestCase):

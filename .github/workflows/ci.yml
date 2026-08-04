@@ -77,7 +77,7 @@ jobs:
       - name: ruff (pyflakes + bugbear; no style noise)
         run: |
           pip install ruff
-          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_agent
+          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_suite lab_capabilities
 
   determinism:
     name: Replay determinism matrix (${{ matrix.os }})
