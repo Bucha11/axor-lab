@@ -142,6 +142,68 @@ class TestCriticalityOverridesReachTheGovernor(unittest.TestCase):
                             {"criticality_overrides": {"send": "VERY_BAD"}})
 
 
+class TestEveryDenialCanBeWrittenIntoATrace(unittest.TestCase):
+    """`decision.gate` accepts only a gate name. Lab kept a private
+    category→gate map keyed on `ssrf`, `consequence`, `positional`, `carrier` —
+    names the kernel does not emit — so seven of eleven categories fell through
+    unmapped, the raw category landed in the field, and any denial outside the
+    taint floor wrote a trace that failed Lab's own schema. Nothing caught it
+    because no test denied for those reasons.
+
+    The map now lives in axor-core, which owns both vocabularies. This checks
+    the two ends still meet."""
+
+    def _gate_enum(self) -> set[str]:
+        import json
+        from pathlib import Path
+
+        schema = json.loads(
+            (Path(__file__).resolve().parent.parent / "contracts" / "schemas"
+             / "trace.schema.json").read_text()
+        )
+        return set(schema["$defs"]["decision"]["properties"]["gate"]["enum"])
+
+    def test_every_gate_the_kernel_can_name_is_a_valid_trace_gate(self) -> None:
+        from axor_core.governor import GATE_OF_CATEGORY
+
+        missing = set(GATE_OF_CATEGORY.values()) - self._gate_enum()
+        self.assertEqual(
+            missing, set(),
+            f"the kernel can deny with gate(s) {sorted(missing)} that trace/v1 "
+            f"rejects — such a denial cannot be recorded at all",
+        )
+
+    def test_the_runtime_schema_mirror_agrees(self) -> None:
+        import json
+        from pathlib import Path
+
+        mirror = json.loads(
+            (Path(__file__).resolve().parent.parent / "lab_contracts" / "schemas"
+             / "trace.schema.json").read_text()
+        )
+        self.assertEqual(
+            set(mirror["$defs"]["decision"]["properties"]["gate"]["enum"]),
+            self._gate_enum(),
+        )
+
+    def test_a_real_denial_records_a_schema_valid_gate(self) -> None:
+        """End to end rather than by inspection: deny for a non-taint reason and
+        check what actually lands in the decision."""
+        from axor_core.contracts.canonical import ConsequenceClass
+        from axor_core.governor import ToolCallGovernor
+
+        from lab_runner.axor_backend import gate_with_governor
+
+        config = {"egress_sinks": {"send"}, "untrusted_sources": {"read"},
+                  "driving_args": {"send": ["to"]},
+                  "consequence_overrides": {"send": ConsequenceClass.CATASTROPHIC}}
+        self.assertFalse(ToolCallGovernor(**config).evaluate("send", {"to": "x"}).allowed)
+        decision = gate_with_governor(config, "on", [], "send", {"to": "x"}, "v_1")
+        self.assertEqual(decision["verdict"], "DENY")
+        self.assertIn(decision["gate"], self._gate_enum())
+        self.assertEqual(decision["gate"], "consequence")
+
+
 @unittest.skipUnless(HAS_WRAP, "axor-wrap not installed")
 class TestParityWithWrap(unittest.TestCase):
     def test_both_compile_the_same_manifests_identically(self) -> None:

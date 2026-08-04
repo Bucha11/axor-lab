@@ -12,8 +12,10 @@ verdicts (so no exact replay), and describes an agent that was never wrapped,
 which means turning governance on later is a re-integration rather than
 flipping a flag.
 
-There is no kernel-free arm any more. Locally the reference kernel observes,
-which is stdlib and always resolvable; a connected runtime carries its own.
+There is no kernel-free arm any more, and no reference-kernel one either: the
+synthesized arm names the INSTALLED axor-core, locally and on a connected
+runtime alike. A default run that measured a one-gate reimplementation was
+measuring something that is not the product.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from lab_contracts import build_bundle, validate_artifact, verify_bundle
 from lab_contracts.errors import BundleIntegrityError
 from lab_runner import run_experiment_suite
 from lab_runner.kernel import KernelRegistry
+from lab_runner.axor_backend import real_kernel_version
 from lab_runner.predicates import TraceView
 from lab_runner.runner import (
     REFERENCE_KERNEL_VERSION,
@@ -69,11 +72,17 @@ class TestTheDefaultArmIsUngoverned(unittest.TestCase):
             {str(t["condition_id"]) for t in result.trials}, {"ungoverned"},
         )
 
-    def test_a_synthesized_arm_names_the_reference_kernel_not_the_installed_one(self) -> None:
-        """It has to be resolvable on ANY machine. Pinning `axor-core@X` would
-        make the default arm unrunnable wherever that exact build is absent —
-        resolve_kernel refuses to substitute under a real-kernel label."""
-        self.assertEqual(observe_only_condition()["kernel"], REFERENCE_KERNEL_VERSION)
+    def test_a_synthesized_arm_names_the_INSTALLED_kernel(self) -> None:
+        """It used to name the reference kernel, so "any machine" could resolve
+        it. axor-core is a required dependency now, so every machine can resolve
+        the real one — and the reference kernel is a ONE-GATE reimplementation,
+        so a default run pinned to it measured something that is not the
+        product. Worse, it was what Lab's whole suite ran on, which is why three
+        defects in the axor-core path survived: replay fabricating a `v_none`
+        driving value, `value_policies` compiled into a shape the governor
+        cannot consume, and a category map keyed on names it does not emit."""
+        self.assertEqual(observe_only_condition()["kernel"], real_kernel_version())
+        self.assertNotEqual(observe_only_condition()["kernel"], REFERENCE_KERNEL_VERSION)
 
     def test_an_empty_registry_does_not_break_the_default(self) -> None:
         """The caller passed KernelRegistry({}), which knows nothing. A
@@ -112,7 +121,7 @@ class TestObservationIsOnEnforcementIsOff(unittest.TestCase):
         _, _, result = _run()
         for trace in result.traces.values():
             producer: dict[str, object] = trace["producer"]  # type: ignore[assignment]
-            self.assertEqual(producer["kernel_version"], REFERENCE_KERNEL_VERSION)
+            self.assertEqual(producer["kernel_version"], real_kernel_version())
 
     def test_predicates_evaluate_over_the_observed_run(self) -> None:
         _, _, result = _run()

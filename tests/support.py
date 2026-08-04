@@ -18,7 +18,8 @@ from lab_runner import Kernel, KernelRegistry  # noqa: E402
 # fake `axor-core@X` that (before r16) silently fell back to the reference kernel
 # while claiming a real build. Real-kernel behavior is exercised separately with
 # the actually-installed build (test_real_kernel).
-KERNEL_PINNED = "reference_taint_floor_kernel"
+from lab_runner.axor_backend import real_kernel_version
+KERNEL_PINNED = real_kernel_version()
 KERNEL_NO_TAINT_FLOOR = "reference_taint_floor_kernel+variant-no-taint-floor"
 
 

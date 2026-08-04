@@ -114,10 +114,9 @@ def observe_only_condition(kernel: str | None = None) -> dict[str, object]:
 
     There is deliberately no kernel-free variant. A run nothing observed cannot
     produce a conformant trace anyway — trace/v1 rules out black-box producers
-    precisely because they "cannot emit value lineage" — and locally the
-    reference kernel is stdlib and always available, so choosing it costs
-    nothing and buys the value ledger, recorded verdicts and exact replay that a
-    kernel-free arm threw away.
+    precisely because they "cannot emit value lineage" — and the kernel is a
+    required dependency, so choosing it costs nothing and buys the value ledger,
+    recorded verdicts and exact replay a kernel-free arm threw away.
     """
     resolved = kernel or _default_kernel_version()
     condition: dict[str, object] = {
@@ -132,16 +131,25 @@ def observe_only_condition(kernel: str | None = None) -> dict[str, object]:
 
 
 def _default_kernel_version() -> str | None:
-    """The reference kernel: stdlib, always resolvable, no axor-core needed.
+    """The installed axor-core — the kernel the product actually is.
 
-    Deliberately NOT the installed real kernel. A locally-synthesized arm must
-    be resolvable on any machine, and pinning `axor-core@X` here would make a
-    default arm unrunnable wherever that exact build is absent — resolve_kernel
-    refuses to substitute under a real-kernel label, and rightly so. A caller
-    that wants the real kernel names it (as the connected-runtime path does,
-    where the runtime carries it).
+    This used to return the reference kernel, on the reasoning that "a
+    locally-synthesized arm must be resolvable on any machine, and pinning
+    axor-core@X would make a default arm unrunnable wherever that build is
+    absent". That reasoning died when axor-core became a required dependency:
+    it is present by construction.
+
+    What it cost while it lived: every default run, and Lab's entire test
+    suite, measured a ONE-GATE reimplementation while the nine-gate kernel sat
+    installed and unexercised. Three real defects in the axor-core path lived
+    behind it — replay fabricating a `v_none` driving value, `value_policies`
+    compiled into a shape the governor cannot consume at all, and a category
+    map keyed on names the kernel does not emit. None were reachable by a test
+    that ran on the reference kernel, and every test did.
     """
-    return REFERENCE_KERNEL_VERSION
+    from .axor_backend import real_kernel_version
+
+    return real_kernel_version() or REFERENCE_KERNEL_VERSION
 
 
 REFERENCE_KERNEL_VERSION = "reference_taint_floor_kernel"
@@ -549,10 +557,13 @@ def run_experiment(
 ) -> ExperimentResult:
     agent = agent or ScriptedAgent()
     if not conditions:
-        # a synthesized arm must be resolvable on ANY machine, so it names the
-        # reference kernel and brings a registry that knows it
+        # the synthesized arm names the installed axor-core. The registry is
+        # still built so a caller that pinned a reference version explicitly
+        # keeps resolving; it is no longer what a DEFAULT run measures.
         conditions = [observe_only_condition()]
-        kernel_registry = default_registry((REFERENCE_KERNEL_VERSION,))
+        kernel_registry = default_registry(
+            (str(c.get("kernel")) for c in conditions if c.get("kernel")),
+        )
     result = ExperimentResult(run_id=run_id, conditions=list(conditions))
     order = 0
     for condition in conditions:
@@ -668,10 +679,13 @@ def run_experiment_suite(
     """
     agent = agent or ScriptedAgent()
     if not conditions:
-        # a synthesized arm must be resolvable on ANY machine, so it names the
-        # reference kernel and brings a registry that knows it
+        # the synthesized arm names the installed axor-core. The registry is
+        # still built so a caller that pinned a reference version explicitly
+        # keeps resolving; it is no longer what a DEFAULT run measures.
         conditions = [observe_only_condition()]
-        kernel_registry = default_registry((REFERENCE_KERNEL_VERSION,))
+        kernel_registry = default_registry(
+            (str(c.get("kernel")) for c in conditions if c.get("kernel")),
+        )
     result = ExperimentResult(run_id=run_id, conditions=list(conditions))
     # materialize the FULL plan up front so a cost stop can record the trials
     # that never ran — otherwise missingness computes over only the trials that

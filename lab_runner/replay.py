@@ -177,11 +177,28 @@ def replay_trace_status(
                 continue
             args = resolve_args(bindings, values)
             if isinstance(kernel, AxorKernel):
-                driving = pending_call.get("arg_bindings", {}).get("recipient", "v_none")  # type: ignore[union-attr]
+                # the driving value comes from the MANIFEST's declared
+                # driving_args, exactly as the live gate resolves it. This read
+                # the hardcoded name "recipient" and fell back to the literal
+                # string "v_none" — so any tool whose driving arg is named
+                # anything else, and every call with no driving args at all,
+                # replayed with a driving value the live run never recorded and
+                # that the ledger does not contain. Replay reported MISMATCH on
+                # traces it had reproduced perfectly, and `exact_replay` — the
+                # capability's headline claim — failed for the real kernel.
+                tool = str(pending_call["tool"])
+                effect: dict[str, object] = manifests[tool].get("effect", {})  # type: ignore[assignment]
+                declared = [str(a) for a in effect.get("driving_args", [])]  # type: ignore[union-attr]
+                driving = bindings.get(declared[0]) if declared else None
                 decision = gate_with_governor(
                     kernel.config, str(condition["enforcement"]), registrations,
-                    str(pending_call["tool"]), args, str(driving),
+                    tool, args, driving,
                 )
+                if driving is None:
+                    decision["driving_unresolved"] = (
+                        {"kind": "no_driving_args"} if not declared
+                        else {"kind": "unresolved_argument", "arg": declared[0]}
+                    )
             else:
                 labels = {
                     name: tuple(values[vid]["labels"])  # type: ignore[arg-type]

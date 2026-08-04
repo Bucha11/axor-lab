@@ -33,15 +33,18 @@ except ImportError:  # pragma: no cover - environment without axor-core
     HAS_AXOR_CORE = False
     AXOR_CORE_VERSION = None
 
-GATE_CATEGORY_MAP = {
-    "taint_enforcement": "taint_floor",
-    "consequence": "consequence",
-    "value_policy": "value_policies",
-    "ssrf": "ssrf",
-    "positional": "positional",
-    "carrier": "carrier",
-    "unclassified_tool": "capability",
-}
+# The category -> gate mapping now lives in axor-core, which owns both
+# vocabularies. This local copy was keyed on `ssrf`, `consequence`,
+# `positional`, `carrier` — names the kernel does not emit (it emits
+# `ssrf_gate`, `consequence_gate`, ...) — so seven of eleven categories fell
+# through unmapped and the raw category landed in `decision.gate`, which accepts
+# only a gate name. Any denial outside the taint floor produced a trace that
+# failed Lab's own schema.
+if HAS_AXOR_CORE:  # pragma: no branch - axor-core is a required dependency
+    from axor_core.governor import gate_of
+else:  # pragma: no cover
+    def gate_of(category: str) -> str:
+        raise UnknownKernelError("axor-core is required to name a denial's gate")
 
 
 def axor_available() -> bool:
@@ -215,12 +218,43 @@ def governor_config(
         "driving_args": canon["driving_args"],
     }
     if canon["value_policies"]:
-        config["value_policies"] = canon["value_policies"]
+        config["value_policies"] = _value_predicates(canon["value_policies"])  # type: ignore[arg-type]
     if canon["consequence_overrides"]:
         config["consequence_overrides"] = _consequence_classes(
             canon["consequence_overrides"],  # type: ignore[arg-type]
         )
     return config
+
+
+def _value_predicates(compiled: dict[str, dict[str, dict[str, object]]]) -> dict[str, object]:
+    """The canonical `{sink: {arg: {"enum": [...]}}}` → the governor's predicates.
+
+    axor-core wants `dict[str, list[ValuePredicate]]` — objects with `.check()`.
+    Handing it the nested dict meant `check_value_policies` iterated a dict and
+    got its KEYS, so the first "predicate" was the string `"recipient"` and the
+    call died on `'str' object has no attribute 'check'`. Every condition
+    carrying an allowlist crashed under the real kernel — including the
+    enum-supersession path this repo describes as the sound, paraphrase-proof
+    control the kernel supersedes taint with.
+
+    The compiled form stays a plain dict because it is what the executable
+    config hash is taken over; predicates are built here, at construction.
+    """
+    from axor_core.policy.value_policy import enum as enum_predicate
+
+    predicates: dict[str, object] = {}
+    for sink, by_arg in compiled.items():
+        built = []
+        for arg, spec in by_arg.items():
+            allowed = spec.get("enum")
+            if allowed is None:
+                raise UnknownKernelError(
+                    f"value policy for {sink}.{arg} declares {sorted(spec)}, and only "
+                    f"'enum' is compiled today — refusing to drop a control silently"
+                )
+            built.append(enum_predicate(arg, list(allowed)))  # type: ignore[arg-type]
+        predicates[sink] = built
+    return predicates
 
 
 def _consequence_classes(overrides: dict[str, str]) -> dict[str, object]:
@@ -252,7 +286,7 @@ def gate_with_governor(
     registrations: list[tuple[str, object]],
     sink_tool: str,
     sink_args: dict[str, object],
-    driving_value_id: str,
+    driving_value_id: str | None,
 ) -> dict[str, object]:
     """The single decision path (live AND replay).
 
@@ -284,7 +318,7 @@ def gate_with_governor(
         }
     return {
         "verdict": "DENY",
-        "gate": GATE_CATEGORY_MAP.get(decision.category, decision.category),
+        "gate": gate_of(str(decision.category)),
         "driving_value_id": driving_value_id,
         "projection": "untrusted-derived",
         "reason": f"axor-core governor [{decision.category}]: {decision.reason}",

@@ -149,7 +149,7 @@ class TestCandidateRealKernel(unittest.TestCase):
 
         def enums(k):
             vps = k.config.get("value_policies", {})
-            return [v for vp in vps.values() for arg in vp.values() for v in arg["enum"]]
+            return [v for preds in vps.values() for p in preds for v in p.allowed]
 
         k_a = resolve_candidate_kernel_for_trace(
             bundle, {"trial": {"scenario_id": "scn-a", "condition_id": "governed"}},

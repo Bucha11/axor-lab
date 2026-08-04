@@ -335,9 +335,11 @@
             "positional",
             "carrier",
             "taint_floor",
-            "adjudicator"
+            "adjudicator",
+            "message",
+            "budget"
           ],
-          "description": "the paper's 9-gate sequence; a DENY names the first gate that denied"
+          "description": "the gate that reached this verdict; a DENY names the first gate that denied. The names are axor-core's own (axor_core.governor.GATE_OF_CATEGORY maps its denial categories onto them), so a kernel that can deny for a reason has a gate name for it here \u2014 `budget` and `message` were missing, and a denial for either wrote a trace that failed this schema."
         },
         "driving_value_id": {
           "type": [

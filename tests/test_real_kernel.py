@@ -31,6 +31,21 @@ from lab_runner import (
 from lab_runner.kernel import KernelRegistry
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
+REFERENCE_KERNEL = "reference_taint_floor_kernel"
+
+
+def _reference_pinned_conditions() -> list[dict[str, object]]:
+    """Conditions as an .axl authored against the reference kernel pinned them.
+
+    Lab's own default is the installed axor-core now, so this can no longer be
+    taken from `support` — but repinning such a file is precisely what
+    `--real-kernel` exists for, so the case still needs a fixture.
+    """
+    return [
+        {**dict(c), "kernel": REFERENCE_KERNEL,
+         "config_hash": condition_config_hash(REFERENCE_KERNEL, c.get("policy"))}
+        for c in support.conditions()
+    ]
 FAITHFUL_ALWAYS = ScriptedAgent(attack_rate=0.0)
 
 
@@ -118,7 +133,11 @@ class TestRealKernelRepin(unittest.TestCase):
         from lab_runner.experiment_file import ResolvedExperiment
 
         version = real_kernel_version()
-        conditions = support.conditions()  # ungoverned(off) + governed(on), reference kernel
+        # an .axl a user authored against the reference kernel. Lab's own default
+        # is the real kernel now, so this has to be built explicitly rather than
+        # taken from support — but repinning such a file is exactly what the
+        # feature is for, so the case is still worth testing.
+        conditions = _reference_pinned_conditions()
         self.assertNotEqual(conditions[0]["kernel"], version)  # baseline starts on reference
 
         _repin_to_real_kernel({"experiment": {"id": "e_real", "conditions": conditions}})
@@ -156,7 +175,7 @@ class TestRealKernelRepin(unittest.TestCase):
         from lab_runner.cli import _environment
         from lab_runner.experiment_file import ResolvedExperiment
 
-        mixed = support.conditions()
+        mixed = _reference_pinned_conditions()
         mixed[1] = {**mixed[1], "kernel": real_kernel_version()}  # two distinct kernels
         resolved = ResolvedExperiment(
             experiment={"id": "e_mixed", "agent_ref": "scripted", "repeats": 1},
@@ -288,7 +307,8 @@ class TestRealKernelInputAllowlist(unittest.TestCase):
         )
         self.assertIsInstance(kernel, AxorKernel)
         vps = kernel.config.get("value_policies", {})
-        flat = [v for vp in vps.values() for arg in vp.values() for v in arg["enum"]]
+        # predicates now, not nested dicts — the shape the governor consumes
+        flat = [v for preds in vps.values() for p in preds for v in p.allowed]
         self.assertIn(support.LANDLORD_IBAN, flat)
         self.assertNotIn("$inputs.known_ibans", flat)
 
