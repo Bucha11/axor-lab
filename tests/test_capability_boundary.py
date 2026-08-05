@@ -139,12 +139,22 @@ class TestDependencyDirectionIsOneWay(unittest.TestCase):
         back-reference would make the two packages one package with extra
         directories."""
         offenders: list[str] = []
-        for package in ("lab_runner", "lab_contracts", "lab_analysis", "lab_agent"):
+        # `lab_agent` used to be listed here and was deleted a while ago;
+        # `rglob` on a missing directory yields nothing, so the entry passed
+        # vacuously and the package that actually replaced it — `lab_suite` —
+        # went unchecked. A guard list is only as good as the names in it.
+        for package in ("lab_runner", "lab_contracts", "lab_analysis", "lab_suite"):
+            self.assertTrue(
+                (REPO_ROOT / package).is_dir(), f"{package} does not exist",
+            )
             for path in sorted((REPO_ROOT / package).rglob("*.py")):
+                relative = str(path.relative_to(REPO_ROOT))
+                if relative in WIRING_POINTS:
+                    continue  # the one declared place a gate is constructed
                 modules = _imported_modules(path)
                 if any(m == "lab_capabilities" or m.startswith("lab_capabilities.")
                        for m in modules):
-                    offenders.append(str(path.relative_to(REPO_ROOT)))
+                    offenders.append(relative)
         self.assertEqual(offenders, [])
 
     def test_the_capability_is_importable_and_wired(self) -> None:

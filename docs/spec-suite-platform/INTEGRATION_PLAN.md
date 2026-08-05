@@ -1,14 +1,25 @@
 # Axor Lab — Suite Platform Integration Plan
 
-**Status:** Phase 0 done (spec adopted, conflicts resolved). Phase 1 schema layer
-landed and green; the rest of Phase 1 (lifecycle / ui-backend / mvp contract docs)
-and Phases 2-6 are not implemented.
+**Status:** Phase 0 done. **Phase 1 done** — schemas landed and green, and the
+four contract docs (`domain-model`, `lifecycle`, `ui-backend-contract`,
+`mvp-contract`) are rewritten around Suite→Run→Trial→EvidenceCase→Regression→
+Artifact. **Phase 2 partially landed** — `lab_suite/` (SDK, three built-in
+suites, execution, dispatch), per-trial metrics and `artifact/v1` all exist and
+are tested; what remains is listed under Phase 2 below and is tracked there, not
+here. Phases 3-6 are not started.
+
 **Authority:** the Experiment Suite Platform RFC in this directory is the
 governing spec. Where it and `docs/spec-v0.3/` disagree, **the new spec wins**.
 Where it and `contracts/` disagree, the new spec sets the *target* and
 `contracts/` is migrated toward it (contracts stay authoritative for what the
 code does *today* — a schema is only "wrong" once its replacement is landed and
 green).
+
+Two things this header got wrong before, both worth keeping in view: it claimed
+Phases 2-6 were untouched long after Phase 2 code landed, and the contract docs
+it listed as "remaining" described endpoints that do not exist. A plan that
+overstates *or* understates what shipped is read once and then ignored, so each
+phase below states what is implemented separately from what it specifies.
 
 **One deliberate deviation from the spec:** the "remote endpoint" input (spec
 §5) is **not adopted** — see §4.6. Every other spec-vs-repo conflict resolves in
@@ -80,7 +91,6 @@ rewriting them.
 | `lab_analysis/` | Wilson, exact McNemar, paired bootstrap, missingness, unit-of-analysis | **keep, demote.** McNemar is a *comparison-suite* aggregation, not a platform default. |
 | `lab_adapters/` | curated AgentDojo banking subset → `scenario/v1` | **becomes the first Suite SDK implementation.** |
 | `lab_server/` | publish handshake, catalog/publication/EvidenceCase HTML, recompute, `runtime_jobs.py` (runtime pull API + UI control endpoints) | **keep the store, replace the surface.** `runtime_jobs.py` is the right shape and the right place to grow the screen API. |
-| `lab_agent/` | BYOK model backend, cassettes, cost estimate | **keep** — becomes a suite execution backend. |
 | `contracts/` | 11 contract docs + 9 schemas + validators + slice examples | **the migration lives here first** (repo is contract-first). |
 | `tests/` (78 files) | 10 acceptance criteria + hardening suites | **keep green.** They are the governance capability's acceptance suite. |
 
@@ -91,15 +101,15 @@ Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 
 | Spec concept | Repo today | Gap |
 |---|---|---|
-| Experiment Suite | `suite/v1` **landed**; `.axl` + `experiment/v1` still the executed path | **medium** — the manifest exists and validates; no SDK and no runner support yet (Phase 2) |
+| Experiment Suite | `suite/v1` **landed**; `lab_suite/` executes it; `.axl` + `experiment/v1` still the CLI's path | **medium** — SDK and runner exist but nothing outside tests calls them (Phase 2.1) |
 | Experiment Run | `Run` / `run_experiment_suite()` | small — rename + drop governance assumptions |
-| Trial | `trial` record in `bundle/v1`, now with a `metrics` block | **small** — schema **landed**; the runner does not populate it yet (Phase 2) |
+| Trial | `trial` record in `bundle/v1` with a `metrics` block, populated per trial | **none** |
 | Observation / Trace | `trace/v1` + value ledger | **none** — richer than the spec asks |
-| EvidenceCase | `evidence-case/v1` **landed**; `lab_runner/evidence.py` still governance-only | **medium** — generic schema exists; extraction is still hardwired to the injection chain (Phase 2) |
-| Regression | `regression/v1` **landed** (4 rule kinds); `lab_runner/regression.py` pins verdicts only | **medium** — schema exists; only `verdict_sequence` is executable today (Phase 2) |
-| Artifact | `artifact/v1` **landed** as a wrapper over `bundle/v1` | **small** — schema exists and preserves bundle hashes; nothing emits one yet (Phase 2) |
+| EvidenceCase | `evidence-case/v1` **landed**; `lab_runner/evidence.py` still governance-only; `BaseSuite.evidence_for` returns `[]` | **medium** — generic schema exists, no generic extractor (Phase 2.3/2.5) |
+| Regression | `regression/v1` **landed** (4 rule kinds); `metric_threshold` + `predicate` execute in `invariants.py`, `verdict_sequence` in `regression.py` | **small** — `evaluator_outcome` waits on the SDK registry (Phase 2.4) |
+| Artifact | `artifact/v1` **landed**; `lab_contracts/artifact.py` assembles one and `lab_suite/execute.py` emits it | **none** |
 | Governance (optional) | optional in the **schemas**; still the spine in the **code** | **inversion, half done** — see §4.1; the code split is Phase 2 |
-| Suite SDK | — | **absent** |
+| Suite SDK | `lab_suite/sdk.py` — `Suite` protocol, `BaseSuite`, `SuiteRegistry`, 3 built-ins | **medium** — no product entry point, no extractors (Phase 2.1/2.3) |
 | Suite Builder | `docs/**/mocks/lab-builder.jsx` | **absent** (no frontend) |
 | Home / Launchpad | server-rendered publication catalog | **absent** — different concept (past vs next action) |
 | Nav: Home/Suites/Runs/Evidence/Regressions/Artifacts/Settings | 3 HTML pages | **absent** |
@@ -353,12 +363,19 @@ Each phase is independently shippable and leaves the test suite green.
 
 **Exit:** a reader knows which document wins. No code change.
 
-### Phase 1 — Domain re-model (contracts first) · ~1 week — **schemas landed**
+### Phase 1 — Domain re-model (contracts first) · **DONE**
 
-**Status: the schema + contract layer is done and green** (626 tests, both
-validators, 14/14 slice examples). What remains in this phase is the
-`lifecycle.md` / `ui-backend-contract.md` / `mvp-contract.md` rewrites, which
-describe surfaces Phase 3 builds.
+**Status: complete.** Schemas + subset validator + slice examples green, and all
+four contract docs rewritten around the platform spine. `lifecycle.md` now
+carries the four input modes (no remote endpoint), the Playground single-trial
+and regression-check lifecycles, and the metrics rule; `ui-backend-contract.md`
+carries the nine-screen table and the Phase 3 endpoint surface;
+`mvp-contract.md` is re-based on the governance-free workflow.
+
+Each of the three rewritten docs states, in its own section, which half is
+implemented and which half is a target. The previous versions did not, and a
+contract doc that reads as a description of the server is how a reader concludes
+`/home` exists.
 
 A third blocker of the same family surfaced while writing the first
 governance-free example and is fixed: **`scenario/v1` required `injection` and
@@ -396,7 +413,38 @@ EvidenceCase→Regression→Artifact; update `lifecycle.md` (five input modes),
 examples including a **governance-free single-arm suite**; full test suite green;
 a v1 bundle still loads.
 
-### Phase 2 — Suite SDK + governance as a capability · ~2–3 weeks
+### Phase 2 — Suite SDK + governance as a capability · ~2–3 weeks — **partially landed**
+
+**Implemented:** `lab_suite/` with `sdk.py` (the `Suite` protocol + `BaseSuite`
++ `SuiteRegistry`), `manifest.py`, `execute.py` (`run_suite`), `dispatch.py`;
+the three built-in suites (Blank, AgentDojo, Budget); per-trial metrics in
+`lab_runner/runner.py` and `loop.py`; `artifact/v1` assembly in
+`lab_contracts/artifact.py`; `metric_threshold` and `predicate` invariants in
+`lab_runner/invariants.py`.
+
+**Not implemented, and each one is load-bearing:**
+
+1. **The SDK is unreachable from the product.** Nothing outside `lab_suite/`
+   and `tests/` imports it — not the CLI, not `lab_server`. `axor-lab run` still
+   goes through `run_experiment_suite` and `.axl`. The exit criterion below is
+   met only from a test, which means a regression in the SDK cannot reach a user
+   because no user can reach the SDK.
+2. **The governance extraction did not happen.** `lab_capabilities/governance/`
+   holds one 110-line `gate.py`. `kernel.py`, `cp_export.py`, `claims.py`, the
+   governance half of `evidence.py` / `regression.py` and the McNemar path are
+   all still in the spine.
+3. **No suite extracts anything.** `BaseSuite.evidence_for` and
+   `regressions_for` return `[]` and no built-in suite overrides either.
+4. **Two of four regression rule kinds execute.** `verdict_sequence` lives
+   apart in `regression.py`; `evaluator_outcome` is unimplemented. Both are
+   reported honestly as `error` rather than silently passing.
+5. **Generic EvidenceCase does not exist.** `build_evidence_case` requires a
+   governed condition and a kernel, and its chain is
+   injection→provenance→gate→verdict. Acceptance criterion 8.4 is open.
+6. **No YAML mode.** The Builder's third editing mode has no serializer, so the
+   Basic→YAML→Basic round-trip (§8.5, the guard for risk §9 row 1) cannot be
+   written. `test_canonical_round_trip_is_lossless` is a JCS JSON round-trip and
+   is not that test.
 
 - New `lab_suite/`: the `Suite` protocol per spec §12 (config schema, ui schema,
   validators, execution hooks, metrics, artifact renderer, regression extractor,

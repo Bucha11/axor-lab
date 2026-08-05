@@ -52,16 +52,16 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
   takedown that preserves attestations, and escaped HTML catalog / publication
   / EvidenceCase pages with three-axis provenance. Stdlib `http.server`; runs
   no live agents.
-- **`lab_agent/`** (B1) — BYOK model-backed agent: `ModelBackend` protocol,
-  `CassetteBackend` (offline) + `AnthropicBackend`, a `WrappedModelAgent`
-  driving the loop through the ledger; cost estimate.
-- **`lab_entitlement/`** (B9) — the Private Lab license (modules as flags) and
-  the two lines as code: safety free forever, org use paid; optional Ed25519.
-- **`lab_endpoint/`** (B5) — instrumented-endpoint trace assembly + black-box
-  eval-only labeling + SSRF guard.
-- **`lab_sandbox/`** (B6) — the sandbox policy decision layer (egress
-  allowlist, resource caps, no host mounts, non-persistent secrets, audit).
-- **`lab_games/`** (B7) — iterated-game runtime with honest per-run statistics.
+- **`lab_suite/`** — the Suite SDK: the `Suite` protocol and `BaseSuite`, a
+  registry with three built-in suites (Blank, AgentDojo, Budget), manifest
+  load/validate/resolve, suite execution, and dispatch to a connected runtime.
+- **`lab_capabilities/governance/`** — governance as an opt-in capability
+  (Suite Platform RFC §10): the kernel gate a suite gets only by declaring it.
+  The dependency direction is enforced by `tests/test_capability_boundary.py`.
+
+`lab_agent/`, `lab_entitlement/`, `lab_endpoint/`, `lab_sandbox/` and
+`lab_games/` were documented here long after they were deleted. They are gone;
+`docs/POST_MVP_PLAN.md` records what each did and why it was cut.
 
 ## CLI quickstart (`axor-lab`, or `python -m lab_runner`)
 
