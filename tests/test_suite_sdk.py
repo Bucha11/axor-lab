@@ -196,16 +196,23 @@ class TestExecution(unittest.TestCase):
         self.assertIn("reads", run.trials[0]["metrics"])  # type: ignore[operator]
 
     def test_the_suites_own_regressions_are_checked(self) -> None:
-        """Budget ships two invariants. The latency one passes; the COST one
-        errors, because a scripted stand-in calls no provider and so nothing
-        measured cost — which is the honest answer, not a pass."""
+        """Budget ships two invariants and both are evaluable.
+
+        It used to ship a third, over `cost_usd`, which errored on every run
+        this repo can perform — nothing here measures cost. Erroring on an
+        absent metric is correct and is pinned in
+        `test_platform_slice_e2e.py`; a BUILT-IN that can never satisfy its own
+        invariant is a different thing, and it was one.
+
+        `RG-budget-reads` bounds the suite's OWN metric, so this also pins that
+        a suite-defined metric reaches a regression rule at all."""
         _, run = self._run("budget")
         by_id = {
             str(regression["id"]): result
             for regression, result in zip(run.resolved.regressions, run.invariants)
         }
         self.assertEqual(by_id["RG-budget-latency"].status, STATUS_PASSED)
-        self.assertEqual(by_id["RG-budget-cost"].status, "error")
+        self.assertEqual(by_id["RG-budget-reads"].status, STATUS_PASSED)
         artifact = run.artifact("a", CREATED, ENVIRONMENT)
         statuses = {
             str(r["id"]): r["history"][0]["status"]  # type: ignore[index]

@@ -57,6 +57,10 @@ _RUN_EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
 _RUN_CONFIRM_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/confirm$")
 _RUN_AGG_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/aggregates$")
 _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/trace$")
+# `validate` is a POST sibling, not a suite id — without the lookahead a GET to
+# /suites/validate answers `no suite 'validate'`, which reads like the endpoint
+# is missing rather than like the method is wrong.
+_SUITE_RE = re.compile(r"^/suites/(?!validate$)([A-Za-z0-9_-]+)$")
 
 
 class RuntimeJobsError(Exception):
@@ -427,6 +431,31 @@ def make_runtime_server(
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             try:
+                if self.path == "/suites":
+                    # The Suite Catalog screen (ui-backend-contract.md §2). The
+                    # payload comes from `lab_suite.suite_catalog`, the same
+                    # function `axor-lab suites` prints — two independent lists
+                    # is how a catalog offers a suite the runner cannot resolve.
+                    from lab_suite import suite_catalog
+
+                    self._require_control()
+                    self._send(200, {"suites": suite_catalog()})
+                    return
+                m = _SUITE_RE.match(self.path)
+                if m:
+                    from lab_suite import builtin_registry
+                    from lab_suite.errors import SuiteNotFound
+
+                    self._require_control()
+                    try:
+                        manifest = builtin_registry().get(m.group(1)).manifest()
+                    except SuiteNotFound as exc:
+                        # an ANNOUNCED-but-unavailable suite has a catalog card
+                        # and no manifest; 404 with the reason beats an empty
+                        # 200 that the Builder would try to open
+                        raise RuntimeJobsError(404, str(exc)) from None
+                    self._send(200, manifest)
+                    return
                 if self.path == "/runtimes":
                     self._require_control()
                     self._send(200, {"runtimes": jobs.list_runtimes()})
@@ -475,6 +504,21 @@ def make_runtime_server(
                         model=str(body.get("model", "")),
                         agent_ref=body.get("agent_ref"),  # type: ignore[arg-type]
                     ))
+                    return
+                if self.path == "/suites/validate":
+                    # The Builder's validate button, in both Basic and YAML
+                    # mode. It validates a POSTED manifest, not a registered id:
+                    # the whole point is to check a document the user is editing
+                    # and has not saved.
+                    from lab_suite import validate_manifest
+
+                    self._require_control()
+                    body = self._read_json()
+                    manifest = body.get("suite")
+                    if not isinstance(manifest, dict):
+                        raise RuntimeJobsError(400, "validate requires {suite}")
+                    errors = validate_manifest(manifest)
+                    self._send(200, {"ok": not errors, "errors": errors})
                     return
                 if self.path == "/scenarios/validate":
                     self._require_control()

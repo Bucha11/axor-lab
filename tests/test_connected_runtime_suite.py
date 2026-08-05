@@ -224,7 +224,55 @@ class TestCollection(unittest.TestCase):
             for regression, result in zip(assignment.resolved.regressions, run.invariants)
         }
         self.assertEqual(by_id["RG-budget-latency"].status, "passed")
-        self.assertEqual(by_id["RG-budget-cost"].status, "error")
+        # the suite's own metric, evaluated by LAB over the trials the runtime
+        # reported — a suite-defined metric has to survive the wire, not just
+        # the in-process path
+        self.assertEqual(by_id["RG-budget-reads"].status, "passed")
+
+    def test_a_suite_defined_metric_survives_the_wire(self) -> None:
+        """`reads` is Budget's own metric, computed by its `metrics_for` hook
+        from the trace.
+
+        The hook ran only on the in-process path. Over the wire Lab merged the
+        runtime's measurements with its own predicate evaluation and never asked
+        the suite for anything — so a metric that existed locally silently
+        vanished the moment the same suite ran on a real agent, and any
+        regression over it went from `passed` to `error`. A metric derived from
+        the trace does not depend on who executed the trial."""
+        store, assignment = self._dispatch_and_run()
+        run = collect_suite_run(assignment, store)
+        completed = [t for t in run.trials if t["status"] == "completed"]
+        self.assertTrue(completed)
+        for trial in completed:
+            self.assertIn("reads", trial["metrics"])  # type: ignore[operator]
+
+    def test_lab_evaluation_still_wins_over_a_suites_own_number(self) -> None:
+        """Precedence has to hold: a suite hook must not be able to overwrite
+        Lab's verdict about success or breach, which is the claim the artifact
+        publishes and the one thing that must be recomputable from the trace."""
+        from lab_suite.dispatch import _collected_metrics
+        from lab_suite.sdk import BaseSuite
+
+        class _Liar(BaseSuite):
+            id = "budget"
+
+            def metrics_for(self, outcome, scenario):  # type: ignore[no-untyped-def]
+                return {"task_success": True, "reads": 99}
+
+        store, assignment = self._dispatch_and_run()
+        run = collect_suite_run(assignment, store)
+        trace = next(iter(run.traces.values()))
+        scenario = assignment.resolved.scenarios[0]
+        metrics = _collected_metrics(
+            _Liar(), scenario, trace, {"metrics": {"duration_ms": 1.0}},
+        )
+        self.assertEqual(metrics["reads"], 99)          # its own metric: kept
+        self.assertEqual(metrics["duration_ms"], 1.0)   # the runtime's: kept
+        # Lab's evaluation of the scenario predicate: not overridable
+        self.assertEqual(
+            metrics["task_success"],
+            _evaluated_task_success(scenario, trace),
+        )
 
     def test_trace_refs_are_content_hashes_lab_computed(self) -> None:
         store, assignment = self._dispatch_and_run()
@@ -340,3 +388,9 @@ class TestUngovernedStillGoesThroughTheCore(unittest.TestCase):
         with self.assertRaises(DispatchError) as ctx:
             collect_suite_run(assignment, store)
         self.assertIn("ran unwrapped", str(ctx.exception))
+
+
+def _evaluated_task_success(scenario, trace):
+    from lab_suite.dispatch import _evaluated
+
+    return _evaluated(scenario, trace)["task_success"]

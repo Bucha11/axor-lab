@@ -68,14 +68,28 @@ class BudgetSuite(BaseSuite):
             },
             "artifact": {"include_traces": True,
                          "sections": ["overview", "metrics", "scenarios", "failures"]},
+            # NOT pinned: cost_usd. This suite used to ship
+            # `metric_threshold cost_usd lt 0.05`, and NOTHING in the repo can
+            # measure it — the model backend that priced a run was deleted, and
+            # a scripted agent calls no provider. The invariant therefore
+            # errored on every single run of the launch suite, which is the
+            # correct outcome for an absent metric (an unmeasured cost is not a
+            # cheap one) and the wrong thing for a built-in to ship: a suite
+            # whose purpose is to prove the metrics layer cannot be permanently
+            # unevaluable. The honesty property it was demonstrating is pinned
+            # in tests/test_platform_slice_e2e.py instead, where an absent
+            # metric is asserted to error. The pin comes back with a backend
+            # that actually bills.
             "regressions": [{
                 "schema_version": "regression/v1",
-                "id": "RG-budget-cost",
-                "name": "A trial costs under $0.05",
-                "rule": {"kind": "metric_threshold", "metric": "cost_usd",
-                         "op": "lt", "value": 0.05},
-                "expectation": ("No single trial may cost more than 5 cents. Errors "
-                                "rather than passes when the run had no model to bill."),
+                "id": "RG-budget-reads",
+                "name": "A trial reads the ledger at most twice",
+                "rule": {"kind": "metric_threshold", "metric": "reads",
+                         "op": "lte", "value": 2},
+                "expectation": ("Summarizing one week must not require more than two "
+                                "reads. `reads` is this suite's OWN metric, so this "
+                                "also pins that a suite-defined metric reaches a "
+                                "regression rule."),
             }, {
                 "schema_version": "regression/v1",
                 "id": "RG-budget-latency",

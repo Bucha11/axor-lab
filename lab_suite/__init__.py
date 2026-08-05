@@ -23,9 +23,16 @@ from .dispatch import (
 from .errors import SuiteError, SuiteValidationError
 from .execute import SuiteRun, run_suite
 from .manifest import ResolvedSuite, load_manifest, resolve_suite, validate_manifest
-from .sdk import Suite, SuiteRegistry, builtin_registry
+from .sdk import (
+    UNAVAILABLE_SUITES,
+    Suite,
+    SuiteRegistry,
+    builtin_registry,
+    suite_catalog,
+)
 
 __all__ = [
+    "UNAVAILABLE_SUITES",
     "DispatchError",
     "ResolvedSuite",
     "SuiteAssignment",
@@ -41,5 +48,6 @@ __all__ = [
     "load_manifest",
     "resolve_suite",
     "run_suite",
+    "suite_catalog",
     "validate_manifest",
 ]

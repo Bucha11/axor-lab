@@ -64,12 +64,20 @@ Enforcement, tool dispatch and provenance construction happen in the runtime, no
 `lab_server/runtime_jobs.py`:
 
 ```
-GET  /runtimes                       GET  /runs/{id}              POST /runtimes/connect
-GET  /runtime/jobs                   GET  /runs/{id}/results      POST /scenarios/validate
-POST /runtime/jobs/{id}/claim        GET  /runs/{id}/aggregates   POST /experiments/plan
-POST /runtime/jobs/{id}/trials/{tid}/events      SSE  /runs/{id}/events        POST /runs
-POST /runtime/jobs/{id}/trials/{tid}/complete    GET  /runs/{id}/trials/{tid}/trace   POST /runs/{id}/confirm
+GET  /suites                         GET  /runs/{id}              POST /suites/validate
+GET  /suites/{id}                    GET  /runs/{id}/results      POST /runtimes/connect
+GET  /runtimes                       GET  /runs/{id}/aggregates   POST /scenarios/validate
+GET  /runtime/jobs                   SSE  /runs/{id}/events       POST /experiments/plan
+POST /runtime/jobs/{id}/claim        GET  /runs/{id}/trials/{tid}/trace    POST /runs
+POST /runtime/jobs/{id}/trials/{tid}/events      POST /runs/{id}/confirm
+POST /runtime/jobs/{id}/trials/{tid}/complete
 ```
+
+`GET /suites` serves `lab_suite.suite_catalog()` — the same function
+`axor-lab suites` prints, so the terminal and the screen cannot disagree about
+which suites exist. An announced-but-unimplemented suite has a catalog card and
+a 404 on its manifest, which is what stops the Builder from opening an empty
+document for a suite nobody wrote.
 
 `lab_server/app.py`: `GET /` (catalog page), `GET /e/{id}`, `GET /e/{id}/evidence/{eid}`, `GET /api/publications`, `GET /api/publications/{id}` (+ `/bundle`, `/reproductions`, `/takedown`).
 

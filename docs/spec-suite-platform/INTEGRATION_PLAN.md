@@ -101,7 +101,7 @@ Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 
 | Spec concept | Repo today | Gap |
 |---|---|---|
-| Experiment Suite | `suite/v1` **landed**; `lab_suite/` executes it; `.axl` + `experiment/v1` still the CLI's path | **medium** — SDK and runner exist but nothing outside tests calls them (Phase 2.1) |
+| Experiment Suite | `suite/v1` **landed**; `lab_suite/` executes it; `axor-lab run-suite` and `GET /suites` reach it; `.axl` remains for the legacy `run` | **small** — the two paths coexist until `.axl` is retired |
 | Experiment Run | `Run` / `run_experiment_suite()` | small — rename + drop governance assumptions |
 | Trial | `trial` record in `bundle/v1` with a `metrics` block, populated per trial | **none** |
 | Observation / Trace | `trace/v1` + value ledger | **none** — richer than the spec asks |
@@ -109,7 +109,7 @@ Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 | Regression | `regression/v1` **landed** (4 rule kinds); `metric_threshold` + `predicate` execute in `invariants.py`, `verdict_sequence` in `regression.py` | **small** — `evaluator_outcome` waits on the SDK registry (Phase 2.4) |
 | Artifact | `artifact/v1` **landed**; `lab_contracts/artifact.py` assembles one and `lab_suite/execute.py` emits it | **none** |
 | Governance (optional) | optional in the **schemas**; still the spine in the **code** | **inversion, half done** — see §4.1; the code split is Phase 2 |
-| Suite SDK | `lab_suite/sdk.py` — `Suite` protocol, `BaseSuite`, `SuiteRegistry`, 3 built-ins | **medium** — no product entry point, no extractors (Phase 2.1/2.3) |
+| Suite SDK | `lab_suite/sdk.py` — `Suite` protocol, `BaseSuite`, `SuiteRegistry`, 3 built-ins, reachable from CLI + server | **medium** — `evidence_for` / `regressions_for` still return `[]` (Phase 2.3) |
 | Suite Builder | `docs/**/mocks/lab-builder.jsx` | **absent** (no frontend) |
 | Home / Launchpad | server-rendered publication catalog | **absent** — different concept (past vs next action) |
 | Nav: Home/Suites/Runs/Evidence/Regressions/Artifacts/Settings | 3 HTML pages | **absent** |
@@ -424,11 +424,22 @@ the three built-in suites (Blank, AgentDojo, Budget); per-trial metrics in
 
 **Not implemented, and each one is load-bearing:**
 
-1. **The SDK is unreachable from the product.** Nothing outside `lab_suite/`
-   and `tests/` imports it — not the CLI, not `lab_server`. `axor-lab run` still
-   goes through `run_experiment_suite` and `.axl`. The exit criterion below is
-   met only from a test, which means a regression in the SDK cannot reach a user
-   because no user can reach the SDK.
+1. ~~**The SDK is unreachable from the product.**~~ **Done.** `axor-lab suites`
+   and `axor-lab run-suite <id|manifest>` run a suite end to end and write an
+   `artifact/v1`; `GET /suites`, `GET /suites/{id}` and `POST /suites/validate`
+   serve the Suite Catalog and the Builder's validate. Both read one catalog
+   function so the terminal and the screen cannot disagree. Pinned in
+   `tests/test_suite_entry_points.py`, which drives the real `main()` and the
+   real HTTP server.
+
+   Two defects surfaced the moment there was a way in. The built-in **Budget**
+   suite pinned `cost_usd < 0.05` and nothing in this repo can measure cost —
+   the backend that priced a run was deleted — so the launch suite errored on
+   every run; it now pins its own `reads` metric, and the error-on-absent rule
+   stays pinned in `test_platform_slice_e2e.py`. And a suite's `metrics_for`
+   hook ran only in-process: over the connected-runtime path Lab never asked the
+   suite for anything, so a suite-defined metric vanished when the same suite
+   ran on a real agent, taking any regression over it from `passed` to `error`.
 2. **The governance extraction did not happen.** `lab_capabilities/governance/`
    holds one 110-line `gate.py`. `kernel.py`, `cp_export.py`, `claims.py`, the
    governance half of `evidence.py` / `regression.py` and the McNemar path are

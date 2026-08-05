@@ -120,7 +120,11 @@ class SuiteRegistry:
         return tuple(sorted(self._suites))
 
     def catalog(self) -> list[dict[str, object]]:
-        """What the Suite Catalog screen renders — one card per suite."""
+        """One card per REGISTERED suite. Every card is `available`.
+
+        For the full catalog the screen renders — these plus the announced ones
+        that do not exist yet — use :func:`suite_catalog`.
+        """
         cards: list[dict[str, object]] = []
         for suite_id in self.ids():
             manifest = self._suites[suite_id].manifest()
@@ -131,6 +135,7 @@ class SuiteRegistry:
                 "origin": manifest.get("origin", "built_in"),
                 "tags": manifest.get("tags", []),
                 "capabilities": manifest.get("capabilities", []),
+                "available": True,
             })
         return cards
 
@@ -139,6 +144,46 @@ class SuiteRegistry:
         suite = self.get(suite_id)
         manifest = suite.manifest()
         return validate_manifest(manifest) + suite.validate(manifest)
+
+
+# Suites the design boards show and the launch set does not include
+# (INTEGRATION_PLAN §6 Phase 2, and the risk table's last row). They are listed
+# so the catalog can say "not yet" out loud. The alternative — showing six cards
+# and having three of them do nothing — is the failure this exists to prevent,
+# and dropping them from the catalog entirely is the other one: a user comparing
+# the product to the design board would conclude the feature was cut.
+UNAVAILABLE_SUITES: tuple[dict[str, object], ...] = (
+    {"id": "prompt_injection", "name": "Prompt Injection",
+     "description": "Injection corpora against an agent's tool surface."},
+    {"id": "performance", "name": "Performance",
+     "description": "Latency and throughput under load."},
+    {"id": "reliability", "name": "Reliability",
+     "description": "Failure and retry behaviour over repeated trials."},
+)
+
+_UNAVAILABLE_REASON = (
+    "announced in the design catalog; not implemented — the launch set is "
+    "Blank, AgentDojo and Budget"
+)
+
+
+def suite_catalog(registry: "SuiteRegistry | None" = None) -> list[dict[str, object]]:
+    """The Suite Catalog payload: registered suites, then the announced ones
+    marked unavailable with the reason.
+
+    One function so the CLI and the screen endpoint cannot disagree about which
+    suites exist — two independent lists is how a catalog ends up offering a
+    suite the runner cannot resolve.
+    """
+    cards = list((registry or builtin_registry()).catalog())
+    known = {str(c["id"]) for c in cards}
+    for announced in UNAVAILABLE_SUITES:
+        if str(announced["id"]) in known:
+            continue  # someone implemented it — the registry wins
+        cards.append({**announced, "origin": "built_in", "tags": [],
+                      "capabilities": [], "available": False,
+                      "reason": _UNAVAILABLE_REASON})
+    return cards
 
 
 def builtin_registry() -> SuiteRegistry:

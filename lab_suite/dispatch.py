@@ -25,10 +25,12 @@ side is written as if the runtime were untrusted:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from lab_contracts import content_hash, validate_artifact
 from lab_contracts.canonical import CONFIG_COMPILER_VERSION, runtime_config_hash
 from lab_runner.invariants import check_invariant
+from lab_runner.loop import LoopOutcome
 from lab_runner.predicates import evaluate
 from lab_runner.runner import (
     connected_runtime_condition,
@@ -38,6 +40,9 @@ from lab_runner.runner import (
 from .errors import SuiteError
 from .execute import SuiteRun, _aggregate
 from .manifest import ResolvedSuite, resolve_suite
+
+if TYPE_CHECKING:
+    from .sdk import BaseSuite, SuiteRegistry
 
 
 class DispatchError(SuiteError):
@@ -153,13 +158,36 @@ def assign_suite(
     )
 
 
-def collect_suite_run(assignment: SuiteAssignment, store: object) -> SuiteRun:
+def collect_suite_run(
+    assignment: SuiteAssignment,
+    store: object,
+    suite: "BaseSuite | None" = None,
+    registry: "SuiteRegistry | None" = None,
+) -> SuiteRun:
     """Assemble a SuiteRun from what the runtime pushed back.
 
     Treats the runtime as untrusted: every trace is schema-checked and matched
     against the plan before it is admitted, and every number Lab reports is
     recomputed here rather than accepted.
+
+    The suite's own ``metrics_for`` hook runs HERE too. It did not, and the
+    consequence was that a suite-defined metric existed on the in-process path
+    and silently vanished the moment the same suite ran on a real agent —
+    taking any regression over it from `passed` to `error`. A metric a suite
+    computes from the trace does not depend on who executed the trial, and a
+    platform where a suite behaves differently by execution mode is two
+    platforms.
     """
+    from .sdk import builtin_registry
+    from .errors import SuiteNotFound
+
+    if suite is None:
+        try:
+            suite = (registry or builtin_registry()).get(assignment.resolved.id)
+        except SuiteNotFound:
+            # a manifest with no registered implementation still runs; it just
+            # contributes no suite-defined metrics
+            suite = None
     results: dict[str, object] = store.results(assignment.run_id)  # type: ignore[attr-defined]
     run = SuiteRun(
         run_id=assignment.run_id, resolved=assignment.resolved,
@@ -213,10 +241,9 @@ def collect_suite_run(assignment: SuiteAssignment, store: object) -> SuiteRun:
             # on someone else's machine, but it must never take a verdict about
             # success or breach on trust — that is the whole claim the artifact
             # publishes, and it has to be recomputable from the trace.
-            "metrics": {
-                **_metrics_of(reported.get(unit, {})),  # type: ignore[arg-type]
-                **_evaluated(scenario, trace),
-            },
+            "metrics": _collected_metrics(
+                suite, scenario, trace, reported.get(unit, {}),  # type: ignore[arg-type]
+            ),
         })
         run.traces[trace_ref] = trace
 
@@ -315,6 +342,42 @@ def _trial_record(
         "seed": seed, "repeat_index": index, "execution_id": assignment.run_id,
         "execution_order": assignment.planned.index(unit),
     }
+
+
+def _collected_metrics(
+    suite: "BaseSuite | None",
+    scenario: dict[str, object],
+    trace: dict[str, object],
+    reported: dict[str, object],
+) -> dict[str, object]:
+    """One trial's metrics, from the three sources that can legitimately produce
+    them, in precedence order.
+
+    Suite-defined first (weakest), then the runtime's own MEASUREMENTS (duration,
+    tokens, cost — Lab did not execute the trial and cannot take them), then
+    Lab's EVALUATION of the scenario's predicates (strongest, because a verdict
+    about success or breach is the claim the artifact publishes and must never
+    be taken on trust).
+    """
+    measured = _metrics_of(reported)
+    evaluated = _evaluated(scenario, trace)
+    suite_metrics: dict[str, object] = {}
+    if suite is not None:
+        # the hook is written against a LoopOutcome. Over the wire there is no
+        # loop — Lab did not run one — so the outcome is reconstructed from what
+        # Lab has and can verify: the returned trace, Lab's own re-evaluation of
+        # the predicates, and the runtime's reported measurements. `stop_reason`
+        # says plainly that this did not come from a local loop rather than
+        # inventing one of the loop's reasons.
+        outcome = LoopOutcome(
+            trace=trace,
+            violation=bool(evaluated.get("ASR", False)),
+            task_success=bool(evaluated.get("task_success", False)),
+            metrics=dict(measured),
+            stop_reason="reported_by_runtime",
+        )
+        suite_metrics = dict(suite.metrics_for(outcome, scenario))
+    return {**suite_metrics, **measured, **evaluated}
 
 
 def _metrics_of(reported: dict[str, object]) -> dict[str, object]:

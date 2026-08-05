@@ -66,6 +66,8 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 ## CLI quickstart (`axor-lab`, or `python -m lab_runner`)
 
 ```
+axor-lab suites                                    # the suite catalog
+axor-lab run-suite budget --out ./artifact --yes    # a suite -> artifact/v1
 axor-lab import-agentdojo banking --out suite.axl   # curated benchmark -> .axl
 axor-lab validate examples/banking-exfil-01.axl
 axor-lab run examples/banking-exfil-01.axl --out ./bundle --yes

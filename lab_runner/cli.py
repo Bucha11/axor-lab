@@ -44,6 +44,7 @@ from .bundle_io import (
 )
 from .claims import deny_claim_text
 from .errors import ExperimentFileError, RunnerError
+from .invariants import STATUS_ERROR, STATUS_FAILED
 from .evidence import build_evidence_case, evidence_condition, validate_twin
 from .experiment_file import ResolvedExperiment, load_axl, resolve
 from .kernel import Kernel, default_registry
@@ -109,6 +110,159 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         f"  scenarios={len(resolved.scenarios)} conditions={len(resolved.conditions)} "
         f"repeats={resolved.repeats} -> {resolved.trial_count} trials"
     )
+    return EXIT_OK
+
+
+def _cmd_suites(args: argparse.Namespace) -> int:
+    """The Suite Catalog, from the terminal.
+
+    Same payload the screen endpoint serves (`lab_suite.suite_catalog`), so the
+    two cannot disagree about which suites exist.
+    """
+    from lab_suite import suite_catalog
+
+    for card in suite_catalog():
+        available = bool(card.get("available"))
+        mark = " " if available else "!"
+        caps = ",".join(str(c) for c in card.get("capabilities") or ()) or "-"
+        print(f"{mark} {card['id']:<18} {card['name']:<22} capabilities={caps}")
+        if card.get("description"):
+            print(f"    {card['description']}")
+        if not available:
+            print(f"    UNAVAILABLE: {card.get('reason', 'not implemented')}")
+    return EXIT_OK
+
+
+def _suite_manifest(target: str) -> tuple[dict[str, object], object]:
+    """Resolve `target` — a registered suite id or a manifest path — to
+    (manifest, suite implementation).
+
+    A manifest file may name a suite the registry knows; then that suite's hooks
+    run over the file's manifest, which is exactly the Builder's edit-and-run
+    loop. A manifest whose `id` is unregistered runs on `BaseSuite` defaults —
+    no program, no metrics, no extractors — rather than being refused, because a
+    manifest is authorable long before an implementation exists.
+    """
+    from lab_suite import builtin_registry, load_manifest
+    from lab_suite.errors import SuiteNotFound
+    from lab_suite.sdk import BaseSuite
+
+    registry = builtin_registry()
+    path = Path(target)
+    if path.exists():
+        manifest = load_manifest(path)
+        try:
+            return manifest, registry.get(str(manifest.get("id", "")))
+        except SuiteNotFound:
+            unimplemented = BaseSuite()
+            unimplemented.id = str(manifest.get("id", ""))
+            unimplemented.manifest = lambda: manifest  # type: ignore[method-assign]
+            return manifest, unimplemented
+    suite = registry.get(target)
+    return suite.manifest(), suite
+
+
+def _cmd_run_suite(args: argparse.Namespace) -> int:
+    from lab_suite import run_suite, validate_manifest
+
+    print("[validating]")
+    manifest, suite = _suite_manifest(args.suite)
+    errors = validate_manifest(manifest) + suite.validate(manifest)  # type: ignore[attr-defined]
+    if errors:
+        for error in errors:
+            print(f"  {error}", file=sys.stderr)
+        return EXIT_VALIDATION
+    execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
+    scenarios = list(manifest.get("scenarios") or []) or list(manifest.get("scenario_refs") or [])
+    conditions = list(execution.get("conditions") or [])
+    repeats = int(execution.get("repeats", 1))  # type: ignore[arg-type]
+    # a suite with NO conditions is single-arm — one trial per (scenario, repeat).
+    # That is the platform's default path, not a degenerate case.
+    trials = len(scenarios) * repeats * max(len(conditions), 1)
+    print(f"valid: {manifest.get('id')}")
+    print(
+        f"  scenarios={len(scenarios)} conditions={len(conditions)} "
+        f"repeats={repeats} -> {trials} trials"
+        + ("  (single-arm: no governance)" if not conditions else "")
+    )
+
+    print("[estimate]")
+    print(f"  {trials} trial(s), local simulated tools, no paid inference")
+    if not _confirmed(args):
+        print(
+            "not confirmed — pass --yes (or answer y) to execute; nothing ran",
+            file=sys.stderr,
+        )
+        return EXIT_UNCONFIRMED
+
+    print("[running_local]")
+    run_id = args.run_id or f"r_{content_hash(manifest)[7:39]}"
+    run = run_suite(manifest, run_id=run_id, suite=suite)  # type: ignore[arg-type]
+    by_status: dict[str, int] = {}
+    for trial in run.trials:
+        by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
+    print(
+        f"  planned {len(run.trials)}: "
+        + ", ".join(f"{n} {status}" for status, n in sorted(by_status.items()))
+    )
+
+    print("[analyzing]")
+    summary = missingness(run.trials)
+    print(f"  {summary.display()}")
+    for aggregate in run.aggregates:
+        _print_aggregate(aggregate)
+    for result in run.invariants:
+        print(f"  invariant {result.regression_id}: {result.status}"
+              + (f" — {result.detail}" if result.detail else ""))
+
+    print("[uploading_artifacts]  (local: writing artifact + bundle)")
+    created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    environment = {
+        "model": {"provider": "scripted", "id": str(manifest.get("id", "")),
+                  "inference_params": {"suite_id": str(manifest.get("id", ""))}},
+    }
+    artifact = run.artifact(
+        artifact_id=f"a_{run_id}", created=created, environment=environment,
+        command=f"axor-lab run-suite {args.suite}",
+    )
+    schema_errors = validate_artifact(artifact, "artifact")
+    if schema_errors:
+        # the artifact IS the deliverable; writing an invalid one and finding out
+        # at publish time is how a run becomes unusable hours later
+        for error in schema_errors:
+            print(f"  [schema] {error}", file=sys.stderr)
+        return EXIT_FAILURE
+    out = Path(args.out)
+    write_bundle_dir(
+        out, artifact["bundle"], run.traces,  # type: ignore[arg-type]
+        overwrite=bool(getattr(args, "overwrite", False)),
+    )
+    (out / "artifact.json").write_text(json.dumps(artifact, indent=2, ensure_ascii=False))
+    # Three outcomes, three exit codes — collapsing them loses the distinction
+    # the whole invariant model rests on. `failed` is a violated invariant.
+    # `error` is one that could NOT be evaluated, which is not a pass either
+    # (an unmeasured latency is not a fast one, lifecycle.md) but is a different
+    # thing to tell a CI than "your change regressed". `skipped` IS fine: the
+    # rule kind executes elsewhere, and failing on it would fail every governed
+    # suite for carrying a verdict_sequence pin.
+    violated = [r for r in run.invariants if r.status == STATUS_FAILED]
+    unevaluable = [r for r in run.invariants if r.status == STATUS_ERROR]
+    print(f"[completed]  artifact: {out}/artifact.json ({len(run.traces)} traces)")
+    print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
+    if violated:
+        print(
+            "  invariants VIOLATED: "
+            + ", ".join(str(r.regression_id) for r in violated),
+            file=sys.stderr,
+        )
+        return EXIT_REGRESSION_DIFFERS
+    if unevaluable:
+        print(
+            "  invariants could not be evaluated: "
+            + ", ".join(f"{r.regression_id} ({r.detail})" for r in unevaluable),
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
     return EXIT_OK
 
 
@@ -1452,6 +1606,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_validate = sub.add_parser("validate", help="validate an .axl experiment file")
     p_validate.add_argument("file")
     p_validate.set_defaults(func=_cmd_validate)
+
+    p_suites = sub.add_parser("suites", help="list the suite catalog")
+    p_suites.set_defaults(func=_cmd_suites)
+
+    p_run_suite = sub.add_parser(
+        "run-suite",
+        help="run a suite by id or manifest path -> artifact (no governance required)",
+    )
+    p_run_suite.add_argument("suite", help="a registered suite id, or a suite/v1 manifest path")
+    p_run_suite.add_argument("--out", required=True, help="artifact + bundle output directory")
+    p_run_suite.add_argument(
+        "--yes", action="store_true", help="confirm the estimate non-interactively",
+    )
+    p_run_suite.add_argument("--run-id", default=None)
+    p_run_suite.add_argument("--created", default=None, help="override timestamp (RFC3339)")
+    p_run_suite.add_argument(
+        "--overwrite", action="store_true",
+        help="replace a non-empty --out directory (clears stale traces first)",
+    )
+    p_run_suite.set_defaults(func=_cmd_run_suite)
 
     p_run = sub.add_parser("run", help="resolve -> estimate -> execute -> analyze -> bundle")
     p_run.add_argument("file")
