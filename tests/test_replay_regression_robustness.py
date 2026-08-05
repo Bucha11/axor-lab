@@ -5,18 +5,9 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import (
-    REPLAY_MALFORMED_TRACE,
-    REPLAY_MATCH,
-    Kernel,
-    ScriptedAgent,
-    check_pins,
-    pin,
-    replay_trace,
-    replay_trace_status,
-    run_trial,
-)
-from lab_runner.regression import (
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import Kernel, REPLAY_MALFORMED_TRACE, REPLAY_MATCH, check_pins, pin, replay_trace, replay_trace_status, run_trial
+from lab_capabilities.governance.regression import (
     STATUS_DIFFERS,
     STATUS_MATCHES,
     STATUS_MISSING,

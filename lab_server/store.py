@@ -35,7 +35,7 @@ from lab_contracts import (
     verify_bundle,
 )
 from lab_contracts.publication import add_reproduction, rebuild_reproduction_log
-from lab_runner import default_registry, replay_bundle
+from lab_capabilities.governance import default_registry, replay_bundle
 
 from .errors import NotFound, PublishRejected
 from .recompute import check_aggregates
@@ -45,7 +45,7 @@ _ATTESTATION_ID_MAX = 128
 
 # the DENY claim text is rendered by ONE shared function so the CLI local
 # publish and this server path produce identical assertions (review r6)
-from lab_runner.claims import deny_claim_text as _deny_claim_text
+from lab_capabilities.governance.claims import deny_claim_text as _deny_claim_text
 
 
 def _semantic_errors(

@@ -19,14 +19,16 @@ from lab_contracts.canonical import (
     world_digest,
 )
 
-from .agents import AgentAdapter, DrivingAgent, ScriptedAgent
+from lab_runner.agents import AgentAdapter, DrivingAgent, ScriptedAgent
+from lab_runner.provenance import mint_untrusted_fields
+from lab_runner.trials import trial_id_for
 from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
-from .errors import RunnerError
+from lab_runner.errors import RunnerError
 from .kernel import Kernel, KernelRegistry, default_registry
-from .ledger import ValueLedger
-from .predicates import evaluate
-from .simulator import SimulatedToolHost
-from .verdicts import executed_under
+from lab_runner.ledger import ValueLedger
+from lab_runner.predicates import evaluate
+from lab_runner.simulator import SimulatedToolHost
+from lab_runner.verdicts import executed_under
 
 RUNTIME_ID = "lab-runner@0.1"
 DEFAULT_AMOUNT = 1200
@@ -206,22 +208,6 @@ def remote_executable_kernel_errors(conditions: list[dict[str, object]]) -> list
     return errors
 
 
-def trial_id_for(
-    run_id: str, scenario_id: str, condition_id: str, seed: str, repeat_index: int
-) -> str:
-    """Stable trial identity, SCOPED TO THE RUN.
-
-    Includes run_id so two runs of the same experiment with different agents /
-    models (run_id carries the agent fingerprint) do not mint identical trial
-    ids — otherwise distinct experiments would look like retries of one trial
-    when merged (review r3). Within one run a retry of the same coordinate still
-    yields the same id (idempotent replace)."""
-    return content_hash(
-        {"run": run_id, "scenario": scenario_id, "condition": condition_id,
-         "seed": seed, "repeat": repeat_index}
-    )
-
-
 def run_trial(
     scenario: dict[str, object],
     manifests: dict[str, dict[str, object]],
@@ -257,7 +243,7 @@ def run_trial(
     # 1. read tool: fixture result; mint an external_read value per untrusted field hit
     read_tool = _read_tool_id(scenario, manifests)
     result = host.execute(read_tool, {})
-    produced = _mint_untrusted_fields(ledger, manifests[read_tool], read_tool, result)
+    produced = mint_untrusted_fields(ledger, manifests[read_tool], read_tool, result)
     events.append(
         {"seq": seq, "node": "root", "type": "tool_result", "tool": read_tool,
          "produces_value_ids": produced}
@@ -593,62 +579,6 @@ def _tool_ids(scenario: dict[str, object]) -> list[str]:
         str(tool["$ref"]) if "$ref" in tool else str(tool.get("id"))
         for tool in scenario.get("tools", [])  # type: ignore[union-attr]
     ]
-
-
-def _mint_untrusted_fields(
-    ledger: ValueLedger, manifest: dict[str, object], tool_id: str, result: object
-) -> list[str]:
-    """Mint an external_read value for every untrusted-field instance present.
-
-    A field also declared in the manifest's `sensitive_fields` is redacted in
-    the trace (review §7.4)."""
-    sensitive_patterns = {
-        _norm_field(str(p)) for p in manifest.get("sensitive_fields", [])  # type: ignore[union-attr]
-    }
-    produced: list[str] = []
-    for pattern in manifest.get("untrusted_fields", []):  # type: ignore[union-attr]
-        path = str(pattern)
-        path = path[len("result."):] if path.startswith("result.") else path
-        is_sensitive = _norm_field(str(pattern)) in sensitive_patterns
-        for concrete, value in _expand_field(result, path):
-            produced.append(
-                ledger.mint_external_read(
-                    value, f"tool_result:{tool_id}:{concrete}",
-                    sensitive=is_sensitive, produced_by=tool_id,
-                )
-            )
-    return produced
-
-
-def _norm_field(pattern: str) -> str:
-    p = pattern[len("result."):] if pattern.startswith("result.") else pattern
-    import re as _re
-
-    return _re.sub(r"\[\d*\]", "[]", p)
-
-
-def _expand_field(node: object, path: str) -> list[tuple[str, object]]:
-    """Expand a field pattern like `transactions[].description` into concrete
-    (path, typed value) instances present in the result. The value is kept
-    typed (not stringified) so the ledger stores the exact decision_value."""
-    if not path:
-        return [("", node)] if isinstance(node, (str, int, float, bool)) else []
-    head, _, rest = path.partition(".")
-    if head.endswith("[]"):
-        key = head[:-2]
-        items = node.get(key, []) if isinstance(node, dict) else []
-        out: list[tuple[str, object]] = []
-        for i, item in enumerate(items):
-            for sub, value in _expand_field(item, rest):
-                suffix = f".{sub}" if sub else ""
-                out.append((f"{key}[{i}]{suffix}", value))
-        return out
-    if isinstance(node, dict) and head in node:
-        return [
-            (f"{head}.{sub}" if sub else head, value)
-            for sub, value in _expand_field(node[head], rest)
-        ]
-    return []
 
 
 def run_experiment_suite(

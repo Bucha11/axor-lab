@@ -22,9 +22,9 @@ from dataclasses import dataclass
 
 from lab_contracts.inputs import expand_list
 
-from .effects import EGRESS_CLASSES, resolve_effect_class
-from .errors import UnknownKernelError
-from .ledger import LABEL_UNTRUSTED
+from lab_runner.effects import EGRESS_CLASSES, resolve_effect_class
+from lab_runner.errors import UnknownKernelError
+from lab_runner.ledger import LABEL_UNTRUSTED
 
 GATE_TAINT_FLOOR = "taint_floor"
 PROJECTION_UNTRUSTED = "untrusted-derived"

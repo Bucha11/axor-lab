@@ -29,8 +29,8 @@ from lab_contracts import (
     validate_artifact,
 )
 
-from .agents import AgentAdapter, resolve_agent
-from .errors import ExperimentFileError, UnknownAgentError
+from lab_runner.agents import AgentAdapter, resolve_agent
+from lab_runner.errors import ExperimentFileError, UnknownAgentError
 from .kernel import KernelRegistry, default_registry, unsupported_reference_policy_fields
 
 
@@ -184,7 +184,7 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
             except ScenarioValidationError as exc:
                 errors += [f"scenario {name}: {e}" for e in exc.errors]
             # fixtures must satisfy each tool's result_schema (review r6)
-            from .simulator import validate_fixture_results
+            from lab_runner.simulator import validate_fixture_results
             errors += [f"[validating] scenario {name}: {e}"
                        for e in validate_fixture_results(scenario, manifests)]
 

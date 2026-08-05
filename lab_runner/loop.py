@@ -355,8 +355,8 @@ def _same_value(a: object, b: object) -> bool:
 def _mint_untrusted(
     ledger: ValueLedger, manifest: dict[str, object], tool_id: str, result: object
 ) -> list[str]:
-    from .runner import _mint_untrusted_fields
+    from .provenance import mint_untrusted_fields
 
-    return _mint_untrusted_fields(ledger, manifest, tool_id, result)
+    return mint_untrusted_fields(ledger, manifest, tool_id, result)
 
 

@@ -16,8 +16,8 @@ from unittest import mock
 from tests import support
 from lab_analysis import binary_aggregate
 from lab_contracts import build_bundle, condition_config_hash, content_hash
-from lab_runner import run_experiment_suite
-from lab_runner.kernel import Kernel, KernelRegistry
+from lab_capabilities.governance import run_experiment_suite
+from lab_capabilities.governance.kernel import Kernel, KernelRegistry
 from lab_server import store as store_mod
 from lab_server.html import render_publication
 from lab_server.store import PublicationStore

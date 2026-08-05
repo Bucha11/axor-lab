@@ -17,17 +17,9 @@ from pathlib import Path
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle, content_hash
-from lab_runner import (
-    AxorKernel,
-    axor_available,
-    check_pins,
-    real_kernel_version,
-    resolve_candidate_kernel_for_trace,
-    resolve_recorded_kernel_for_trace,
-    run_experiment_suite,
-)
+from lab_capabilities.governance import AxorKernel, axor_available, check_pins, real_kernel_version, resolve_candidate_kernel_for_trace, resolve_recorded_kernel_for_trace, run_experiment_suite
 from lab_runner.bundle_io import write_bundle_dir
-from lab_runner.regression import RegressionPin
+from lab_capabilities.governance.regression import RegressionPin
 
 CREATED = "2026-07-20T12:00:00+00:00"
 

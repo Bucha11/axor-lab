@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lab_runner.axor_backend import AxorKernel, gate_with_governor, resolve_kernel
-from lab_runner.kernel import Kernel, KernelRegistry, default_registry
+from lab_capabilities.governance.axor_backend import AxorKernel, gate_with_governor, resolve_kernel
+from lab_capabilities.governance.kernel import Kernel, KernelRegistry, default_registry
 from lab_runner.ledger import ValueLedger
 
 

@@ -15,7 +15,8 @@ from pathlib import Path
 
 from tests import support
 from lab_contracts import build_bundle, load_schemas, validate_artifact, verify_bundle
-from lab_runner import ScriptedAgent, run_experiment_suite
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_experiment_suite
 from lab_runner.bundle_io import write_bundle_dir
 from lab_runner.errors import RunnerError
 

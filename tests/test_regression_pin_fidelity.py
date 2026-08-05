@@ -16,7 +16,8 @@ import copy
 import unittest
 
 from tests import support
-from lab_runner import ScriptedAgent, pin, check_pins, run_trial
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import check_pins, pin, run_trial
 
 ATTACK = ScriptedAgent(attack_rate=1.0)
 

@@ -13,7 +13,8 @@ import unittest
 
 from tests import support
 from lab_contracts import content_hash
-from lab_runner import Kernel, ValueLedger, replay_trace
+from lab_runner import ValueLedger
+from lab_capabilities.governance import Kernel, replay_trace
 
 
 class TestLedgerStoresAuthoritativeValue(unittest.TestCase):

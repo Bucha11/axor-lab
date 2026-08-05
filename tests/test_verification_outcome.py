@@ -25,7 +25,7 @@ from lab_contracts.signing import (
     signed_ref,
     verify_receipt,
 )
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_runner.cli import EXIT_FAILURE, EXIT_OK, main
 
 _HAS_NACL = importlib.util.find_spec("nacl") is not None

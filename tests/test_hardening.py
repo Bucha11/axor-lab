@@ -17,7 +17,7 @@ from pathlib import Path
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_server.errors import NotFound, PublishRejected
 from lab_server.store import PublicationStore
 

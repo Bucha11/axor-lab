@@ -6,12 +6,21 @@ dependency direction does. Without a test like this, one convenient import puts
 governance back in the spine and nobody notices until a governance-free run
 needs a kernel registry.
 
-Two rules:
+Three rules:
 
   1. The platform SPINE must not import governance. A module that runs every
      experiment cannot depend on machinery only some experiments use.
   2. The direction is one-way. Governance reaches into the platform; the
-     platform never reaches back.
+     platform never reaches back — except at a short list of declared
+     composition roots, each of which must actually wire something.
+  3. Every module on that list is real and still needed. A stale exemption is a
+     hole, not a harmless leftover.
+
+The files themselves live in `lab_capabilities/governance/` now. They used to
+sit in `lab_runner/` with this test asserting the direction over them by name —
+which held, and still left `import lab_runner` pulling in the kernel, replay,
+EvidenceCase rendering and the whole Control Plane bridge, because the package
+root re-exported all of it.
 
 The check reads the source's import statements rather than inspecting loaded
 modules, so an import buried in a function body is caught too — that is exactly
@@ -32,8 +41,10 @@ SPINE = (
     "lab_runner/invariants.py",
     "lab_runner/predicates.py",
     "lab_runner/ledger.py",
+    "lab_runner/provenance.py",
     "lab_runner/simulator.py",
     "lab_runner/agents.py",
+    "lab_runner/trials.py",
     "lab_contracts/artifact.py",
     "lab_contracts/bundle.py",
     "lab_contracts/canonical.py",
@@ -41,22 +52,28 @@ SPINE = (
     "lab_suite/sdk.py",
 )
 
-# The governance capability: gates, kernels, verdicts, replay, the CP bridge.
-GOVERNANCE_MODULES = frozenset({
-    "lab_capabilities",
-    "lab_runner.kernel",
-    "lab_runner.axor_backend",
-    "lab_runner.replay",
-    "lab_runner.evidence",
-    "lab_runner.regression",
-    "lab_runner.cp_export",
-    "lab_runner.claims",
-})
+# The governance capability. One prefix now: the modules moved into the package
+# instead of being listed here by name while living in `lab_runner`. That list
+# was a promise about files that were somewhere else, and it kept the whole
+# stack reachable from `import lab_runner`.
+GOVERNANCE_MODULES = frozenset({"lab_capabilities"})
 
-# The ONE place the platform is allowed to wire a gate in: suite execution has
-# to construct the capability a suite asked for. Keeping it to a single file is
-# what makes the dependency reviewable.
-WIRING_POINTS = ("lab_suite/execute.py",)
+# The composition roots — the only files allowed to reach into the capability.
+# Each is here for a stated reason, and the list is asserted to be exactly this
+# below so a fourth one cannot appear quietly.
+#
+#   lab_suite/execute.py        constructs the Gate a suite's condition names
+#   lab_suite/dispatch.py       constructs the arms a REMOTE run executes under
+#   lab_suite/builtin/agentdojo.py  a built-in that declares the capability and
+#                               must name the kernel its condition pins
+#   lab_runner/cli.py           the CLI is a composition root, not spine: its
+#                               `.axl` commands ARE the capability's surface
+WIRING_POINTS = (
+    "lab_runner/cli.py",
+    "lab_suite/builtin/agentdojo.py",
+    "lab_suite/dispatch.py",
+    "lab_suite/execute.py",
+)
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -120,17 +137,30 @@ class TestSpineIsGovernanceFree(unittest.TestCase):
             "know only the Gate protocol",
         )
 
-    def test_governance_wiring_lives_in_one_place(self) -> None:
-        """lab_suite must reach the capability from exactly one file, so the
+    def test_governance_is_wired_only_at_the_declared_composition_roots(self) -> None:
+        """Every reach into the capability is at a file on the list, so the
         dependency is reviewable rather than scattered."""
         offenders: list[str] = []
-        for path in sorted((REPO_ROOT / "lab_suite").rglob("*.py")):
-            relative = str(path.relative_to(REPO_ROOT))
-            if relative in WIRING_POINTS:
-                continue
-            if _touches_governance(_imported_modules(path)):
-                offenders.append(relative)
+        for package in ("lab_suite", "lab_runner", "lab_contracts", "lab_analysis"):
+            for path in sorted((REPO_ROOT / package).rglob("*.py")):
+                relative = str(path.relative_to(REPO_ROOT))
+                if relative in WIRING_POINTS:
+                    continue
+                if _touches_governance(_imported_modules(path)):
+                    offenders.append(relative)
         self.assertEqual(offenders, [], f"governance imported outside {WIRING_POINTS}")
+
+    def test_every_declared_wiring_point_actually_wires_something(self) -> None:
+        """A stale entry on the list is a hole: it exempts a file that no longer
+        needs exempting, and the next import into that file passes unnoticed."""
+        for relative in WIRING_POINTS:
+            with self.subTest(module=relative):
+                path = REPO_ROOT / relative
+                self.assertTrue(path.is_file(), f"{relative} does not exist")
+                self.assertTrue(
+                    _touches_governance(_imported_modules(path)),
+                    f"{relative} is exempted but imports no governance",
+                )
 
 
 class TestDependencyDirectionIsOneWay(unittest.TestCase):
@@ -150,7 +180,7 @@ class TestDependencyDirectionIsOneWay(unittest.TestCase):
             for path in sorted((REPO_ROOT / package).rglob("*.py")):
                 relative = str(path.relative_to(REPO_ROOT))
                 if relative in WIRING_POINTS:
-                    continue  # the one declared place a gate is constructed
+                    continue  # a declared composition root
                 modules = _imported_modules(path)
                 if any(m == "lab_capabilities" or m.startswith("lab_capabilities.")
                        for m in modules):

@@ -13,7 +13,7 @@ import unittest
 from tests import support
 from lab_contracts import ScenarioValidationError, load_schemas, validate_scenario
 from lab_contracts.subset_validator import validate_against
-from lab_runner.experiment_file import ExperimentFileError, resolve
+from lab_capabilities.governance.experiment_file import ExperimentFileError, resolve
 
 
 def _schemas():

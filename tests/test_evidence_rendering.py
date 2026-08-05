@@ -19,8 +19,9 @@ from pathlib import Path
 
 from tests import support
 from lab_contracts import build_bundle
-from lab_runner import ScriptedAgent, run_experiment_suite, run_trial
-from lab_runner.evidence import _chain, evidence_condition, validate_twin
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_experiment_suite, run_trial
+from lab_capabilities.governance.evidence import _chain, evidence_condition, validate_twin
 from lab_server.html import render_evidence, render_publication
 from lab_server.store import PublicationStore, StoredPublication, _deny_claim_text
 

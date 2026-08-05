@@ -13,7 +13,8 @@ import unittest
 from pathlib import Path
 
 from tests import support
-from lab_runner import ScriptedAgent, replay_trace, run_trial
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import replay_trace, run_trial
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)

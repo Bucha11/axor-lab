@@ -12,13 +12,14 @@ CONTRACTS_DIR = REPO_ROOT / "contracts"
 sys.path.insert(0, str(REPO_ROOT))
 
 from lab_contracts import condition_config_hash, validate_artifact  # noqa: E402
-from lab_runner import Kernel, KernelRegistry  # noqa: E402
+from lab_capabilities.governance import KernelRegistry
+from lab_capabilities.governance import Kernel
 
 # the standard slice runs the REFERENCE kernel and says so — it must not pin a
 # fake `axor-core@X` that (before r16) silently fell back to the reference kernel
 # while claiming a real build. Real-kernel behavior is exercised separately with
 # the actually-installed build (test_real_kernel).
-from lab_runner.axor_backend import real_kernel_version
+from lab_capabilities.governance.axor_backend import real_kernel_version
 KERNEL_PINNED = real_kernel_version()
 KERNEL_NO_TAINT_FLOOR = "reference_taint_floor_kernel+variant-no-taint-floor"
 

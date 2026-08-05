@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from lab_runner import Kernel
+from lab_capabilities.governance import Kernel
 from tests import support
 
 KERNEL = Kernel(version=support.KERNEL_PINNED)

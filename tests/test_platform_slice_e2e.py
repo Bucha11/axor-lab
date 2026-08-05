@@ -27,9 +27,9 @@ from lab_contracts import (
     validate_artifact,
     verify_bundle,
 )
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_runner.invariants import STATUS_ERROR, STATUS_FAILED, STATUS_PASSED, check_invariant
-from lab_runner.kernel import KernelRegistry
+from lab_capabilities.governance.kernel import KernelRegistry
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "contracts" / "examples" / "slice-examples.json"
 CREATED = "2026-08-02T00:00:00+00:00"

@@ -113,7 +113,7 @@ def _conditions() -> list[dict[str, object]]:
 
 
 def _kernel_version() -> str:
-    from lab_runner.runner import connected_runtime_kernel
+    from lab_capabilities.governance.runner import connected_runtime_kernel
 
     return connected_runtime_kernel()
 

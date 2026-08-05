@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from lab_contracts.canonical import canonical_json
 
 from .kernel import Kernel
-from .verdicts import was_enforced
+from lab_runner.verdicts import was_enforced
 
 # Replay outcome per trace — a single bool conflated "the recomputed verdict
 # differs" with "the trace is structurally broken" (an intent with no decision,
@@ -263,7 +263,7 @@ def replay_bundle(
 ) -> ReplayReport:
     """Replay every trace referenced by the bundle's trials."""
     from .axor_backend import resolve_kernel
-    from .errors import UnknownKernelError
+    from lab_runner.errors import UnknownKernelError
 
     class _Shim:
         def get(self, version: str) -> object:

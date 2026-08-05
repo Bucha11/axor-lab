@@ -35,11 +35,10 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
   subset JSON-Schema validator (cwd-independent), semantic checks (author-time
   scenario validation, trace referential integrity), canonical JCS hashing,
   bundle assembly/verification, typed publication claims.
-- **`lab_runner/`** — the execution engine + CLI: value ledger with
-  conservative-join provenance, the single pure `decide` shared by live runs and
-  replay, simulated tools with `$injection` fixtures, predicate evaluation,
-  trial/suite runner (scripted agent behind a pluggable `AgentAdapter`), exact
-  replay, EvidenceCase, regression pinning.
+- **`lab_runner/`** — the platform execution engine + CLI: value ledger with
+  conservative-join provenance, untrusted-field minting, the general agent loop,
+  simulated tools with `$injection` fixtures, predicate evaluation, executable
+  invariants, trial identity, bundle I/O.
 - **`lab_analysis/`** — the statistics engine (`contracts/statistics.md` as
   code): Wilson, exact McNemar over stored pairs, paired bootstrap, missingness
   honesty, unit-of-analysis enforcement.
@@ -56,8 +55,12 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
   registry with three built-in suites (Blank, AgentDojo, Budget), manifest
   load/validate/resolve, suite execution, and dispatch to a connected runtime.
 - **`lab_capabilities/governance/`** — governance as an opt-in capability
-  (Suite Platform RFC §10): the kernel gate a suite gets only by declaring it.
-  The dependency direction is enforced by `tests/test_capability_boundary.py`.
+  (Suite Platform RFC §10): the reference kernel and the real axor-core backend,
+  the gate a condition resolves to, exact verdict replay, EvidenceCase
+  rendering, verdict pinning, the Control Plane bridge, and the paired `.axl`
+  experiment runner. `lab_runner` imports none of it — the dependency direction
+  and the short list of composition roots are enforced by
+  `tests/test_capability_boundary.py`.
 
 `lab_agent/`, `lab_entitlement/`, `lab_endpoint/`, `lab_sandbox/` and
 `lab_games/` were documented here long after they were deleted. They are gone;

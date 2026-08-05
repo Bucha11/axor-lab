@@ -17,18 +17,9 @@ from lab_contracts import (
     content_hash,
     executable_config_hash,
 )
-from lab_runner import (
-    AxorKernel,
-    ScriptedAgent,
-    axor_available,
-    governor_config,
-    real_kernel_version,
-    replay_trace,
-    resolve_kernel,
-    run_experiment,
-    run_trial,
-)
-from lab_runner.kernel import KernelRegistry
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import AxorKernel, axor_available, governor_config, real_kernel_version, replay_trace, resolve_kernel, run_experiment, run_trial
+from lab_capabilities.governance.kernel import KernelRegistry
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 REFERENCE_KERNEL = "reference_taint_floor_kernel"
@@ -128,9 +119,9 @@ class TestRealKernelRepin(unittest.TestCase):
 
     def test_repin_covers_baseline_and_bundle_verifies(self) -> None:
         from lab_contracts import build_bundle, verify_bundle
-        from lab_runner import run_experiment_suite
+        from lab_capabilities.governance import run_experiment_suite
         from lab_runner.cli import _environment, _repin_to_real_kernel
-        from lab_runner.experiment_file import ResolvedExperiment
+        from lab_capabilities.governance.experiment_file import ResolvedExperiment
 
         version = real_kernel_version()
         # an .axl a user authored against the reference kernel. Lab's own default
@@ -173,7 +164,7 @@ class TestRealKernelRepin(unittest.TestCase):
         # a legitimately mixed-kernel bundle omits the global kernel_version rather
         # than writing a comma-joined value that fails verify AFTER the run
         from lab_runner.cli import _environment
-        from lab_runner.experiment_file import ResolvedExperiment
+        from lab_capabilities.governance.experiment_file import ResolvedExperiment
 
         mixed = _reference_pinned_conditions()
         mixed[1] = {**mixed[1], "kernel": real_kernel_version()}  # two distinct kernels

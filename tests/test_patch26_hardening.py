@@ -16,9 +16,9 @@ import unittest
 from lab_contracts import load_schemas, validate_scenario
 from lab_contracts.errors import ScenarioValidationError
 from lab_contracts.subset_validator import validate_against
-from lab_runner.claims import deny_claim_text
+from lab_capabilities.governance.claims import deny_claim_text
 from lab_runner.errors import ExperimentFileError
-from lab_runner.experiment_file import resolve
+from lab_capabilities.governance.experiment_file import resolve
 from tests import support
 
 

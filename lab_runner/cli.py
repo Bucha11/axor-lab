@@ -34,7 +34,6 @@ from lab_contracts import (
     validate_artifact,
 )
 
-from .axor_backend import resolve_candidate_kernel_for_trace, resolve_kernel
 from .bundle_io import (
     PACKAGING,
     read_bundle_dir,
@@ -42,16 +41,35 @@ from .bundle_io import (
     write_bundle_dir,
     write_superseded_attempts,
 )
-from .claims import deny_claim_text
 from .errors import ExperimentFileError, RunnerError
 from .invariants import STATUS_ERROR, STATUS_FAILED
-from .evidence import build_evidence_case, evidence_condition, validate_twin
-from .experiment_file import ResolvedExperiment, load_axl, resolve
-from .kernel import Kernel, default_registry
-from .regression import STATUS_DIFFERS, STATUS_MATCHES, RegressionPin, check_pins, pin
-from .replay import replay_bundle
-from .runner import run_experiment_suite
 from .verdicts import contained
+
+# The CLI is a COMPOSITION ROOT, not part of the platform spine: it wires
+# whatever the user's command needs. Every governance command below —
+# validate/run/replay/pin/regress/evidence/export-cp on an `.axl` experiment —
+# is the governance capability's own surface, so it reaches into the capability
+# here and nowhere else in `lab_runner`. That is why this file is a declared
+# wiring point in `tests/test_capability_boundary.py`.
+from lab_capabilities.governance import (
+    Kernel,
+    RegressionPin,
+    ResolvedExperiment,
+    build_evidence_case,
+    check_pins,
+    default_registry,
+    evidence_condition,
+    load_axl,
+    pin,
+    replay_bundle,
+    resolve,
+    resolve_candidate_kernel_for_trace,
+    resolve_kernel,
+    run_experiment_suite,
+    validate_twin,
+)
+from lab_capabilities.governance.claims import deny_claim_text
+from lab_capabilities.governance.regression import STATUS_DIFFERS, STATUS_MATCHES
 
 # Statistics failures are a separate hierarchy from RunnerError;
 # main() maps them to stable exit codes instead of leaking a traceback
@@ -822,7 +840,7 @@ def _publish_to_server(
 
 
 def _cmd_export_cp(args: argparse.Namespace) -> int:
-    from .cp_export import CPExportError, export_cp
+    from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
     bundle, traces = read_bundle_dir(Path(args.bundle))
     regressions: list[dict[str, object]] = []
@@ -1040,7 +1058,7 @@ def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
       - DERIVABILITY: the deploy config recomputes byte-identical from
         source-bundle/ (graph + design-aware bridge + recorded runtime provenance).
     """
-    from .cp_export import CPExportError, export_cp
+    from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
     directory = Path(args.dir)
     deploy_path = directory / "cp-deploy.json"
@@ -1188,7 +1206,7 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
         validate_scenario,
     )
 
-    from .replay import REPLAY_MATCH, replay_trace_status
+    from lab_capabilities.governance.replay import REPLAY_MATCH, replay_trace_status
 
     trace: dict[str, object] = json.loads(Path(args.trace).read_text())
     scenario: dict[str, object] = json.loads(Path(args.scenario).read_text())
@@ -1353,7 +1371,7 @@ def _repin_to_real_kernel(document: dict[str, object]) -> None:
     a different kernel's opinion of the same calls. Both arms share one kernel,
     and the bundle has a single kernel_version."""
     from lab_contracts import condition_config_hash
-    from lab_runner import axor_available, real_kernel_version
+    from lab_capabilities.governance import axor_available, real_kernel_version
 
     if not axor_available():
         raise RunnerError("--real-kernel requested but axor-core is not installed")

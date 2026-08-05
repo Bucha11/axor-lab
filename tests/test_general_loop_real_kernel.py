@@ -27,8 +27,8 @@ import unittest
 
 from tests import support
 from lab_capabilities.governance.gate import KernelGate, gate_for_condition
-from lab_runner import axor_available, governor_config, real_kernel_version
-from lab_runner.axor_backend import AxorKernel
+from lab_capabilities.governance import axor_available, governor_config, real_kernel_version
+from lab_capabilities.governance.axor_backend import AxorKernel
 from lab_runner.loop import Finish, ScriptedProgram, ToolCall, run_loop_trial
 from lab_runner.verdicts import contained
 

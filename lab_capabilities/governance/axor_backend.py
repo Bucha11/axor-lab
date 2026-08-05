@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from lab_contracts import compiled_governor_config
 
-from .errors import UnknownKernelError
+from lab_runner.errors import UnknownKernelError
 
 try:
     import axor_core  # noqa: F401

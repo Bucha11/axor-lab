@@ -7,7 +7,8 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import ScriptedAgent, build_evidence_case, run_trial
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import build_evidence_case, run_trial
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 

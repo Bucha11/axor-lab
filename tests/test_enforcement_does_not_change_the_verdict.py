@@ -26,8 +26,9 @@ import unittest
 
 from tests import support
 from lab_contracts import validate_artifact
-from lab_runner import ScriptedAgent, axor_available, governor_config, real_kernel_version, run_trial
-from lab_runner.axor_backend import AxorKernel
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import axor_available, governor_config, real_kernel_version, run_trial
+from lab_capabilities.governance.axor_backend import AxorKernel
 from lab_runner.verdicts import contained, executed_under, was_enforced
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)

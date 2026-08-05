@@ -16,7 +16,7 @@ from pathlib import Path
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test, two_proportion_test
 from lab_contracts import build_bundle
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_server.recompute import check_aggregates
 from lab_server.store import PublicationStore
 

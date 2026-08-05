@@ -12,8 +12,8 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import run_experiment_suite
-from lab_runner.experiment_file import ResolvedExperiment
+from lab_capabilities.governance import run_experiment_suite
+from lab_capabilities.governance.experiment_file import ResolvedExperiment
 from lab_analysis import missingness
 
 

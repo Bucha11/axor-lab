@@ -20,15 +20,9 @@ from lab_contracts import (
     make_claim,
     validate_scenario,
 )
-from lab_runner import (
-    build_evidence_case,
-    check_pins,
-    pin,
-    replay_bundle,
-    run_experiment,
-    trial_id_for,
-)
-from lab_runner.regression import STATUS_MATCHES
+from lab_runner import trial_id_for
+from lab_capabilities.governance import build_evidence_case, check_pins, pin, replay_bundle, run_experiment
+from lab_capabilities.governance.regression import STATUS_MATCHES
 
 REPEATS = 30
 CREATED = "2026-07-19T00:00:00Z"

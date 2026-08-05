@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from lab_contracts.canonical import content_hash
 
-from .errors import UnknownKernelError
+from lab_runner.errors import UnknownKernelError
 from .replay import (
     REPLAY_MALFORMED_TRACE,
     REPLAY_MATCH,

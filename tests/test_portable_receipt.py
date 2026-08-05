@@ -27,7 +27,7 @@ from lab_contracts.signing import (
     signed_ref,
     verify_receipt,
 )
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_runner.bundle_io import read_bundle_package
 from lab_server import make_server
 

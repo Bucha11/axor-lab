@@ -17,10 +17,11 @@ import unittest
 from pathlib import Path
 
 from tests import support
-from lab_runner import ScriptedAgent, run_trial
-from lab_runner.claims import deny_claim_text
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_trial
+from lab_capabilities.governance.claims import deny_claim_text
 from lab_runner.errors import ExperimentFileError
-from lab_runner.experiment_file import resolve
+from lab_capabilities.governance.experiment_file import resolve
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "banking-exfil-01.axl"
 

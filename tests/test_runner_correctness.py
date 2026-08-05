@@ -5,8 +5,9 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import ScriptedAgent, run_experiment, run_trial
-from lab_runner.experiment_file import resolve
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_experiment, run_trial
+from lab_capabilities.governance.experiment_file import resolve
 from lab_runner.ledger import ValueLedger
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)

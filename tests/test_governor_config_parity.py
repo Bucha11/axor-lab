@@ -26,7 +26,7 @@ import importlib.util
 import unittest
 
 from lab_contracts import compiled_governor_config
-from lab_runner.axor_backend import governor_config
+from lab_capabilities.governance.axor_backend import governor_config
 
 HAS_WRAP = importlib.util.find_spec("axor_wrap") is not None
 
@@ -192,7 +192,7 @@ class TestEveryDenialCanBeWrittenIntoATrace(unittest.TestCase):
         from axor_core.contracts.canonical import ConsequenceClass
         from axor_core.governor import ToolCallGovernor
 
-        from lab_runner.axor_backend import gate_with_governor
+        from lab_capabilities.governance.axor_backend import gate_with_governor
 
         config = {"egress_sinks": {"send"}, "untrusted_sources": {"read"},
                   "driving_args": {"send": ["to"]},

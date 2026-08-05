@@ -32,7 +32,7 @@ from lab_contracts.canonical import CONFIG_COMPILER_VERSION, runtime_config_hash
 from lab_runner.invariants import check_invariant
 from lab_runner.loop import LoopOutcome
 from lab_runner.predicates import evaluate
-from lab_runner.runner import (
+from lab_capabilities.governance.runner import (
     connected_runtime_condition,
     remote_executable_kernel_errors,
 )
@@ -331,7 +331,7 @@ def _trial_record(
     assignment: SuiteAssignment, unit: str, scenario: dict[str, object],
     condition: dict[str, object], index: int,
 ) -> dict[str, object]:
-    from lab_runner.runner import trial_id_for
+    from lab_runner.trials import trial_id_for
 
     seed = f"s{index:03d}"
     return {

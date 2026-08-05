@@ -87,7 +87,8 @@ rewriting them.
 | Package | Role | Verdict against the new spec |
 |---|---|---|
 | `lab_contracts/` | 9 JSON Schemas, subset validator, JCS canonical hashing, bundle assembly/verify, typed publication claims | **keep, extend.** Hashing + bundle verification are platform-grade. Schemas need the suite/evidence/regression/metrics layer. |
-| `lab_runner/` | value ledger, `decide`, simulated tools, predicate evaluator, trial/suite runner, replay, EvidenceCase, regression pinning, CP export | **split.** ~60% is generic execution/replay; ~40% (`kernel.py`, `claims.py`, `cp_export.py`, the governance half of `evidence.py`/`regression.py`) is the governance capability. |
+| `lab_runner/` | value ledger, untrusted-field minting, general loop, simulated tools, predicate evaluator, invariants, trial identity, bundle I/O, CLI | **split done.** The kernel, replay, EvidenceCase, verdict pinning, CP export and the `.axl` runner moved to `lab_capabilities/governance/`. |
+| `lab_capabilities/governance/` | reference + axor-core kernels, gate, replay, EvidenceCase, verdict pins, CP bridge, paired `.axl` runner | **the capability.** Reachable only from four declared composition roots. |
 | `lab_analysis/` | Wilson, exact McNemar, paired bootstrap, missingness, unit-of-analysis | **keep, demote.** McNemar is a *comparison-suite* aggregation, not a platform default. |
 | `lab_adapters/` | curated AgentDojo banking subset → `scenario/v1` | **becomes the first Suite SDK implementation.** |
 | `lab_server/` | publish handshake, catalog/publication/EvidenceCase HTML, recompute, `runtime_jobs.py` (runtime pull API + UI control endpoints) | **keep the store, replace the surface.** `runtime_jobs.py` is the right shape and the right place to grow the screen API. |
@@ -108,7 +109,7 @@ Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 | EvidenceCase | `evidence-case/v1` **landed**; `lab_runner/evidence.py` still governance-only; `BaseSuite.evidence_for` returns `[]` | **medium** — generic schema exists, no generic extractor (Phase 2.3/2.5) |
 | Regression | `regression/v1` **landed** (4 rule kinds); `metric_threshold` + `predicate` execute in `invariants.py`, `verdict_sequence` in `regression.py` | **small** — `evaluator_outcome` waits on the SDK registry (Phase 2.4) |
 | Artifact | `artifact/v1` **landed**; `lab_contracts/artifact.py` assembles one and `lab_suite/execute.py` emits it | **none** |
-| Governance (optional) | optional in the **schemas**; still the spine in the **code** | **inversion, half done** — see §4.1; the code split is Phase 2 |
+| Governance (optional) | optional in the schemas AND separated in the code (`lab_capabilities/governance/`) | **small** — a run still always resolves a kernel by design (no kernel-free arm); "optional" means no conditions, not no capability |
 | Suite SDK | `lab_suite/sdk.py` — `Suite` protocol, `BaseSuite`, `SuiteRegistry`, 3 built-ins, reachable from CLI + server | **medium** — `evidence_for` / `regressions_for` still return `[]` (Phase 2.3) |
 | Suite Builder | `docs/**/mocks/lab-builder.jsx` | **absent** (no frontend) |
 | Home / Launchpad | server-rendered publication catalog | **absent** — different concept (past vs next action) |
@@ -440,10 +441,27 @@ the three built-in suites (Blank, AgentDojo, Budget); per-trial metrics in
    hook ran only in-process: over the connected-runtime path Lab never asked the
    suite for anything, so a suite-defined metric vanished when the same suite
    ran on a real agent, taking any regression over it from `passed` to `error`.
-2. **The governance extraction did not happen.** `lab_capabilities/governance/`
-   holds one 110-line `gate.py`. `kernel.py`, `cp_export.py`, `claims.py`, the
-   governance half of `evidence.py` / `regression.py` and the McNemar path are
-   all still in the spine.
+2. ~~**The governance extraction did not happen.**~~ **Done.** `kernel.py`,
+   `axor_backend.py`, `replay.py`, `evidence.py`, `regression.py`,
+   `cp_export.py`, `claims.py`, `runner.py` and `experiment_file.py` moved into
+   `lab_capabilities/governance/` (git mv — moved, not rewritten), and
+   `lab_runner/__init__` no longer re-exports any of them. Before this,
+   `import lab_runner` pulled the kernel, replay, EvidenceCase rendering and the
+   entire Control Plane bridge into any process that wanted a value ledger.
+
+   Two things came back to the spine because they were never governance:
+   `trial_id_for` (a trial needs an id whether or not anything gated it) and
+   `mint_untrusted_fields` — `lab_runner/loop.py` was reaching into the paired
+   runner for it from inside a function body, which is the direction the
+   boundary test forbids and the reason that test reads the AST rather than the
+   loaded modules.
+
+   The boundary test now names composition roots instead of a single wiring
+   point, and asserts each one still wires something — a stale exemption is a
+   hole, not a leftover. `lab_analysis` keeps McNemar: it is a comparison-suite
+   AGGREGATION a suite asks for, not a gate, and moving statistics into the
+   governance package would put the honest-statistics layer behind a capability
+   flag.
 3. **No suite extracts anything.** `BaseSuite.evidence_for` and
    `regressions_for` return `[]` and no built-in suite overrides either.
 4. **Two of four regression rule kinds execute.** `verdict_sequence` lives

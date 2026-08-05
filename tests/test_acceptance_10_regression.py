@@ -11,8 +11,9 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import ScriptedAgent, check_pins, pin, run_trial
-from lab_runner.regression import STATUS_DIFFERS, STATUS_MATCHES
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import check_pins, pin, run_trial
+from lab_capabilities.governance.regression import STATUS_DIFFERS, STATUS_MATCHES
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 

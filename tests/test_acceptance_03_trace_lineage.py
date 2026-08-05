@@ -12,7 +12,8 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import ScriptedAgent, run_trial
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_trial
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 FAITHFUL_ALWAYS = ScriptedAgent(attack_rate=0.0)

@@ -20,10 +20,11 @@ from lab_analysis import (
     wilson_interval,
 )
 from lab_analysis.errors import InsufficientDataError
-from lab_runner import ScriptedAgent, run_experiment_suite
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_experiment_suite
 from lab_runner.cli import _aggregates, _effective_design
 from lab_runner.errors import RunnerError
-from lab_runner.experiment_file import load_axl, resolve
+from lab_capabilities.governance.experiment_file import load_axl, resolve
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "banking-exfil-01.axl"
 

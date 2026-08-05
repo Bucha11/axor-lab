@@ -302,7 +302,7 @@ class TestReplayOverALoopTrace(unittest.TestCase):
         """Exact replay is the governance capability's core promise, and it has
         to survive the new execution path: a loop trace with SEVERAL gated calls
         must recompute the same ordered verdicts over the frozen trace."""
-        from lab_runner.replay import REPLAY_MATCH, replay_trace_status
+        from lab_capabilities.governance.replay import REPLAY_MATCH, replay_trace_status
         scenario = support.banking_scenario()
         manifests = support.manifests()
         condition = {str(c["id"]): c for c in support.conditions()}["governed"]
@@ -329,11 +329,11 @@ class TestSliceRunnerIsUnchanged(unittest.TestCase):
         pinned by canonicalization vectors and published hashes, so it must keep
         producing exactly what it always did."""
         from lab_runner.agents import ScriptedAgent
-        from lab_runner.runner import run_trial
+        from lab_capabilities.governance.runner import run_trial
         scenario = support.banking_scenario()
         conditions = {str(c["id"]): c for c in support.conditions()}
         condition = conditions["governed"]
-        from lab_runner.axor_backend import resolve_kernel
+        from lab_capabilities.governance.axor_backend import resolve_kernel
         kernel = resolve_kernel(
             str(condition["kernel"]), support.manifests(), condition.get("policy"),
             support.kernel_registry(), scenario["inputs"],

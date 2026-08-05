@@ -12,7 +12,7 @@ Three modes, per claims.md — never two, because "governed" is ambiguous:
 from __future__ import annotations
 
 from .kernel import Kernel
-from .verdicts import contained, was_enforced
+from lab_runner.verdicts import contained, was_enforced
 from .replay import (
     REPLAY_MALFORMED_TRACE,
     REPLAY_REDACTED_INPUT_UNAVAILABLE,

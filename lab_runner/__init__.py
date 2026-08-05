@@ -1,24 +1,22 @@
-"""lab_runner — the local execution engine and CLI (Phases 1–2 of the plan).
+"""lab_runner — the platform's execution engine.
 
-Owns everything that runs: value ledger with conservative-join provenance,
-the single pure `decide` shared by live runs and replay, simulated tools,
-predicate evaluation over traces, the trial/experiment runner, exact replay,
-EvidenceCase rendering, and regression pinning. Contracts live in
-lab_contracts; statistics in lab_analysis.
+What runs EVERY experiment, governed or not: the value ledger with
+conservative-join provenance, the general agent loop, simulated tools, the typed
+predicate evaluator, executable invariants, bundle I/O and the CLI.
+
+This package used to also own the kernel, replay, EvidenceCase rendering,
+verdict pinning, the Control Plane bridge and the paired `.axl` experiment
+runner — and re-exported all of them from here, so `import lab_runner` pulled
+the entire governance stack into any process that wanted a value ledger. They
+live in `lab_capabilities.governance` now (Suite Platform RFC §10: governance is
+an optional capability). Nothing here imports them, which is what
+`tests/test_capability_boundary.py` enforces in both directions.
+
+Contracts live in lab_contracts; statistics in lab_analysis; the Suite SDK in
+lab_suite.
 """
 
 from .agents import AgentAdapter, ScriptedAgent, resolve_agent
-from .axor_backend import (
-    AxorKernel,
-    axor_available,
-    gate_with_governor,
-    governor_config,
-    real_kernel_version,
-    resolve_candidate_kernel_for_trace,
-    resolve_kernel,
-    resolve_kernel_for_trace,
-    resolve_recorded_kernel_for_trace,
-)
 from .errors import (
     ConfirmationRequired,
     ExperimentFileError,
@@ -28,77 +26,30 @@ from .errors import (
     UnknownKernelError,
     UnsupportedPredicateError,
 )
-from .evidence import build_evidence_case, evidence_condition, validate_twin
-from .kernel import Kernel, KernelRegistry, default_registry
+from .invariants import InvariantResult, check_invariant
 from .ledger import ValueLedger
+from .loop import LoopOutcome, run_loop_trial
 from .predicates import evaluate
-from .regression import RegressionPin, check_pins, pin
-from .replay import (
-    REPLAY_MALFORMED_TRACE,
-    REPLAY_MATCH,
-    REPLAY_MISMATCH,
-    REPLAY_REDACTED_INPUT_UNAVAILABLE,
-    REPLAY_UNSUPPORTED_KERNEL,
-    ReplayReport,
-    replay_bundle,
-    replay_trace,
-    replay_trace_status,
-)
-from .runner import (
-    ExperimentResult,
-    TrialOutcome,
-    run_experiment,
-    run_experiment_suite,
-    run_trial,
-    trial_id_for,
-)
 from .simulator import SimulatedToolHost
+from .trials import trial_id_for
 
 __all__ = [
     "AgentAdapter",
-    "AxorKernel",
     "ConfirmationRequired",
-    "axor_available",
-    "gate_with_governor",
-    "governor_config",
-    "real_kernel_version",
-    "resolve_candidate_kernel_for_trace",
-    "resolve_kernel",
-    "resolve_kernel_for_trace",
-    "resolve_recorded_kernel_for_trace",
     "ExperimentFileError",
-    "ExperimentResult",
-    "Kernel",
-    "KernelRegistry",
-    "REPLAY_MALFORMED_TRACE",
-    "REPLAY_MATCH",
-    "REPLAY_MISMATCH",
-    "REPLAY_REDACTED_INPUT_UNAVAILABLE",
-    "REPLAY_UNSUPPORTED_KERNEL",
+    "InvariantResult",
+    "LoopOutcome",
     "RealExecutionBlocked",
-    "RegressionPin",
-    "ReplayReport",
     "RunnerError",
     "ScriptedAgent",
     "SimulatedToolHost",
-    "TrialOutcome",
     "UnknownAgentError",
     "UnknownKernelError",
     "UnsupportedPredicateError",
     "ValueLedger",
-    "build_evidence_case",
-    "evidence_condition",
-    "validate_twin",
-    "check_pins",
-    "default_registry",
+    "check_invariant",
     "evaluate",
-    "pin",
-    "replay_bundle",
-    "replay_trace",
-    "replay_trace_status",
     "resolve_agent",
-    "run_experiment",
-    "run_experiment_suite",
-    "run_trial",
+    "run_loop_trial",
     "trial_id_for",
 ]

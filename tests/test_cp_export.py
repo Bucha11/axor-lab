@@ -16,8 +16,8 @@ import unittest
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle, condition_config_hash, content_hash
-from lab_runner import run_experiment_suite
-from lab_runner.cp_export import (
+from lab_capabilities.governance import run_experiment_suite
+from lab_capabilities.governance.cp_export import (
     PRODUCTION_TODO,
     CPExportError,
     earned_bridge,

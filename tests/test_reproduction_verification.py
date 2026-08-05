@@ -117,7 +117,7 @@ class TestReproductionReloadOverStore(unittest.TestCase):
         # write a forged reproductions.json directly and confirm reproductions_of
         # re-derives a trusted (empty-verified) view
         from lab_contracts import build_bundle
-        from lab_runner import run_experiment_suite
+        from lab_capabilities.governance import run_experiment_suite
         from lab_server.store import PublicationStore
         from tests import support
 

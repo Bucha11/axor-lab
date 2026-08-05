@@ -19,10 +19,10 @@ from pathlib import Path
 from tests import support
 from lab_adapters import import_suite, manifests
 from lab_contracts import build_bundle
-from lab_runner import default_registry, run_experiment_suite
+from lab_capabilities.governance import default_registry, run_experiment_suite
 from lab_runner.bundle_io import read_bundle_dir, write_bundle_dir
 from lab_runner.errors import RunnerError
-from lab_runner.replay import replay_bundle
+from lab_capabilities.governance.replay import replay_bundle
 
 REPEATS = 6
 CREATED = "2026-07-19T12:00:00+00:00"

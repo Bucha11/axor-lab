@@ -22,9 +22,10 @@ from lab_analysis import binary_aggregate
 from lab_contracts import build_artifact, build_bundle, content_hash, reproducibility_of
 from lab_capabilities.governance import gate_for_condition
 from lab_runner.invariants import InvariantResult, check_invariant
-from lab_runner.kernel import KernelRegistry
+from lab_capabilities.governance.kernel import KernelRegistry
 from lab_runner.loop import LoopOutcome, run_loop_trial
-from lab_runner.runner import observe_only_condition, trial_id_for
+from lab_capabilities.governance import observe_only_condition
+from lab_runner.trials import trial_id_for
 
 from .manifest import ResolvedSuite, resolve_suite
 from .sdk import BaseSuite, SuiteRegistry, builtin_registry

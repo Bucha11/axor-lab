@@ -17,7 +17,8 @@ from pathlib import Path
 
 from tests import support
 from lab_contracts import content_hash
-from lab_runner import run_experiment, ScriptedAgent
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_experiment
 from lab_runner.bundle_io import write_superseded_attempts
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)

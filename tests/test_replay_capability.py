@@ -13,16 +13,10 @@ from __future__ import annotations
 import copy
 import unittest
 
-from lab_runner import (
-    REPLAY_MATCH,
-    REPLAY_REDACTED_INPUT_UNAVAILABLE,
-    ScriptedAgent,
-    default_registry,
-    replay_trace_status,
-    run_trial,
-)
-from lab_runner.evidence import build_evidence_case
-from lab_runner.replay import _verdict_core
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import REPLAY_MATCH, REPLAY_REDACTED_INPUT_UNAVAILABLE, default_registry, replay_trace_status, run_trial
+from lab_capabilities.governance.evidence import build_evidence_case
+from lab_capabilities.governance.replay import _verdict_core
 from tests import support
 
 

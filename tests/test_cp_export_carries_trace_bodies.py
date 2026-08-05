@@ -25,8 +25,9 @@ import unittest
 
 from tests import support
 from lab_contracts import build_bundle, content_hash
-from lab_runner import ScriptedAgent, run_experiment_suite
-from lab_runner.cp_export import CPExportError, export_cp
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_experiment_suite
+from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
 CREATED = "2026-08-04T00:00:00+00:00"
 

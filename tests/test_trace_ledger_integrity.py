@@ -14,7 +14,8 @@ import unittest
 
 from lab_contracts import content_hash
 from lab_contracts.semantics import trace_semantics
-from lab_runner import ScriptedAgent, run_trial
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_trial
 from tests import support
 
 

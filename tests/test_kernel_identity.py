@@ -10,15 +10,9 @@ from __future__ import annotations
 
 import unittest
 
-from lab_runner import (
-    REPLAY_UNSUPPORTED_KERNEL,
-    ScriptedAgent,
-    default_registry,
-    real_kernel_version,
-    replay_bundle,
-    run_trial,
-)
-from lab_runner.axor_backend import AxorKernel, axor_available, resolve_kernel
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import REPLAY_UNSUPPORTED_KERNEL, default_registry, real_kernel_version, replay_bundle, run_trial
+from lab_capabilities.governance.axor_backend import AxorKernel, axor_available, resolve_kernel
 from lab_runner.errors import UnknownKernelError
 from tests import support
 

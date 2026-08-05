@@ -55,7 +55,7 @@ _AGGREGATORS = {
 # rule kinds this module knows about but cannot run yet — reported, not skipped
 # silently, so a suite never believes an unrun invariant held
 _ELSEWHERE = {
-    "verdict_sequence": "needs kernel resolution + replay (lab_runner.regression)",
+    "verdict_sequence": "needs kernel resolution + replay (lab_capabilities.governance.regression)",
     "evaluator_outcome": "needs the Suite SDK evaluator registry",
 }
 
