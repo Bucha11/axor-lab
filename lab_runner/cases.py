@@ -59,7 +59,16 @@ def _label(event: dict[str, Any]) -> str:
         decision = event.get("decision") or {}
         verdict = str(decision.get("verdict", "?"))
         gate = str(decision.get("gate", "?"))
-        return f"{verdict} at the {gate} gate" + (f" ({tool})" if tool else "")
+        label = f"{verdict} at the {gate} gate" + (f" ({tool})" if tool else "")
+        # A DENY the run did not OBEY is the most misreadable line a narrative
+        # can carry: the verdict says blocked and the next entry is the tool
+        # result. `enforcement: off` means the kernel decided and the caller
+        # executed anyway — which is exactly what an ungoverned arm measures —
+        # so the label says so rather than letting a reader conclude the call
+        # was stopped.
+        if verdict == "DENY" and decision.get("enforced") is False:
+            label += " — recorded, not enforced"
+        return label
     if tool:
         return f"{kind.replace('_', ' ')}: {tool}"
     return kind.replace("_", " ")

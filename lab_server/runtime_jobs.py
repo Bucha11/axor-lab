@@ -39,12 +39,19 @@ The connected_runtime lifecycle (ui-backend-contract.md):
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 import secrets
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from lab_server.static import (
+    content_type as static_content_type,
+    default_root as static_default_root,
+    is_app_route,
+    resolve as static_resolve,
+)
 from lab_server.screens import (
     ScreenStore,
     ScreenStoreError,
@@ -393,6 +400,7 @@ def make_runtime_server(
     control_token: str | None = None,
     store: RuntimeJobStore | None = None,
     screens: "ScreenStore | None" = None,
+    web_root: "pathlib.Path | None" = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs + screen-API server. `control_token`, if set,
     gates the control surface (runtime registration, run assignment, every
@@ -400,6 +408,10 @@ def make_runtime_server(
     ingest_key issued at connect."""
     jobs = store or RuntimeJobStore()
     shelf = screens if screens is not None else ScreenStore()
+    # The built app, when there is one. Absent, every API route still answers
+    # and only the browser surface is missing — the server never pretends to
+    # serve a frontend that was not built.
+    site = web_root if web_root is not None else static_default_root()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:  # quiet
@@ -646,11 +658,31 @@ def make_runtime_server(
                     self._require_control()
                     self._send(200, {"run_id": m.group(1), "state": jobs.run_state(m.group(1))})
                     return
+                if self._serve_static():
+                    return
                 self._send(404, {"error": "not found"})
             except (RuntimeJobsError, ScreenStoreError) as exc:
                 self._send(exc.status, {"error": exc.message})
             except Exception as exc:  # noqa: BLE001 — never leak a traceback
                 self._send(500, {"error": f"{type(exc).__name__}"})
+
+        def _serve_static(self) -> bool:
+            """The built app. Static files are NOT gated by the control token —
+            gating them would mean the login surface needs a login."""
+            if site is None:
+                return False
+            file = static_resolve(site, self.path)
+            if file is None and is_app_route(self.path):
+                file = site / "index.html"   # deep links survive a reload
+            if file is None or not file.is_file():
+                return False
+            body = file.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", static_content_type(file))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
 
         def do_PUT(self) -> None:  # noqa: N802
             try:

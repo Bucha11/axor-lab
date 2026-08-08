@@ -151,6 +151,42 @@ def _cmd_suites(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Run the screen API and the built web app from one process.
+
+    Without this the app had no documented way to start: `python -m lab_server`
+    runs the CATALOG server (publications), which is a different surface and
+    serves none of the screens. An interface a user cannot launch is the same
+    island the Suite SDK was.
+    """
+    import os
+
+    from lab_server.runtime_jobs import make_runtime_server
+    from lab_server.static import default_root
+
+    token = args.control_token or os.environ.get("AXOR_LAB_CONTROL_TOKEN")
+    server = make_runtime_server(host=args.host, port=args.port, control_token=token)
+    site = default_root()
+    print(f"axor-lab on http://{args.host}:{args.port}")
+    if site is None:
+        # said plainly rather than serving a 404 the user has to diagnose
+        print("  web app:  NOT BUILT — run `npm --prefix web install && "
+              "npm --prefix web run build`")
+    else:
+        print(f"  web app:  {site}")
+    print(
+        "  auth:     "
+        + ("token-gated" if token else
+           "OPEN — every screen endpoint is unauthenticated. Local dev only; "
+           "pass --control-token before exposing this.")
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+    return EXIT_OK
+
+
 def _cmd_suite_yaml(args: argparse.Namespace) -> int:
     """Print a suite manifest as YAML — the Builder's third editing mode, from
     the terminal.
@@ -1647,6 +1683,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_suites = sub.add_parser("suites", help="list the suite catalog")
     p_suites.set_defaults(func=_cmd_suites)
+
+    p_serve = sub.add_parser(
+        "serve", help="run the screen API + the built web app",
+    )
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8871)
+    p_serve.add_argument(
+        "--control-token", default=None,
+        help="require this bearer token on every screen endpoint "
+             "(or AXOR_LAB_CONTROL_TOKEN)",
+    )
+    p_serve.set_defaults(func=_cmd_serve)
 
     p_suite_yaml = sub.add_parser(
         "suite-yaml", help="print a suite manifest as YAML (the Builder's third mode)",

@@ -1,0 +1,115 @@
+/* Design tokens — INTEGRATION_PLAN §5, sampled from the dark board.
+ *
+ * Dark is the default and light is a second theme built from the SAME token
+ * names, not a separate design. A screen that reaches past these for a raw hex
+ * is a screen that stops matching the board the first time a value moves.
+ */
+
+:root,
+:root[data-theme="dark"] {
+  --accent: #00d4a4;
+  --accent-pressed: #20b486;
+  --accent-soft: #4ee0c2;
+
+  --bg: #080f14;
+  --surface: #11161d;
+  --surface-raised: #161c24;
+  --border: #1d2430;
+  --border-strong: #2a313c;
+  --muted-fg: #6b7787;
+  --fg: #e6ebf1;
+
+  --success: #21a852;
+  --warning: #e6891d;
+  --danger: #e34437;
+  --info: #2879ef;
+  --special: #7e55f0;
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* 8pt grid */
+  --s1: 8px;
+  --s2: 16px;
+  --s3: 24px;
+  --s4: 32px;
+  --s5: 40px;
+  --s6: 48px;
+  --s8: 64px;
+
+  --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+}
+
+:root[data-theme="light"] {
+  --bg: #f7f9fb;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --muted-fg: #64748b;
+  --fg: #0f172a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 {
+  font-size: 32px;
+  line-height: 40px;
+  font-weight: 700;
+  margin: 0;
+}
+h2 {
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 600;
+  margin: 0;
+}
+h3 {
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  margin: 0;
+}
+h4 {
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 500;
+  margin: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 16px;
+}

@@ -10,8 +10,11 @@ Governance is a separated capability under `lab_capabilities/governance/`.
 **Phase 3 done** — every screen in §5 has a named endpoint returning a
 schema-conforming payload, pinned over real HTTP by
 `tests/test_screen_api.py`. Storage is in memory; durable storage is a swap of
-`lab_server/screens.py`, not of the endpoints. **Phases 4-6 are not started** —
-Phase 4 is the web app.
+`lab_server/screens.py`, not of the endpoints. **Phase 4 landed** — `web/` (React + Vite +
+TypeScript) implements every screen against the real endpoints, and
+`axor-lab serve` runs the API and the built app from one process. What is
+deliberately NOT built is listed under Phase 4 below. **Phases 5-6 are not
+started.**
 
 **Authority:** the Experiment Suite Platform RFC in this directory is the
 governing spec. Where it and `docs/spec-v0.3/` disagree, **the new spec wins**.
@@ -557,7 +560,46 @@ Two things the work surfaced, neither reachable before there were screens:
   schema-invalid document answered 500 instead of 422 — a validation failure
   presented as a server fault.
 
-### Phase 4 — Web app · ~4–6 weeks
+### Phase 4 — Web app · **landed, with two stated gaps**
+
+**Settled here (open question 1):** the frontend lives in `web/` inside
+axor-lab. A separate repo was the alternative, argued for by the open-core split
+(§4.8); it buys nothing until the Builder is actually commercial, and costs a
+second CI, a second release and a version skew between the app and the endpoint
+table it renders.
+
+**Built:** Home/Launchpad, Suite Catalog, Playground, Runs, Run Report, Trial
+detail, EvidenceCase, Regression, Artifacts, Integrations — all integrated
+against real endpoints, no inline fixtures. Design tokens from §5 as CSS
+variables, dark default. `axor-lab serve` serves the API and `web/dist` from one
+process.
+
+**Not built, and the app says so on the screen:**
+
+- **Basic and Advanced Builder modes.** The Builder ships YAML mode only. All
+  three modes edit ONE manifest (RFC §13), which is enforced server-side; a
+  partial Basic form would be exactly the failure that rule guards against — a
+  mode owning state another mode cannot see.
+- **Live run progress.** `SSE /runs/{id}/events` is served and not consumed; the
+  Runs screen reads state on load.
+
+**Three defects the browser found, none reachable before there was one:**
+
+- The control token was applied in an effect. React runs a child's effects
+  before its parent's, so on reload every screen fired its first request and got
+  a 401 before the token was restored — the app showed a permission error to a
+  user who had already entered one. It is applied synchronously now, and
+  entering a token remounts the screen tree so every request re-runs.
+- A recorded DENY rendered identically whether or not it was OBEYED. On an
+  ungoverned arm (`enforcement: off`) the kernel decides and the caller executes
+  anyway — the verdict said blocked and the next timeline row was the tool
+  result. Both the trace timeline and the EvidenceCase label now say "recorded,
+  not enforced", and the tone is warning rather than danger.
+- `python -m lab_server` runs the CATALOG server, so the web app had no
+  documented way to start. `axor-lab serve` is that entry point, and it says out
+  loud when the app has not been built and when the API is unauthenticated.
+
+### Phase 4 — original plan · ~4–6 weeks
 
 New `web/` (React + Vite + TypeScript). Design tokens from §5 as CSS variables,
 dark default. Ship order = risk order, each screen integrated against a real

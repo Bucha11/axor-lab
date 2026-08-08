@@ -6,3 +6,7 @@ build/
 
 # CLI publish receipts (written next to cwd by default)
 *.acceptance.json
+
+# web app build + deps
+web/node_modules/
+web/dist/
