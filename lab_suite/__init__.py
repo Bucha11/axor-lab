@@ -23,6 +23,7 @@ from .dispatch import (
 from .errors import SuiteError, SuiteValidationError
 from .execute import SuiteRun, run_suite
 from .manifest import ResolvedSuite, load_manifest, resolve_suite, validate_manifest
+from .yaml_mode import YamlUnavailable, from_yaml, round_trips, to_yaml
 from .sdk import (
     UNAVAILABLE_SUITES,
     Suite,
@@ -47,7 +48,11 @@ __all__ = [
     "builtin_registry",
     "load_manifest",
     "resolve_suite",
+    "YamlUnavailable",
+    "from_yaml",
+    "round_trips",
     "run_suite",
     "suite_catalog",
+    "to_yaml",
     "validate_manifest",
 ]

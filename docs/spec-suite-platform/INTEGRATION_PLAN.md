@@ -462,18 +462,36 @@ the three built-in suites (Blank, AgentDojo, Budget); per-trial metrics in
    AGGREGATION a suite asks for, not a gate, and moving statistics into the
    governance package would put the honest-statistics layer behind a capability
    flag.
-3. **No suite extracts anything.** `BaseSuite.evidence_for` and
-   `regressions_for` return `[]` and no built-in suite overrides either.
-4. **Two of four regression rule kinds execute.** `verdict_sequence` lives
-   apart in `regression.py`; `evaluator_outcome` is unimplemented. Both are
-   reported honestly as `error` rather than silently passing.
-5. **Generic EvidenceCase does not exist.** `build_evidence_case` requires a
-   governed condition and a kernel, and its chain is
-   injection→provenance→gate→verdict. Acceptance criterion 8.4 is open.
-6. **No YAML mode.** The Builder's third editing mode has no serializer, so the
-   Basic→YAML→Basic round-trip (§8.5, the guard for risk §9 row 1) cannot be
-   written. `test_canonical_round_trip_is_lossless` is a JCS JSON round-trip and
-   is not that test.
+3. ~~**No suite extracts anything.**~~ **Done.** `SuiteRun` collects what
+   `evidence_for` / `regressions_for` return and `SuiteRun.artifact` carries
+   them — it passed `evidence_cases=[]` unconditionally before, so even a suite
+   that DID extract something would have dropped it. AgentDojo raises a
+   `prompt_injection` case per breached trial and none for a contained one;
+   Budget raises `budget_overflow` only when its own `reads` metric goes over.
+4. ~~**Two of four regression rule kinds execute.**~~ **Three now.**
+   `evaluator_outcome` runs in `invariants.py` against the suite's declared
+   evaluator table, resolving `trial_metric`, `suite_hook` and `predicate`
+   evaluators, and comparing by CANONICAL equality — `1 == True` in Python, and
+   a count of one is not the answer `true`. An evaluator the suite did not
+   declare, or one over a value no trial measured, is `error`, never a pass.
+   `verdict_sequence` stays in the governance capability and is still reported
+   `skipped`.
+5. ~~**Generic EvidenceCase does not exist.**~~ **Done** (acceptance criterion
+   8.4). `lab_runner/cases.py` builds an `evidence-case/v1` over any trial with
+   no kernel, no condition and no governance block: the timeline POINTS AT trace
+   events by `seq` instead of restating them, and a metric the trial did not
+   measure is omitted rather than shown as zero. `threshold_case` returns None
+   for an UNMEASURED metric as well as an in-bounds one — a case asserting an
+   overrun nobody measured is fabricated evidence.
+6. ~~**No YAML mode.**~~ **Done** (acceptance criterion 8.5). `lab_suite/
+   yaml_mode.py`, reachable as `axor-lab suite-yaml`, `GET /suites/{id}/yaml`
+   and `POST /suites/validate-yaml`. PyYAML is an optional extra
+   (`axor-lab[yaml]`); the core stays stdlib-only. The round trip is asserted by
+   CANONICAL HASH over the YAML 1.1 landmines — `yes`/`no`/`on`/`off`/`~`, dates,
+   `007`, `1e5` — because a manifest with `"on"` as a string comes back `True`
+   from a naive round trip and the hash changes with nobody touching the
+   document. The loader drops the timestamp resolver so a bare date stays the
+   string it was typed as.
 
 - New `lab_suite/`: the `Suite` protocol per spec §12 (config schema, ui schema,
   validators, execution hooks, metrics, artifact renderer, regression extractor,

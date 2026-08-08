@@ -197,3 +197,19 @@ def resolve_suite(
         evaluators=tuple(evaluation.get("evaluators") or []),  # type: ignore[arg-type]
         regressions=tuple(manifest.get("regressions") or []),  # type: ignore[arg-type]
     )
+
+
+def declared_evaluators(manifest: dict[str, object]) -> dict[str, dict[str, object]]:
+    """The suite's evaluators, keyed by id — what an `evaluator_outcome`
+    invariant resolves its `evaluator` name against.
+
+    A suite that declares none gets an empty table, and an invariant naming an
+    evaluator then errors with the list it could have named. That beats a
+    silent pass and beats a crash.
+    """
+    evaluation: dict[str, object] = manifest.get("evaluation") or {}  # type: ignore[assignment]
+    return {
+        str(e["id"]): dict(e)
+        for e in evaluation.get("evaluators") or []  # type: ignore[union-attr]
+        if isinstance(e, dict) and e.get("id")
+    }

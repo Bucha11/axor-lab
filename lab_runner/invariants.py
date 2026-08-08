@@ -5,16 +5,19 @@ trial. `latency < threshold`, `budget <= limit`, `task_success == true`,
 `forbidden_tool_calls == 0`, a gate verdict sequence and a custom evaluator
 outcome are all the same kind of object, differing only in their `rule`.
 
-Two rules run here today:
+Three of the four rule kinds run here:
 
   - ``metric_threshold`` — a bound on a per-trial metric (bundle/v1
     trial.metrics), either per trial or over an aggregate across trials;
   - ``predicate`` — a typed predicate/v1 over the trial's trace, reusing the
-    evaluator that already backs scenario `violation` / `task_success`.
+    evaluator that already backs scenario `violation` / `task_success`;
+  - ``evaluator_outcome`` — the result of an evaluator the SUITE declared
+    (`suite/v1 evaluation.evaluators`), compared to `expect` by canonical
+    equality.
 
-``verdict_sequence`` stays in `regression.py` (it needs kernel resolution and
-replay), and ``evaluator_outcome`` waits on the Suite SDK. Both are reported as
-``skipped`` here rather than silently passing.
+``verdict_sequence`` stays in the governance capability — it needs kernel
+resolution and replay — and is reported as ``skipped`` here rather than
+silently passing.
 
 The cardinal rule: **an invariant that could not be evaluated is `error`, never
 `passed`.** A missing metric, an unparseable rule or a trial with no trace are
@@ -27,6 +30,8 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+
+from lab_contracts import content_hash
 
 from .predicates import evaluate
 
@@ -52,12 +57,13 @@ _AGGREGATORS = {
     "max": max,
 }
 
-# rule kinds this module knows about but cannot run yet — reported, not skipped
+# rule kinds this module knows about but does not run — reported, not skipped
 # silently, so a suite never believes an unrun invariant held
 _ELSEWHERE = {
     "verdict_sequence": "needs kernel resolution + replay (lab_capabilities.governance.regression)",
-    "evaluator_outcome": "needs the Suite SDK evaluator registry",
 }
+
+_RUNS_HERE = ("metric_threshold", "predicate", "evaluator_outcome")
 
 
 @dataclass(frozen=True)
@@ -102,12 +108,17 @@ def check_invariant(
     trials: list[dict[str, object]],
     traces: dict[str, dict[str, object]] | None = None,
     scenarios: dict[str, dict[str, object]] | None = None,
+    evaluators: dict[str, dict[str, object]] | None = None,
 ) -> InvariantResult:
     """Evaluate one regression/v1 over a run's completed trials.
 
     `traces` is keyed by trace_ref (as bundle trials cite them). Only COMPLETED
     trials are considered: a failed trial is a missingness fact, not evidence
     that an invariant broke.
+
+    `evaluators` is the suite's declared evaluator table, keyed by id, needed
+    only by an `evaluator_outcome` rule. Absent, such a rule is an `error`
+    naming the evaluator it could not resolve — never a pass.
     """
     rid = str(regression.get("id", "?"))
     rule: dict[str, object] = regression.get("rule") or {}  # type: ignore[assignment]
@@ -115,7 +126,7 @@ def check_invariant(
 
     if kind in _ELSEWHERE:
         return InvariantResult(rid, STATUS_SKIPPED, detail=f"{kind}: {_ELSEWHERE[kind]}")
-    if kind not in ("metric_threshold", "predicate"):
+    if kind not in _RUNS_HERE:
         return InvariantResult(rid, STATUS_ERROR, detail=f"unknown rule kind {kind!r}")
 
     scoped = [
@@ -130,6 +141,11 @@ def check_invariant(
 
     if kind == "metric_threshold":
         return _check_metric_threshold(rid, regression, rule, scoped)
+    if kind == "evaluator_outcome":
+        return _check_evaluator_outcome(
+            rid, regression, rule, scoped, traces or {}, scenarios or {},
+            evaluators or {},
+        )
     return _check_predicate(rid, regression, rule, scoped, traces or {}, scenarios or {})
 
 
@@ -286,6 +302,112 @@ def _check_predicate(
         holds.append((trial_id, actual == expect, actual))
 
     return _verdict(rid, holds, _quantifier(regression), f"predicate == {expect}")
+
+
+def _evaluator_value(
+    declaration: dict[str, object],
+    trial: dict[str, object],
+    traces: dict[str, dict[str, object]],
+    scenarios: dict[str, dict[str, object]],
+) -> tuple[object, str]:
+    """The value one declared evaluator produced for one trial.
+
+    Returns (value, error). A NON-EMPTY error means the evaluator could not be
+    resolved at all, which is `error` upstream — never a comparison against a
+    default.
+
+    `suite_hook` reads the produced name straight off `trial.metrics`: the SDK's
+    `metrics_for` hook is where a suite's own code lands its results, so an
+    evaluator backed by a hook is already recorded there. Resolving it any other
+    way would mean running the suite's code a second time, on a trial that has
+    already finished, and possibly disagreeing with what the artifact records.
+    """
+    kind = str(declaration.get("kind", ""))
+    produces = str(declaration.get("produces", ""))
+    trial_id = str(trial.get("trial_id"))
+    metrics: dict[str, object] = trial.get("metrics") or {}  # type: ignore[assignment]
+
+    if kind in ("trial_metric", "suite_hook"):
+        key = str(declaration.get("metric") or produces)
+        if key not in metrics:
+            source = "trial.metrics" if kind == "trial_metric" else "the suite hook"
+            return None, (
+                f"evaluator {declaration.get('id')!r} reads {key!r} from {source}, "
+                f"which trial {trial_id} did not record — an unmeasured value "
+                "cannot be compared to an expectation"
+            )
+        return metrics[key], ""
+
+    if kind == "predicate":
+        predicate = declaration.get("predicate")
+        if not isinstance(predicate, dict):
+            return None, (
+                f"evaluator {declaration.get('id')!r} declares kind=predicate "
+                "with no predicate"
+            )
+        trace = traces.get(str(trial.get("trace_ref")))
+        if trace is None:
+            return None, (
+                f"trial {trial_id} cites trace_ref {trial.get('trace_ref')!r} "
+                "which is not in the run"
+            )
+        scenario = scenarios.get(str(trial.get("scenario_id"))) or {}
+        inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
+        try:
+            return evaluate(predicate, trace, inputs), ""
+        except Exception as exc:  # noqa: BLE001 — unevaluable is `error`, not `failed`
+            return None, (
+                f"evaluator {declaration.get('id')!r} could not be evaluated on "
+                f"trial {trial_id}: {type(exc).__name__}: {exc}"
+            )
+
+    return None, f"evaluator {declaration.get('id')!r} has unknown kind {kind!r}"
+
+
+def _check_evaluator_outcome(
+    rid: str,
+    regression: dict[str, object],
+    rule: dict[str, object],
+    scoped: list[dict[str, object]],
+    traces: dict[str, dict[str, object]],
+    scenarios: dict[str, dict[str, object]],
+    evaluators: dict[str, dict[str, object]],
+) -> InvariantResult:
+    """An invariant over a suite-declared evaluator's result.
+
+    This kind was declared in `regression/v1` from the start and never ran: it
+    reported `skipped`, which is honest but means a suite could pin its own
+    evaluator's outcome and get no answer forever.
+    """
+    name = str(rule.get("evaluator", ""))
+    declaration = evaluators.get(name)
+    if declaration is None:
+        return InvariantResult(
+            rid, STATUS_ERROR,
+            detail=(
+                f"evaluator {name!r} is not declared by the suite "
+                f"(declared: {sorted(evaluators)}) — the invariant names "
+                "something that does not exist"
+            ),
+        )
+    expect = rule.get("expect", True)
+    expected_hash = content_hash(expect)
+
+    holds: list[tuple[str, bool, object]] = []
+    for trial in scoped:
+        value, error = _evaluator_value(declaration, trial, traces, scenarios)
+        if error:
+            return InvariantResult(
+                rid, STATUS_ERROR, detail=error, trials_checked=len(scoped),
+            )
+        # canonical equality (regression/v1: "compared by canonical equality"),
+        # so `1` and `1.0` and `True` are not conflated the way `==` conflates
+        # them in Python
+        holds.append((str(trial.get("trial_id")), content_hash(value) == expected_hash, value))
+
+    return _verdict(
+        rid, holds, _quantifier(regression), f"evaluator {name} == {expect!r}",
+    )
 
 
 def check_invariants(

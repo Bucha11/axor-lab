@@ -44,6 +44,10 @@ packages = [
 lab_contracts = ["schemas/*.schema.json"]
 
 [project.optional-dependencies]
+# The Builder's YAML editing mode (Suite Platform RFC §13). Basic and Advanced
+# edit the same manifest as JSON and need nothing extra, so the platform core
+# stays stdlib-only; only the third editor needs a parser.
+yaml = ["pyyaml>=6.0"]
 # `byok` is retired. It drove a model against SIMULATED tools, so the numbers
 # described neither the caller's agent nor their tools — a run that closed no
 # user story. Kept as an empty alias so an existing

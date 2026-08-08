@@ -10,9 +10,10 @@ and produces an artifact with metrics") was therefore satisfied only from a test
 A user could not reach the code, which also means a regression in it could not
 reach a user — the SDK was an island with a test harness moored to it.
 
-This file pins the two entry points that make it not an island: the CLI
-(`axor-lab suites`, `axor-lab run-suite`) and the screen endpoints
-(`GET /suites`, `GET /suites/{id}`, `POST /suites/validate`). It runs the real
+This file pins the entry points that make it not an island: the CLI
+(`axor-lab suites`, `run-suite`, `suite-yaml`) and the screen endpoints
+(`GET /suites`, `GET /suites/{id}`, `GET /suites/{id}/yaml`,
+`POST /suites/validate`, `POST /suites/validate-yaml`). It runs the real
 `main()` and the real HTTP server, because an entry point tested by calling the
 function underneath it is the same island with a longer bridge.
 """
@@ -175,6 +176,25 @@ class TestTheCliRunsASuite(unittest.TestCase):
             self.assertFalse(out_dir.exists())
 
 
+class TestTheYamlModeIsReachableToo(unittest.TestCase):
+    """A third editing mode nobody can open is the same island the SDK was."""
+
+    def test_the_cli_prints_a_manifest_as_yaml(self) -> None:
+        code, out, err = _run_cli("suite-yaml", "budget")
+        self.assertEqual(code, 0, err)
+        self.assertIn("schema_version: suite/v1", out)
+
+    def test_what_it_prints_parses_back_to_the_same_manifest(self) -> None:
+        from lab_contracts import content_hash
+        from lab_suite import from_yaml
+
+        _, out, _ = _run_cli("suite-yaml", "budget")
+        self.assertEqual(
+            content_hash(from_yaml(out)),
+            content_hash(builtin_registry().get("budget").manifest()),
+        )
+
+
 class TestInvariantOutcomesGetDistinctExitCodes(unittest.TestCase):
     """`failed` and `error` are not the same answer and must not share an exit
     code: one says a change regressed, the other says the invariant could not be
@@ -311,6 +331,40 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         status, payload = self._request("GET", "/suites/validate")
         self.assertEqual(status, 404)
         self.assertNotIn("no suite", json.dumps(payload))
+
+    def test_the_yaml_endpoint_serves_the_same_manifest(self) -> None:
+        from lab_contracts import content_hash
+        from lab_suite import from_yaml
+
+        request = urllib.request.Request(f"{self.base}/suites/budget/yaml")
+        request.add_header("Authorization", f"Bearer {CONTROL}")
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            self.assertEqual(response.headers["Content-Type"], "application/yaml")
+            text = response.read().decode()
+        self.assertEqual(
+            content_hash(from_yaml(text)),
+            content_hash(builtin_registry().get("budget").manifest()),
+        )
+
+    def test_validate_yaml_reports_a_parse_error_as_an_error_not_a_500(self) -> None:
+        """A user editing YAML types invalid YAML constantly. That is feedback,
+        not a server fault."""
+        status, payload = self._request(
+            "POST", "/suites/validate-yaml", {"yaml": "id: [unclosed\n"},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["errors"])
+
+    def test_validate_yaml_applies_the_same_rules_as_the_json_validator(self) -> None:
+        from lab_suite import to_yaml
+
+        manifest = builtin_registry().get("budget").manifest()
+        _, from_json = self._request("POST", "/suites/validate", {"suite": manifest})
+        _, from_text = self._request(
+            "POST", "/suites/validate-yaml", {"yaml": to_yaml(manifest)},
+        )
+        self.assertEqual(from_json, from_text)
 
     def test_the_endpoints_require_the_control_token(self) -> None:
         for method, path, body in (

@@ -151,6 +151,26 @@ def _cmd_suites(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_suite_yaml(args: argparse.Namespace) -> int:
+    """Print a suite manifest as YAML — the Builder's third editing mode, from
+    the terminal.
+
+    Round-tripping through this and back must not change the manifest; that is
+    acceptance criterion 8.5 and it is pinned in
+    `tests/test_yaml_mode_round_trip.py`.
+    """
+    from lab_suite import to_yaml
+    from lab_suite.yaml_mode import YamlUnavailable
+
+    manifest, _ = _suite_manifest(args.suite)
+    try:
+        print(to_yaml(manifest), end="")
+    except YamlUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAILURE
+    return EXIT_OK
+
+
 def _suite_manifest(target: str) -> tuple[dict[str, object], object]:
     """Resolve `target` — a registered suite id or a manifest path — to
     (manifest, suite implementation).
@@ -1627,6 +1647,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_suites = sub.add_parser("suites", help="list the suite catalog")
     p_suites.set_defaults(func=_cmd_suites)
+
+    p_suite_yaml = sub.add_parser(
+        "suite-yaml", help="print a suite manifest as YAML (the Builder's third mode)",
+    )
+    p_suite_yaml.add_argument("suite", help="a registered suite id, or a manifest path")
+    p_suite_yaml.set_defaults(func=_cmd_suite_yaml)
 
     p_run_suite = sub.add_parser(
         "run-suite",

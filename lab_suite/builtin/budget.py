@@ -48,6 +48,16 @@ class BudgetSuite(BaseSuite):
             "execution": {"strategy": "matrix", "repeats": 5, "seed_policy": "per_repeat",
                           "budgets": {"max_usd": 5.0}},
             "evaluation": {
+                # A suite-declared evaluator, so `evaluator_outcome` has
+                # something real to resolve. Its result comes from this suite's
+                # own `metrics_for` hook — the longest path in the platform
+                # (suite code -> trial.metrics -> invariant) and the one that
+                # silently broke over the wire when `collect_suite_run` did not
+                # call the hook at all.
+                "evaluators": [
+                    {"id": "read_count", "kind": "suite_hook",
+                     "hook": "metrics_for", "produces": "reads"},
+                ],
                 "metrics": [
                     {"name": "task_success", "label": "Task Success", "kind": "boolean",
                      "source": "trial_metric", "from": "task_success",
@@ -85,11 +95,20 @@ class BudgetSuite(BaseSuite):
                 "id": "RG-budget-reads",
                 "name": "A trial reads the ledger at most twice",
                 "rule": {"kind": "metric_threshold", "metric": "reads",
-                         "op": "lte", "value": 2},
+                         "op": "lte", "value": READ_BUDGET},
                 "expectation": ("Summarizing one week must not require more than two "
                                 "reads. `reads` is this suite's OWN metric, so this "
                                 "also pins that a suite-defined metric reaches a "
                                 "regression rule."),
+            }, {
+                "schema_version": "regression/v1",
+                "id": "RG-budget-read-count",
+                "name": "Summarizing one week takes exactly one read",
+                "rule": {"kind": "evaluator_outcome", "evaluator": "read_count",
+                         "expect": 1},
+                "expectation": ("Exactly one read, compared by canonical "
+                                "equality \u2014 so 1 and True are not the "
+                                "same answer."),
             }, {
                 "schema_version": "regression/v1",
                 "id": "RG-budget-latency",
@@ -119,6 +138,35 @@ class BudgetSuite(BaseSuite):
         """
         results = [e for e in outcome.trace["events"] if e.get("type") == "tool_result"]
         return {"reads": len(results)}
+
+    def evidence_for(
+        self, outcome: LoopOutcome, trial: dict[str, object], scenario: dict[str, object]
+    ) -> list[dict[str, object]]:
+        """A `budget_overflow` case for a trial that read more than it should.
+
+        A NON-GOVERNANCE EvidenceCase — no injection, no gate, no verdict. The
+        only builder this repo had was the governance chain, so every other kind
+        of investigation was unrepresentable in code while being perfectly
+        representable in the schema.
+
+        `threshold_case` returns None when `reads` was never measured, not just
+        when it was within bounds: a case asserting an overrun nobody measured
+        is a fabricated finding.
+        """
+        from lab_runner.cases import case_id_for, threshold_case
+
+        case = threshold_case(
+            case_id=case_id_for(trial, "budget_overflow"),
+            kind="budget_overflow", metric="reads", limit=READ_BUDGET,
+            trial=trial, trace=outcome.trace, run_id=str(trial.get("execution_id", "")),
+        )
+        return [case] if case is not None else []
+
+
+# What "too many reads" means for this suite, in one place: the invariant the
+# manifest pins and the case the extractor raises must not disagree about the
+# limit, or a run can fail its regression and produce no evidence for why.
+READ_BUDGET = 2
 
 
 def _read_manifest() -> dict[str, object]:

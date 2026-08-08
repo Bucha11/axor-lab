@@ -27,7 +27,7 @@ from lab_runner.loop import LoopOutcome, run_loop_trial
 from lab_capabilities.governance import observe_only_condition
 from lab_runner.trials import trial_id_for
 
-from .manifest import ResolvedSuite, resolve_suite
+from .manifest import ResolvedSuite, declared_evaluators, resolve_suite
 from .sdk import BaseSuite, SuiteRegistry, builtin_registry
 
 _STATS_AGGREGATORS = {
@@ -50,6 +50,9 @@ class SuiteRun:
     aggregates: list[dict[str, object]] = field(default_factory=list)
     invariants: list[InvariantResult] = field(default_factory=list)
     conditions: list[dict[str, object]] = field(default_factory=list)
+    # what the suite's own extractors produced, per trial, during the run
+    evidence_cases: list[dict[str, object]] = field(default_factory=list)
+    pinned: list[dict[str, object]] = field(default_factory=list)
     # set when a run-wide cost ceiling stopped the run early; the partial result
     # flows through missingness and analysis honestly rather than looking complete
 
@@ -75,7 +78,8 @@ class SuiteRun:
         return build_artifact(
             artifact_id=artifact_id, created=created, bundle=bundle,
             suite=self.resolved.manifest,
-            evidence_cases=[], regressions=regressions,
+            evidence_cases=list(self.evidence_cases),
+            regressions=regressions + list(self.pinned),
             reproduce={
                 "command": command or f"axor-lab run {self.resolved.id}",
                 "requires": [],
@@ -139,10 +143,10 @@ def run_suite(
                  seed, repeat_index, order, max_steps)
 
     run.aggregates = _aggregate(run)
+    scenarios_by_id = {str(s["name"]): s for s in resolved.scenarios}
+    evaluators = declared_evaluators(resolved.manifest)
     run.invariants = [
-        check_invariant(regression, run.trials, run.traces, {
-            str(s["name"]): s for s in resolved.scenarios
-        })
+        check_invariant(regression, run.trials, run.traces, scenarios_by_id, evaluators)
         for regression in resolved.regressions
     ]
     return run
@@ -215,6 +219,13 @@ def _run_one(
     run.trials.append(record)
     run.traces[trace_ref] = outcome.trace
     run.outcomes[trial_key] = outcome
+
+    # What the SUITE curates from this trial. Both hooks default to nothing —
+    # curation is a human act unless a suite knows better — and a suite that
+    # does know is the only thing that can turn a recorded trial into an
+    # investigation without a person reading it.
+    run.evidence_cases.extend(suite.evidence_for(outcome, record, scenario))
+    run.pinned.extend(suite.regressions_for(outcome, record, scenario))
 
 
 def _fingerprint(gate: object) -> str:

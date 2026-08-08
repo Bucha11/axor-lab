@@ -39,7 +39,7 @@ from lab_capabilities.governance.runner import (
 
 from .errors import SuiteError
 from .execute import SuiteRun, _aggregate
-from .manifest import ResolvedSuite, resolve_suite
+from .manifest import ResolvedSuite, declared_evaluators, resolve_suite
 
 if TYPE_CHECKING:
     from .sdk import BaseSuite, SuiteRegistry
@@ -251,8 +251,11 @@ def collect_suite_run(
     # recheck, and `results["aggregates"]` is deliberately ignored here.
     run.aggregates = _aggregate(run)
     run.invariants = [
-        check_invariant(regression, run.trials, run.traces,
-                        {str(s["name"]): s for s in assignment.resolved.scenarios})
+        check_invariant(
+            regression, run.trials, run.traces,
+            {str(s["name"]): s for s in assignment.resolved.scenarios},
+            declared_evaluators(assignment.resolved.manifest),
+        )
         for regression in assignment.resolved.regressions
     ]
     return run

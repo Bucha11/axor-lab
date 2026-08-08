@@ -61,6 +61,7 @@ _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/tr
 # /suites/validate answers `no suite 'validate'`, which reads like the endpoint
 # is missing rather than like the method is wrong.
 _SUITE_RE = re.compile(r"^/suites/(?!validate$)([A-Za-z0-9_-]+)$")
+_SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
 
 
 class RuntimeJobsError(Exception):
@@ -384,6 +385,14 @@ def make_runtime_server(
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_text(self, status: int, text: str, content_type: str) -> None:
+            body = text.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _send_sse(self, frames: list[tuple[str, dict[str, object]]]) -> None:
             # a snapshot event-stream: emit the run's current lifecycle state +
             # trial progress as text/event-stream frames, then close. A long-lived
@@ -440,6 +449,25 @@ def make_runtime_server(
 
                     self._require_control()
                     self._send(200, {"suites": suite_catalog()})
+                    return
+                m = _SUITE_YAML_RE.match(self.path)
+                if m:
+                    # the Builder's YAML mode reads the SAME manifest the Basic
+                    # and Advanced modes edit — one document, three editors
+                    # (RFC §13). A second serializer here is how the modes start
+                    # disagreeing about what the experiment is.
+                    from lab_suite import builtin_registry, to_yaml
+                    from lab_suite.errors import SuiteNotFound
+                    from lab_suite.yaml_mode import YamlUnavailable
+
+                    self._require_control()
+                    try:
+                        text = to_yaml(builtin_registry().get(m.group(1)).manifest())
+                    except SuiteNotFound as exc:
+                        raise RuntimeJobsError(404, str(exc)) from None
+                    except YamlUnavailable as exc:
+                        raise RuntimeJobsError(501, str(exc)) from None
+                    self._send_text(200, text, "application/yaml")
                     return
                 m = _SUITE_RE.match(self.path)
                 if m:
@@ -518,6 +546,32 @@ def make_runtime_server(
                     if not isinstance(manifest, dict):
                         raise RuntimeJobsError(400, "validate requires {suite}")
                     errors = validate_manifest(manifest)
+                    self._send(200, {"ok": not errors, "errors": errors})
+                    return
+                if self.path == "/suites/validate-yaml":
+                    # Same validator, one parse earlier. The YAML mode must not
+                    # get a weaker check than the JSON one, or a manifest can be
+                    # valid in one editor and not the other.
+                    from lab_suite import from_yaml, validate_manifest
+                    from lab_suite.errors import SuiteError
+                    from lab_suite.yaml_mode import YamlUnavailable
+
+                    self._require_control()
+                    body = self._read_json()
+                    text = body.get("yaml")
+                    if not isinstance(text, str):
+                        raise RuntimeJobsError(400, "validate-yaml requires {yaml}")
+                    try:
+                        parsed = from_yaml(text)
+                    except YamlUnavailable as exc:
+                        raise RuntimeJobsError(501, str(exc)) from None
+                    except SuiteError as exc:
+                        self._send(200, {"ok": False, "errors": [str(exc)]})
+                        return
+                    except Exception as exc:  # noqa: BLE001 — a parse error is the user's
+                        self._send(200, {"ok": False, "errors": [f"invalid YAML: {exc}"]})
+                        return
+                    errors = validate_manifest(parsed)
                     self._send(200, {"ok": not errors, "errors": errors})
                     return
                 if self.path == "/scenarios/validate":

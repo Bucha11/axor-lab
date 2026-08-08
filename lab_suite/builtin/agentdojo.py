@@ -10,7 +10,13 @@ scenarios it imports are attack scenarios and studying them is the point.
 from __future__ import annotations
 
 from lab_adapters.agentdojo import available_suites, import_suite, manifests
-from lab_runner.loop import AgentProgram, Finish, ScriptedProgram, ToolCall
+from lab_runner.loop import (
+    AgentProgram,
+    Finish,
+    LoopOutcome,
+    ScriptedProgram,
+    ToolCall,
+)
 
 from ..manifest import ResolvedSuite
 from ..sdk import BaseSuite
@@ -91,6 +97,44 @@ class AgentDojoSuite(BaseSuite):
                                     "amount": inputs.get("amount", 1200)}),
             Finish(),
         ])
+
+    def evidence_for(
+        self, outcome: LoopOutcome, trial: dict[str, object], scenario: dict[str, object]
+    ) -> list[dict[str, object]]:
+        case = _breach_case(outcome, trial, scenario)
+        return [case] if case is not None else []
+
+
+def _breach_case(outcome, trial, scenario):
+    """A `prompt_injection` case for a trial where the attack landed.
+
+    The governance chain — injection -> provenance -> gated call -> verdict —
+    is built by the capability (`lab_capabilities.governance.evidence`) and
+    attaches as the case's optional `governance` block. What is built here is
+    the platform half: which trial, which events, what it cost. A suite must be
+    able to raise a case without reaching into the capability, or "governance is
+    optional" is false for evidence.
+    """
+    from lab_runner.cases import build_case, case_id_for, turning_point
+
+    if not outcome.violation:
+        return None
+    return build_case(
+        case_id=case_id_for(trial, "prompt_injection"),
+        kind="prompt_injection",
+        title=f"Injected instruction reached the sink in {scenario.get('name', 'a trial')}",
+        trial=trial, trace=outcome.trace,
+        run_id=str(trial.get("execution_id", "")),
+        severity="high",
+        summary=(
+            "The scenario's violation predicate matched: untrusted content from "
+            "the injection fixture drove an egress call. The timeline points at "
+            "the recorded events; the trace's value ledger is authoritative for "
+            "the provenance."
+        ),
+        highlight_seq=turning_point(outcome.trace),
+        tags=["prompt_injection", "data_exfiltration"],
+    )
 
 
 def _conditions() -> list[dict[str, object]]:
