@@ -31,7 +31,8 @@ Navigation (Web UX RFC): **Home · Suites · Runs · Evidence · Regressions · 
 | Suite Catalog | `GET /suites` | `[{ id, name, description, origin, available }]` |
 | Suite detail | `GET /suites/{id}` | `suite/v1` |
 | Suite Builder (save) | `PUT /suites/{id}`, `POST /suites` | `suite/v1` |
-| Suite Builder (validate) | `POST /suites/validate` | `{ ok, errors[] }` |
+| Suite Builder (validate) | `POST /suites/validate`, `POST /suites/validate-yaml` | `{ ok, errors[] }` |
+| Suite Builder (YAML mode) | `GET /suites/{id}/yaml` | the same `suite/v1`, serialized |
 | Playground — one trial | `POST /playground/trial` | one `trial` record + its `trace/v1` |
 | Run (live) | `POST /runs`, `GET /runs/{id}`, `SSE /runs/{id}/events` | a lifecycle state + trial progress |
 | Run Report | `GET /runs/{id}/report` | `bundle/v1.aggregates` + per-metric summaries |
@@ -44,7 +45,7 @@ Navigation (Web UX RFC): **Home · Suites · Runs · Evidence · Regressions · 
 
 **The Suite Catalog shows an explicit unavailable state.** The design boards show six suite cards and three suites exist (Blank, AgentDojo, Budget). The catalog renders the other three as unavailable — never as a card that runs nothing.
 
-**The Suite Builder's six sections — Agents · Scenarios · Environment & Tools · Execution · Evaluation · Artifact — and its three modes — Basic / Advanced / YAML — all edit ONE `suite/v1` document.** Every Builder field has a home in the manifest, or Basic mode owns state the YAML mode cannot see and the modes silently disagree about what the experiment is. That rule is testable without any frontend and is pinned in `tests/test_suite_platform_contracts.py`.
+**The Suite Builder's six sections — Agents · Scenarios · Environment & Tools · Execution · Evaluation · Artifact — and its three modes — Basic / Advanced / YAML — all edit ONE `suite/v1` document.** Every Builder field has a home in the manifest, or Basic mode owns state the YAML mode cannot see and the modes silently disagree about what the experiment is. That rule is testable without any frontend and is pinned twice: every Builder section maps to a manifest field (`tests/test_suite_platform_contracts.py`), and Basic → YAML → Basic is lossless by canonical hash over the YAML 1.1 landmines (`tests/test_yaml_mode_round_trip.py`). YAML mode needs the optional `axor-lab[yaml]` extra and answers 501 without it — the platform core stays stdlib-only.
 
 ## 3. Runtime-facing execution contract
 
@@ -65,11 +66,12 @@ Enforcement, tool dispatch and provenance construction happen in the runtime, no
 
 ```
 GET  /suites                         GET  /runs/{id}              POST /suites/validate
-GET  /suites/{id}                    GET  /runs/{id}/results      POST /runtimes/connect
-GET  /runtimes                       GET  /runs/{id}/aggregates   POST /scenarios/validate
-GET  /runtime/jobs                   SSE  /runs/{id}/events       POST /experiments/plan
-POST /runtime/jobs/{id}/claim        GET  /runs/{id}/trials/{tid}/trace    POST /runs
-POST /runtime/jobs/{id}/trials/{tid}/events      POST /runs/{id}/confirm
+GET  /suites/{id}                    GET  /runs/{id}/results      POST /suites/validate-yaml
+GET  /suites/{id}/yaml               GET  /runs/{id}/aggregates   POST /runtimes/connect
+GET  /runtimes                       SSE  /runs/{id}/events       POST /scenarios/validate
+GET  /runtime/jobs                   GET  /runs/{id}/trials/{tid}/trace    POST /experiments/plan
+POST /runtime/jobs/{id}/claim                                     POST /runs
+POST /runtime/jobs/{id}/trials/{tid}/events                       POST /runs/{id}/confirm
 POST /runtime/jobs/{id}/trials/{tid}/complete
 ```
 

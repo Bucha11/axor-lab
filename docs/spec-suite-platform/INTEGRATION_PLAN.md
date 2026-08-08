@@ -1,12 +1,13 @@
 # Axor Lab — Suite Platform Integration Plan
 
-**Status:** Phase 0 done. **Phase 1 done** — schemas landed and green, and the
-four contract docs (`domain-model`, `lifecycle`, `ui-backend-contract`,
-`mvp-contract`) are rewritten around Suite→Run→Trial→EvidenceCase→Regression→
-Artifact. **Phase 2 partially landed** — `lab_suite/` (SDK, three built-in
-suites, execution, dispatch), per-trial metrics and `artifact/v1` all exist and
-are tested; what remains is listed under Phase 2 below and is tracked there, not
-here. Phases 3-6 are not started.
+**Status:** Phase 0 done. **Phase 1 done** — schemas green and the four contract
+docs rewritten around Suite→Run→Trial→EvidenceCase→Regression→Artifact.
+**Phase 2 done** — the Suite SDK with three built-in suites, per-trial metrics,
+`artifact/v1`, generic EvidenceCase extraction, three of four regression rule
+kinds executing in the spine (`verdict_sequence` runs in the capability), the
+YAML editing mode, and CLI + screen-endpoint entry points for all of it.
+Governance is a separated capability under `lab_capabilities/governance/`.
+**Phases 3-6 are not started** — Phase 3 is the rest of the screen API (§5).
 
 **Authority:** the Experiment Suite Platform RFC in this directory is the
 governing spec. Where it and `docs/spec-v0.3/` disagree, **the new spec wins**.
@@ -106,11 +107,11 @@ Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 | Experiment Run | `Run` / `run_experiment_suite()` | small — rename + drop governance assumptions |
 | Trial | `trial` record in `bundle/v1` with a `metrics` block, populated per trial | **none** |
 | Observation / Trace | `trace/v1` + value ledger | **none** — richer than the spec asks |
-| EvidenceCase | `evidence-case/v1` **landed**; `lab_runner/evidence.py` still governance-only; `BaseSuite.evidence_for` returns `[]` | **medium** — generic schema exists, no generic extractor (Phase 2.3/2.5) |
-| Regression | `regression/v1` **landed** (4 rule kinds); `metric_threshold` + `predicate` execute in `invariants.py`, `verdict_sequence` in `regression.py` | **small** — `evaluator_outcome` waits on the SDK registry (Phase 2.4) |
+| EvidenceCase | `evidence-case/v1` **landed**; `lab_runner/cases.py` builds a generic one; suites extract via `evidence_for` and the cases reach the artifact | **none** — the governance chain is the optional `governance` block on a case |
+| Regression | `regression/v1` **landed** (4 rule kinds); `metric_threshold`, `predicate` and `evaluator_outcome` execute in `invariants.py`; `verdict_sequence` in the governance capability | **none** |
 | Artifact | `artifact/v1` **landed**; `lab_contracts/artifact.py` assembles one and `lab_suite/execute.py` emits it | **none** |
 | Governance (optional) | optional in the schemas AND separated in the code (`lab_capabilities/governance/`) | **small** — a run still always resolves a kernel by design (no kernel-free arm); "optional" means no conditions, not no capability |
-| Suite SDK | `lab_suite/sdk.py` — `Suite` protocol, `BaseSuite`, `SuiteRegistry`, 3 built-ins, reachable from CLI + server | **medium** — `evidence_for` / `regressions_for` still return `[]` (Phase 2.3) |
+| Suite SDK | `lab_suite/sdk.py` — `Suite` protocol, `BaseSuite`, `SuiteRegistry`, 3 built-ins, extractors, YAML mode; reachable from CLI + server | **none** |
 | Suite Builder | `docs/**/mocks/lab-builder.jsx` | **absent** (no frontend) |
 | Home / Launchpad | server-rendered publication catalog | **absent** — different concept (past vs next action) |
 | Nav: Home/Suites/Runs/Evidence/Regressions/Artifacts/Settings | 3 HTML pages | **absent** |
