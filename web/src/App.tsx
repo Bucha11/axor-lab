@@ -116,16 +116,25 @@ export function App() {
         />
       </nav>
       <main>
-        {/* Keyed by the token: entering one REMOUNTS the screen tree, so every
-            `useAsync` re-runs. Without it a user who typed a token sat looking
-            at the 401 the first render produced, with no way forward but a
-            manual reload. */}
-        <Screen key={token} route={route} />
-        {!currentToken() && (
-          <p className="muted small token-hint">
-            Every screen endpoint requires the control token the server was
-            started with.
-          </p>
+        {/* No token, no requests. Every screen endpoint is gated, so firing
+            them first produces a wall of 401s and an error panel that reads
+            like the server is broken — when what is actually missing is one
+            field the user has not filled in yet. */}
+        {currentToken() ? (
+          // Keyed by the token: entering one REMOUNTS the screen tree, so every
+          // `useAsync` re-runs. Without it a user who typed a token sat looking
+          // at whatever the first render produced, with no way forward but a
+          // manual reload.
+          <Screen key={token} route={route} />
+        ) : (
+          <div className="screen">
+            <h1>Control token</h1>
+            <p className="muted">
+              Every screen endpoint requires the control token this server was
+              started with (<code>axor-lab serve --control-token …</code>). Paste
+              it above.
+            </p>
+          </div>
         )}
       </main>
     </div>

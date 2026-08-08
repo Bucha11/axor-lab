@@ -185,6 +185,41 @@ class TestTheBuilderCanSave(ScreenApiTestCase):
         status, _ = self.call("PUT", "/suites/budget", {"suite": self._manifest()})
         self.assertEqual(status, 200)
 
+    def test_what_was_saved_is_what_comes_back(self) -> None:
+        """The Builder loaded from the built-in registry and saved to the store,
+        so a save reported success and the next load served the ORIGINAL
+        document — the edit vanished with a green tick beside it. Reading and
+        writing have to name the same place."""
+        edited = {**self._manifest(), "description": "edited"}
+        self.call("PUT", "/suites/budget", {"suite": edited})
+        _, fetched = self.call("GET", "/suites/budget")
+        self.assertEqual(fetched["description"], "edited")
+
+    def test_the_catalog_shows_the_saved_name_not_the_builtin_one(self) -> None:
+        self.call("PUT", "/suites/budget", {"suite": {**self._manifest(), "name": "Renamed"}})
+        _, catalog = self.call("GET", "/suites")
+        card = next(c for c in catalog["suites"] if c["id"] == "budget")
+        self.assertEqual(card["name"], "Renamed")
+
+    def test_a_suite_this_workspace_authored_appears_in_the_catalog(self) -> None:
+        mine = {**self._manifest(), "id": "mine", "name": "Mine"}
+        self.call("POST", "/suites", {"suite": mine})
+        _, catalog = self.call("GET", "/suites")
+        ids = [c["id"] for c in catalog["suites"]]
+        self.assertIn("mine", ids)
+        # appended after the built-ins and the announced placeholders, so the
+        # catalog reads the same way it did before the workspace had any
+        self.assertEqual(ids[-1], "mine")
+
+    def test_the_yaml_view_serves_the_saved_document_too(self) -> None:
+        from lab_suite import from_yaml
+
+        self.call("PUT", "/suites/budget", {"suite": {**self._manifest(), "version": "9.9"}})
+        request = urllib.request.Request(f"{self.base}/suites/budget/yaml")
+        request.add_header("Authorization", f"Bearer {CONTROL}")
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            self.assertEqual(from_yaml(response.read().decode())["version"], "9.9")
+
 
 class TestEvidenceAndRegressionsAndArtifacts(ScreenApiTestCase):
     def _case(self) -> dict:

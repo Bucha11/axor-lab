@@ -118,3 +118,25 @@ section { display: flex; flex-direction: column; gap: var(--s2); }
 }
 .errors { color: var(--danger); font-size: 12px; margin: 0; padding-left: var(--s3); }
 .outcome { display: flex; flex-direction: column; gap: var(--s1); margin-top: var(--s2); }
+
+.progress {
+  width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 4px;
+}
+.progress-bar {
+  height: 4px; background: var(--accent); border-radius: var(--radius-sm);
+  min-width: 2px; transition: width 200ms ease;
+}
+.progress { border-top: 1px solid var(--border); padding-top: var(--s1); }
+
+.builder-fields { display: flex; flex-direction: column; gap: var(--s2); }
+.builder-fields .field input,
+.builder-fields .field select { min-width: 260px; max-width: 520px; }
+.small-area, .json-area {
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  font-family: var(--mono); font-size: 12px; line-height: 18px;
+  padding: var(--s1); resize: vertical; width: 100%;
+}
+.small-area { min-height: 56px; font-family: var(--font); font-size: 14px; }
+.json-area { min-height: 140px; }
+.json-area.invalid { border-color: var(--danger); }

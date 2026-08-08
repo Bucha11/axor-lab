@@ -166,6 +166,11 @@ export interface RunResults {
 export interface ValidationResult {
   ok: boolean;
   errors: string[];
+  /** the parsed manifest, on a successful YAML validation. The client never
+   * parses YAML itself — a second implementation would disagree with the
+   * server's about `on`, `~` and dates, and the one that decides whether a run
+   * starts is the server's. */
+  suite?: Json;
 }
 
 // ── endpoints ────────────────────────────────────────────────────────────────
@@ -179,6 +184,21 @@ export const api = {
     const headers: Record<string, string> = {};
     if (token) headers["Authorization"] = `Bearer ${token}`;
     const response = await fetch(`/suites/${encodeURIComponent(id)}/yaml`, { headers });
+    const text = await response.text();
+    if (!response.ok) throw new ApiError(response.status, text || "yaml unavailable");
+    return text;
+  },
+  /** Serialize the manifest the Builder is holding — the edited one, not the
+   * stored one. There is exactly one YAML implementation and it is the
+   * server's. */
+  suiteYamlOf: async (suite: Json): Promise<string> => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const response = await fetch("/suites/to-yaml", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ suite }),
+    });
     const text = await response.text();
     if (!response.ok) throw new ApiError(response.status, text || "yaml unavailable");
     return text;

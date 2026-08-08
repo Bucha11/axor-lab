@@ -1,7 +1,9 @@
+import { useEffect } from "react";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
 import { Empty, Failed, Json, Link, Loading, Stat } from "../components/ui";
 import { StatusTag, Timeline } from "../components/Timeline";
+import { useRunEvents } from "../lib/useRunEvents";
 
 export function Runs() {
   const { data, error, loading, reload } = useAsync(() => api.home());
@@ -32,6 +34,20 @@ export function Runs() {
 export function RunReport({ runId }: { runId: string }) {
   const report = useAsync(() => api.runReport(runId), [runId]);
   const results = useAsync(() => api.runResults(runId), [runId]);
+  // Live progress. The report itself is REFETCHED when the run reaches a
+  // terminal state rather than being patched from the stream: the stream
+  // carries progress, and coverage/aggregates are the backend's to compute.
+  // Deriving them here would be the second opinion the contract forbids.
+  const progress = useRunEvents(runId);
+  const finished = progress?.terminal ?? false;
+  useEffect(() => {
+    if (finished) {
+      report.reload();
+      results.reload();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finished]);
+
   if (report.loading || results.loading) return <Loading />;
   if (report.error) return <Failed error={report.error} onRetry={report.reload} />;
   if (!report.data) return null;
@@ -41,7 +57,26 @@ export function RunReport({ runId }: { runId: string }) {
     <div className="screen">
       <header className="screen-head">
         <h1>Run {runId}</h1>
-        <StatusTag status={report.data.state} />
+        {/* The live state when the stream has one, the loaded state otherwise —
+            never both, so the screen cannot show two different answers. */}
+        <StatusTag status={progress?.state ?? report.data.state} />
+        {progress && !progress.terminal && (
+          <div className="progress">
+            <div
+              className="progress-bar"
+              style={{
+                width: `${
+                  progress.planned > 0
+                    ? Math.round((progress.completed / progress.planned) * 100)
+                    : 0
+                }%`,
+              }}
+            />
+            <span className="muted small">
+              {progress.completed}/{progress.planned} trial(s) — live
+            </span>
+          </div>
+        )}
       </header>
 
       {/* Coverage BEFORE aggregates, per statistics.md §5: a report that shows

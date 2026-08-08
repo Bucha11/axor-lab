@@ -40,9 +40,11 @@ from __future__ import annotations
 
 import json
 import pathlib
+import queue
 import re
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -129,6 +131,14 @@ class _Job:
     trials: dict[str, _Trial] = field(default_factory=dict)
     estimate: dict[str, object] = field(default_factory=dict)
     aggregates: list[dict[str, object]] = field(default_factory=list)
+    # Live listeners on this run's event stream. A queue per subscriber, so a
+    # slow reader cannot stall the runtime thread that is publishing.
+    listeners: "list[queue.SimpleQueue]" = field(default_factory=list)
+
+
+# A run is over when it reaches one of these; the event stream closes with it
+# rather than holding a connection open for something that will never move.
+TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 
 
 class RuntimeJobStore:
@@ -200,6 +210,7 @@ class RuntimeJobStore:
                 raise RuntimeJobsError(409, f"run {job_id!r} is not awaiting confirmation "
                                             f"(state {job.state})")
             job.state = "waiting_for_runtime"
+            self._publish_locked(job)
             return {"run_id": job_id, "state": job.state}
 
     def attach_aggregates(self, job_id: str,
@@ -214,7 +225,68 @@ class RuntimeJobStore:
             job.aggregates = list(aggregates)
             if job.state in ("running", "receiving_traces", "analyzing"):
                 job.state = "completed"
+            self._publish_locked(job)
             return {"run_id": job_id, "state": job.state, "aggregates": len(job.aggregates)}
+
+    # -- live progress ----------------------------------------------------
+    def subscribe(self, job_id: str) -> "queue.SimpleQueue":
+        """A queue of this run's progress events, plus the current snapshot.
+
+        The snapshot is delivered THROUGH the queue, inside the lock, so a
+        subscriber cannot miss a transition that lands between "read the current
+        state" and "start listening". Reading state first and subscribing second
+        is the classic lost-update: a run that finishes in that gap streams
+        nothing and the screen waits forever on a run that is already done.
+        """
+        listener: queue.SimpleQueue = queue.SimpleQueue()
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise RuntimeJobsError(404, f"unknown run {job_id!r}")
+            job.listeners.append(listener)
+            for frame in self._frames_locked(job):
+                listener.put(frame)
+        return listener
+
+    def unsubscribe(self, job_id: str, listener: "queue.SimpleQueue") -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.listeners = [x for x in job.listeners if x is not listener]
+
+    def _frames_locked(self, job: _Job) -> list[tuple[str, dict[str, object]]]:
+        """The two frames that describe a run's progress right now.
+
+        `trials` comes FIRST and `state` second, because a terminal `state`
+        closes the stream: emitting it first meant a client subscribing to an
+        already-finished run got the state, then `done`, and never the trial
+        data queued behind it. Progress before the frame that ends the stream.
+        """
+        done = sum(1 for t in job.trials.values() if t.status in ("completed", "failed"))
+        return [
+            ("trials", {"run_id": job.job_id, "completed": done,
+                        "planned": len(job.planned),
+                        "trials": [
+                            {"trial_id": t.trial_id, "status": t.status,
+                             "attempt": t.attempt, "metrics": dict(t.metrics)}
+                            for t in job.trials.values()
+                        ]}),
+            ("state", {"run_id": job.job_id, "state": job.state,
+                       "terminal": job.state in TERMINAL_STATES}),
+        ]
+
+    def _publish_locked(self, job: _Job) -> None:
+        """Push the current snapshot to every listener. Called with the lock
+        held, from the mutation that changed something — never from a poller,
+        so a screen sees a transition when it happens rather than up to an
+        interval later."""
+        if not job.listeners:
+            return
+        frames = self._frames_locked(job)
+        for listener in job.listeners:
+            for frame in frames:
+                listener.put(frame)
 
     def run_ids(self) -> list[str]:
         """Every run this store knows, oldest first — the Launchpad's recent
@@ -277,6 +349,7 @@ class RuntimeJobStore:
             if job.state != "waiting_for_runtime":
                 raise RuntimeJobsError(409, f"run {job_id!r} is not claimable (state {job.state})")
             job.state = "running"
+            self._publish_locked(job)
             return {"run_id": job_id, "assignment": job.assignment,
                     "planned_trials": list(job.planned)}
 
@@ -298,6 +371,7 @@ class RuntimeJobStore:
             trial.events.extend(events)
             if job.state == "running":
                 job.state = "receiving_traces"
+            self._publish_locked(job)
             return {"trial_id": trial_id, "events": len(trial.events), "attempt": trial.attempt}
 
     def complete_trial(self, job_id: str, trial_id: str, runtime_ref: str,
@@ -328,6 +402,7 @@ class RuntimeJobStore:
                     if isinstance(v, (int, float, str, bool))
                 }
             self._maybe_finish(job)
+            self._publish_locked(job)
             return {"trial_id": trial_id, "status": trial.status, "run_state": job.state,
                     "attempt": trial.attempt, "superseded": trial.superseded}
 
@@ -433,28 +508,94 @@ def make_runtime_server(
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_sse(self, frames: list[tuple[str, dict[str, object]]]) -> None:
-            # a snapshot event-stream: emit the run's current lifecycle state +
-            # trial progress as text/event-stream frames, then close. A long-lived
-            # push stream is the extension point; the frame format is already SSE
-            # so a browser EventSource reads it unchanged.
-            body = "".join(
-                f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in frames
-            ).encode()
+        def _stream_sse(self, job_id: str, max_seconds: float = 900.0) -> None:
+            """A LIVE event stream for one run.
+
+            This used to send two frames and close — a snapshot wearing
+            `text/event-stream`, so a screen that subscribed got one picture of a
+            run in progress and nothing after it. The Run screen could show
+            progress only by being reloaded.
+
+            Three things it has to get right:
+
+              - **No lost update.** `subscribe` delivers the current snapshot
+                THROUGH the queue while holding the store's lock, so a run that
+                finishes between "read state" and "start listening" cannot slip
+                past. Reading first and subscribing second is exactly how a
+                screen ends up waiting forever on a run that is already done.
+              - **Closing.** The stream ends when the run reaches a terminal
+                state. A browser reconnects an EventSource that closes, so it
+                also sends a `done` event first: the client can stop rather than
+                reconnect to a run that will never move again.
+              - **Not leaking a thread.** A client that vanishes is only noticed
+                on a write, so a heartbeat comment goes out on every idle tick;
+                `max_seconds` is the backstop for a run that hangs without ever
+                reaching a terminal state.
+            """
+            listener = jobs.subscribe(job_id)   # raises 404 before any header
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Content-Length", str(len(body)))
+            # `Connection: close`, not keep-alive. This stream ENDS — when the
+            # run reaches a terminal state — and it carries no Content-Length,
+            # so on a keep-alive connection the client has no way to know the
+            # body is over and blocks reading a response that will never grow.
+            self.send_header("Connection", "close")
+            self.close_connection = True
             self.end_headers()
-            self.wfile.write(body)
+            deadline = time.monotonic() + max_seconds
+            try:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._sse_frame("timeout", {"run_id": job_id})
+                        return
+                    try:
+                        name, payload = listener.get(timeout=min(15.0, remaining))
+                    except queue.Empty:
+                        # a comment line: invisible to EventSource, and the write
+                        # is what reveals a client that has gone away
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                        continue
+                    self._sse_frame(name, payload)
+                    if name == "state" and payload.get("terminal"):
+                        self._sse_frame("done", {"run_id": job_id,
+                                                 "state": payload.get("state")})
+                        return
+            except (BrokenPipeError, ConnectionResetError):
+                return          # the client closed the tab; nothing to report
+            finally:
+                jobs.unsubscribe(job_id, listener)
+
+        def _sse_frame(self, name: str, payload: dict[str, object]) -> None:
+            self.wfile.write(
+                f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode()
+            )
+            self.wfile.flush()
 
         def _bearer(self) -> str | None:
             auth = self.headers.get("Authorization", "")
             return auth[7:] if auth.startswith("Bearer ") else None
 
         def _require_control(self) -> None:
-            if control_token is not None and self._bearer() != control_token:
-                raise RuntimeJobsError(401, "control token required")
+            if control_token is None:
+                return
+            if self._bearer() == control_token:
+                return
+            # `EventSource` cannot set a header, so the SSE stream — and only it —
+            # also accepts the token as a query parameter. A token in a URL can
+            # land in a proxy log, which is a real cost; the alternative is an
+            # unauthenticated stream of run contents to anyone who can reach the
+            # port. Restricted to this one route so the trade is not quietly
+            # extended to endpoints that have a header available.
+            if _RUN_EVENTS_RE.match(self.path.split("?", 1)[0]):
+                from urllib.parse import parse_qs, urlparse
+
+                supplied = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+                if supplied == control_token:
+                    return
+            raise RuntimeJobsError(401, "control token required")
 
         def _runtime_ref(self) -> str:
             key = self._bearer()
@@ -462,6 +603,51 @@ def make_runtime_server(
             if ref is None:
                 raise RuntimeJobsError(401, "a valid runtime ingest_key is required")
             return ref
+
+        def _resolve_suite(self, suite_id: str) -> dict[str, object]:
+            """A SAVED suite wins over the built-in of the same id.
+
+            The Builder loaded from the registry and saved to the store, so a
+            save reported success and the next load served the original
+            document — the edit vanished with a green tick beside it. Reading
+            and writing have to name the same place.
+            """
+            from lab_suite import builtin_registry
+            from lab_suite.errors import SuiteNotFound
+
+            try:
+                return shelf.get("suite", suite_id)
+            except ScreenStoreError:
+                pass
+            try:
+                return builtin_registry().get(suite_id).manifest()
+            except SuiteNotFound:
+                raise
+
+        def _catalog(self, builtin: list[dict[str, object]]) -> list[dict[str, object]]:
+            """Built-ins and announced placeholders, with saved suites layered
+            over them — an edited built-in shows the EDITED name, and a suite the
+            workspace authored appears at all."""
+            saved = {
+                str(m.get("id", "")): {
+                    "id": str(m.get("id", "")),
+                    "name": m.get("name", m.get("id", "")),
+                    "description": m.get("description", ""),
+                    "origin": m.get("origin", "mine"),
+                    "tags": m.get("tags", []),
+                    "capabilities": m.get("capabilities", []),
+                    "available": True,
+                }
+                for m in shelf.list("suite") if m.get("id")
+            }
+            # ORDER is preserved: registered suites, then the announced
+            # placeholders, then anything this workspace authored. An empty
+            # store therefore returns exactly what `axor-lab suites` prints,
+            # which is the property `test_the_catalog_endpoint_serves_the_same_
+            # list_as_the_cli` pins.
+            cards = [dict(saved.pop(str(c["id"]), c)) for c in builtin]
+            cards.extend(saved[key] for key in sorted(saved))
+            return cards
 
         def _document(self, key: str) -> dict[str, object]:
             """The document a Builder/screen POSTs, under its own key.
@@ -524,7 +710,12 @@ def make_runtime_server(
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             try:
-                if self.path == "/home":
+                # the routing path WITHOUT the query string. Comparing routes
+                # against `self.path` meant `GET /suites?x=1` matched nothing and
+                # fell through to a 404 — a request that is merely decorated is
+                # not a different route.
+                path = self.path.split("?", 1)[0]
+                if path == "/home":
                     # the Launchpad: the NEXT action, not the past. A catalog of
                     # what has already been published is a different screen.
                     from lab_suite import suite_catalog
@@ -536,39 +727,39 @@ def make_runtime_server(
                         suite_catalog(), shelf,
                     ))
                     return
-                if self.path == "/evidence":
+                if path == "/evidence":
                     self._require_control()
                     self._send(200, evidence_list(shelf))
                     return
-                if self.path == "/regressions":
+                if path == "/regressions":
                     self._require_control()
                     self._send(200, regression_list(shelf))
                     return
-                if self.path == "/artifacts":
+                if path == "/artifacts":
                     self._require_control()
                     self._send(200, artifact_list(shelf))
                     return
-                m = _EVIDENCE_RE.match(self.path)
+                m = _EVIDENCE_RE.match(path)
                 if m:
                     self._require_control()
                     self._send(200, shelf.get("evidence-case", m.group(1)))
                     return
-                m = _REGRESSION_RE.match(self.path)
+                m = _REGRESSION_RE.match(path)
                 if m:
                     self._require_control()
                     self._send(200, shelf.get("regression", m.group(1)))
                     return
-                m = _ARTIFACT_RE.match(self.path)
+                m = _ARTIFACT_RE.match(path)
                 if m:
                     self._require_control()
                     self._send(200, shelf.get("artifact", m.group(1)))
                     return
-                m = _RUN_REPORT_RE.match(self.path)
+                m = _RUN_REPORT_RE.match(path)
                 if m:
                     self._require_control()
                     self._send(200, run_report(jobs.results(m.group(1))))
                     return
-                m = _RUN_TRIAL_RE.match(self.path)
+                m = _RUN_TRIAL_RE.match(path)
                 if m:
                     self._require_control()
                     run_id, trial_id = m.group(1), m.group(2)
@@ -581,43 +772,43 @@ def make_runtime_server(
                         trace = None
                     self._send(200, trial_detail(jobs.results(run_id), trial_id, trace))
                     return
-                if self.path == "/suites":
+                if path == "/suites":
                     # The Suite Catalog screen (ui-backend-contract.md §2). The
                     # payload comes from `lab_suite.suite_catalog`, the same
                     # function `axor-lab suites` prints — two independent lists
-                    # is how a catalog offers a suite the runner cannot resolve.
+                    # is how a catalog offers a suite the runner cannot resolve —
+                    # merged with the suites this workspace has SAVED.
                     from lab_suite import suite_catalog
 
                     self._require_control()
-                    self._send(200, {"suites": suite_catalog()})
+                    self._send(200, {"suites": self._catalog(suite_catalog())})
                     return
-                m = _SUITE_YAML_RE.match(self.path)
+                m = _SUITE_YAML_RE.match(path)
                 if m:
                     # the Builder's YAML mode reads the SAME manifest the Basic
                     # and Advanced modes edit — one document, three editors
                     # (RFC §13). A second serializer here is how the modes start
                     # disagreeing about what the experiment is.
-                    from lab_suite import builtin_registry, to_yaml
+                    from lab_suite import to_yaml
                     from lab_suite.errors import SuiteNotFound
                     from lab_suite.yaml_mode import YamlUnavailable
 
                     self._require_control()
                     try:
-                        text = to_yaml(builtin_registry().get(m.group(1)).manifest())
+                        text = to_yaml(self._resolve_suite(m.group(1)))
                     except SuiteNotFound as exc:
                         raise RuntimeJobsError(404, str(exc)) from None
                     except YamlUnavailable as exc:
                         raise RuntimeJobsError(501, str(exc)) from None
                     self._send_text(200, text, "application/yaml")
                     return
-                m = _SUITE_RE.match(self.path)
+                m = _SUITE_RE.match(path)
                 if m:
-                    from lab_suite import builtin_registry
                     from lab_suite.errors import SuiteNotFound
 
                     self._require_control()
                     try:
-                        manifest = builtin_registry().get(m.group(1)).manifest()
+                        manifest = self._resolve_suite(m.group(1))
                     except SuiteNotFound as exc:
                         # an ANNOUNCED-but-unavailable suite has a catalog card
                         # and no manifest; 404 with the reason beats an empty
@@ -625,35 +816,30 @@ def make_runtime_server(
                         raise RuntimeJobsError(404, str(exc)) from None
                     self._send(200, manifest)
                     return
-                if self.path == "/runtimes":
+                if path == "/runtimes":
                     self._require_control()
                     self._send(200, {"runtimes": jobs.list_runtimes()})
                     return
-                if _RUNTIME_JOBS_RE.match(self.path):
+                if _RUNTIME_JOBS_RE.match(path):
                     ref = self._runtime_ref()
                     self._send(200, {"jobs": jobs.list_jobs(ref)})
                     return
-                m = _RUN_RESULTS_RE.match(self.path)
+                m = _RUN_RESULTS_RE.match(path)
                 if m:
                     self._require_control()
                     self._send(200, jobs.results(m.group(1)))
                     return
-                m = _RUN_TRACE_RE.match(self.path)
+                m = _RUN_TRACE_RE.match(path)
                 if m:
                     self._require_control()
                     self._send(200, jobs.trial_trace(m.group(1), m.group(2)))
                     return
-                m = _RUN_EVENTS_RE.match(self.path)
+                m = _RUN_EVENTS_RE.match(path)
                 if m:
                     self._require_control()
-                    res = jobs.results(m.group(1))  # raises 404 for unknown run
-                    self._send_sse([
-                        ("state", {"run_id": res["run_id"], "state": res["state"]}),
-                        ("trials", {"trials": res["trials"],
-                                    "planned_trials": res["planned_trials"]}),
-                    ])
+                    self._stream_sse(m.group(1))
                     return
-                m = _RUN_RE.match(self.path)
+                m = _RUN_RE.match(path)
                 if m:
                     self._require_control()
                     self._send(200, {"run_id": m.group(1), "state": jobs.run_state(m.group(1))})
@@ -686,7 +872,12 @@ def make_runtime_server(
 
         def do_PUT(self) -> None:  # noqa: N802
             try:
-                m = _SUITE_RE.match(self.path)
+                # the routing path WITHOUT the query string. Comparing routes
+                # against `self.path` meant `GET /suites?x=1` matched nothing and
+                # fell through to a 404 — a request that is merely decorated is
+                # not a different route.
+                path = self.path.split("?", 1)[0]
+                m = _SUITE_RE.match(path)
                 if m:
                     self._require_control()
                     document = self._document("suite")
@@ -707,7 +898,12 @@ def make_runtime_server(
 
         def do_POST(self) -> None:  # noqa: N802
             try:
-                if self.path == "/runtimes/connect":
+                # the routing path WITHOUT the query string. Comparing routes
+                # against `self.path` meant `GET /suites?x=1` matched nothing and
+                # fell through to a 404 — a request that is merely decorated is
+                # not a different route.
+                path = self.path.split("?", 1)[0]
+                if path == "/runtimes/connect":
                     self._require_control()
                     body = self._read_json()
                     self._send(201, jobs.connect_runtime(
@@ -715,7 +911,7 @@ def make_runtime_server(
                         agent_ref=body.get("agent_ref"),  # type: ignore[arg-type]
                     ))
                     return
-                if self.path == "/playground/trial":
+                if path == "/playground/trial":
                     # ONE trial for inspection (RFC §13). Not a Run: nothing is
                     # stored, nothing is aggregated, and the payload says so.
                     self._require_control()
@@ -727,29 +923,29 @@ def make_runtime_server(
                         seed=body.get("seed"),  # type: ignore[arg-type]
                     ))
                     return
-                if self.path == "/suites":
+                if path == "/suites":
                     self._require_control()
                     self._send(201, {"id": shelf.put("suite", self._document("suite"))})
                     return
-                if self.path == "/evidence":
+                if path == "/evidence":
                     self._require_control()
                     self._send(201, {
                         "id": shelf.put("evidence-case", self._document("evidence_case")),
                     })
                     return
-                if self.path == "/regressions":
+                if path == "/regressions":
                     self._require_control()
                     self._send(201, {
                         "id": shelf.put("regression", self._document("regression")),
                     })
                     return
-                if self.path == "/artifacts":
+                if path == "/artifacts":
                     self._require_control()
                     self._send(201, {"id": shelf.put(
                         "artifact", self._document("artifact"), id_field="artifact_id",
                     )})
                     return
-                m = _REGRESSION_RUN_RE.match(self.path)
+                m = _REGRESSION_RUN_RE.match(path)
                 if m:
                     # a CHECK, not a Run (lifecycle.md): it consumes trials that
                     # already exist, and `error` stays distinct from `failed`
@@ -764,7 +960,7 @@ def make_runtime_server(
                         evaluators=body.get("evaluators") or {},  # type: ignore[arg-type]
                     ))
                     return
-                if self.path == "/suites/validate":
+                if path == "/suites/validate":
                     # The Builder's validate button, in both Basic and YAML
                     # mode. It validates a POSTED manifest, not a registered id:
                     # the whole point is to check a document the user is editing
@@ -779,7 +975,23 @@ def make_runtime_server(
                     errors = validate_manifest(manifest)
                     self._send(200, {"ok": not errors, "errors": errors})
                     return
-                if self.path == "/suites/validate-yaml":
+                if path == "/suites/to-yaml":
+                    # Serialize the manifest the Builder is HOLDING, not the one
+                    # on disk. Switching Basic -> YAML must show the edits the
+                    # user just made; serializing the stored suite would silently
+                    # discard them, which is the one thing the "three modes, one
+                    # document" rule exists to prevent.
+                    from lab_suite import to_yaml
+                    from lab_suite.yaml_mode import YamlUnavailable
+
+                    self._require_control()
+                    document = self._document("suite")
+                    try:
+                        self._send_text(200, to_yaml(document), "application/yaml")
+                    except YamlUnavailable as exc:
+                        raise RuntimeJobsError(501, str(exc)) from None
+                    return
+                if path == "/suites/validate-yaml":
                     # Same validator, one parse earlier. The YAML mode must not
                     # get a weaker check than the JSON one, or a manifest can be
                     # valid in one editor and not the other.
@@ -803,9 +1015,18 @@ def make_runtime_server(
                         self._send(200, {"ok": False, "errors": [f"invalid YAML: {exc}"]})
                         return
                     errors = validate_manifest(parsed)
-                    self._send(200, {"ok": not errors, "errors": errors})
+                    # the PARSED manifest comes back on success. The Builder's
+                    # Basic and Advanced modes edit the document, YAML mode edits
+                    # its text, and switching between them has to move the same
+                    # object — so the client asks the server to parse rather than
+                    # becoming a second YAML implementation that can disagree
+                    # about what `on` or `2026-08-08` means.
+                    self._send(200, {
+                        "ok": not errors, "errors": errors,
+                        **({"suite": parsed} if not errors else {}),
+                    })
                     return
-                if self.path == "/scenarios/validate":
+                if path == "/scenarios/validate":
                     self._require_control()
                     body = self._read_json()
                     scenario = body.get("scenario")
@@ -822,7 +1043,7 @@ def make_runtime_server(
                     else:
                         self._send(200, {"ok": True, "errors": []})
                     return
-                if self.path == "/experiments/plan":
+                if path == "/experiments/plan":
                     self._require_control()
                     body = self._read_json()
                     experiment = body.get("experiment")
@@ -830,7 +1051,7 @@ def make_runtime_server(
                         raise RuntimeJobsError(400, "plan requires {experiment}")
                     self._send(200, plan_experiment(experiment))
                     return
-                if self.path == "/runs":
+                if path == "/runs":
                     self._require_control()
                     body = self._read_json()
                     experiment = body.get("experiment")
@@ -845,12 +1066,12 @@ def make_runtime_server(
                         estimate=estimate if isinstance(estimate, dict) else None,
                     ))
                     return
-                m = _RUN_CONFIRM_RE.match(self.path)
+                m = _RUN_CONFIRM_RE.match(path)
                 if m:
                     self._require_control()
                     self._send(200, jobs.confirm_run(m.group(1)))
                     return
-                m = _RUN_AGG_RE.match(self.path)
+                m = _RUN_AGG_RE.match(path)
                 if m:
                     self._require_control()
                     body = self._read_json()
@@ -859,12 +1080,12 @@ def make_runtime_server(
                         raise RuntimeJobsError(400, "aggregates must be a list")
                     self._send(200, jobs.attach_aggregates(m.group(1), aggregates))
                     return
-                m = _CLAIM_RE.match(self.path)
+                m = _CLAIM_RE.match(path)
                 if m:
                     ref = self._runtime_ref()
                     self._send(200, jobs.claim(m.group(1), ref))
                     return
-                m = _EVENTS_RE.match(self.path)
+                m = _EVENTS_RE.match(path)
                 if m:
                     ref = self._runtime_ref()
                     body = self._read_json()
@@ -873,7 +1094,7 @@ def make_runtime_server(
                         raise RuntimeJobsError(400, "events must be a list")
                     self._send(200, jobs.append_events(m.group(1), m.group(2), ref, events))
                     return
-                m = _TRIAL_DONE_RE.match(self.path)
+                m = _TRIAL_DONE_RE.match(path)
                 if m:
                     ref = self._runtime_ref()
                     body = self._read_json()

@@ -32,15 +32,38 @@ axor-lab serve --control-token <token>
 - **The palette is the tokens.** `src/tokens.css` holds the board's values; a
   hard-coded hex anywhere else fails the test.
 
+## The Suite Builder's three modes
+
+Basic, Advanced and YAML edit ONE `suite/v1` document (RFC §13). The forms are
+not exhaustive — `scenarios` alone is an arbitrarily deep array — and they do not
+need to be: the manifest lives in one piece of state, every field writes back
+through `writePath`, and a key no form renders is carried along untouched.
+Switching modes moves the DOCUMENT, not the text.
+
+`sections.test.ts` pins the property the design rests on: editing one field
+never touches another, an advanced-only field survives a Basic-mode edit, and
+rewriting every rendered field with its own value is a no-op.
+
+YAML is serialized and parsed by the SERVER (`POST /suites/to-yaml`,
+`POST /suites/validate-yaml` returns the parsed manifest). A parser here would
+be a second implementation that can disagree about `on`, `~` and `2026-08-08`,
+and the one that decides whether a run starts is the server's.
+
+## Live run progress
+
+The Run screen subscribes to `SSE /runs/{id}/events` and updates without a
+reload. The stream closes when the run reaches a terminal state and sends `done`
+first, so the browser stops rather than reconnecting to a run that will never
+move again.
+
+`EventSource` cannot set a header, so this ONE endpoint also accepts the control
+token as a query parameter. That is a real trade — a token in a URL can land in
+a proxy log — accepted here because the alternative is an unauthenticated stream
+of run contents. It is scoped to this route; every other endpoint takes the
+header.
+
 ## What is NOT built
 
-The Suite Builder ships **YAML mode only**. RFC §13 specifies Basic, Advanced
-and YAML over one manifest; the load-bearing rule is that all three edit the
-same document, which is enforced server-side (`round_trips`, and every Builder
-section mapping to a manifest field). A partial Basic form would be the exact
-failure that rule guards against — a mode owning state another mode cannot see —
-so it is absent and says so on the screen.
-
-There is no live run progress (`SSE /runs/{id}/events` is served but not
-consumed): the Runs screen reads state on load. Starting a run from the browser
-needs a connected runtime, so the flow is Integrations → connect → assign.
+Starting a run from the browser needs a connected runtime, so the flow is
+Integrations → connect → assign; there is no "run this suite now" button for a
+runtime that has not claimed the job.

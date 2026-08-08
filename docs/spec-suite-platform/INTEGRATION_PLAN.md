@@ -12,8 +12,8 @@ schema-conforming payload, pinned over real HTTP by
 `tests/test_screen_api.py`. Storage is in memory; durable storage is a swap of
 `lab_server/screens.py`, not of the endpoints. **Phase 4 landed** — `web/` (React + Vite +
 TypeScript) implements every screen against the real endpoints, and
-`axor-lab serve` runs the API and the built app from one process. What is
-deliberately NOT built is listed under Phase 4 below. **Phases 5-6 are not
+`axor-lab serve` runs the API and the built app from one process — including all
+three Builder modes and live run progress over SSE. **Phases 5-6 are not
 started.**
 
 **Authority:** the Experiment Suite Platform RFC in this directory is the
@@ -574,16 +574,22 @@ against real endpoints, no inline fixtures. Design tokens from §5 as CSS
 variables, dark default. `axor-lab serve` serves the API and `web/dist` from one
 process.
 
-**Not built, and the app says so on the screen:**
+**Both gaps this phase originally shipped with are now closed:**
 
-- **Basic and Advanced Builder modes.** The Builder ships YAML mode only. All
-  three modes edit ONE manifest (RFC §13), which is enforced server-side; a
-  partial Basic form would be exactly the failure that rule guards against — a
-  mode owning state another mode cannot see.
-- **Live run progress.** `SSE /runs/{id}/events` is served and not consumed; the
-  Runs screen reads state on load.
+- **All three Builder modes.** Basic, Advanced and YAML over one document. The
+  forms are not exhaustive and do not need to be — the manifest lives in one
+  piece of state and every field writes back through a path, so a key no form
+  renders is carried along untouched. `sections.test.ts` pins that: editing one
+  field never touches another, an advanced-only field survives a Basic edit, and
+  rewriting every rendered field with its own value is a no-op. YAML is
+  serialized and parsed by the SERVER, so there is still exactly one YAML
+  implementation.
+- **Live run progress.** `SSE /runs/{id}/events` is a real stream now: the store
+  publishes on every transition, the handler holds the connection open, and the
+  Run screen updates without a reload. Verified in a browser —
+  `running → completed` with no navigation.
 
-**Three defects the browser found, none reachable before there was one:**
+**Six defects the browser found, none reachable before there was one:**
 
 - The control token was applied in an effect. React runs a child's effects
   before its parent's, so on reload every screen fired its first request and got
@@ -598,6 +604,16 @@ process.
 - `python -m lab_server` runs the CATALOG server, so the web app had no
   documented way to start. `axor-lab serve` is that entry point, and it says out
   loud when the app has not been built and when the API is unauthenticated.
+- The Builder loaded a suite from the built-in registry and SAVED it to the
+  screen store, so a save reported success and the next load served the original
+  document — the edit vanished with a green tick beside it. Reads resolve a
+  saved suite over the built-in now, and the catalog shows the saved name.
+- Routes were matched against the full request path, so `GET /suites?x=1`
+  matched nothing and fell through to a 404. A request that is merely decorated
+  is not a different route.
+- `SSE` emitted the run STATE before the trial counts. A terminal state closes
+  the stream, so a client subscribing to an already-finished run got the state,
+  then `done`, and never the trial data queued behind it.
 
 ### Phase 4 — original plan · ~4–6 weeks
 

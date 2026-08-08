@@ -357,6 +357,9 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         self.assertTrue(payload["errors"])
 
     def test_validate_yaml_applies_the_same_rules_as_the_json_validator(self) -> None:
+        """Same verdict, same errors. The YAML path additionally returns the
+        PARSED manifest, so the Builder can switch modes without becoming a
+        second YAML implementation."""
         from lab_suite import to_yaml
 
         manifest = builtin_registry().get("budget").manifest()
@@ -364,13 +367,57 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         _, from_text = self._request(
             "POST", "/suites/validate-yaml", {"yaml": to_yaml(manifest)},
         )
-        self.assertEqual(from_json, from_text)
+        self.assertEqual(
+            (from_json["ok"], from_json["errors"]),
+            (from_text["ok"], from_text["errors"]),
+        )
+        self.assertEqual(from_text["suite"], manifest)
+
+    def test_the_serializer_round_trips_an_EDITED_manifest(self) -> None:
+        """The Builder's mode switch serializes the document it is HOLDING, not
+        the one on disk. Serializing the stored suite would silently discard the
+        edits the user just made — the one thing "three modes, one document"
+        exists to prevent."""
+        from lab_suite import from_yaml
+
+        edited = {**builtin_registry().get("budget").manifest(), "description": "edited"}
+        request = urllib.request.Request(
+            f"{self.base}/suites/to-yaml",
+            data=json.dumps({"suite": edited}).encode(), method="POST",
+        )
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Authorization", f"Bearer {CONTROL}")
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            self.assertEqual(response.headers["Content-Type"], "application/yaml")
+            text = response.read().decode()
+        self.assertEqual(from_yaml(text), edited)
+
+    def test_validate_yaml_returns_the_parsed_manifest_so_the_client_need_not_parse(
+        self,
+    ) -> None:
+        from lab_suite import to_yaml
+
+        manifest = builtin_registry().get("budget").manifest()
+        _, payload = self._request(
+            "POST", "/suites/validate-yaml", {"yaml": to_yaml(manifest)},
+        )
+        self.assertEqual(payload["suite"], manifest)
+
+    def test_an_invalid_yaml_returns_no_manifest_to_switch_to(self) -> None:
+        """A Builder that switched modes on a broken document would show a form
+        over something the server never accepted."""
+        _, payload = self._request(
+            "POST", "/suites/validate-yaml", {"yaml": "schema_version: suite/v1\n"},
+        )
+        self.assertFalse(payload["ok"])
+        self.assertNotIn("suite", payload)
 
     def test_the_endpoints_require_the_control_token(self) -> None:
         for method, path, body in (
             ("GET", "/suites", None),
             ("GET", "/suites/budget", None),
             ("POST", "/suites/validate", {"suite": {}}),
+            ("POST", "/suites/to-yaml", {"suite": {}}),
         ):
             with self.subTest(path=path):
                 status, _ = self._request(method, path, body, token=None)
