@@ -7,7 +7,11 @@ docs rewritten around Suite→Run→Trial→EvidenceCase→Regression→Artifact
 kinds executing in the spine (`verdict_sequence` runs in the capability), the
 YAML editing mode, and CLI + screen-endpoint entry points for all of it.
 Governance is a separated capability under `lab_capabilities/governance/`.
-**Phases 3-6 are not started** — Phase 3 is the rest of the screen API (§5).
+**Phase 3 done** — every screen in §5 has a named endpoint returning a
+schema-conforming payload, pinned over real HTTP by
+`tests/test_screen_api.py`. Storage is in memory; durable storage is a swap of
+`lab_server/screens.py`, not of the endpoints. **Phases 4-6 are not started** —
+Phase 4 is the web app.
 
 **Authority:** the Experiment Suite Platform RFC in this directory is the
 governing spec. Where it and `docs/spec-v0.3/` disagree, **the new spec wins**.
@@ -517,7 +521,7 @@ an artifact with metrics; a `latency < threshold` regression passes and fails
 correctly; all 10 acceptance criteria still green under the governance
 capability.
 
-### Phase 3 — Screen API · ~2 weeks
+### Phase 3 — Screen API · **DONE**
 
 Extend `lab_server/runtime_jobs.py` + `store.py` into the screen API from §5,
 keeping "rendered, never computed":
@@ -538,8 +542,20 @@ GET  /artifacts · GET /artifacts/{id}
 GET  /integrations · GET /runtimes …    (existing runtime endpoints unchanged)
 ```
 
-**Exit:** every screen in §5 has a named endpoint returning a schema-conforming
-payload; contract tests assert the binding.
+**Exit met.** Every screen in §5 has a named endpoint; `tests/test_screen_api.py`
+asserts the binding over real HTTP.
+
+Two things the work surfaced, neither reachable before there were screens:
+
+- A Playground preview that trimmed a comparison suite to one arm left the
+  suite's `mcnemar` aggregation declared over two, and the validator correctly
+  refused the manifest. Aggregations and regressions come off a preview
+  entirely — an aggregate over one trial is not a rate, and an invariant checked
+  against a preview would report a pass or a failure about a run that does not
+  exist.
+- `ScreenStoreError` was not in the POST handler's except clause, so a
+  schema-invalid document answered 500 instead of 422 — a validation failure
+  presented as a server fault.
 
 ### Phase 4 — Web app · ~4–6 weeks
 

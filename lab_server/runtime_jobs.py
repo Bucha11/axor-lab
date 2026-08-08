@@ -45,6 +45,19 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from lab_server.screens import (
+    ScreenStore,
+    ScreenStoreError,
+    artifact_list,
+    evidence_list,
+    home_payload,
+    playground_trial,
+    regression_list,
+    run_regression,
+    run_report,
+    trial_detail,
+)
+
 _MAX_BODY = 8 * 1024 * 1024
 
 _RUNTIME_JOBS_RE = re.compile(r"^/runtime/jobs$")
@@ -62,6 +75,12 @@ _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/tr
 # is missing rather than like the method is wrong.
 _SUITE_RE = re.compile(r"^/suites/(?!validate$)([A-Za-z0-9_-]+)$")
 _SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
+_RUN_REPORT_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/report$")
+_RUN_TRIAL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)$")
+_EVIDENCE_RE = re.compile(r"^/evidence/([A-Za-z0-9_.:-]+)$")
+_REGRESSION_RE = re.compile(r"^/regressions/([A-Za-z0-9_.:-]+)$")
+_REGRESSION_RUN_RE = re.compile(r"^/regressions/([A-Za-z0-9_.:-]+)/run$")
+_ARTIFACT_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)$")
 
 
 class RuntimeJobsError(Exception):
@@ -189,6 +208,12 @@ class RuntimeJobStore:
             if job.state in ("running", "receiving_traces", "analyzing"):
                 job.state = "completed"
             return {"run_id": job_id, "state": job.state, "aggregates": len(job.aggregates)}
+
+    def run_ids(self) -> list[str]:
+        """Every run this store knows, oldest first — the Launchpad's recent
+        activity reads the tail."""
+        with self._lock:
+            return list(self._jobs)
 
     def run_state(self, job_id: str) -> str:
         with self._lock:
@@ -367,11 +392,14 @@ def make_runtime_server(
     *,
     control_token: str | None = None,
     store: RuntimeJobStore | None = None,
+    screens: "ScreenStore | None" = None,
 ) -> ThreadingHTTPServer:
-    """A threaded runtime-jobs server. `control_token`, if set, gates the control
-    surface (runtime registration + run assignment); the runtime-facing endpoints
-    are gated by the per-runtime ingest_key issued at connect."""
+    """A threaded runtime-jobs + screen-API server. `control_token`, if set,
+    gates the control surface (runtime registration, run assignment, every
+    screen); the runtime-facing endpoints are gated by the per-runtime
+    ingest_key issued at connect."""
     jobs = store or RuntimeJobStore()
+    shelf = screens if screens is not None else ScreenStore()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:  # quiet
@@ -423,6 +451,50 @@ def make_runtime_server(
                 raise RuntimeJobsError(401, "a valid runtime ingest_key is required")
             return ref
 
+        def _document(self, key: str) -> dict[str, object]:
+            """The document a Builder/screen POSTs, under its own key.
+
+            Named rather than "the whole body" so a client cannot smuggle a
+            second document past validation by nesting it, and so a missing body
+            says which key it was missing.
+            """
+            body = self._read_json()
+            document = body.get(key)
+            if not isinstance(document, dict):
+                raise RuntimeJobsError(400, f"this endpoint requires {{{key}}}")
+            return document
+
+        def _playground_suite(
+            self, body: dict[str, object],
+        ) -> tuple[dict[str, object], object]:
+            """The suite a Playground preview runs: a posted manifest, or a
+            registered id."""
+            from lab_suite import builtin_registry
+            from lab_suite.errors import SuiteNotFound
+            from lab_suite.sdk import BaseSuite
+
+            registry = builtin_registry()
+            manifest = body.get("suite")
+            if not isinstance(manifest, dict):
+                suite_id = body.get("suite_id")
+                if not isinstance(suite_id, str):
+                    raise RuntimeJobsError(
+                        400, "a playground trial requires {suite} or {suite_id}",
+                    )
+                try:
+                    suite = registry.get(suite_id)
+                except SuiteNotFound as exc:
+                    raise RuntimeJobsError(404, str(exc)) from None
+                return suite.manifest(), suite
+            try:
+                return manifest, registry.get(str(manifest.get("id", "")))
+            except SuiteNotFound:
+                # an unregistered manifest still previews, on BaseSuite defaults
+                unimplemented = BaseSuite()
+                unimplemented.id = str(manifest.get("id", ""))
+                unimplemented.manifest = lambda: manifest  # type: ignore[method-assign]
+                return manifest, unimplemented
+
         def _read_json(self) -> dict[str, object]:
             length = int(self.headers.get("Content-Length", 0) or 0)
             if length > _MAX_BODY:
@@ -440,6 +512,63 @@ def make_runtime_server(
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             try:
+                if self.path == "/home":
+                    # the Launchpad: the NEXT action, not the past. A catalog of
+                    # what has already been published is a different screen.
+                    from lab_suite import suite_catalog
+
+                    self._require_control()
+                    self._send(200, home_payload(
+                        jobs.list_runtimes(),
+                        [{"run_id": j, "state": jobs.run_state(j)} for j in jobs.run_ids()],
+                        suite_catalog(), shelf,
+                    ))
+                    return
+                if self.path == "/evidence":
+                    self._require_control()
+                    self._send(200, evidence_list(shelf))
+                    return
+                if self.path == "/regressions":
+                    self._require_control()
+                    self._send(200, regression_list(shelf))
+                    return
+                if self.path == "/artifacts":
+                    self._require_control()
+                    self._send(200, artifact_list(shelf))
+                    return
+                m = _EVIDENCE_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    self._send(200, shelf.get("evidence-case", m.group(1)))
+                    return
+                m = _REGRESSION_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    self._send(200, shelf.get("regression", m.group(1)))
+                    return
+                m = _ARTIFACT_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    self._send(200, shelf.get("artifact", m.group(1)))
+                    return
+                m = _RUN_REPORT_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    self._send(200, run_report(jobs.results(m.group(1))))
+                    return
+                m = _RUN_TRIAL_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    run_id, trial_id = m.group(1), m.group(2)
+                    try:
+                        trace = jobs.trial_trace(run_id, trial_id)
+                    except RuntimeJobsError:
+                        # a planned trial with no trace yet is a real state, not
+                        # a 404: the screen shows the record and says the trace
+                        # has not arrived
+                        trace = None
+                    self._send(200, trial_detail(jobs.results(run_id), trial_id, trace))
+                    return
                 if self.path == "/suites":
                     # The Suite Catalog screen (ui-backend-contract.md §2). The
                     # payload comes from `lab_suite.suite_catalog`, the same
@@ -518,7 +647,28 @@ def make_runtime_server(
                     self._send(200, {"run_id": m.group(1), "state": jobs.run_state(m.group(1))})
                     return
                 self._send(404, {"error": "not found"})
-            except RuntimeJobsError as exc:
+            except (RuntimeJobsError, ScreenStoreError) as exc:
+                self._send(exc.status, {"error": exc.message})
+            except Exception as exc:  # noqa: BLE001 — never leak a traceback
+                self._send(500, {"error": f"{type(exc).__name__}"})
+
+        def do_PUT(self) -> None:  # noqa: N802
+            try:
+                m = _SUITE_RE.match(self.path)
+                if m:
+                    self._require_control()
+                    document = self._document("suite")
+                    if str(document.get("id")) != m.group(1):
+                        raise RuntimeJobsError(
+                            400,
+                            f"the manifest's id {document.get('id')!r} does not match "
+                            f"the path {m.group(1)!r} — saving it would silently "
+                            "create a second suite",
+                        )
+                    self._send(200, {"id": shelf.put("suite", document)})
+                    return
+                self._send(404, {"error": "not found"})
+            except (RuntimeJobsError, ScreenStoreError) as exc:
                 self._send(exc.status, {"error": exc.message})
             except Exception as exc:  # noqa: BLE001 — never leak a traceback
                 self._send(500, {"error": f"{type(exc).__name__}"})
@@ -531,6 +681,55 @@ def make_runtime_server(
                     self._send(201, jobs.connect_runtime(
                         model=str(body.get("model", "")),
                         agent_ref=body.get("agent_ref"),  # type: ignore[arg-type]
+                    ))
+                    return
+                if self.path == "/playground/trial":
+                    # ONE trial for inspection (RFC §13). Not a Run: nothing is
+                    # stored, nothing is aggregated, and the payload says so.
+                    self._require_control()
+                    body = self._read_json()
+                    manifest, suite = self._playground_suite(body)
+                    self._send(200, playground_trial(
+                        manifest, suite,
+                        scenario_name=body.get("scenario"),  # type: ignore[arg-type]
+                        seed=body.get("seed"),  # type: ignore[arg-type]
+                    ))
+                    return
+                if self.path == "/suites":
+                    self._require_control()
+                    self._send(201, {"id": shelf.put("suite", self._document("suite"))})
+                    return
+                if self.path == "/evidence":
+                    self._require_control()
+                    self._send(201, {
+                        "id": shelf.put("evidence-case", self._document("evidence_case")),
+                    })
+                    return
+                if self.path == "/regressions":
+                    self._require_control()
+                    self._send(201, {
+                        "id": shelf.put("regression", self._document("regression")),
+                    })
+                    return
+                if self.path == "/artifacts":
+                    self._require_control()
+                    self._send(201, {"id": shelf.put(
+                        "artifact", self._document("artifact"), id_field="artifact_id",
+                    )})
+                    return
+                m = _REGRESSION_RUN_RE.match(self.path)
+                if m:
+                    # a CHECK, not a Run (lifecycle.md): it consumes trials that
+                    # already exist, and `error` stays distinct from `failed`
+                    self._require_control()
+                    body = self._read_json()
+                    run_id = body.get("run_id")
+                    if not isinstance(run_id, str):
+                        raise RuntimeJobsError(400, "running a regression requires {run_id}")
+                    self._send(200, run_regression(
+                        shelf.get("regression", m.group(1)), jobs.results(run_id),
+                        scenarios=body.get("scenarios") or {},  # type: ignore[arg-type]
+                        evaluators=body.get("evaluators") or {},  # type: ignore[arg-type]
                     ))
                     return
                 if self.path == "/suites/validate":
@@ -658,7 +857,7 @@ def make_runtime_server(
                     ))
                     return
                 self._send(404, {"error": "not found"})
-            except RuntimeJobsError as exc:
+            except (RuntimeJobsError, ScreenStoreError) as exc:
                 self._send(exc.status, {"error": exc.message})
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"error": f"{type(exc).__name__}"})

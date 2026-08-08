@@ -65,25 +65,50 @@ Enforcement, tool dispatch and provenance construction happen in the runtime, no
 `lab_server/runtime_jobs.py`:
 
 ```
-GET  /suites                         GET  /runs/{id}              POST /suites/validate
-GET  /suites/{id}                    GET  /runs/{id}/results      POST /suites/validate-yaml
-GET  /suites/{id}/yaml               GET  /runs/{id}/aggregates   POST /runtimes/connect
-GET  /runtimes                       SSE  /runs/{id}/events       POST /scenarios/validate
-GET  /runtime/jobs                   GET  /runs/{id}/trials/{tid}/trace    POST /experiments/plan
-POST /runtime/jobs/{id}/claim                                     POST /runs
-POST /runtime/jobs/{id}/trials/{tid}/events                       POST /runs/{id}/confirm
-POST /runtime/jobs/{id}/trials/{tid}/complete
+GET  /home                           GET  /runs/{id}                 POST /suites
+GET  /suites                         GET  /runs/{id}/results         PUT  /suites/{id}
+GET  /suites/{id}                    GET  /runs/{id}/report          POST /suites/validate
+GET  /suites/{id}/yaml               GET  /runs/{id}/aggregates      POST /suites/validate-yaml
+GET  /evidence                       GET  /runs/{id}/trials/{tid}    POST /evidence
+GET  /evidence/{id}                  GET  /runs/{id}/trials/{tid}/trace   POST /regressions
+GET  /regressions                    SSE  /runs/{id}/events          POST /regressions/{id}/run
+GET  /regressions/{id}               GET  /runtimes                  POST /artifacts
+GET  /artifacts                      GET  /runtime/jobs              POST /playground/trial
+GET  /artifacts/{id}                                                 POST /runtimes/connect
+                                                                     POST /scenarios/validate
+POST /runtime/jobs/{id}/claim                                        POST /experiments/plan
+POST /runtime/jobs/{id}/trials/{tid}/events                          POST /runs
+POST /runtime/jobs/{id}/trials/{tid}/complete                        POST /runs/{id}/confirm
 ```
 
-`GET /suites` serves `lab_suite.suite_catalog()` — the same function
-`axor-lab suites` prints, so the terminal and the screen cannot disagree about
-which suites exist. An announced-but-unimplemented suite has a catalog card and
-a 404 on its manifest, which is what stops the Builder from opening an empty
-document for a suite nobody wrote.
+Every screen in §2 now has an endpoint. What each one is careful about:
+
+- `GET /home` derives the onboarding step from what the workspace HAS, in the
+  order the workflow needs it — not from a stored wizard position that can drift
+  from reality — and offers only suites that are `available`, because Home is a
+  launch surface and a card there is a button.
+- `GET /suites` serves `lab_suite.suite_catalog()`, the same function
+  `axor-lab suites` prints, so the terminal and the screen cannot disagree about
+  which suites exist. An announced-but-unimplemented suite has a catalog card and
+  a 404 on its manifest, which stops the Builder opening an empty document.
+- `PUT /suites/{id}` refuses a manifest whose own `id` differs from the path:
+  saving it would silently create a SECOND suite and leave the Builder editing
+  the one nobody runs.
+- `POST /playground/trial` runs ONE trial, on one scenario and one arm, with
+  aggregations and regressions stripped — neither has anything to operate on for
+  a single trial, and an aggregate over one trial is not a rate. Nothing is
+  stored, and the payload carries `counted_in_a_run: false` so a client cannot
+  quietly file it beside a Run's trials.
+- `GET /runs/{id}/report` states coverage (completed / planned) and per-metric
+  coverage BEFORE aggregates, and computes no rate of its own.
+- `POST /regressions/{id}/run` is a CHECK, not a Run: it consumes trials that
+  already exist, and `error` stays distinct from `failed`.
+- Every store write is schema-validated before it lands, and every screen
+  endpoint requires the control token.
 
 `lab_server/app.py`: `GET /` (catalog page), `GET /e/{id}`, `GET /e/{id}/evidence/{eid}`, `GET /api/publications`, `GET /api/publications/{id}` (+ `/bundle`, `/reproductions`, `/takedown`).
 
-Everything in §2 that is not in this list has no implementation yet — that is Phase 3. This section exists so the table above reads as a target and not as a description.
+Storage is in memory (`lab_server/screens.py`), like the runtime-job store beside it — durable storage is a swap of that class, not of the endpoints.
 
 ## 5. Pairing (governance capability)
 
