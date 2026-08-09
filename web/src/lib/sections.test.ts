@@ -85,12 +85,27 @@ describe("the Builder is a form, not a wall of JSON textareas", () => {
     }
   });
 
-  it("basic mode shows no raw JSON editor at all", () => {
-    // JSON stays available — in Advanced and YAML. Basic is the mode for
-    // someone who does not want to hand-balance brackets.
-    const basic = [...IDENTITY, ...SECTIONS.flatMap((section) => section.fields)]
-      .filter((field) => !field.advanced);
-    expect(basic.filter((field) => field.widget === "json")).toEqual([]);
+  it("no mode shows a raw JSON editor — deep structures LINK to the one text editor", () => {
+    // there is exactly one text editor, the YAML mode. A JSON textarea in a
+    // form would be a second one, duplicating it badly; the widget vocabulary
+    // no longer even contains "json", and what cannot be formed is a
+    // "yaml-link" that jumps the cursor to that key.
+    const all = [...IDENTITY, ...SECTIONS.flatMap((section) => section.fields)];
+    expect(all.filter((field) => (field.widget as string) === "json")).toEqual([]);
+    for (const path of ["environment.tools", "environment.fixtures"]) {
+      expect(all.find((field) => field.path === path)?.widget, path).toBe("yaml-link");
+    }
+  });
+
+  it("advanced structures that CAN be forms are forms", () => {
+    const all = SECTIONS.flatMap((section) => section.fields);
+    for (const path of ["agents", "execution.conditions", "evaluation.evaluators", "regressions"]) {
+      expect(all.find((field) => field.path === path)?.widget, path).toBe("list");
+    }
+    expect(all.find((field) => field.path === "topology.kind")?.widget).toBe("select");
+    expect(all.find((field) => field.path === "execution.budgets.max_usd")?.widget).toBe(
+      "number",
+    );
   });
 });
 

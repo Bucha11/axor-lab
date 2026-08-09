@@ -16,16 +16,23 @@ import type { Json } from "./api";
  * it.
  */
 
+/**
+ * `yaml-link` is the deliberate absence of a widget: a deep structure (a tool
+ * manifest's args_schema, a governance policy) is not formable, and rendering
+ * a JSON textarea for it would be a second text editor duplicating the YAML
+ * mode. The field shows what is there and one click lands the cursor ON that
+ * key in YAML — one text editor, reachable from the form.
+ */
 export type Widget =
   | "text"
   | "textarea"
   | "number"
   | "select"
   | "checkbox"
-  | "json"
   | "tags"
   | "chips"
-  | "list";
+  | "list"
+  | "yaml-link";
 
 /** A field of one item inside a `list` widget. Flat on purpose: an item field
  * that itself needs a list is the signal the item belongs in Advanced JSON. */
@@ -96,8 +103,29 @@ export const SECTIONS: SectionSpec[] = [
       "pick it in Run below. This section only describes multi-agent topologies " +
       "(planner/worker, attacker/defender) — leave it empty for a single agent.",
     fields: [
-      { path: "agents", label: "Agents (topology roles)", widget: "json", advanced: true },
-      { path: "topology", label: "Topology", widget: "json", advanced: true },
+      {
+        path: "agents",
+        label: "Agents (topology roles)",
+        widget: "list",
+        advanced: true,
+        item: [
+          { key: "ref", label: "Ref", widget: "text", placeholder: "gpt-4o@2026-05" },
+          { key: "role", label: "Role", widget: "text", placeholder: "planner / attacker…" },
+          { key: "provider", label: "Provider", widget: "text", placeholder: "openai" },
+          { key: "model", label: "Model", widget: "text", placeholder: "gpt-4o" },
+        ],
+        blank: { ref: "" },
+      },
+      {
+        path: "topology.kind",
+        label: "Topology",
+        widget: "select",
+        advanced: true,
+        options: [
+          "single", "planner_workers", "reviewer_pipeline",
+          "negotiation", "swarm", "attacker_defender",
+        ],
+      },
     ],
   },
   {
@@ -136,9 +164,9 @@ export const SECTIONS: SectionSpec[] = [
         widget: "checkbox",
         advanced: true,
       },
-      { path: "environment.tools", label: "Tool manifests", widget: "json", advanced: true },
-      { path: "environment.fixtures", label: "Fixtures", widget: "json", advanced: true },
-      { path: "environment.variables", label: "Variables", widget: "json", advanced: true },
+      { path: "environment.tools", label: "Tool manifests", widget: "yaml-link", advanced: true },
+      { path: "environment.fixtures", label: "Fixtures", widget: "yaml-link", advanced: true },
+      { path: "environment.variables", label: "Variables", widget: "yaml-link", advanced: true },
     ],
   },
   {
@@ -163,12 +191,37 @@ export const SECTIONS: SectionSpec[] = [
       { path: "execution.concurrency", label: "Concurrency", widget: "number", advanced: true },
       { path: "execution.timeout_s", label: "Timeout (s)", widget: "number", advanced: true },
       { path: "execution.retries", label: "Retries", widget: "number", advanced: true },
-      { path: "execution.budgets", label: "Budgets", widget: "json", advanced: true },
+      { path: "execution.budgets.max_usd", label: "Budget (USD)", widget: "number", advanced: true },
+      {
+        path: "execution.budgets.max_trials",
+        label: "Budget (trials)",
+        widget: "number",
+        advanced: true,
+      },
+      {
+        path: "execution.budgets.max_input_tokens",
+        label: "Budget (input tokens)",
+        widget: "number",
+        advanced: true,
+      },
+      {
+        path: "execution.budgets.max_output_tokens",
+        label: "Budget (output tokens)",
+        widget: "number",
+        advanced: true,
+      },
       {
         path: "execution.conditions",
         label: "Conditions (governance)",
-        widget: "json",
+        widget: "list",
         advanced: true,
+        item: [
+          { key: "id", label: "Id", widget: "text", placeholder: "governed" },
+          { key: "label", label: "Label", widget: "text", placeholder: "governed + allowlist" },
+          { key: "enforcement", label: "Enforcement", widget: "select", options: ["off", "on"] },
+          { key: "kernel", label: "Kernel", widget: "text", placeholder: "reference_taint_floor_kernel" },
+        ],
+        blank: { schema_version: "condition/v1", id: "", enforcement: "on" },
         help: "omit for a single-arm run; present requires 'governance' in capabilities",
       },
     ],
@@ -238,8 +291,44 @@ export const SECTIONS: SectionSpec[] = [
         ],
         blank: { metric: "", fn: "mean", unit_of_analysis: "trial" },
       },
-      { path: "evaluation.evaluators", label: "Evaluators", widget: "json", advanced: true },
-      { path: "regressions", label: "Invariants", widget: "json", advanced: true },
+      {
+        path: "evaluation.evaluators",
+        label: "Evaluators",
+        widget: "list",
+        advanced: true,
+        item: [
+          { key: "id", label: "Id", widget: "text", placeholder: "read_count" },
+          {
+            key: "kind",
+            label: "Kind",
+            widget: "select",
+            options: ["predicate", "trial_metric", "suite_hook"],
+          },
+          { key: "metric", label: "Metric", widget: "text", placeholder: "trial_metric: key" },
+          { key: "hook", label: "Hook", widget: "text", placeholder: "suite_hook: entry point" },
+          { key: "produces", label: "Produces", widget: "text", placeholder: "reads" },
+        ],
+        blank: { id: "", kind: "suite_hook", produces: "" },
+        help: "a 'predicate' evaluator's predicate object is edited in YAML",
+      },
+      {
+        path: "regressions",
+        label: "Invariants",
+        widget: "list",
+        advanced: true,
+        item: [
+          { key: "id", label: "Id", widget: "text", placeholder: "RG-budget-reads" },
+          { key: "name", label: "Name", widget: "text" },
+          { key: "expectation", label: "Expectation", widget: "textarea" },
+        ],
+        blank: {
+          schema_version: "regression/v1",
+          id: "",
+          name: "",
+          rule: { kind: "metric_threshold", metric: "", op: "lt", value: 0 },
+        },
+        help: "the executable rule lives under each item's Details, in YAML",
+      },
     ],
   },
   {

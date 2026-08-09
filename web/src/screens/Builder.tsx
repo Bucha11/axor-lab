@@ -35,14 +35,25 @@ const MODES: [Mode, string][] = [
   ["yaml", "YAML"],
 ];
 
+/** One line saying what the field holds — shown beside "Edit in YAML" so the
+ * link is a description, not a mystery door. */
+function summaryOf(value: unknown): string {
+  if (value === undefined || value === null) return "not set";
+  if (Array.isArray(value)) return `${value.length} item(s)`;
+  if (typeof value === "object") return `${Object.keys(value).length} key(s)`;
+  return String(value);
+}
+
 function Widget({
   spec,
   value,
   onChange,
+  onJump,
 }: {
   spec: FieldSpec;
   value: unknown;
   onChange: (next: unknown) => void;
+  onJump: (path: string) => void;
 }) {
   const clear = (raw: string) => (raw.trim() === "" ? undefined : raw);
 
@@ -121,10 +132,18 @@ function Widget({
           fields={spec.item ?? []}
           blank={spec.blank ?? {}}
           onChange={onChange}
+          onJump={() => onJump(spec.path)}
         />
       );
-    case "json":
-      return <JsonField value={value} onChange={onChange} />;
+    case "yaml-link":
+      return (
+        <div className="row">
+          <span className="muted small">{summaryOf(value)}</span>
+          <button type="button" className="item-add" onClick={() => onJump(spec.path)}>
+            Edit in YAML →
+          </button>
+        </div>
+      );
     default:
       return (
         <input
@@ -214,11 +233,13 @@ function ListField({
   fields,
   blank,
   onChange,
+  onJump,
 }: {
   value: unknown;
   fields: ItemFieldSpec[];
   blank: Json;
   onChange: (next: unknown) => void;
+  onJump: () => void;
 }) {
   const items: Json[] = Array.isArray(value)
     ? value.filter((item): item is Json => !!item && typeof item === "object")
@@ -254,23 +275,14 @@ function ListField({
               ))}
             </div>
             {Object.keys(rest).length > 0 && (
-              <details className="item-details">
-                <summary className="muted small">
-                  Details ({Object.keys(rest).join(", ")})
-                </summary>
-                <JsonField
-                  value={rest}
-                  onChange={(next) => {
-                    const kept = Object.fromEntries(
-                      Object.entries(item).filter(([key]) => named.has(key)),
-                    );
-                    writeItem(index, {
-                      ...kept,
-                      ...(next && typeof next === "object" ? (next as Json) : {}),
-                    });
-                  }}
-                />
-              </details>
+              <div className="row">
+                <span className="muted small">
+                  also: {Object.keys(rest).join(", ")}
+                </span>
+                <button type="button" className="item-add" onClick={onJump}>
+                  Edit in YAML →
+                </button>
+              </div>
             )}
             <button
               type="button"
@@ -343,67 +355,18 @@ function ItemInput({
   }
 }
 
-/**
- * A structured field edited as JSON.
- *
- * It holds its own TEXT while the text is unparseable, rather than writing
- * through on every keystroke: parsing mid-edit turns every intermediate state
- * into a "field deleted", and the manifest loses the value the moment the user
- * types an opening brace.
- */
-function JsonField({
-  value,
-  onChange,
-}: {
-  value: unknown;
-  onChange: (next: unknown) => void;
-}) {
-  const serialized = value === undefined ? "" : JSON.stringify(value, null, 2);
-  const [text, setText] = useState(serialized);
-  const [invalid, setInvalid] = useState(false);
-  useEffect(() => {
-    setText(serialized);
-    setInvalid(false);
-  }, [serialized]);
-
-  return (
-    <>
-      <textarea
-        className={`json-area${invalid ? " invalid" : ""}`}
-        value={text}
-        spellCheck={false}
-        onChange={(event) => {
-          const raw = event.target.value;
-          setText(raw);
-          if (raw.trim() === "") {
-            setInvalid(false);
-            onChange(undefined);
-            return;
-          }
-          try {
-            const parsed = JSON.parse(raw);
-            setInvalid(false);
-            onChange(parsed);
-          } catch {
-            setInvalid(true); // keep the text, do not touch the manifest
-          }
-        }}
-      />
-      {invalid && <span className="muted small">not valid JSON — not saved yet</span>}
-    </>
-  );
-}
-
 function Fields({
   fields,
   manifest,
   advanced,
   onChange,
+  onJump,
 }: {
   fields: FieldSpec[];
   manifest: Json;
   advanced: boolean;
   onChange: (next: Json) => void;
+  onJump: (path: string) => void;
 }) {
   const shown = fields.filter((field) => advanced || !field.advanced);
   return (
@@ -422,6 +385,7 @@ function Fields({
             spec={spec}
             value={readPath(manifest, spec.path)}
             onChange={(next) => onChange(writePath(manifest, spec.path, next))}
+            onJump={onJump}
           />
           {spec.widget === "checkbox" && <span>{spec.label}</span>}
           {spec.help && <span className="muted small">{spec.help}</span>}
@@ -443,6 +407,21 @@ export function Builder({ suiteId }: { suiteId: string }) {
   const [runtimes, setRuntimes] = useState<RuntimeRow[] | null>(null);
   const [runtimeRef, setRuntimeRef] = useState("");
   const [runError, setRunError] = useState<string | null>(null);
+  const [jumpTarget, setJumpTarget] = useState<string | null>(null);
+
+  // runs AFTER the YAML textarea is committed — the whole reason the cursor
+  // placement is an effect and not a callback racing the render
+  useEffect(() => {
+    if (mode !== "yaml" || jumpTarget === null) return;
+    setJumpTarget(null);
+    const area = document.querySelector<HTMLTextAreaElement>(".yaml");
+    if (!area) return;
+    const offset = yamlOffsetOf(area.value, jumpTarget);
+    area.focus();
+    area.setSelectionRange(offset, offset);
+    const line = area.value.slice(0, offset).split("\n").length - 1;
+    area.scrollTop = Math.max(0, line * 18 - 60);
+  }, [mode, jumpTarget]);
 
   // the connected agents this suite can be dispatched to. Loaded here, not
   // hardcoded: the dropdown IS the list of runtimes Integrations connected,
@@ -558,6 +537,42 @@ export function Builder({ suiteId }: { suiteId: string }) {
     }
   }
 
+  /** Character offset of `path`'s key in a YAML text — found by walking the
+   * keys with 2-space indentation, the shape `to_yaml` emits. A miss returns 0:
+   * landing at the top of the document beats not landing in it. */
+  function yamlOffsetOf(text: string, path: string): number {
+    let from = 0;
+    let indent = 0;
+    for (const key of path.split(".")) {
+      const found = new RegExp(`^ {${indent}}("?)${key}\\1:`, "m").exec(text.slice(from));
+      if (!found) return 0;
+      from += found.index + found[0].length;
+      indent += 2;
+    }
+    return from;
+  }
+
+  /** The form's escape hatch for structures too deep to form: serialize the
+   * CURRENT document (same server round trip as the mode switch) and open the
+   * YAML editor with the cursor on the requested key. The cursor is placed in
+   * an effect, not a rAF — a rAF can fire before React commits the textarea,
+   * and then there is nothing to place a cursor into. */
+  async function jumpToYaml(path: string) {
+    if (manifest === null) return;
+    setBusy(true);
+    try {
+      const text = await api.suiteYamlOf(manifest);
+      setYaml(text);
+      setMode("yaml");
+      setJumpTarget(path);
+    } catch (exc) {
+      setErrors([exc instanceof Error ? exc.message : String(exc)]);
+      setOk(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /** Save, then dispatch to the chosen agent, then land on the live run.
    * Save-first is deliberate: the server dispatches the STORED suite, and a
    * run of anything other than what is on screen is the stale-document bug
@@ -634,6 +649,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
               manifest={manifest}
               advanced={mode === "advanced"}
               onChange={edited}
+              onJump={jumpToYaml}
             />
           </Card>
           {SECTIONS.filter(
@@ -652,6 +668,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
                 manifest={manifest}
                 advanced={mode === "advanced"}
                 onChange={edited}
+                onJump={jumpToYaml}
               />
             </Card>
           ))}
