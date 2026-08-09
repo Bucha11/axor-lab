@@ -789,13 +789,18 @@ def make_runtime_server(
     store: RuntimeJobStore | None = None,
     screens: "ScreenStore | None" = None,
     web_root: "pathlib.Path | None" = None,
+    data_dir: "str | pathlib.Path | None" = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs + screen-API server. `control_token`, if set,
     gates the control surface (runtime registration, run assignment, every
     screen); the runtime-facing endpoints are gated by the per-runtime
-    ingest_key issued at connect."""
+    ingest_key issued at connect.
+
+    `data_dir` makes the workspace DURABLE: suites, evidence, regressions and
+    artifacts are persisted there and reloaded on restart (the hosted-workspace
+    half of the open-core split). Omitted, storage is in-memory."""
     jobs = store or RuntimeJobStore()
-    shelf = screens if screens is not None else ScreenStore()
+    shelf = screens if screens is not None else ScreenStore(persist_dir=data_dir)
     # The built app, when there is one. Absent, every API route still answers
     # and only the browser surface is missing — the server never pretends to
     # serve a frontend that was not built.

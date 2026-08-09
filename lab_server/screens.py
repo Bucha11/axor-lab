@@ -16,8 +16,12 @@ storage is a swap of this class, not of the endpoints.
 
 from __future__ import annotations
 
+import json
+import os
 import threading
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 from lab_contracts import validate_artifact
 
@@ -42,12 +46,58 @@ class ScreenStore:
     the renderer was wrong.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, persist_dir: str | Path | None = None) -> None:
         self._lock = threading.Lock()
         self._by_kind: dict[str, dict[str, dict[str, Any]]] = {
             kind: {} for kind in SCREEN_KINDS
         }
+        # DURABLE storage (open-core plan §4.8 / RFC §16 "hosted workspace"): a
+        # workspace that vanishes on restart is a demo, not a product. With a
+        # directory, every document is written to disk and reloaded on startup —
+        # the swap this class's own docstring anticipated. Without one, the store
+        # is in-memory exactly as before (the tests' default, and the offline
+        # single-shot CLI's).
+        self._root = Path(persist_dir) if persist_dir is not None else None
+        if self._root is not None:
+            self._load_from_disk()
 
+    # -- persistence ------------------------------------------------------
+    def _dir_for(self, kind: str) -> Path:
+        assert self._root is not None
+        path = self._root / kind
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _path_for(self, kind: str, identifier: str) -> Path:
+        # the id can carry colons and slashes (sha256:..., paths); quote it so it
+        # is one safe filename, reversible on load
+        return self._dir_for(kind) / f"{quote(identifier, safe='')}.json"
+
+    def _load_from_disk(self) -> None:
+        for kind in SCREEN_KINDS:
+            directory = self._dir_for(kind)
+            for file in directory.glob("*.json"):
+                try:
+                    document = json.loads(file.read_text())
+                except (OSError, ValueError):
+                    continue  # a corrupt file is skipped, not fatal on startup
+                identifier = unquote(file.stem)
+                self._by_kind[kind][identifier] = document
+
+    def _write(self, kind: str, identifier: str, document: dict[str, Any]) -> None:
+        if self._root is None:
+            return
+        target = self._path_for(kind, identifier)
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(document, ensure_ascii=False))
+        os.replace(tmp, target)  # atomic: a reader never sees a half-written file
+
+    def _erase(self, kind: str, identifier: str) -> None:
+        if self._root is None:
+            return
+        self._path_for(kind, identifier).unlink(missing_ok=True)
+
+    # -- API --------------------------------------------------------------
     def put(self, kind: str, document: dict[str, Any], id_field: str = "id") -> str:
         if kind not in self._by_kind:
             raise ScreenStoreError(400, f"unknown kind {kind!r}")
@@ -61,6 +111,7 @@ class ScreenStore:
             raise ScreenStoreError(422, f"{kind} has no {id_field}")
         with self._lock:
             self._by_kind[kind][identifier] = dict(document)
+            self._write(kind, identifier, self._by_kind[kind][identifier])
         return identifier
 
     def get(self, kind: str, identifier: str) -> dict[str, Any]:
@@ -73,7 +124,10 @@ class ScreenStore:
     def delete(self, kind: str, identifier: str) -> bool:
         """Remove a stored document. Missing is a no-op (idempotent delete)."""
         with self._lock:
-            return self._by_kind.get(kind, {}).pop(identifier, None) is not None
+            existed = self._by_kind.get(kind, {}).pop(identifier, None) is not None
+            if existed:
+                self._erase(kind, identifier)
+            return existed
 
     def list(self, kind: str) -> list[dict[str, Any]]:
         with self._lock:

@@ -172,9 +172,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from lab_server.static import default_root
 
     token = args.control_token or os.environ.get("AXOR_LAB_CONTROL_TOKEN")
-    server = make_runtime_server(host=args.host, port=args.port, control_token=token)
+    data_dir = getattr(args, "data_dir", None) or os.environ.get("AXOR_LAB_DATA_DIR")
+    server = make_runtime_server(
+        host=args.host, port=args.port, control_token=token, data_dir=data_dir)
     site = default_root()
     print(f"axor-lab on http://{args.host}:{args.port}")
+    print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
     if site is None:
         # said plainly rather than serving a 404 the user has to diagnose
         print("  web app:  NOT BUILT — run `npm --prefix web install && "
@@ -1700,6 +1703,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--control-token", default=None,
         help="require this bearer token on every screen endpoint "
              "(or AXOR_LAB_CONTROL_TOKEN)",
+    )
+    p_serve.add_argument(
+        "--data-dir", default=None,
+        help="persist the workspace (suites, evidence, regressions, artifacts) "
+             "in this directory and reload it on restart (or AXOR_LAB_DATA_DIR); "
+             "omitted, storage is in-memory",
     )
     p_serve.set_defaults(func=_cmd_serve)
 
