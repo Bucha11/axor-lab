@@ -653,10 +653,36 @@ predate this spec.
 Choose Suite → Configure → Preview Trial → Run → Inspect → Create EvidenceCase →
 Pin Regression → Export Artifact.
 
-### Phase 5 — Open core packaging · ~1 week
+### Phase 5 — Open core packaging · ~1 week · **boundary enforced; distribution split + entitlement deferred**
 
-Split per §4.8; re-introduce an entitlement gate for the commercial half only if
-Phase 4 actually ships hosted features.
+Split per §4.8. This is packaging discipline, not a feature — the deliverable is
+that the OPEN core stays genuinely separable from the COMMERCIAL half.
+
+**The §16 map, as enforced by `tests/test_open_core_boundary.py`:**
+
+| Half | Packages | §16 items |
+|---|---|---|
+| **Open** | `lab_contracts`, `lab_analysis`, `lab_suite`, `lab_runner`, `lab_capabilities`, `lab_adapters` | suite format, runner, replay, artifact format, regression format, SDK (+ the governance capability, a capability of the runner) |
+| **Commercial** | `lab_server`, `web/` | Suite Builder (the primary commercial UX), hosted workspace, hosted execution, artifact/screen API, registry |
+
+**Enforced now** (the part that rots silently if left to convention): the open
+core must not import the commercial half. `test_open_core_boundary.py` walks
+every open module's imports (at any nesting depth), asserts none reach
+`lab_server`, pins the single declared seam — `lab_runner/cli.py`'s `serve`
+command, whose `lab_server` import is lazy — and, in a fresh interpreter, proves
+importing the open SDK + replay surface pulls in zero `lab_server` modules. So
+`import lab_suite` / `import lab_runner` is installable and runnable with no
+hosted server present, today.
+
+**Deferred, with reason:**
+- *Two installable distributions* (`axor-lab-core` open + `axor-lab` commercial
+  depending on it) — the boundary that makes the split CORRECT is enforced; the
+  `pyproject` split that makes it PACKAGED is mechanical and lands when there is
+  a release to cut.
+- *Entitlement / licensing gate* — the plan gates the commercial half only "if
+  Phase 4 actually ships hosted features." It hasn't: the server is a
+  single-process demo with in-memory storage. There is nothing to gate, and a
+  gate over nothing is theatre.
 
 ### Phase 6 — Multi-agent · unscheduled
 
