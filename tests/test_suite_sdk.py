@@ -201,6 +201,24 @@ class TestExecution(unittest.TestCase):
         artifact = run.artifact("a", CREATED, ENVIRONMENT)
         self.assertEqual(artifact["suite"]["id"], "budget")  # type: ignore[index]
 
+    def test_include_traces_drives_the_reproducibility_claim(self) -> None:
+        """`artifact.include_traces` was read by nothing while the artifact
+        hardcoded exact_replay — a claim over a body carrying no traces. A suite
+        that declares it false produces a metrics-only artifact that says so."""
+        suite = builtin_registry().get("budget")
+        governed = run_suite(suite.manifest(), run_id="r", suite=suite)
+        self.assertEqual(
+            governed.artifact("a", CREATED, ENVIRONMENT)["reproduce"]["reproducibility"],
+            "exact_replay",
+        )
+        manifest = copy.deepcopy(suite.manifest())
+        manifest["artifact"]["include_traces"] = False  # type: ignore[index]
+        metrics_only = run_suite(manifest, run_id="r", suite=suite)
+        self.assertEqual(
+            metrics_only.artifact("a", CREATED, ENVIRONMENT)["reproduce"]["reproducibility"],
+            "not_reproducible",
+        )
+
     def test_only_declared_aggregations_are_computed(self) -> None:
         """The platform must not helpfully add a comparison the suite never
         asked for — that is how McNemar became a default instead of a request."""

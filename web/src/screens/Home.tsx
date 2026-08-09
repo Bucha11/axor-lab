@@ -29,6 +29,14 @@ const STEP_COPY: Record<string, { title: string; body: string; action?: [string,
   },
 };
 
+// the backend's quick_actions name API endpoints; the UI needs ROUTES. This is
+// the id→route map, so a quick action jumps to the screen that performs it.
+const QUICK_ROUTES: Record<string, string> = {
+  run_suite: "/suites",
+  playground: "/playground",
+  connect_runtime: "/integrations",
+};
+
 export function Home() {
   const { data, error, loading, reload } = useAsync(() => api.home());
   if (loading) return <Loading />;
@@ -39,6 +47,7 @@ export function Home() {
     title: data.onboarding_step,
     body: "",
   };
+  const quickActions = (data.quick_actions ?? []).filter((a) => QUICK_ROUTES[a.id]);
 
   return (
     <div className="screen">
@@ -54,6 +63,20 @@ export function Home() {
           <Button onClick={() => navigate(step.action![1])}>{step.action[0]}</Button>
         )}
       </Card>
+
+      {quickActions.length > 0 && (
+        <div className="row">
+          {quickActions.map((action) => (
+            <Button
+              key={action.id}
+              variant="secondary"
+              onClick={() => navigate(QUICK_ROUTES[action.id]!)}
+            >
+              {action.label}
+            </Button>
+          ))}
+        </div>
+      )}
 
       <section>
         <h2>Suites</h2>

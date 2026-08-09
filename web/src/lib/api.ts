@@ -85,6 +85,8 @@ export interface RunRow {
   state: string;
   planned: number;
   completed: number;
+  created_at?: number;
+  updated_at?: number;
 }
 
 export interface RunReport {

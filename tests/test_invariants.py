@@ -222,6 +222,33 @@ class TestVerdictSequence(unittest.TestCase):
         self.assertEqual(result.status, STATUS_ERROR)
 
 
+class TestMalformedRuleErrorsAreActionable(unittest.TestCase):
+    """A discriminated union (rule keys on `kind`) must not fail with a bare
+    'oneOf matched 0 branches' — the message should name the field that is wrong
+    in the branch the author meant."""
+
+    def _errors(self, rule: dict) -> list[str]:
+        from lab_contracts import validate_artifact
+        return validate_artifact(
+            {"schema_version": "regression/v1", "id": "x", "name": "n", "rule": rule},
+            "regression")
+
+    def test_a_missing_field_names_the_field(self) -> None:
+        errs = self._errors({"kind": "metric_threshold", "metric": "m"})
+        self.assertTrue(any("op" in e for e in errs), errs)
+        self.assertFalse(any("oneOf matched" in e for e in errs), errs)
+
+    def test_two_kinds_in_one_rule_names_the_extra(self) -> None:
+        errs = self._errors({"kind": "metric_threshold", "metric": "m", "op": "lt",
+                             "value": 1, "predicate": {}})
+        self.assertTrue(any("predicate" in e for e in errs), errs)
+
+    def test_an_unknown_kind_stays_generic(self) -> None:
+        # no branch discriminates on kind="bogus", so the generic message is honest
+        errs = self._errors({"kind": "bogus"})
+        self.assertTrue(errs)
+
+
 class TestUnrunnableKinds(unittest.TestCase):
     def test_unknown_kind_errors(self) -> None:
         rule = {"schema_version": "regression/v1", "id": "RG-9", "name": "v",

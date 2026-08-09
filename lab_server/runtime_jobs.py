@@ -262,6 +262,11 @@ class _Job:
     trials: dict[str, _Trial] = field(default_factory=dict)
     estimate: dict[str, object] = field(default_factory=dict)
     aggregates: list[dict[str, object]] = field(default_factory=list)
+    # epoch seconds — so the Runs list can show a run's age and a dead run
+    # (running, but not touched in a long time) is distinguishable from an
+    # active one. Updated on every published transition.
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     # Live listeners on this run's event stream. A queue per subscriber, so a
     # slow reader cannot stall the runtime thread that is publishing.
     listeners: "list[queue.SimpleQueue]" = field(default_factory=list)
@@ -427,6 +432,7 @@ class RuntimeJobStore:
         held, from the mutation that changed something — never from a poller,
         so a screen sees a transition when it happens rather than up to an
         interval later."""
+        job.updated_at = time.time()
         if not job.listeners:
             return
         frames = self._frames_locked(job)
@@ -458,11 +464,16 @@ class RuntimeJobStore:
             return trial.trace
 
     def _results_locked(self, job: _Job) -> dict[str, object]:
+        # the runtime REPORTS runtime_config_hash; it is verified only at collect,
+        # which recomputes it from the assignment and refuses a mismatch. Served
+        # here it is unverified metadata — flagged as such so a consumer does not
+        # read a runtime's self-reported fingerprint as one Lab checked.
         trials = [
             {"trial_id": t.trial_id, "status": t.status, "attempt": t.attempt,
              "superseded": t.superseded, "events": len(t.events),
              "has_trace": t.trace is not None, "metrics": dict(t.metrics),
-             "runtime_config_hash": t.runtime_config_hash}
+             "runtime_config_hash": t.runtime_config_hash,
+             "runtime_config_hash_verified": False}
             for t in job.trials.values()
         ]
         # planned units the runtime never started are a real state — `pending` —
@@ -557,7 +568,8 @@ class RuntimeJobStore:
                 {"run_id": j.job_id, "state": j.state,
                  "planned": len(j.planned),
                  "completed": sum(1 for t in j.trials.values()
-                                  if t.status == "completed")}
+                                  if t.status == "completed"),
+                 "created_at": j.created_at, "updated_at": j.updated_at}
                 for j in self._jobs.values()
             ]
         return list(reversed(rows))

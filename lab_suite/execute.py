@@ -75,6 +75,12 @@ class SuiteRun:
              "history": [result.as_history_entry(self.run_id, created)]}
             for regression, result in zip(self.resolved.regressions, self.invariants)
         ]
+        # the suite's OWN declaration, not a hardcoded True: a suite that ships
+        # `artifact.include_traces: false` produces a metrics-only artifact, and
+        # claiming exact_replay over a body that carries no traces is a promise
+        # nothing can keep. The flag was read by nothing before.
+        artifact_cfg: dict[str, object] = self.resolved.manifest.get("artifact") or {}  # type: ignore[assignment]
+        traces_included = bool(artifact_cfg.get("include_traces", True))
         return build_artifact(
             artifact_id=artifact_id, created=created, bundle=bundle,
             suite=self.resolved.manifest,
@@ -86,7 +92,7 @@ class SuiteRun:
                 # The old default named a command that errored on every artifact.
                 "command": command or f"axor-lab run-suite {self.resolved.id}",
                 "requires": [],
-                "reproducibility": reproducibility_of(bundle, True),
+                "reproducibility": reproducibility_of(bundle, traces_included),
             },
         )
 

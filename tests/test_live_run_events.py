@@ -330,6 +330,18 @@ class TestTheStoreRefusesAHostileRuntime(LiveEventsTestCase):
             return json.loads(response.read())
 
 
+class TestRunsCarryAge(LiveEventsTestCase):
+    def test_a_run_row_carries_timestamps(self) -> None:
+        """A run with no timestamps cannot be shown as stale; the Runs list
+        needs an age to tell a dead run from an active one."""
+        request = urllib.request.Request(f"{self.base}/runs")
+        request.add_header("Authorization", f"Bearer {CONTROL}")
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            row = json.loads(response.read())["runs"][0]
+        self.assertIn("created_at", row)
+        self.assertIn("updated_at", row)
+
+
 class TestRunsAreAllListed(LiveEventsTestCase):
     def test_the_runs_endpoint_lists_every_run_not_just_five(self) -> None:
         """The Runs screen read home.recent_runs (capped at 5); a sixth run, or

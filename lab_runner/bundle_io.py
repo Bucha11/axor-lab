@@ -201,6 +201,18 @@ def read_bundle_package(path: Path) -> tuple[dict[str, object], dict[str, dict[s
         data = json.loads(Path(path).read_text())
     except (OSError, ValueError) as exc:
         raise RunnerError(f"{path} is not readable JSON: {exc}") from exc
+    if isinstance(data, dict) and data.get("schema_version") == "artifact/v1":
+        # a common, honest mistake: `run-suite` prints the artifact as "the
+        # deliverable", so a user points verify/replay at it. An artifact/v1
+        # embeds trace HASHES, not trace bodies (the schema has nowhere to put
+        # them), so it cannot be replayed alone — say exactly where the traces
+        # are instead of the generic "not a reproduction package".
+        raise RunnerError(
+            f"{path} is an artifact/v1, which carries trace hashes but not the "
+            "traces themselves. Replay/verify need the bundle DIRECTORY written "
+            "beside it (axor-lab run-suite --out <dir>) or a downloaded "
+            "{bundle, traces} package."
+        )
     if not isinstance(data, dict) or "bundle" not in data or "traces" not in data:
         raise RunnerError(
             f"{path} is not a reproduction package (expected a JSON object with "

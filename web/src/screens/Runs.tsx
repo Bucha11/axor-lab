@@ -9,6 +9,18 @@ import { useRunEvents } from "../lib/useRunEvents";
 // awaiting confirmation or waiting for a runtime has not started
 const PRE_START = new Set(["awaiting_confirmation", "waiting_for_runtime"]);
 
+/** "3m ago" from an epoch-seconds timestamp — so a run's age is visible and a
+ * stuck run (running, but idle for a long time) is distinguishable from a fresh
+ * one. */
+function ago(epochSeconds?: number): string {
+  if (!epochSeconds) return "";
+  const secs = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
 export function Runs() {
   // every run, from the dedicated endpoint — the Runs screen used to read
   // home.recent_runs (capped at 5), so a sixth run silently vanished
@@ -30,6 +42,7 @@ export function Runs() {
               <Link to={`/runs/${run.run_id}`}>{run.run_id}</Link>
               <span className="muted small">{run.completed}/{run.planned}</span>
               <StatusTag status={run.state} />
+              <span className="muted small">{ago(run.updated_at)}</span>
             </li>
           ))}
         </ul>
