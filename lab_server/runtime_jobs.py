@@ -45,6 +45,7 @@ import re
 import secrets
 import threading
 import time
+from urllib.parse import unquote
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -715,7 +716,10 @@ def make_runtime_server(
                 # against `self.path` meant `GET /suites?x=1` matched nothing and
                 # fell through to a 404 — a request that is merely decorated is
                 # not a different route.
-                path = self.path.split("?", 1)[0]
+                path = unquote(self.path.split("?", 1)[0])
+                # ...and DECODED: the client percent-encodes every path segment
+                # (a trial unit carries colons), so without unquote a trial link
+                # that works when typed raw 404s when the app follows it
                 if path == "/home":
                     # the Launchpad: the NEXT action, not the past. A catalog of
                     # what has already been published is a different screen.
@@ -877,7 +881,10 @@ def make_runtime_server(
                 # against `self.path` meant `GET /suites?x=1` matched nothing and
                 # fell through to a 404 — a request that is merely decorated is
                 # not a different route.
-                path = self.path.split("?", 1)[0]
+                path = unquote(self.path.split("?", 1)[0])
+                # ...and DECODED: the client percent-encodes every path segment
+                # (a trial unit carries colons), so without unquote a trial link
+                # that works when typed raw 404s when the app follows it
                 m = _SUITE_RE.match(path)
                 if m:
                     self._require_control()
@@ -903,7 +910,10 @@ def make_runtime_server(
                 # against `self.path` meant `GET /suites?x=1` matched nothing and
                 # fell through to a 404 — a request that is merely decorated is
                 # not a different route.
-                path = self.path.split("?", 1)[0]
+                path = unquote(self.path.split("?", 1)[0])
+                # ...and DECODED: the client percent-encodes every path segment
+                # (a trial unit carries colons), so without unquote a trial link
+                # that works when typed raw 404s when the app follows it
                 if path == "/runtimes/connect":
                     self._require_control()
                     body = self._read_json()

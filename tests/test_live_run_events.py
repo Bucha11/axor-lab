@@ -223,6 +223,24 @@ class TestRoutingIgnoresTheQueryString(LiveEventsTestCase):
             self.assertIn("suites", json.loads(response.read()))
 
 
+class TestRoutingDecodesThePath(LiveEventsTestCase):
+    def test_a_percent_encoded_trial_link_reaches_the_trial(self) -> None:
+        """The client percent-encodes every path segment, and a trial unit
+        carries colons — so the app requests `/trials/name%3Aarm%3A0`. The
+        routes were matched against the RAW path, which meant every trial link
+        in the Run report 404'd in the browser while the same URL typed with
+        literal colons worked."""
+        import urllib.parse
+
+        self._execute()
+        encoded = urllib.parse.quote(self.unit, safe="")
+        request = urllib.request.Request(f"{self.base}/runs/{self.run_id}/trials/{encoded}")
+        request.add_header("Authorization", f"Bearer {CONTROL}")
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            payload = json.loads(response.read())
+        self.assertEqual(payload["trial"]["trial_id"], self.unit)
+
+
 class TestManyListeners(LiveEventsTestCase):
     def test_two_screens_watching_one_run_both_see_it_finish(self) -> None:
         """One queue per subscriber, so a slow reader cannot stall the runtime
