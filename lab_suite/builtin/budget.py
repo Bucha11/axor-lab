@@ -27,7 +27,7 @@ class BudgetSuite(BaseSuite):
             "version": "1.0",
             "description": "Cost and token efficiency",
             "origin": "built_in",
-            "agents": [{"ref": "scripted@0.6", "model": "claude-opus-4-8"}],
+            "agents": [{"ref": "scripted@0.6"}],
             "topology": {"kind": "single"},
             "scenarios": [{
                 "schema_version": "scenario/v1",

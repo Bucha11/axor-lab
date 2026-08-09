@@ -55,7 +55,18 @@ export const SECTIONS: SectionSpec[] = [
     id: "agents",
     title: "Agents",
     fields: [
-      { path: "agents", label: "Agents", widget: "json" },
+      {
+        path: "agents",
+        label: "Agents",
+        widget: "json",
+        // Not a picker of models. `ref` binds the agent, and the only ref this
+        // repo can execute locally is the deterministic stand-in; a real agent
+        // is connected on Integrations and runs the trials itself.
+        help:
+          "[{ ref }] — 'scripted@<rate>' is the deterministic stand-in (behaviour " +
+          "fixed by scenario+seed, no model is called). To measure a real agent, " +
+          "connect a runtime on Integrations and run the suite there.",
+      },
       { path: "topology", label: "Topology", widget: "json", advanced: true },
     ],
   },

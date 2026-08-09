@@ -100,6 +100,37 @@ class TestManifestValidation(unittest.TestCase):
         errors = validate_manifest(manifest)
         self.assertTrue(any("say which" in e for e in errors), errors)
 
+    def test_a_stand_in_agent_may_not_advertise_a_model(self) -> None:
+        """The Builder renders `agents[]` verbatim and the artifact carries it,
+        so `{"ref": "scripted@0.6", "model": "claude-opus-4-8"}` presents a
+        model as the thing that produced the numbers while the trials are run
+        by a hash of (scenario, seed). Nothing reads the field — which is why it
+        has to be refused rather than ignored."""
+        manifest = _budget()
+        manifest["agents"] = [{"ref": "scripted@0.6", "model": "claude-opus-4-8"}]
+        errors = validate_manifest(manifest)
+        self.assertTrue(any("deterministic stand-in" in e for e in errors), errors)
+
+    def test_a_real_agent_ref_keeps_its_identity(self) -> None:
+        """The same fields are how a runtime-executed suite records WHICH model
+        it ran — the rule is about a stand-in claiming one, not about the
+        fields."""
+        manifest = _budget()
+        manifest["agents"] = [
+            {"ref": "gpt-4o@2026-05", "provider": "openai", "model": "gpt-4o"},
+        ]
+        errors = validate_manifest(manifest)
+        self.assertFalse([e for e in errors if "stand-in" in e], errors)
+
+    def test_no_builtin_advertises_a_model_it_does_not_run(self) -> None:
+        for suite_id in builtin_registry().ids():
+            manifest = builtin_registry().get(suite_id).manifest()
+            for entry in manifest.get("agents") or []:  # type: ignore[union-attr]
+                self.assertEqual(
+                    set(entry) - {"ref", "role", "name", "tool_ids"}, set(),
+                    f"{suite_id} declares agent identity nothing executes: {entry}",
+                )
+
     def test_schema_errors_suppress_semantic_noise(self) -> None:
         """A manifest that fails the schema reports THAT, not a cascade of
         semantic complaints about fields the schema already rejected."""

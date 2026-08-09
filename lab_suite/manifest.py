@@ -147,6 +147,40 @@ def validate_manifest(
             f"[suite] topology 'single' but {len(agents)} agents declared — say which "
             "topology relates them"
         )
+    errors.extend(_scripted_agent_errors(agents))
+    return errors
+
+
+# The agent identity fields `suite.schema.json` allows. They describe the model
+# a runtime is expected to run; NOTHING resolves them locally, where the only
+# adapter that exists is the deterministic stand-in (`lab_runner.agents`).
+_MODEL_IDENTITY = ("provider", "model", "system_prompt", "params")
+
+
+def _scripted_agent_errors(agents: list[dict[str, object]]) -> list[str]:
+    """A stand-in agent may not advertise a model it will never call.
+
+    `scripted@<rate>` is a fixture: behaviour is a hash of (scenario, seed), so
+    a `model:` beside it is read by nothing and honoured by nothing — but it is
+    rendered in the Builder and carried into the artifact, where it reads as the
+    model that produced the numbers. That is a reproducibility claim the run
+    cannot support, so it is refused rather than ignored.
+    """
+    errors: list[str] = []
+    for entry in agents:
+        if not isinstance(entry, dict):
+            continue
+        ref = str(entry.get("ref", ""))
+        if ref.partition("@")[0] != "scripted":
+            continue  # a real agent's identity belongs to the runtime that runs it
+        declared = [key for key in _MODEL_IDENTITY if entry.get(key) is not None]
+        if declared:
+            errors.append(
+                f"[suite] agent {ref!r} is the deterministic stand-in but declares "
+                f"{', '.join(declared)} — nothing runs that model, and the artifact "
+                "would name it as the one that produced the results. Drop the field, "
+                "or bind a real agent through a connected runtime"
+            )
     return errors
 
 
