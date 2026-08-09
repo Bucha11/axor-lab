@@ -78,6 +78,7 @@ _RUN_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)$")
 _RUN_RESULTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/results$")
 _RUN_EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/events$")
 _RUN_CONFIRM_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/confirm$")
+_RUN_CANCEL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/cancel$")
 _RUN_AGG_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/aggregates$")
 _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/trace$")
 # `validate` is a POST sibling, not a suite id — without the lookahead a GET to
@@ -101,6 +102,34 @@ class RuntimeJobsError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+# Metrics that are Lab's VERDICT about a trial, not the runtime's measurement.
+# The runtime may report duration/tokens/cost — things only it can observe — but
+# task_success/ASR are recomputed by Lab from the trace (collect_suite_run), and
+# a runtime that could set them on the raw store would grade its own homework on
+# every UI surface that reads the store before a bundle is built.
+RESERVED_METRICS = frozenset({"task_success", "ASR"})
+
+
+def _trace_errors(trace: object) -> list[str]:
+    """Schema errors for a runtime-pushed trace, or ['not a trace'] if absent.
+
+    The runtime is untrusted; a trace is validated at the moment it arrives, the
+    same check collect_suite_run runs, so poison never reaches `completed`."""
+    if not isinstance(trace, dict):
+        return ["no trace body"]
+    from lab_contracts import validate_artifact
+
+    return validate_artifact(trace, "trace")
+
+
+def _sanitize_metrics(metrics: dict[str, object]) -> dict[str, object]:
+    """Keep scalar runtime measurements; drop Lab-owned verdict names."""
+    return {
+        str(k): v for k, v in metrics.items()
+        if isinstance(v, (int, float, str, bool)) and str(k) not in RESERVED_METRICS
+    }
 
 
 @dataclass
@@ -224,6 +253,21 @@ class RuntimeJobStore:
             job = self._jobs.get(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
+            if any(not isinstance(a, dict) for a in aggregates):
+                raise RuntimeJobsError(400, "each aggregate must be an object")
+            # Finalization requires plan coverage. Attaching aggregates (even an
+            # empty list) used to flip a 1/2 run to `completed`, painting a green
+            # terminal badge over a run that never finished. A run with trials
+            # still outstanding is closed by cancel_run, not by pretending its
+            # aggregates are final.
+            if job.planned:
+                done = {tid for tid, t in job.trials.items()
+                        if t.status in ("completed", "failed")}
+                if not set(job.planned) <= done:
+                    outstanding = len(set(job.planned) - done)
+                    raise RuntimeJobsError(
+                        409, f"cannot finalize run {job_id!r}: {outstanding} planned "
+                             "trial(s) have not completed (cancel it to close a partial run)")
             job.aggregates = list(aggregates)
             if job.state in ("running", "receiving_traces", "analyzing"):
                 job.state = "completed"
@@ -314,17 +358,30 @@ class RuntimeJobStore:
             return trial.trace
 
     def _results_locked(self, job: _Job) -> dict[str, object]:
+        trials = [
+            {"trial_id": t.trial_id, "status": t.status, "attempt": t.attempt,
+             "superseded": t.superseded, "events": len(t.events),
+             "has_trace": t.trace is not None, "metrics": dict(t.metrics),
+             "runtime_config_hash": t.runtime_config_hash}
+            for t in job.trials.values()
+        ]
+        # planned units the runtime never started are a real state — `pending` —
+        # not an absence. Omitting them made the run screen list fewer trials
+        # than the plan and turned a deep link to an unstarted trial into a hard
+        # 404; a run stuck at 3/5 could not show what the other two were.
+        started = set(job.trials)
+        for unit in job.planned:
+            if unit not in started:
+                trials.append({
+                    "trial_id": unit, "status": "pending", "attempt": 0,
+                    "superseded": 0, "events": 0, "has_trace": False,
+                    "metrics": {}, "runtime_config_hash": None,
+                })
         return {
             "run_id": job.job_id, "state": job.state,
             "planned_trials": list(job.planned),
             "estimate": dict(job.estimate),
-            "trials": [
-                {"trial_id": t.trial_id, "status": t.status, "attempt": t.attempt,
-                 "superseded": t.superseded, "events": len(t.events),
-                 "has_trace": t.trace is not None, "metrics": dict(t.metrics),
-                 "runtime_config_hash": t.runtime_config_hash}
-                for t in job.trials.values()
-            ],
+            "trials": trials,
             "traces": [t.trace for t in job.trials.values() if t.trace is not None],
             # `bundle.aggregates` — RENDERED by the UI, never recomputed there
             "aggregates": list(job.aggregates),
@@ -336,6 +393,22 @@ class RuntimeJobStore:
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             return self._results_locked(job)
+
+    def list_runs(self) -> list[dict[str, object]]:
+        """Every run, newest first — the Runs screen's source.
+
+        The screen used to read `home.recent_runs`, capped at 5, so a sixth run
+        (or a stuck partial one pushed past the cap) silently vanished from the
+        only screen named Runs."""
+        with self._lock:
+            rows = [
+                {"run_id": j.job_id, "state": j.state,
+                 "planned": len(j.planned),
+                 "completed": sum(1 for t in j.trials.values()
+                                  if t.status == "completed")}
+                for j in self._jobs.values()
+            ]
+        return list(reversed(rows))
 
     # -- runtime-facing surface ------------------------------------------
     def list_jobs(self, runtime_ref: str) -> list[dict[str, object]]:
@@ -359,6 +432,8 @@ class RuntimeJobStore:
                       events: list[dict[str, object]]) -> dict[str, object]:
         with self._lock:
             job = self._require_owned(job_id, runtime_ref)
+            self._require_active(job)
+            self._require_planned(job, trial_id)
             trial = job.trials.setdefault(trial_id, _Trial(trial_id=trial_id))
             if trial.status != "pending":
                 # streaming events into an already-finished trial starts a fresh
@@ -382,8 +457,27 @@ class RuntimeJobStore:
                        runtime_config_hash: str | None = None) -> dict[str, object]:
         with self._lock:
             job = self._require_owned(job_id, runtime_ref)
+            self._require_active(job)
+            self._require_planned(job, trial_id)
+            # the runtime is untrusted input. A status outside the contract is a
+            # bug on its side, not a silent success: coercing "error" to
+            # "completed" counted a broken trial as a passing one.
+            if status not in ("completed", "failed"):
+                raise RuntimeJobsError(
+                    400, f"trial status must be 'completed' or 'failed', got {status!r}")
+            # a completed trial MUST carry a schema-valid trace; a failed one may
+            # carry a partial trace or none. Accepting an invalid trace here let
+            # poison reach `completed` and be served to the UI raw, while collect
+            # could never assemble the run into a bundle — a durable DoS.
+            if status == "completed":
+                errors = _trace_errors(trace)
+                if errors:
+                    raise RuntimeJobsError(
+                        422, f"completed trial needs a valid trace: {errors[:3]}")
+            elif trace is not None and _trace_errors(trace):
+                trace = None  # keep the failure, drop the unusable trace body
             trial = job.trials.setdefault(trial_id, _Trial(trial_id=trial_id))
-            new_status = status if status in ("completed", "failed") else "completed"
+            new_status = status
             if trial.status in ("completed", "failed"):
                 # re-completing an already-finished trial. Identical (status,trace)
                 # is IDEMPOTENT — a duplicate delivery, not a change. A DIFFERENT
@@ -399,14 +493,27 @@ class RuntimeJobStore:
             if runtime_config_hash:
                 trial.runtime_config_hash = str(runtime_config_hash)
             if metrics:
-                trial.metrics = {
-                    str(k): v for k, v in metrics.items()
-                    if isinstance(v, (int, float, str, bool))
-                }
+                trial.metrics = _sanitize_metrics(metrics)
             self._maybe_finish(job)
             self._publish_locked(job)
             return {"trial_id": trial_id, "status": trial.status, "run_state": job.state,
                     "attempt": trial.attempt, "superseded": trial.superseded}
+
+    def cancel_run(self, job_id: str) -> dict[str, object]:
+        """Terminate a run that will not finish on its own.
+
+        A run whose runtime died mid-plan otherwise sits `running` forever —
+        `failed`/`cancelled` were declared terminal states nothing ever
+        assigned. Cancelling is the operator's way to close it; already-terminal
+        runs are left as they are (idempotent)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise RuntimeJobsError(404, f"unknown run {job_id!r}")
+            if job.state not in TERMINAL_STATES:
+                job.state = "cancelled"
+                self._publish_locked(job)
+            return {"run_id": job_id, "state": job.state}
 
     # -- internals --------------------------------------------------------
     def _require_owned(self, job_id: str, runtime_ref: str) -> _Job:
@@ -416,6 +523,25 @@ class RuntimeJobStore:
         if job.runtime_ref != runtime_ref:
             raise RuntimeJobsError(403, "this runtime does not own that run")
         return job
+
+    def _require_active(self, job: _Job) -> None:
+        """A run only accepts trials while a claimed runtime is executing it.
+
+        Ingesting into `waiting_for_runtime` completed trials on an unclaimed
+        run; into `awaiting_confirmation` it drove the run to `completed` without
+        the operator ever confirming the estimate — the confirmation gate,
+        bypassed. Trials belong to a run that is running."""
+        if job.state not in ("running", "receiving_traces"):
+            raise RuntimeJobsError(
+                409, f"run {job.job_id!r} is not accepting trials (state {job.state})")
+
+    def _require_planned(self, job: _Job, trial_id: str) -> None:
+        """The runtime may only push trials Lab planned. An unplanned unit was
+        stored and rendered as a trial the experiment never described — the same
+        rule collect_suite_run enforces, moved to the moment of arrival."""
+        if job.planned and trial_id not in job.planned:
+            raise RuntimeJobsError(
+                409, f"trial {trial_id!r} is not in the plan for run {job.job_id!r}")
 
     def _maybe_finish(self, job: _Job) -> None:
         # a job with no explicit plan finishes when the runtime says so (a later
@@ -825,6 +951,12 @@ def make_runtime_server(
                     self._require_control()
                     self._send(200, {"runtimes": jobs.list_runtimes()})
                     return
+                if path == "/runs":
+                    # the Runs screen's source — every run, not the home
+                    # payload's 5-most-recent slice.
+                    self._require_control()
+                    self._send(200, {"runs": jobs.list_runs()})
+                    return
                 if _RUNTIME_JOBS_RE.match(path):
                     ref = self._runtime_ref()
                     self._send(200, {"jobs": jobs.list_jobs(ref)})
@@ -1119,6 +1251,11 @@ def make_runtime_server(
                 if m:
                     self._require_control()
                     self._send(200, jobs.confirm_run(m.group(1)))
+                    return
+                m = _RUN_CANCEL_RE.match(path)
+                if m:
+                    self._require_control()
+                    self._send(200, jobs.cancel_run(m.group(1)))
                     return
                 m = _RUN_AGG_RE.match(path)
                 if m:

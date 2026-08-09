@@ -241,6 +241,110 @@ class TestRoutingDecodesThePath(LiveEventsTestCase):
         self.assertEqual(payload["trial"]["trial_id"], self.unit)
 
 
+class TestTheStoreRefusesAHostileRuntime(LiveEventsTestCase):
+    """The runtime is untrusted input. These validations used to live only in
+    collect_suite_run, which no HTTP route calls — so a hostile runtime
+    corrupted live state and every raw-store screen, and collect merely failed
+    later. The checks now run at ingest."""
+
+    def _key(self) -> str:
+        return str(self.connection["ingest_key"])
+
+    def _complete(self, unit, body, token=None):
+        return self.call_status(
+            "POST", f"/runtime/jobs/{self.run_id}/trials/{unit}/complete", body,
+            token=token or self._key())
+
+    def call_status(self, method, path, body, token):
+        request = urllib.request.Request(
+            f"{self.base}{path}", data=json.dumps(body).encode(), method=method)
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    def test_completing_before_claim_is_refused(self) -> None:
+        """An unclaimed run is not executing; completing a trial on it (or on an
+        awaiting_confirmation run) bypassed the claim/confirm gate."""
+        status = self._complete(self.unit, {"trace": self.trace, "status": "completed"})
+        self.assertEqual(status, 409)
+
+    def test_an_unplanned_trial_is_refused(self) -> None:
+        self._post(f"/runtime/jobs/{self.run_id}/claim", {}, token=self._key())
+        status = self._complete("ghost:cond:99", {"trace": self.trace, "status": "completed"})
+        self.assertEqual(status, 409)
+
+    def test_a_completed_trial_needs_a_valid_trace(self) -> None:
+        self._post(f"/runtime/jobs/{self.run_id}/claim", {}, token=self._key())
+        status = self._complete(self.unit, {"trace": {"schema_version": "trace/v1"},
+                                            "status": "completed"})
+        self.assertEqual(status, 422)
+
+    def test_an_unknown_status_is_refused(self) -> None:
+        self._post(f"/runtime/jobs/{self.run_id}/claim", {}, token=self._key())
+        status = self._complete(self.unit, {"trace": self.trace, "status": "error"})
+        self.assertEqual(status, 400)
+
+    def test_a_runtime_cannot_report_a_lab_owned_verdict(self) -> None:
+        """task_success is Lab's verdict, recomputed from the trace. A runtime
+        that could set it on the raw store would grade its own homework on every
+        UI surface that reads the store before a bundle is built."""
+        key = self._key()
+        self._post(f"/runtime/jobs/{self.run_id}/claim", {}, token=key)
+        self._post(
+            f"/runtime/jobs/{self.run_id}/trials/{self.unit}/complete",
+            {"trace": self.trace, "status": "completed",
+             "metrics": {"task_success": True, "duration_ms": 2.0}},
+            token=key,
+        )
+        results = self._get(f"/runs/{self.run_id}/results")
+        trial = next(t for t in results["trials"] if t["trial_id"] == self.unit)
+        self.assertNotIn("task_success", trial["metrics"])
+        self.assertIn("duration_ms", trial["metrics"])
+
+    def test_a_stuck_run_can_be_cancelled_to_a_terminal_state(self) -> None:
+        self._post(f"/runtime/jobs/{self.run_id}/claim", {}, token=self._key())
+        cancelled = self._post(f"/runs/{self.run_id}/cancel", {})
+        self.assertEqual(cancelled["state"], "cancelled")
+
+    def test_finalizing_a_run_with_outstanding_trials_is_refused(self) -> None:
+        """Attaching aggregates flipped a partial run straight to a green
+        `completed`. A run with trials outstanding is closed by cancel, not by
+        pretending its aggregates are final."""
+        self._post(f"/runtime/jobs/{self.run_id}/claim", {}, token=self._key())
+        status = self.call_status(
+            "POST", f"/runs/{self.run_id}/aggregates", {"aggregates": []}, token=CONTROL)
+        self.assertEqual(status, 409)
+
+    def _get(self, path: str) -> dict:
+        request = urllib.request.Request(f"{self.base}{path}")
+        request.add_header("Authorization", f"Bearer {CONTROL}")
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            return json.loads(response.read())
+
+
+class TestRunsAreAllListed(LiveEventsTestCase):
+    def test_the_runs_endpoint_lists_every_run_not_just_five(self) -> None:
+        """The Runs screen read home.recent_runs (capped at 5); a sixth run, or
+        a stuck partial one, vanished from the only screen named Runs."""
+        for _ in range(6):
+            self._post("/runs", {
+                "experiment": {"schema_version": "experiment/v1", "id": "e",
+                               "type": "benchmark", "scenario_ids": ["s"], "repeats": 1,
+                               "agent_ref": "scripted@0.6"},
+                "runtime_ref": self.connection["runtime_ref"],
+                "planned_trials": ["s:ungoverned:0"],
+            })
+        request = urllib.request.Request(f"{self.base}/runs")
+        request.add_header("Authorization", f"Bearer {CONTROL}")
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            runs = json.loads(response.read())["runs"]
+        self.assertGreaterEqual(len(runs), 7)  # the setUp run + 6 more
+
+
 class TestManyListeners(LiveEventsTestCase):
     def test_two_screens_watching_one_run_both_see_it_finish(self) -> None:
         """One queue per subscriber, so a slow reader cannot stall the runtime

@@ -185,28 +185,46 @@ class TestCollection(unittest.TestCase):
         store, runtime_ref = _store_with_runtime()
         suite = builtin_registry().get("budget")
         assignment = assign_suite(suite.manifest(), runtime_ref, store)
+        # run ONE real trial so a valid trace exists to clone, then claim keeps
+        # the run active for the rogue ingest
         runtime = _WrappedRuntime(store, runtime_ref)
-        runtime.work()
-        rogue = dict(next(iter(store.results(assignment.run_id)["traces"])))  # type: ignore[arg-type]
+        for job in store.list_jobs(runtime_ref):
+            claimed = store.claim(str(job["job_id"]), runtime_ref)
+            scenarios = {str(s["name"]): s for s in claimed["assignment"]["scenarios"]}
+            manifests = {str(m["id"]): m for m in claimed["assignment"]["tool_manifests"]}
+            unit = str(claimed["planned_trials"][0])
+            sid, cid, idx = unit.rsplit(":", 2)
+            trace, _ = runtime._run(scenarios[sid], manifests, cid, int(idx))
+            store.complete_trial(str(job["job_id"]), unit, runtime_ref, trace)
+        rogue = dict(trace)
         rogue["trial"] = {**rogue["trial"], "scenario_id": "not-in-the-suite"}
-        store.complete_trial(assignment.run_id, "rogue", runtime_ref, rogue)
-        with self.assertRaises(DispatchError) as ctx:
-            collect_suite_run(assignment, store)
+        # the store now refuses an unplanned unit at ingest — the same rule
+        # collect enforces, moved to the moment of arrival so poison never lands
+        from lab_server.runtime_jobs import RuntimeJobsError
+
+        with self.assertRaises(RuntimeJobsError) as ctx:
+            store.complete_trial(assignment.run_id, "rogue", runtime_ref, rogue)
+        self.assertEqual(ctx.exception.status, 409)
         self.assertIn("not in the plan", str(ctx.exception))
 
     def test_an_invalid_trace_is_refused(self) -> None:
         store, runtime_ref = _store_with_runtime()
         suite = builtin_registry().get("budget")
         assignment = assign_suite(suite.manifest(), runtime_ref, store)
+        unit = "budget-spend-summary-01:ungoverned:0"
+        store.claim(assignment.run_id, runtime_ref)  # a run only accepts trials while active
         broken = {"schema_version": "trace/v1", "trace_id": "t",
                   "trial": {"run_id": "r", "scenario_id": "budget-spend-summary-01",
                             "condition_id": "ungoverned", "seed": "s000",
                             "repeat_index": 0}}  # no producer, no events
-        store.complete_trial(assignment.run_id, "budget-spend-summary-01:ungoverned:0",
-                             runtime_ref, broken)
-        with self.assertRaises(DispatchError) as ctx:
-            collect_suite_run(assignment, store)
-        self.assertIn("invalid trace", str(ctx.exception))
+        # a completed trial must carry a schema-valid trace; the store now
+        # refuses the invalid one at ingest rather than letting it reach
+        # `completed` and only failing later at collect
+        from lab_server.runtime_jobs import RuntimeJobsError
+
+        with self.assertRaises(RuntimeJobsError) as ctx:
+            store.complete_trial(assignment.run_id, unit, runtime_ref, broken)
+        self.assertEqual(ctx.exception.status, 422)
 
     def test_runtime_reported_metrics_are_kept_and_unmeasured_ones_are_not(self) -> None:
         """Lab did not execute the trial so it cannot time it; what it can do is
@@ -461,6 +479,9 @@ class TestUngovernedStillGoesThroughTheCore(unittest.TestCase):
         unwrapped["trial"] = {**unwrapped["trial"],
                               "scenario_id": str(scenario["name"]),
                               "condition_id": "ungoverned", "repeat_index": 0}
+        store.claim(assignment.run_id, runtime_ref)  # a run only accepts trials while active
+        # the trace is schema-VALID (so it passes ingest) but names no kernel —
+        # the unwrapped-agent rule is a collect-time integrity check, not schema
         store.complete_trial(assignment.run_id,
                              f"{scenario['name']}:ungoverned:0", runtime_ref, unwrapped)
         with self.assertRaises(DispatchError) as ctx:
