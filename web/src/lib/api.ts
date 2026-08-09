@@ -209,6 +209,15 @@ export const api = {
     call<ValidationResult>("POST", "/suites/validate-yaml", { yaml }),
   saveSuite: (id: string, suite: Json) =>
     call<{ id: string }>("PUT", `/suites/${encodeURIComponent(id)}`, { suite }),
+  /** Bind a connected agent (a runtime_ref from Integrations) to the STORED
+   * suite and start a run. The server resolves the suite saved-first, so what
+   * runs is what Save wrote. */
+  dispatchSuite: (id: string, runtimeRef: string) =>
+    call<{ run_id: string; state: string; planned_trials: string[] }>(
+      "POST",
+      `/suites/${encodeURIComponent(id)}/dispatch`,
+      { runtime_ref: runtimeRef },
+    ),
 
   playground: (request: { suite_id?: string; suite?: Json; scenario?: string; seed?: string }) =>
     call<PlaygroundResult>("POST", "/playground/trial", request),

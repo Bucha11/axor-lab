@@ -84,6 +84,7 @@ _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/tr
 # is missing rather than like the method is wrong.
 _SUITE_RE = re.compile(r"^/suites/(?!validate$)([A-Za-z0-9_-]+)$")
 _SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
+_SUITE_DISPATCH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/dispatch$")
 _RUN_REPORT_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/report$")
 _RUN_TRIAL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)$")
 _EVIDENCE_RE = re.compile(r"^/evidence/([A-Za-z0-9_.:-]+)$")
@@ -959,6 +960,43 @@ def make_runtime_server(
                         scenarios=body.get("scenarios") or {},  # type: ignore[arg-type]
                         evaluators=body.get("evaluators") or {},  # type: ignore[arg-type]
                     ))
+                    return
+                m = _SUITE_DISPATCH_RE.match(path)
+                if m:
+                    # The Builder's Run button: bind a CONNECTED agent to this
+                    # suite and start a run. The suite resolves stored-first —
+                    # the document being dispatched is the one Save wrote, not
+                    # the built-in it started from. The agent is a runtime_ref
+                    # from /runtimes/connect; the manifest's `agents[]` names
+                    # what the suite is ABOUT, this names who executes it.
+                    from lab_suite.dispatch import build_assignment
+                    from lab_suite.errors import SuiteError, SuiteNotFound
+
+                    self._require_control()
+                    body = self._read_json()
+                    runtime_ref = body.get("runtime_ref")
+                    if not isinstance(runtime_ref, str) or not runtime_ref:
+                        raise RuntimeJobsError(
+                            400,
+                            "dispatch requires {runtime_ref} — connect an "
+                            "agent on Integrations first",
+                        )
+                    try:
+                        manifest = self._resolve_suite(m.group(1))
+                    except SuiteNotFound as exc:
+                        raise RuntimeJobsError(404, str(exc)) from None
+                    try:
+                        planned = build_assignment(manifest, runtime_ref)
+                    except SuiteError as exc:
+                        # a manifest that resolves but cannot be executed on a
+                        # remote runtime is the user's to fix, not a crash
+                        raise RuntimeJobsError(422, str(exc)) from None
+                    created = jobs.create_run(
+                        runtime_ref, planned.assignment,
+                        planned=list(planned.planned),
+                    )
+                    created["planned_trials"] = list(planned.planned)
+                    self._send(201, created)
                     return
                 if path == "/suites/validate":
                     # The Builder's validate button, in both Basic and YAML

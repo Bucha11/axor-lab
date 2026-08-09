@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, type Json } from "../lib/api";
+import { api, type Json, type RuntimeRow } from "../lib/api";
+import { navigate } from "../lib/router";
 import {
   IDENTITY,
   SECTIONS,
@@ -7,7 +8,7 @@ import {
   readPath,
   writePath,
 } from "../lib/sections";
-import { Button, Card, Failed, Loading, Tag } from "../components/ui";
+import { Button, Card, Failed, Link, Loading, Tag } from "../components/ui";
 
 /**
  * The Suite Builder — Basic, Advanced and YAML over ONE manifest (RFC §13).
@@ -198,6 +199,28 @@ export function Builder({ suiteId }: { suiteId: string }) {
   const [ok, setOk] = useState<boolean | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [runtimes, setRuntimes] = useState<RuntimeRow[] | null>(null);
+  const [runtimeRef, setRuntimeRef] = useState("");
+  const [runError, setRunError] = useState<string | null>(null);
+
+  // the connected agents this suite can be dispatched to. Loaded here, not
+  // hardcoded: the dropdown IS the list of runtimes Integrations connected,
+  // and an empty list renders as "go connect one", never as a fake choice.
+  useEffect(() => {
+    let live = true;
+    api
+      .runtimes()
+      .then(({ runtimes: rows }) => {
+        if (!live) return;
+        setRuntimes(rows);
+        const only = rows.length === 1 ? rows[0] : undefined;
+        if (only) setRuntimeRef(only.runtime_ref);
+      })
+      .catch(() => live && setRuntimes([]));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -288,6 +311,34 @@ export function Builder({ suiteId }: { suiteId: string }) {
     }
   }
 
+  /** Save, then dispatch to the chosen agent, then land on the live run.
+   * Save-first is deliberate: the server dispatches the STORED suite, and a
+   * run of anything other than what is on screen is the stale-document bug
+   * the Builder already fixed once. */
+  async function run() {
+    if (!runtimeRef) return;
+    setBusy(true);
+    setRunError(null);
+    try {
+      const document = await current();
+      if (document === null) return;
+      const result = await api.validateSuite(document);
+      setOk(result.ok);
+      setErrors(result.errors);
+      if (!result.ok) return;
+      const id = String(document.id ?? suiteId);
+      await api.saveSuite(id, document);
+      setManifest(document);
+      setSaved(true);
+      const created = await api.dispatchSuite(id, runtimeRef);
+      navigate(`/runs/${created.run_id}`);
+    } catch (exc) {
+      setRunError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (loadError) return <Failed error={loadError} />;
   if (manifest === null) return <Loading />;
 
@@ -371,6 +422,39 @@ export function Builder({ suiteId }: { suiteId: string }) {
             ))}
           </ul>
         )}
+      </Card>
+
+      <Card>
+        <h3>Run</h3>
+        {runtimes === null ? (
+          <Loading />
+        ) : runtimes.length === 0 ? (
+          <p className="muted">
+            No agent connected yet. Bring your agent on{" "}
+            <Link to="/integrations">Integrations</Link> — the connected runtime
+            executes the suite on its side and pushes traces back; Lab never
+            runs the agent itself.
+          </p>
+        ) : (
+          <div className="row">
+            <select
+              value={runtimeRef}
+              onChange={(event) => setRuntimeRef(event.target.value)}
+            >
+              <option value="">— choose an agent —</option>
+              {runtimes.map((runtime) => (
+                <option key={runtime.runtime_ref} value={runtime.runtime_ref}>
+                  {runtime.model || runtime.agent_ref || "agent"} (
+                  {runtime.runtime_ref})
+                </option>
+              ))}
+            </select>
+            <Button onClick={run} disabled={busy || !runtimeRef}>
+              Save &amp; run
+            </Button>
+          </div>
+        )}
+        {runError && <p className="errors">{runError}</p>}
       </Card>
     </div>
   );

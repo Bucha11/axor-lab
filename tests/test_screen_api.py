@@ -221,6 +221,90 @@ class TestTheBuilderCanSave(ScreenApiTestCase):
             self.assertEqual(from_yaml(response.read().decode())["version"], "9.9")
 
 
+class TestTheBuilderCanDispatch(ScreenApiTestCase):
+    """`POST /suites/{id}/dispatch` — the Run button.
+
+    Bring your agent on Integrations, pick it from the dropdown, run. Before
+    this route existed the whole dispatch path (`build_assignment` →
+    `POST /runs` → SSE) was reachable only from tests: the UI could author and
+    validate a suite and then had no way to run it against anything.
+    """
+
+    def _connect(self) -> dict:
+        _, connection = self.call("POST", "/runtimes/connect", {"model": "gpt-4o"})
+        return connection
+
+    def test_dispatch_binds_the_agent_and_creates_the_run(self) -> None:
+        connection = self._connect()
+        status, created = self.call(
+            "POST", "/suites/budget/dispatch",
+            {"runtime_ref": connection["runtime_ref"]},
+        )
+        self.assertEqual(status, 201, created)
+        self.assertEqual(created["state"], "waiting_for_runtime")
+        # budget: 1 scenario x 5 repeats x 1 (synthesized ungoverned) arm
+        self.assertEqual(len(created["planned_trials"]), 5)
+
+    def test_the_connected_agent_receives_the_executable_suite(self) -> None:
+        """The runtime polls its jobs with the ingest key and must find the
+        RESOLVED payload — scenario bodies and tool manifests, not references —
+        because it has no access to Lab's registries."""
+        connection = self._connect()
+        _, created = self.call(
+            "POST", "/suites/budget/dispatch",
+            {"runtime_ref": connection["runtime_ref"]},
+        )
+        _, jobs = self.call("GET", "/runtime/jobs", token=connection["ingest_key"])
+        self.assertIn(created["run_id"], [j["job_id"] for j in jobs["jobs"]])
+        _, claimed = self.call(
+            "POST", f"/runtime/jobs/{created['run_id']}/claim", {},
+            token=connection["ingest_key"],
+        )
+        assignment = claimed["assignment"]
+        self.assertEqual(assignment["suite_ref"], "budget")
+        self.assertTrue(assignment["scenarios"][0]["task"])
+        self.assertTrue(assignment["conditions"])
+
+    def test_it_dispatches_the_saved_suite_not_the_builtin(self) -> None:
+        """Save-then-run must run what is on screen. The Builder already had
+        this bug once on the read side — the save vanished behind a green
+        tick — so the dispatch side is pinned too."""
+        manifest = builtin_registry().get("budget").manifest()
+        manifest["execution"]["repeats"] = 2  # type: ignore[index]
+        self.call("PUT", "/suites/budget", {"suite": manifest})
+        connection = self._connect()
+        _, created = self.call(
+            "POST", "/suites/budget/dispatch",
+            {"runtime_ref": connection["runtime_ref"]},
+        )
+        self.assertEqual(len(created["planned_trials"]), 2)
+
+    def test_no_agent_chosen_is_a_400_that_says_where_agents_come_from(self) -> None:
+        status, payload = self.call("POST", "/suites/budget/dispatch", {})
+        self.assertEqual(status, 400)
+        self.assertIn("Integrations", payload["error"])
+
+    def test_an_unknown_agent_is_a_404_not_a_created_run(self) -> None:
+        status, _ = self.call(
+            "POST", "/suites/budget/dispatch", {"runtime_ref": "rt_gone"},
+        )
+        self.assertEqual(status, 404)
+
+    def test_an_unknown_suite_is_a_404(self) -> None:
+        connection = self._connect()
+        status, _ = self.call(
+            "POST", "/suites/no-such/dispatch",
+            {"runtime_ref": connection["runtime_ref"]},
+        )
+        self.assertEqual(status, 404)
+
+    def test_dispatch_is_gated_by_the_control_token(self) -> None:
+        status, _ = self.call(
+            "POST", "/suites/budget/dispatch", {"runtime_ref": "rt"}, token=None,
+        )
+        self.assertEqual(status, 401)
+
+
 class TestEvidenceAndRegressionsAndArtifacts(ScreenApiTestCase):
     def _case(self) -> dict:
         return {
