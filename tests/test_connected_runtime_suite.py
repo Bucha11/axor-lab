@@ -28,6 +28,7 @@ from lab_suite import (
     build_assignment,
     builtin_registry,
     collect_suite_run,
+    run_suite,
 )
 
 CREATED = "2026-08-03T00:00:00+00:00"
@@ -282,6 +283,83 @@ class TestCollection(unittest.TestCase):
                 continue
             ref = str(trial["trace_ref"])
             self.assertEqual(ref, content_hash(run.traces[ref]))
+
+
+class TestCollectionParity(unittest.TestCase):
+    """The dispatched path must produce what the in-process path does — a suite
+    that behaves differently by execution mode is two platforms.
+
+    These push REAL suite traces (produced by `run_suite` with the actual
+    built-in) back through the store, the way the refund-desk story's mock
+    runtime does — the fixed `_WrappedRuntime` runs a budget-shaped scripted
+    program that never triggers agentdojo's attack.
+    """
+
+    def _dispatch_execute(self, manifest, suite_id, *, fail_unit=None):
+        store, runtime_ref = _store_with_runtime()
+        suite = builtin_registry().get(suite_id)
+        assignment = assign_suite(manifest, runtime_ref, store)
+        local = run_suite(manifest, run_id=assignment.run_id, suite=suite)
+        by_unit = {
+            f"{t['scenario_id']}:{t['condition_id']}:{t['repeat_index']}":
+                (local.traces[str(t["trace_ref"])], t["metrics"])
+            for t in local.trials if t.get("status") == "completed"
+        }
+        for job in store.list_jobs(runtime_ref):
+            claimed = store.claim(str(job["job_id"]), runtime_ref)
+            for unit in claimed["planned_trials"]:
+                trace, metrics = by_unit[str(unit)]
+                store.complete_trial(
+                    str(job["job_id"]), str(unit), runtime_ref, trace,
+                    status="failed" if str(unit) == fail_unit else "completed",
+                    metrics=dict(metrics),
+                )
+        return store, assignment
+
+    def test_evidence_cases_are_built_on_the_dispatched_path(self) -> None:
+        """`evidence_for` ran only in-process; over the wire the breach cases a
+        suite raises silently vanished — the metrics_for parity bug, left open
+        for evidence."""
+        manifest = builtin_registry().get("agentdojo").manifest()
+        store, assignment = self._dispatch_execute(manifest, "agentdojo")
+        run = collect_suite_run(assignment, store)
+        breaches = [c for c in run.evidence_cases if c.get("kind") == "prompt_injection"]
+        self.assertTrue(breaches, "no evidence cases collected from a run with breaches")
+
+    def test_a_failed_trial_with_a_trace_stays_failed_and_is_excluded(self) -> None:
+        """A runtime can complete a trial `failed` while still returning a trace.
+        Admitting it as completed because a trace exists lets it into the
+        aggregate denominator, flattering the result."""
+        manifest = builtin_registry().get("budget").manifest()
+        fail_unit = "budget-spend-summary-01:ungoverned:0"
+        store, assignment = self._dispatch_execute(manifest, "budget", fail_unit=fail_unit)
+        run = collect_suite_run(assignment, store)
+        failed = [t for t in run.trials if t["status"] == "failed"]
+        self.assertEqual(len(failed), 1)
+        unit = (f"{failed[0]['scenario_id']}:{failed[0]['condition_id']}:"
+                f"{failed[0]['repeat_index']}")
+        self.assertEqual(unit, fail_unit)
+        self.assertIsNotNone(failed[0].get("trace_ref"))  # trace WAS returned
+        for aggregate in run.aggregates:
+            self.assertLessEqual(int(aggregate["n"]), 4)
+
+    def test_a_declared_mcnemar_test_is_computed_over_the_arms(self) -> None:
+        """agentdojo declares `test: mcnemar` on ASR; the suite pipeline never
+        computed it — the flagship governed-vs-ungoverned comparison had no test
+        on the path the Builder and dispatch use."""
+        import copy
+
+        manifest = copy.deepcopy(builtin_registry().get("agentdojo").manifest())
+        manifest["execution"]["repeats"] = 30
+        store, assignment = self._dispatch_execute(manifest, "agentdojo")
+        run = collect_suite_run(assignment, store)
+        governed_asr = next(
+            a for a in run.aggregates
+            if a["metric"] == "ASR" and a["condition_id"] == "governed"
+        )
+        self.assertIn("test", governed_asr)
+        self.assertEqual(governed_asr["test"]["name"], "mcnemar")
+        self.assertEqual(governed_asr["test"]["vs"], "ungoverned")
 
 
 class TestLabNeverExecutes(unittest.TestCase):

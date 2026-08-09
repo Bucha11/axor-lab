@@ -220,20 +220,37 @@ def collect_suite_run(
         scenario, condition, index = by_unit[unit]
         trial_record = _trial_record(assignment, unit, scenario, condition, index)
         trace = traces_by_unit.get(unit)
+        reported_unit: dict[str, object] = reported.get(unit, {})  # type: ignore[assignment]
+        reported_status = str(reported_unit.get("status", "")) if reported_unit else ""
         if trace is None:
             # a planned trial with no trace is MISSING, and recorded as such —
             # dropping it would shrink the denominator and flatter the result
-            status = str(reported.get(unit, {}).get("status", "failed"))  # type: ignore[union-attr]
             run.trials.append({
-                **trial_record, "status": "failed" if status != "excluded" else "excluded",
+                **trial_record,
+                "status": "excluded" if reported_status == "excluded" else "failed",
                 "failure_reason": "no trace returned by the runtime",
             })
             continue
+        if reported_status == "failed":
+            # a trace can arrive WITH a failed status — a run that crashed after
+            # producing partial output. The reported status is authoritative here:
+            # admitting it as `completed` because a trace exists lets a failed
+            # trial into `_aggregate`'s denominator (it counts only completed
+            # trials), flattering the result and contradicting the coverage note
+            # the Run report shows right above the aggregates.
+            trace_ref = content_hash(trace)
+            run.trials.append({
+                **trial_record, "status": "failed", "trace_ref": trace_ref,
+                "failure_reason": str(reported_unit.get("failure_reason")
+                                      or "reported failed by the runtime"),
+            })
+            run.traces[trace_ref] = trace
+            continue
         trace_ref = content_hash(trace)
-        run.trials.append({
+        record = {
             **trial_record, "status": "completed", "trace_ref": trace_ref,
             **_config_fingerprint(
-                unit, scenario, condition, assignment, reported.get(unit, {}),  # type: ignore[arg-type]
+                unit, scenario, condition, assignment, reported_unit,
             ),
             # the runtime's MEASUREMENTS (duration, tokens, cost) it alone could
             # take, plus Lab's own EVALUATION of the scenario's predicates over
@@ -241,11 +258,18 @@ def collect_suite_run(
             # on someone else's machine, but it must never take a verdict about
             # success or breach on trust — that is the whole claim the artifact
             # publishes, and it has to be recomputable from the trace.
-            "metrics": _collected_metrics(
-                suite, scenario, trace, reported.get(unit, {}),  # type: ignore[arg-type]
-            ),
-        })
+            "metrics": _collected_metrics(suite, scenario, trace, reported_unit),
+        }
+        run.trials.append(record)
         run.traces[trace_ref] = trace
+        # The SUITE's curation of this trial — the same hook the in-process path
+        # runs. Omitting it here meant a breach the suite could name in-process
+        # silently produced no EvidenceCase the moment the same suite ran on a
+        # connected agent: the parity bug this function's docstring cites for
+        # metrics_for, left open for evidence_for.
+        if suite is not None:
+            outcome = _outcome_from(scenario, trace, reported_unit)
+            run.evidence_cases.extend(suite.evidence_for(outcome, record, scenario))
 
     # Lab recomputes. A runtime-supplied aggregate would be a number nobody can
     # recheck, and `results["aggregates"]` is deliberately ignored here.
@@ -366,21 +390,30 @@ def _collected_metrics(
     evaluated = _evaluated(scenario, trace)
     suite_metrics: dict[str, object] = {}
     if suite is not None:
-        # the hook is written against a LoopOutcome. Over the wire there is no
-        # loop — Lab did not run one — so the outcome is reconstructed from what
-        # Lab has and can verify: the returned trace, Lab's own re-evaluation of
-        # the predicates, and the runtime's reported measurements. `stop_reason`
-        # says plainly that this did not come from a local loop rather than
-        # inventing one of the loop's reasons.
-        outcome = LoopOutcome(
-            trace=trace,
-            violation=bool(evaluated.get("ASR", False)),
-            task_success=bool(evaluated.get("task_success", False)),
-            metrics=dict(measured),
-            stop_reason="reported_by_runtime",
-        )
-        suite_metrics = dict(suite.metrics_for(outcome, scenario))
+        suite_metrics = dict(suite.metrics_for(_outcome_from(scenario, trace, reported), scenario))
     return {**suite_metrics, **measured, **evaluated}
+
+
+def _outcome_from(
+    scenario: dict[str, object], trace: dict[str, object], reported: dict[str, object]
+) -> LoopOutcome:
+    """Reconstruct a LoopOutcome from what Lab has over the wire.
+
+    The suite hooks (metrics_for, evidence_for) are written against a
+    LoopOutcome, but over the wire there is no loop — Lab did not run one. The
+    outcome is rebuilt from what Lab has AND can verify: the returned trace,
+    Lab's own re-evaluation of the scenario predicates, the runtime's reported
+    measurements. `stop_reason` says plainly it did not come from a local loop
+    rather than inventing one of the loop's reasons.
+    """
+    evaluated = _evaluated(scenario, trace)
+    return LoopOutcome(
+        trace=trace,
+        violation=bool(evaluated.get("ASR", False)),
+        task_success=bool(evaluated.get("task_success", False)),
+        metrics=dict(_metrics_of(reported)),
+        stop_reason="reported_by_runtime",
+    )
 
 
 def _metrics_of(reported: dict[str, object]) -> dict[str, object]:

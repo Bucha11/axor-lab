@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from lab_analysis import binary_aggregate
+from lab_analysis import binary_aggregate, mcnemar_test, two_proportion_test
 from lab_contracts import build_artifact, build_bundle, content_hash, reproducibility_of
 from lab_capabilities.governance import gate_for_condition
 from lab_runner.invariants import InvariantResult, check_invariant
@@ -242,17 +242,35 @@ def _aggregate(run: SuiteRun) -> list[dict[str, object]]:
     """Compute exactly the aggregations the suite declared — no more."""
     aggregates: list[dict[str, object]] = []
     by_trial = {str(t["trial_id"]): t for t in run.trials if t.get("status") == "completed"}
+    # the observe-only / ungoverned arm is the comparison baseline; a declared
+    # `test` on a treated arm compares against it.
+    baseline = next(
+        (str(c["id"]) for c in run.conditions if str(c.get("enforcement", "")) == "off"),
+        None,
+    )
     for spec in run.resolved.aggregations:
         metric = str(spec["metric"])
         fn = str(spec["fn"])
         unit = str(spec.get("unit_of_analysis", "trial"))
+        test_kind = str(spec.get("test", "none"))
         for condition in run.conditions:
             cid = str(condition["id"])
             trials = [t for t in by_trial.values() if str(t["condition_id"]) == cid]
             if not trials:
                 continue
             if fn == "rate":
-                aggregate = _rate(metric, cid, trials, unit)
+                # a declared comparison test on a treated arm: pair against the
+                # baseline and attach the test payload. Validator already
+                # guarantees >=2 conditions when a test is declared (manifest.py),
+                # so a missing baseline here means every arm enforces — no
+                # observe-only reference to compare to, so no test, not a crash.
+                test = None
+                if (test_kind in ("mcnemar", "two_proportion")
+                        and baseline is not None and cid != baseline):
+                    test = _comparison_test(
+                        test_kind, metric, baseline, cid, by_trial.values(),
+                    )
+                aggregate = _rate(metric, cid, trials, unit, test=test)
                 if aggregate is not None:
                     aggregates.append(aggregate)
                 continue
@@ -280,6 +298,7 @@ def _aggregate(run: SuiteRun) -> list[dict[str, object]]:
 
 def _rate(
     metric: str, condition_id: str, trials: list[dict[str, object]], unit: str,
+    test: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """A binary rate with a Wilson interval — the honest estimator for a
     proportion (statistics.md).
@@ -298,7 +317,43 @@ def _rate(
         successes += int(value)
     if n == 0:
         return None
-    return binary_aggregate(metric, condition_id, successes, n, unit_of_analysis=unit)
+    return binary_aggregate(metric, condition_id, successes, n, unit_of_analysis=unit, test=test)
+
+
+def _comparison_test(
+    kind: str, metric: str, baseline: str, treated: str,
+    completed_trials: "object",
+) -> dict[str, object] | None:
+    """The paired/independent test payload comparing `treated` against `baseline`.
+
+    mcnemar needs matched pairs — the same (scenario, repeat) under both arms,
+    which the seed policy guarantees for a deterministic agent. A pair is kept
+    only when BOTH arms recorded the boolean; a half-measured pair is dropped
+    rather than guessed.
+    """
+    trials = list(completed_trials)
+    def _index(cid: str) -> dict[tuple[str, object], bool]:
+        out: dict[tuple[str, object], bool] = {}
+        for t in trials:
+            if str(t["condition_id"]) != cid:
+                continue
+            value = _binary_value(metric, t)
+            if value is not None:
+                out[(str(t["scenario_id"]), t.get("repeat_index"))] = value
+        return out
+
+    base_by_key, treated_by_key = _index(baseline), _index(treated)
+    shared = sorted(base_by_key.keys() & treated_by_key.keys(), key=lambda k: (k[0], str(k[1])))
+    if not shared:
+        return None
+    if kind == "mcnemar":
+        pairs = [(base_by_key[k], treated_by_key[k]) for k in shared]
+        return mcnemar_test(pairs, vs=baseline)
+    base_succ = sum(int(base_by_key[k]) for k in base_by_key)
+    treated_succ = sum(int(treated_by_key[k]) for k in treated_by_key)
+    return two_proportion_test(
+        base_succ, len(base_by_key), treated_succ, len(treated_by_key), vs=baseline,
+    )
 
 
 def _binary_value(metric: str, trial: dict[str, object]) -> bool | None:
