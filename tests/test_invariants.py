@@ -197,15 +197,33 @@ class TestPredicateRule(unittest.TestCase):
         self.assertIn("not in the run", result.detail)
 
 
-class TestUnrunnableKinds(unittest.TestCase):
-    def test_verdict_sequence_is_skipped_not_passed(self) -> None:
-        """A rule this engine cannot run must never report `passed` — a suite
-        would then believe an invariant held that was never evaluated."""
+class TestVerdictSequence(unittest.TestCase):
+    def _trace(self, *verdicts: str) -> dict[str, object]:
+        return {"events": [{"type": "gate_decision", "decision": {"verdict": v}}
+                           for v in verdicts]}
+
+    def test_a_matching_recorded_sequence_passes(self) -> None:
+        rule = {"schema_version": "regression/v1", "id": "RG-9", "name": "v",
+                "rule": {"kind": "verdict_sequence", "verdicts": ["ALLOW", "DENY"]}}
+        result = check_invariant(
+            rule, [_trial("t1")], traces={"ref_t1": self._trace("ALLOW", "DENY")})
+        self.assertEqual(result.status, STATUS_PASSED)
+
+    def test_a_differing_recorded_sequence_fails(self) -> None:
+        rule = {"schema_version": "regression/v1", "id": "RG-9", "name": "v",
+                "rule": {"kind": "verdict_sequence", "verdicts": ["ALLOW", "DENY"]}}
+        result = check_invariant(
+            rule, [_trial("t1")], traces={"ref_t1": self._trace("ALLOW", "ALLOW")})
+        self.assertEqual(result.status, STATUS_FAILED)
+
+    def test_a_trial_with_no_trace_errors_never_passes(self) -> None:
         rule = {"schema_version": "regression/v1", "id": "RG-9", "name": "v",
                 "rule": {"kind": "verdict_sequence", "verdicts": ["DENY"]}}
-        result = check_invariant(rule, [_trial("t1", 900)])
-        self.assertEqual(result.status, STATUS_SKIPPED)
+        result = check_invariant(rule, [_trial("t1")], traces={})
+        self.assertEqual(result.status, STATUS_ERROR)
 
+
+class TestUnrunnableKinds(unittest.TestCase):
     def test_unknown_kind_errors(self) -> None:
         rule = {"schema_version": "regression/v1", "id": "RG-9", "name": "v",
                 "rule": {"kind": "telepathy"}}

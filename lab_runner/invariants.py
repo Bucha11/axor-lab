@@ -59,11 +59,9 @@ _AGGREGATORS = {
 
 # rule kinds this module knows about but does not run — reported, not skipped
 # silently, so a suite never believes an unrun invariant held
-_ELSEWHERE = {
-    "verdict_sequence": "needs kernel resolution + replay (lab_capabilities.governance.regression)",
-}
+_ELSEWHERE: dict[str, str] = {}
 
-_RUNS_HERE = ("metric_threshold", "predicate", "evaluator_outcome")
+_RUNS_HERE = ("metric_threshold", "predicate", "evaluator_outcome", "verdict_sequence")
 
 
 @dataclass(frozen=True)
@@ -146,7 +144,47 @@ def check_invariant(
             rid, regression, rule, scoped, traces or {}, scenarios or {},
             evaluators or {},
         )
+    if kind == "verdict_sequence":
+        return _check_verdict_sequence(rid, regression, rule, scoped, traces or {})
     return _check_predicate(rid, regression, rule, scoped, traces or {}, scenarios or {})
+
+
+def _check_verdict_sequence(
+    rid: str,
+    regression: dict[str, object],
+    rule: dict[str, object],
+    scoped: list[dict[str, object]],
+    traces: dict[str, dict[str, object]],
+) -> InvariantResult:
+    """The recorded gate_decision verdicts of each trial must match `verdicts`.
+
+    This checks a trial's ALREADY-RECORDED verdict sequence — the run was
+    executed under its kernel and the verdicts are in the trace, so this is a
+    trace read like every other rule here. It is NOT the kernel-replay-drift
+    check (re-running a possibly-changed kernel over a frozen trace to detect a
+    behaviour change); that stays in the governance capability, which owns the
+    kernel. A trial whose trace Lab does not hold is an `error`, never a pass.
+    """
+    expected = [str(v) for v in (rule.get("verdicts") or [])]  # type: ignore[union-attr]
+    holds: list[tuple[str, bool, object]] = []
+    for trial in scoped:
+        ref = str(trial.get("trace_ref", ""))
+        trace = traces.get(ref)
+        if trace is None:
+            return InvariantResult(
+                rid, STATUS_ERROR,
+                detail=f"trial {trial.get('trial_id')!r} has no trace to read verdicts from",
+            )
+        recorded = [
+            str(((e.get("decision") or {}).get("verdict")))  # type: ignore[union-attr]
+            for e in trace.get("events", [])  # type: ignore[union-attr]
+            if e.get("type") == "gate_decision"
+        ]
+        holds.append((str(trial.get("trial_id")), recorded == expected, recorded))
+    return _verdict(
+        rid, holds, _quantifier(regression),
+        f"recorded verdict sequence == {expected}",
+    )
 
 
 def _quantifier(regression: dict[str, object]) -> str:

@@ -464,6 +464,87 @@ class TestTheRunScreens(ScreenApiTestCase):
         _, result = self.call("POST", "/regressions/RG-cost/run", {"run_id": run_id})
         self.assertEqual(result["status"], "error")
 
+    def test_evaluator_outcome_resolves_from_the_runs_own_suite(self) -> None:
+        """The client sends only {run_id}; an evaluator_outcome rule names an
+        evaluator declared by the suite, not the request. Defaulting the
+        evaluator table from the run's own suite is what turns this from a
+        permanent `error` into a real verdict — but only when the run carries
+        its suite, i.e. it was dispatched."""
+        connect = self.call("POST", "/runtimes/connect", {"model": "m"})[1]
+        created = self.call(
+            "POST", "/suites/budget/dispatch",
+            {"runtime_ref": connect["runtime_ref"]})[1]
+        run_id = created["run_id"]
+        suite = builtin_registry().get("budget")
+        local = run_suite(suite.manifest(), run_id="seed", suite=suite)
+        by_unit = {
+            f"{t['scenario_id']}:{t['condition_id']}:{t['repeat_index']}":
+                local.traces[str(t["trace_ref"])]
+            for t in local.trials if t.get("status") == "completed"
+        }
+        self.call("POST", f"/runtime/jobs/{run_id}/claim", {}, token=connect["ingest_key"])
+        for unit in created["planned_trials"]:
+            self.call(
+                "POST", f"/runtime/jobs/{run_id}/trials/{unit}/complete",
+                {"trace": by_unit[unit], "status": "completed",
+                 "metrics": {"duration_ms": 1.5}}, token=connect["ingest_key"])
+        # budget ships evaluator "read_count" (produces "reads"); expect 1
+        self.call("POST", "/regressions", {"regression": {
+            "schema_version": "regression/v1", "id": "RG-reads",
+            "name": "one read", "rule": {"kind": "evaluator_outcome",
+                                         "evaluator": "read_count", "expect": 1},
+        }})
+        status, result = self.call("POST", "/regressions/RG-reads/run", {"run_id": run_id})
+        self.assertEqual(status, 200, result)
+        self.assertNotEqual(result["status"], "error")
+        self.assertEqual(result["status"], "passed")
+
+    def _dispatch_and_finish(self, suite_id: str) -> str:
+        connect = self.call("POST", "/runtimes/connect", {"model": "m"})[1]
+        created = self.call(
+            "POST", f"/suites/{suite_id}/dispatch",
+            {"runtime_ref": connect["runtime_ref"]})[1]
+        run_id = created["run_id"]
+        suite = builtin_registry().get(suite_id)
+        local = run_suite(suite.manifest(), run_id="seed", suite=suite)
+        by_unit = {
+            f"{t['scenario_id']}:{t['condition_id']}:{t['repeat_index']}":
+                local.traces[str(t["trace_ref"])]
+            for t in local.trials if t.get("status") == "completed"
+        }
+        self.call("POST", f"/runtime/jobs/{run_id}/claim", {}, token=connect["ingest_key"])
+        for unit in created["planned_trials"]:
+            self.call(
+                "POST", f"/runtime/jobs/{run_id}/trials/{unit}/complete",
+                {"trace": by_unit[unit], "status": "completed",
+                 "metrics": {"duration_ms": 1.5}}, token=connect["ingest_key"])
+        return run_id
+
+    def test_a_finished_dispatched_run_produces_a_stored_artifact(self) -> None:
+        """`completed` produces an Artifact (lifecycle.md). The collect step that
+        builds it ran nowhere on the dispatched path, so the Artifacts screen
+        stayed empty after a run whose whole output is a portable artifact."""
+        self._dispatch_and_finish("budget")
+        _, artifacts = self.call("GET", "/artifacts")
+        self.assertEqual(len(artifacts["artifacts"]), 1)
+
+    def test_a_finished_dispatched_run_stores_its_evidence_cases(self) -> None:
+        """agentdojo raises prompt_injection cases; they were computed in-process
+        and dropped over the wire, leaving the Evidence screen empty after a run
+        with proven breaches."""
+        self._dispatch_and_finish("agentdojo")
+        _, evidence = self.call("GET", "/evidence")
+        self.assertTrue(evidence["evidence_cases"])
+
+    def test_a_finished_dispatched_run_persists_labs_recomputed_metrics(self) -> None:
+        """The trial screen read the runtime's self-reported metrics; Lab's
+        recomputation (budget's suite metric `reads`) is now persisted so the UI
+        and regressions see the authoritative numbers."""
+        run_id = self._dispatch_and_finish("budget")
+        _, results = self.call("GET", f"/runs/{run_id}/results")
+        completed = [t for t in results["trials"] if t["status"] == "completed"]
+        self.assertTrue(all("reads" in t["metrics"] for t in completed))
+
     def test_running_a_regression_without_a_run_id_is_refused(self) -> None:
         self.call("POST", "/regressions", {"regression": {
             "schema_version": "regression/v1", "id": "RG-x", "name": "x",

@@ -132,6 +132,69 @@ def _sanitize_metrics(metrics: dict[str, object]) -> dict[str, object]:
     }
 
 
+def finalize_suite_run(jobs: "RuntimeJobStore", shelf: ScreenStore, run_id: str) -> None:
+    """Collect a completed DISPATCHED run and persist what collection produces.
+
+    A connected-runtime run finished but produced nothing durable: aggregates
+    were the operator's manual step, the recomputed per-trial metrics were
+    thrown away, the suite's EvidenceCases were never stored, and no Artifact
+    was ever built — the Artifacts and Evidence screens stayed empty after a run
+    that had both. This is that missing step, run server-side the moment the run
+    completes. Best-effort: a collection failure must never fail the runtime's
+    completing request, so every step is guarded.
+    """
+    assignment_dict = jobs.assignment_of(run_id)
+    manifest = (assignment_dict or {}).get("suite")
+    runtime_ref = (assignment_dict or {}).get("_runtime_ref")
+    if not isinstance(manifest, dict):
+        return  # not a suite dispatch (a raw experiment run) — nothing to collect
+    try:
+        import dataclasses
+
+        from lab_contracts import validate_artifact
+        from lab_suite.dispatch import build_assignment, collect_suite_run
+
+        rebuilt = dataclasses.replace(
+            build_assignment(manifest, str(runtime_ref or "runtime")), run_id=run_id)
+        collected = collect_suite_run(rebuilt, jobs)
+    except Exception:  # noqa: BLE001 — collection is best-effort; the trial still completed
+        return
+
+    by_unit = {
+        f"{t['scenario_id']}:{t['condition_id']}:{t['repeat_index']}": t.get("metrics", {})
+        for t in collected.trials if t.get("status") == "completed"
+    }
+    jobs.overwrite_trial_metrics(run_id, by_unit)  # type: ignore[arg-type]
+    if collected.aggregates:
+        try:
+            jobs.attach_aggregates(run_id, collected.aggregates)
+        except RuntimeJobsError:
+            pass
+    for case in collected.evidence_cases:
+        try:
+            shelf.put("evidence-case", case)
+        except ScreenStoreError:
+            pass
+    try:
+        created = _now_iso()
+        artifact = collected.artifact(f"a_{run_id}", created, _run_environment(manifest))
+        if not validate_artifact(artifact, "artifact"):
+            shelf.put("artifact", artifact, id_field="artifact_id")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _run_environment(manifest: dict[str, object]) -> dict[str, object]:
+    return {"model": {"provider": "connected_runtime",
+                      "id": str(manifest.get("id", "suite"))}}
+
+
+def _now_iso() -> str:
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 @dataclass
 class _Trial:
     trial_id: str
@@ -393,6 +456,58 @@ class RuntimeJobStore:
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             return self._results_locked(job)
+
+    def overwrite_trial_metrics(self, job_id: str,
+                                by_unit: dict[str, dict[str, object]]) -> None:
+        """Replace stored per-trial metrics with Lab's recomputed ones.
+
+        The runtime pushes the measurements it alone can take (duration, tokens);
+        Lab recomputes the verdict-bearing ones (task_success, suite metrics)
+        from the trace at collect. Persisting the collected set here is what lets
+        the trial screen and a regression read Lab's authoritative numbers
+        instead of whatever the runtime reported — the runtime no longer grades
+        its own homework on the UI."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            for unit, metrics in by_unit.items():
+                trial = job.trials.get(unit)
+                if trial is not None:
+                    # Lab's recomputation IS the authority — unlike a runtime
+                    # push, it keeps task_success/ASR (the verdict it recomputed)
+                    trial.metrics = {
+                        str(k): v for k, v in metrics.items()
+                        if isinstance(v, (int, float, str, bool))
+                    }
+
+    def assignment_of(self, job_id: str) -> dict[str, object] | None:
+        """The assignment a run was created with, plus its runtime_ref — enough
+        to rebuild a SuiteAssignment and collect the run."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            return {**job.assignment, "_runtime_ref": job.runtime_ref}
+
+    def run_suite_context(self, job_id: str) -> dict[str, object]:
+        """The scenarios and evaluators the run's own suite declared, for a
+        regression check. An `evaluator_outcome` rule needs the evaluator table;
+        the client sends only {run_id}, so it is defaulted from here — the run
+        already carries the suite it executed."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise RuntimeJobsError(404, f"unknown run {job_id!r}")
+            suite: dict[str, object] = job.assignment.get("suite") or {}  # type: ignore[assignment]
+        scenarios = {str(s.get("name")): s
+                     for s in (suite.get("scenarios") or [])  # type: ignore[union-attr]
+                     if isinstance(s, dict)}
+        evaluation: dict[str, object] = suite.get("evaluation") or {}  # type: ignore[assignment]
+        evaluators = {str(e.get("id")): e
+                      for e in (evaluation.get("evaluators") or [])  # type: ignore[union-attr]
+                      if isinstance(e, dict)}
+        return {"scenarios": scenarios, "evaluators": evaluators}
 
     def list_runs(self) -> list[dict[str, object]]:
         """Every run, newest first — the Runs screen's source.
@@ -1097,10 +1212,15 @@ def make_runtime_server(
                     run_id = body.get("run_id")
                     if not isinstance(run_id, str):
                         raise RuntimeJobsError(400, "running a regression requires {run_id}")
+                    # default the scenarios + evaluator table from the run's OWN
+                    # suite. Without this an evaluator_outcome rule always errored
+                    # ("evaluator not declared") because the client sends only
+                    # {run_id} — the evaluator table it names lives on the run.
+                    context = jobs.run_suite_context(run_id)
                     self._send(200, run_regression(
                         shelf.get("regression", m.group(1)), jobs.results(run_id),
-                        scenarios=body.get("scenarios") or {},  # type: ignore[arg-type]
-                        evaluators=body.get("evaluators") or {},  # type: ignore[arg-type]
+                        scenarios=body.get("scenarios") or context["scenarios"],  # type: ignore[arg-type]
+                        evaluators=body.get("evaluators") or context["evaluators"],  # type: ignore[arg-type]
                     ))
                     return
                 m = _SUITE_DISPATCH_RE.match(path)
@@ -1287,13 +1407,19 @@ def make_runtime_server(
                     trace = body.get("trace")
                     metrics = body.get("metrics")
                     rch = body.get("runtime_config_hash")
-                    self._send(200, jobs.complete_trial(
+                    result = jobs.complete_trial(
                         m.group(1), m.group(2), ref,
                         trace if isinstance(trace, dict) else None,
                         status=str(body.get("status", "completed")),
                         metrics=metrics if isinstance(metrics, dict) else None,
                         runtime_config_hash=str(rch) if isinstance(rch, str) else None,
-                    ))
+                    )
+                    # the run just reached terminal — collect it and persist
+                    # aggregates, recomputed metrics, evidence and an artifact,
+                    # the step that otherwise never ran on a dispatched run
+                    if result.get("run_state") == "completed":
+                        finalize_suite_run(jobs, shelf, m.group(1))
+                    self._send(200, result)
                     return
                 self._send(404, {"error": "not found"})
             except (RuntimeJobsError, ScreenStoreError) as exc:

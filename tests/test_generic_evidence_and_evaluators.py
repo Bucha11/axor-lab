@@ -261,24 +261,31 @@ class TestEvaluatorOutcomeRuns(unittest.TestCase):
         self.assertIn("cost_usd", result.detail)
 
 
-class TestOnlyVerdictSequenceIsStillElsewhere(unittest.TestCase):
-    def test_evaluator_outcome_is_no_longer_reported_as_skipped(self) -> None:
-        from lab_runner.invariants import _ELSEWHERE
+class TestAllFourRuleKindsRunHere(unittest.TestCase):
+    def test_no_rule_kind_is_reported_as_skipped(self) -> None:
+        from lab_runner.invariants import _ELSEWHERE, _RUNS_HERE
 
-        self.assertNotIn("evaluator_outcome", _ELSEWHERE)
-        self.assertIn("verdict_sequence", _ELSEWHERE)
+        self.assertEqual(_ELSEWHERE, {})
+        for kind in ("metric_threshold", "predicate", "evaluator_outcome",
+                     "verdict_sequence"):
+            self.assertIn(kind, _RUNS_HERE)
 
-    def test_a_verdict_sequence_pin_still_skips_rather_than_erroring(self) -> None:
-        """It runs in the governance capability, which needs kernel resolution
-        and replay. Reporting it as an error here would fail every governed
-        suite for carrying a pin that works."""
+    def test_a_verdict_sequence_pin_reads_the_recorded_verdicts(self) -> None:
+        """It checks the ALREADY-RECORDED verdict sequence of each trial — a
+        trace read like every other rule. budget's ungoverned trace records a
+        single ALLOW, so a pin expecting exactly that passes and one expecting
+        DENY fails; neither skips."""
         _, run = _run("budget")
-        result = check_invariant(
-            {"id": "RG-v", "rule": {"kind": "verdict_sequence",
-                                    "trace_ref": "x", "verdicts": ["DENY"]}},
+        passing = check_invariant(
+            {"id": "RG-v", "rule": {"kind": "verdict_sequence", "verdicts": ["ALLOW"]}},
             run.trials, run.traces, {},
         )
-        self.assertEqual(result.status, "skipped")
+        self.assertEqual(passing.status, "passed")
+        failing = check_invariant(
+            {"id": "RG-v2", "rule": {"kind": "verdict_sequence", "verdicts": ["DENY"]}},
+            run.trials, run.traces, {},
+        )
+        self.assertEqual(failing.status, "failed")
 
 
 if __name__ == "__main__":
