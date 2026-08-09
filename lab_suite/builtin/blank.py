@@ -26,8 +26,6 @@ class BlankSuite(BaseSuite):
             "version": "1.0",
             "description": "Create your own suite",
             "origin": "built_in",
-            "agents": [{"ref": "scripted@0.6"}],
-            "topology": {"kind": "single"},
             "scenarios": [{
                 "schema_version": "scenario/v1",
                 "name": "blank-01",

@@ -403,14 +403,24 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         )
         self.assertEqual(payload["suite"], manifest)
 
-    def test_an_invalid_yaml_returns_no_manifest_to_switch_to(self) -> None:
-        """A Builder that switched modes on a broken document would show a form
-        over something the server never accepted."""
+    def test_unparseable_yaml_returns_no_manifest_to_switch_to(self) -> None:
+        """No parse, no document — there is nothing for a form to hold."""
+        _, payload = self._request(
+            "POST", "/suites/validate-yaml", {"yaml": "id: [unclosed\n"},
+        )
+        self.assertFalse(payload["ok"])
+        self.assertNotIn("suite", payload)
+
+    def test_a_parsed_but_invalid_manifest_comes_back_with_its_errors(self) -> None:
+        """A semantically invalid document is still THE document. Withholding
+        it trapped the user in YAML mode: introduce one semantic error there
+        and every route back to the form that would help fix it was refused."""
         _, payload = self._request(
             "POST", "/suites/validate-yaml", {"yaml": "schema_version: suite/v1\n"},
         )
         self.assertFalse(payload["ok"])
-        self.assertNotIn("suite", payload)
+        self.assertTrue(payload["errors"])
+        self.assertEqual(payload["suite"], {"schema_version": "suite/v1"})
 
     def test_the_endpoints_require_the_control_token(self) -> None:
         for method, path, body in (

@@ -122,14 +122,16 @@ class TestManifestValidation(unittest.TestCase):
         errors = validate_manifest(manifest)
         self.assertFalse([e for e in errors if "stand-in" in e], errors)
 
-    def test_no_builtin_advertises_a_model_it_does_not_run(self) -> None:
+    def test_no_builtin_pins_an_agent_at_all(self) -> None:
+        """The executor is bound at dispatch — the Run panel's dropdown of
+        connected runtimes — not in the manifest. A built-in that pinned
+        `scripted@0.6` made the Builder present a fixture as an agent choice;
+        `agents[]` remains in the schema for multi-agent topologies, where the
+        entries are roles, not the executor."""
         for suite_id in builtin_registry().ids():
             manifest = builtin_registry().get(suite_id).manifest()
-            for entry in manifest.get("agents") or []:  # type: ignore[union-attr]
-                self.assertEqual(
-                    set(entry) - {"ref", "role", "name", "tool_ids"}, set(),
-                    f"{suite_id} declares agent identity nothing executes: {entry}",
-                )
+            self.assertNotIn("agents", manifest, suite_id)
+            self.assertNotIn("topology", manifest, suite_id)
 
     def test_schema_errors_suppress_semantic_noise(self) -> None:
         """A manifest that fails the schema reports THAT, not a cascade of

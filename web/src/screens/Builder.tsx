@@ -5,6 +5,7 @@ import {
   IDENTITY,
   SECTIONS,
   type FieldSpec,
+  type ItemFieldSpec,
   readPath,
   writePath,
 } from "../lib/sections";
@@ -98,12 +99,233 @@ function Widget({
           onChange={(e) => onChange(clear(e.target.value))}
         />
       );
+    case "chips":
+      return (
+        <ChipsField value={value} options={spec.options ?? []} onChange={onChange} />
+      );
+    case "list":
+      return (
+        <ListField
+          value={value}
+          fields={spec.item ?? []}
+          blank={spec.blank ?? {}}
+          onChange={onChange}
+        />
+      );
     case "json":
       return <JsonField value={value} onChange={onChange} />;
     default:
       return (
         <input
           value={value === undefined ? "" : String(value)}
+          onChange={(e) => onChange(clear(e.target.value))}
+        />
+      );
+  }
+}
+
+/**
+ * A set-of-strings field as toggle chips.
+ *
+ * The known values are clickable — nobody should have to know that
+ * "governance" is a word this platform understands, the screen says so. The
+ * schema keeps the list open for third-party capabilities, so a typed extra is
+ * accepted too and renders as a removable chip beside the known ones.
+ */
+function ChipsField({
+  value,
+  options,
+  onChange,
+}: {
+  value: unknown;
+  options: string[];
+  onChange: (next: unknown) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const selected = Array.isArray(value) ? value.map(String) : [];
+  const write = (items: string[]) => onChange(items.length === 0 ? undefined : items);
+  const toggle = (item: string) =>
+    write(
+      selected.includes(item)
+        ? selected.filter((existing) => existing !== item)
+        : [...selected, item],
+    );
+  const custom = selected.filter((item) => !options.includes(item));
+
+  return (
+    <div className="chips">
+      {options.map((option) => (
+        <button
+          key={option}
+          type="button"
+          className={`chip${selected.includes(option) ? " chip-on" : ""}`}
+          onClick={() => toggle(option)}
+        >
+          {option}
+        </button>
+      ))}
+      {custom.map((item) => (
+        <button
+          key={item}
+          type="button"
+          className="chip chip-on"
+          title="remove"
+          onClick={() => toggle(item)}
+        >
+          {item} ×
+        </button>
+      ))}
+      <input
+        className="chip-input"
+        value={draft}
+        placeholder="custom…"
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          const item = draft.trim();
+          if (item && !selected.includes(item)) write([...selected, item]);
+          setDraft("");
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * A list of objects as a list of small forms — one card per item, each field a
+ * real input, add and remove as buttons. The named fields cover what a person
+ * edits routinely; everything else the item carries stays under Details as
+ * JSON, preserved untouched — the same carry-through rule as the manifest.
+ */
+function ListField({
+  value,
+  fields,
+  blank,
+  onChange,
+}: {
+  value: unknown;
+  fields: ItemFieldSpec[];
+  blank: Json;
+  onChange: (next: unknown) => void;
+}) {
+  const items: Json[] = Array.isArray(value)
+    ? value.filter((item): item is Json => !!item && typeof item === "object")
+    : [];
+  const write = (next: Json[]) => onChange(next.length === 0 ? undefined : next);
+  const writeItem = (index: number, item: Json) =>
+    write(items.map((existing, i) => (i === index ? item : existing)));
+  const named = new Set(fields.map((field) => field.key));
+
+  return (
+    <div className="item-list">
+      {items.map((item, index) => {
+        const rest = Object.fromEntries(
+          Object.entries(item).filter(([key]) => !named.has(key)),
+        );
+        return (
+          <div key={index} className="item-card">
+            <div className="item-fields">
+              {fields.map((field) => (
+                <label key={field.key} className="field">
+                  <span className="field-label">{field.label}</span>
+                  <ItemInput
+                    field={field}
+                    value={item[field.key]}
+                    onChange={(next) => {
+                      const updated: Json = { ...item };
+                      if (next === undefined) delete updated[field.key];
+                      else updated[field.key] = next;
+                      writeItem(index, updated);
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+            {Object.keys(rest).length > 0 && (
+              <details className="item-details">
+                <summary className="muted small">
+                  Details ({Object.keys(rest).join(", ")})
+                </summary>
+                <JsonField
+                  value={rest}
+                  onChange={(next) => {
+                    const kept = Object.fromEntries(
+                      Object.entries(item).filter(([key]) => named.has(key)),
+                    );
+                    writeItem(index, {
+                      ...kept,
+                      ...(next && typeof next === "object" ? (next as Json) : {}),
+                    });
+                  }}
+                />
+              </details>
+            )}
+            <button
+              type="button"
+              className="item-remove"
+              onClick={() => write(items.filter((_, i) => i !== index))}
+            >
+              Remove
+            </button>
+          </div>
+        );
+      })}
+      <button type="button" className="item-add" onClick={() => write([...items, { ...blank }])}>
+        + Add
+      </button>
+    </div>
+  );
+}
+
+function ItemInput({
+  field,
+  value,
+  onChange,
+}: {
+  field: ItemFieldSpec;
+  value: unknown;
+  onChange: (next: unknown) => void;
+}) {
+  const clear = (raw: string) => (raw.trim() === "" ? undefined : raw);
+  switch (field.widget) {
+    case "number":
+      return (
+        <input
+          type="number"
+          value={value === undefined || value === null ? "" : String(value)}
+          onChange={(e) =>
+            onChange(e.target.value === "" ? undefined : Number(e.target.value))
+          }
+        />
+      );
+    case "select":
+      return (
+        <select
+          value={value === undefined ? "" : String(value)}
+          onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value)}
+        >
+          <option value="">—</option>
+          {(field.options ?? []).map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      );
+    case "textarea":
+      return (
+        <textarea
+          className="small-area"
+          value={value === undefined ? "" : String(value)}
+          onChange={(e) => onChange(clear(e.target.value))}
+        />
+      );
+    default:
+      return (
+        <input
+          value={value === undefined ? "" : String(value)}
+          placeholder={field.placeholder}
           onChange={(e) => onChange(clear(e.target.value))}
         />
       );
@@ -254,7 +476,11 @@ export function Builder({ suiteId }: { suiteId: string }) {
         const result = await api.validateSuiteYaml(yaml);
         setOk(result.ok);
         setErrors(result.errors);
-        if (!result.ok || !result.suite) return; // stay in YAML; the text is wrong
+        // Only an UNPARSEABLE text pins the user here — there is no document
+        // to switch to. A parsed document that fails validation moves to the
+        // form with its errors showing; trapping someone in YAML until they
+        // fix semantics blind is the opposite of a mode switch.
+        if (!result.suite) return;
         setManifest(result.suite);
       }
       setMode(next);
@@ -273,7 +499,9 @@ export function Builder({ suiteId }: { suiteId: string }) {
     const result = await api.validateSuiteYaml(yaml);
     setOk(result.ok);
     setErrors(result.errors);
-    return result.ok && result.suite ? result.suite : null;
+    // a parsed document is returned even when invalid — Save and Run
+    // re-validate and refuse; only an unparseable text yields nothing
+    return result.suite ?? null;
   }
 
   async function validate() {
@@ -392,6 +620,9 @@ export function Builder({ suiteId }: { suiteId: string }) {
           {SECTIONS.map((section) => (
             <Card key={section.id}>
               <h3>{section.title}</h3>
+              {section.description && (
+                <p className="muted small">{section.description}</p>
+              )}
               <Fields
                 fields={section.fields}
                 manifest={manifest}

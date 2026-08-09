@@ -39,8 +39,6 @@ class AgentDojoSuite(BaseSuite):
             "description": "General agent capability evaluation",
             "origin": "built_in",
             "capabilities": ["governance"],
-            "agents": [{"ref": "scripted@0.6"}],
-            "topology": {"kind": "single"},
             "scenarios": list(scenarios),
             "environment": {
                 "tools": tool_manifests,

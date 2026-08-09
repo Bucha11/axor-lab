@@ -48,6 +48,42 @@ describe("the six sections are the ones the spec names", () => {
   });
 });
 
+describe("the Builder is a form, not a wall of JSON textareas", () => {
+  it("capabilities are clickable known values, not a comma-separated guess", () => {
+    // nobody should have to already know that 'governance' is a word this
+    // platform understands — the screen offers it
+    const spec = IDENTITY.find((field) => field.path === "capabilities");
+    expect(spec?.widget).toBe("chips");
+    expect(spec?.options).toContain("governance");
+  });
+
+  it("the agents section pins nothing in basic mode", () => {
+    // the executor is bound at run time (the Run panel's runtime dropdown);
+    // agents[] describes multi-agent topologies and lives in Advanced
+    const agents = SECTIONS.find((section) => section.id === "agents");
+    expect(agents?.fields.every((field) => field.advanced)).toBe(true);
+    expect(agents?.description).toBeTruthy();
+  });
+
+  it("the routinely edited arrays are item forms with real inputs", () => {
+    for (const path of ["scenarios", "evaluation.metrics", "evaluation.aggregations"]) {
+      const spec = SECTIONS.flatMap((section) => section.fields).find(
+        (field) => field.path === path,
+      );
+      expect(spec?.widget, path).toBe("list");
+      expect(spec?.item?.length, path).toBeGreaterThan(0);
+    }
+  });
+
+  it("basic mode shows no raw JSON editor at all", () => {
+    // JSON stays available — in Advanced and YAML. Basic is the mode for
+    // someone who does not want to hand-balance brackets.
+    const basic = [...IDENTITY, ...SECTIONS.flatMap((section) => section.fields)]
+      .filter((field) => !field.advanced);
+    expect(basic.filter((field) => field.widget === "json")).toEqual([]);
+  });
+});
+
 describe("editing one field touches nothing else", () => {
   it("writes the value at the path", () => {
     const next = writePath(MANIFEST, "execution.repeats", 12);

@@ -1053,15 +1053,16 @@ def make_runtime_server(
                         self._send(200, {"ok": False, "errors": [f"invalid YAML: {exc}"]})
                         return
                     errors = validate_manifest(parsed)
-                    # the PARSED manifest comes back on success. The Builder's
-                    # Basic and Advanced modes edit the document, YAML mode edits
-                    # its text, and switching between them has to move the same
-                    # object — so the client asks the server to parse rather than
-                    # becoming a second YAML implementation that can disagree
-                    # about what `on` or `2026-08-08` means.
+                    # the PARSED manifest comes back whenever the text PARSES —
+                    # including when validation then fails. The Builder's modes
+                    # edit one document, and a semantically invalid document is
+                    # still THE document: withholding it here trapped the user
+                    # in YAML mode, unable to switch to the form that would
+                    # help them fix the error. Only an unparseable text has no
+                    # document to hand back. The client still never parses YAML
+                    # itself — one implementation, the server's.
                     self._send(200, {
-                        "ok": not errors, "errors": errors,
-                        **({"suite": parsed} if not errors else {}),
+                        "ok": not errors, "errors": errors, "suite": parsed,
                     })
                     return
                 if path == "/scenarios/validate":
