@@ -140,7 +140,14 @@ export const SECTIONS: SectionSpec[] = [
           { key: "name", label: "Name", widget: "text", placeholder: "unique-scenario-01" },
           { key: "task", label: "Task", widget: "textarea" },
         ],
-        blank: { schema_version: "scenario/v1", name: "", task: "" },
+        // a valid skeleton — tools/fixtures/task_success are schema-required, so
+        // seeding empties lets a new scenario save instead of failing on three
+        // fields the form never shows; refine them per item in Advanced / YAML
+        blank: {
+          schema_version: "scenario/v1", name: "", task: "",
+          inputs: {}, tools: [], fixtures: {},
+          task_success: { event: "final_output" },
+        },
         help:
           "tools, inputs, fixtures and success predicates live on each scenario — " +
           "edit them per item under Details, or in Advanced / YAML",

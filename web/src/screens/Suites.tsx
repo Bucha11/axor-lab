@@ -1,10 +1,38 @@
+import { useState } from "react";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
-import { Card, Failed, Loading, Tag } from "../components/ui";
+import { Button, Card, Failed, Loading, Tag } from "../components/ui";
 import { navigate } from "../lib/router";
 
 export function Suites() {
   const { data, error, loading, reload } = useAsync(() => api.suites());
+  const [busy, setBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  async function createSuite() {
+    // derive from the `blank` built-in — a guaranteed-valid starter — rather
+    // than hand-building a manifest here that would drift from the schema (the
+    // scenario needs a tool, a fixture, a success predicate). A fresh id +
+    // origin makes it the workspace's own.
+    const id = `suite-${Math.floor(Date.now() / 1000)}`;
+    setBusy(true);
+    setCreateError(null);
+    try {
+      const base = await api.suite("blank");
+      await api.createSuite({ ...base, id, name: id, origin: "workspace" });
+      navigate(`/suites/${id}`);
+    } catch (exc) {
+      setCreateError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    await api.deleteSuite(id);
+    reload();
+  }
+
   if (loading) return <Loading />;
   if (error) return <Failed error={error} onRetry={reload} />;
 
@@ -16,6 +44,10 @@ export function Suites() {
           An Experiment Suite is one portable manifest: scenarios, agent,
           execution strategy, evaluators, metrics, artifact layout, invariants.
         </p>
+        <div className="row">
+          <Button onClick={createSuite} disabled={busy}>+ New suite</Button>
+        </div>
+        {createError && <p className="errors">{createError}</p>}
       </header>
       <div className="grid">
         {(data?.suites ?? []).map((suite) => (
@@ -31,6 +63,12 @@ export function Suites() {
                   board. */}
               {!suite.available && <Tag tone="warning">Not yet</Tag>}
             </div>
+            {/* id + origin, so two suites that share a name (a fork of a
+                built-in) are still distinguishable */}
+            <p className="muted small">
+              <code>{suite.id}</code>
+              {suite.origin && ` · ${suite.origin}`}
+            </p>
             <p className="muted">{suite.description}</p>
             {!suite.available && <p className="muted small">{suite.reason}</p>}
             {(suite.capabilities ?? []).map((c) => (
@@ -38,6 +76,18 @@ export function Suites() {
                 {c}
               </Tag>
             ))}
+            {suite.origin === "workspace" && (
+              <button
+                type="button"
+                className="item-remove"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  remove(suite.id);
+                }}
+              >
+                Delete
+              </button>
+            )}
           </Card>
         ))}
       </div>

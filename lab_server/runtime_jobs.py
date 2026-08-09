@@ -143,33 +143,39 @@ def finalize_suite_run(jobs: "RuntimeJobStore", shelf: ScreenStore, run_id: str)
     completes. Best-effort: a collection failure must never fail the runtime's
     completing request, so every step is guarded.
     """
+    try:
+        _collect_and_persist(jobs, shelf, run_id)
+    except Exception:  # noqa: BLE001 — collection is best-effort; never fail the request
+        pass
+    # ALWAYS transition to the terminal state and publish `done` — even for a
+    # raw (non-suite) run or a collection that failed. The run reached its plan;
+    # it must not be stranded in `analyzing`.
+    jobs.mark_completed(run_id)
+
+
+def _collect_and_persist(jobs: "RuntimeJobStore", shelf: ScreenStore, run_id: str) -> None:
     assignment_dict = jobs.assignment_of(run_id)
     manifest = (assignment_dict or {}).get("suite")
     runtime_ref = (assignment_dict or {}).get("_runtime_ref")
     if not isinstance(manifest, dict):
         return  # not a suite dispatch (a raw experiment run) — nothing to collect
-    try:
-        import dataclasses
+    import dataclasses
 
-        from lab_contracts import validate_artifact
-        from lab_suite.dispatch import build_assignment, collect_suite_run
+    from lab_contracts import validate_artifact
+    from lab_suite.dispatch import build_assignment, collect_suite_run
 
-        rebuilt = dataclasses.replace(
-            build_assignment(manifest, str(runtime_ref or "runtime")), run_id=run_id)
-        collected = collect_suite_run(rebuilt, jobs)
-    except Exception:  # noqa: BLE001 — collection is best-effort; the trial still completed
-        return
+    rebuilt = dataclasses.replace(
+        build_assignment(manifest, str(runtime_ref or "runtime")), run_id=run_id)
+    collected = collect_suite_run(rebuilt, jobs)
 
+    # persist EVERYTHING first, then transition to completed last (below), so a
+    # browser that reloads on the SSE `done` sees the finished report — not a
+    # race against collection that reads empty aggregates.
     by_unit = {
         f"{t['scenario_id']}:{t['condition_id']}:{t['repeat_index']}": t.get("metrics", {})
         for t in collected.trials if t.get("status") == "completed"
     }
     jobs.overwrite_trial_metrics(run_id, by_unit)  # type: ignore[arg-type]
-    if collected.aggregates:
-        try:
-            jobs.attach_aggregates(run_id, collected.aggregates)
-        except RuntimeJobsError:
-            pass
     for case in collected.evidence_cases:
         try:
             shelf.put("evidence-case", case)
@@ -182,6 +188,11 @@ def finalize_suite_run(jobs: "RuntimeJobStore", shelf: ScreenStore, run_id: str)
             shelf.put("artifact", artifact, id_field="artifact_id")
     except Exception:  # noqa: BLE001
         pass
+    if collected.aggregates:
+        with jobs._lock:  # noqa: SLF001 — store the aggregates without finalizing yet
+            job = jobs._jobs.get(run_id)  # noqa: SLF001
+            if job is not None:
+                job.aggregates = list(collected.aggregates)
 
 
 def _verify_artifact_integrity(artifact: dict[str, object]) -> None:
@@ -689,14 +700,31 @@ class RuntimeJobStore:
                 409, f"trial {trial_id!r} is not in the plan for run {job.job_id!r}")
 
     def _maybe_finish(self, job: _Job) -> None:
-        # a job with no explicit plan finishes when the runtime says so (a later
-        # complete-run call); with a plan, it finishes once every planned trial is done
+        # every planned trial done → `analyzing`, NOT `completed`. The terminal
+        # `completed` (and the SSE `done` that closes the stream) is published
+        # only after finalize has persisted aggregates, metrics, evidence and the
+        # artifact — otherwise a browser reloads on `done` and races the
+        # collection, reading an empty report. A run with no plan also parks at
+        # `analyzing` until the runtime signals overall completion.
         if not job.planned:
             job.state = "analyzing"
             return
         done = {tid for tid, t in job.trials.items() if t.status in ("completed", "failed")}
-        if set(job.planned) <= done:
-            job.state = "completed"
+        if set(job.planned) <= done and job.state not in TERMINAL_STATES:
+            job.state = "analyzing"
+
+    def mark_completed(self, job_id: str) -> dict[str, object]:
+        """Transition an analyzing run to the terminal `completed` and publish
+        `done`. Called by finalize AFTER persistence, so a subscriber that
+        reloads on `done` sees the finished report. Idempotent."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return {"run_id": job_id, "state": "unknown"}
+            if job.state not in TERMINAL_STATES:
+                job.state = "completed"
+                self._publish_locked(job)
+            return {"run_id": job_id, "state": job.state}
 
 
 def plan_experiment(experiment: dict[str, object]) -> dict[str, object]:
@@ -1500,11 +1528,12 @@ def make_runtime_server(
                         metrics=metrics if isinstance(metrics, dict) else None,
                         runtime_config_hash=str(rch) if isinstance(rch, str) else None,
                     )
-                    # the run just reached terminal — collect it and persist
-                    # aggregates, recomputed metrics, evidence and an artifact,
-                    # the step that otherwise never ran on a dispatched run
-                    if result.get("run_state") == "completed":
+                    # the plan just completed (state `analyzing`) — collect,
+                    # persist, and only then transition to `completed`+`done`, so
+                    # a browser reloading on `done` sees the finished report
+                    if result.get("run_state") == "analyzing":
                         finalize_suite_run(jobs, shelf, m.group(1))
+                        result["run_state"] = jobs.run_state(m.group(1))
                     self._send(200, result)
                     return
                 self._send(404, {"error": "not found"})

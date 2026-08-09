@@ -24,7 +24,11 @@ export function Timeline({ trace }: { trace: JsonValue }) {
       {events.map((event) => (
         <li key={event.seq} className={event.type === "gate_decision" ? "gate" : ""}>
           <span className="seq">{event.seq}</span>
-          <span className="kind">{event.type.replace(/_/g, " ")}</span>
+          {/* an event with no `type` is malformed input, not a crash: the
+              server now validates traces at ingest, but the screen still guards
+              rather than throwing inside React's render on a `.replace` of
+              undefined */}
+          <span className="kind">{(event.type ?? "event").replace(/_/g, " ")}</span>
           {event.tool && <code>{event.tool}</code>}
           {event.decision?.verdict && (
             <Tag tone={verdictTone(event.decision)}>

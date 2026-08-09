@@ -80,6 +80,13 @@ export interface HomePayload {
   recent_runs: { run_id: string; state: string }[];
 }
 
+export interface RunRow {
+  run_id: string;
+  state: string;
+  planned: number;
+  completed: number;
+}
+
 export interface RunReport {
   run_id: string;
   state: string;
@@ -88,6 +95,7 @@ export interface RunReport {
   coverage: { completed: number; planned: number };
   metric_coverage: Record<string, number>;
   aggregates: Json[];
+  estimate?: Record<string, number>;
 }
 
 export interface TrialRecord {
@@ -207,8 +215,11 @@ export const api = {
     call<ValidationResult>("POST", "/suites/validate", { suite }),
   validateSuiteYaml: (yaml: string) =>
     call<ValidationResult>("POST", "/suites/validate-yaml", { yaml }),
+  createSuite: (suite: Json) => call<{ id: string }>("POST", "/suites", { suite }),
   saveSuite: (id: string, suite: Json) =>
     call<{ id: string }>("PUT", `/suites/${encodeURIComponent(id)}`, { suite }),
+  deleteSuite: (id: string) =>
+    call<{ id: string; deleted: boolean }>("DELETE", `/suites/${encodeURIComponent(id)}`),
   /** Bind a connected agent (a runtime_ref from Integrations) to the STORED
    * suite and start a run. The server resolves the suite saved-first, so what
    * runs is what Save wrote. */
@@ -229,10 +240,17 @@ export const api = {
       agent_ref: agentRef,
     }),
 
+  runs: () => call<{ runs: RunRow[] }>("GET", "/runs"),
   runResults: (runId: string) =>
     call<RunResults>("GET", `/runs/${encodeURIComponent(runId)}/results`),
   runReport: (runId: string) =>
     call<RunReport>("GET", `/runs/${encodeURIComponent(runId)}/report`),
+  cancelRun: (runId: string) =>
+    call<{ run_id: string; state: string }>(
+      "POST", `/runs/${encodeURIComponent(runId)}/cancel`, {}),
+  confirmRun: (runId: string) =>
+    call<{ run_id: string; state: string }>(
+      "POST", `/runs/${encodeURIComponent(runId)}/confirm`, {}),
   trial: (runId: string, trialId: string) =>
     call<TrialDetail>(
       "GET",

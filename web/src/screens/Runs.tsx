@@ -1,15 +1,21 @@
 import { useEffect } from "react";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
-import { Empty, Failed, Json, Link, Loading, Stat } from "../components/ui";
+import { Button, Empty, Failed, Json, Link, Loading, Stat } from "../components/ui";
 import { StatusTag, Timeline } from "../components/Timeline";
 import { useRunEvents } from "../lib/useRunEvents";
 
+// pre-start / dead states the progress bar must NOT paint as "live" — a run
+// awaiting confirmation or waiting for a runtime has not started
+const PRE_START = new Set(["awaiting_confirmation", "waiting_for_runtime"]);
+
 export function Runs() {
-  const { data, error, loading, reload } = useAsync(() => api.home());
+  // every run, from the dedicated endpoint — the Runs screen used to read
+  // home.recent_runs (capped at 5), so a sixth run silently vanished
+  const { data, error, loading, reload } = useAsync(() => api.runs());
   if (loading) return <Loading />;
   if (error) return <Failed error={error} onRetry={reload} />;
-  const runs = data?.recent_runs ?? [];
+  const runs = data?.runs ?? [];
   return (
     <div className="screen">
       <header className="screen-head">
@@ -22,6 +28,7 @@ export function Runs() {
           {runs.map((run) => (
             <li key={run.run_id}>
               <Link to={`/runs/${run.run_id}`}>{run.run_id}</Link>
+              <span className="muted small">{run.completed}/{run.planned}</span>
               <StatusTag status={run.state} />
             </li>
           ))}
@@ -51,7 +58,20 @@ export function RunReport({ runId }: { runId: string }) {
   if (report.loading || results.loading) return <Loading />;
   if (report.error) return <Failed error={report.error} onRetry={report.reload} />;
   if (!report.data) return null;
-  const { coverage, trials_by_status, metric_coverage, aggregates } = report.data;
+  const { coverage, trials_by_status, metric_coverage, aggregates, estimate } = report.data;
+  const state = progress?.state ?? report.data.state;
+  const preStart = PRE_START.has(state);
+  const terminal = progress?.terminal ?? ["completed", "failed", "cancelled"].includes(state);
+
+  async function confirm() {
+    await api.confirmRun(runId);
+    report.reload();
+    results.reload();
+  }
+  async function cancel() {
+    await api.cancelRun(runId);
+    report.reload();
+  }
 
   return (
     <div className="screen">
@@ -59,8 +79,10 @@ export function RunReport({ runId }: { runId: string }) {
         <h1>Run {runId}</h1>
         {/* The live state when the stream has one, the loaded state otherwise —
             never both, so the screen cannot show two different answers. */}
-        <StatusTag status={progress?.state ?? report.data.state} />
-        {progress && !progress.terminal && (
+        <StatusTag status={state} />
+        {/* the progress bar means "in flight" — only for a run that has actually
+            started, never for one awaiting confirmation or a runtime */}
+        {progress && !progress.terminal && !preStart && (
           <div className="progress">
             <div
               className="progress-bar"
@@ -77,6 +99,22 @@ export function RunReport({ runId }: { runId: string }) {
             </span>
           </div>
         )}
+        {state === "awaiting_confirmation" && (
+          <div className="row">
+            <span className="muted small">
+              Estimate:{" "}
+              {estimate && Object.keys(estimate).length > 0
+                ? Object.entries(estimate).map(([k, v]) => `${k} ${v}`).join(" · ")
+                : "not provided"}
+            </span>
+            <Button onClick={confirm}>Confirm &amp; start</Button>
+          </div>
+        )}
+        {!terminal && !preStart && (
+          <Button variant="secondary" onClick={cancel}>
+            Cancel run
+          </Button>
+        )}
       </header>
 
       {/* Coverage BEFORE aggregates, per statistics.md §5: a report that shows
@@ -87,9 +125,14 @@ export function RunReport({ runId }: { runId: string }) {
         <div className="stats">
           <Stat label="completed" value={coverage.completed} />
           <Stat label="planned" value={coverage.planned} />
-          {Object.entries(trials_by_status).map(([status, n]) => (
-            <Stat key={status} label={status} value={n} />
-          ))}
+          {/* the by-status breakdown, WITHOUT completed — it is already the
+              first tile, and showing it twice ("4 completed … 4 completed")
+              read as a bug */}
+          {Object.entries(trials_by_status)
+            .filter(([status]) => status !== "completed")
+            .map(([status, n]) => (
+              <Stat key={status} label={status} value={n} />
+            ))}
         </div>
         {coverage.completed < coverage.planned && (
           <p className="muted">
@@ -128,7 +171,7 @@ export function RunReport({ runId }: { runId: string }) {
             a rate derived in the browser would be a second opinion about a published number.
           </Empty>
         ) : (
-          <Json value={aggregates} />
+          <AggregatesTable rows={aggregates} />
         )}
       </section>
 
@@ -143,6 +186,50 @@ export function RunReport({ runId }: { runId: string }) {
           ))}
         </ul>
       </section>
+    </div>
+  );
+}
+
+/** Aggregates as a table, not a JSON dump. Every value is RENDERED from the
+ * stored aggregate — nothing is computed here (the contract's rule) — but a
+ * per-metric/per-arm row with the interval and any comparison test spelled out
+ * is what the Run Report promised instead of a `<pre>`. */
+function AggregatesTable({ rows }: { rows: Record<string, unknown>[] }) {
+  const num = (v: unknown) => (typeof v === "number" ? v.toFixed(3) : "—");
+  return (
+    <div className="table-scroll">
+      <table className="agg-table">
+        <thead>
+          <tr>
+            <th>metric</th><th>arm</th><th>estimate</th><th>interval</th>
+            <th>n</th><th>test</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => {
+            const interval = (row.interval ?? {}) as Record<string, unknown>;
+            const test = row.test as Record<string, unknown> | undefined;
+            return (
+              <tr key={i}>
+                <td><code>{String(row.metric ?? "")}</code></td>
+                <td>{String(row.condition_id ?? "")}</td>
+                <td>{num(row.estimate)}</td>
+                <td className="muted small">
+                  {interval.method && interval.method !== "none"
+                    ? `${interval.method} [${num(interval.low)}, ${num(interval.high)}]`
+                    : "—"}
+                </td>
+                <td>{String(row.n ?? "")}</td>
+                <td className="muted small">
+                  {test
+                    ? `${test.name} vs ${test.vs}: p=${num(test.p)} (${test.status})`
+                    : "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -179,9 +266,14 @@ export function TrialScreen({ runId, trialId }: { runId: string; trialId: string
         <h2>Timeline</h2>
         {data.trace ? (
           <Timeline trace={data.trace} />
+        ) : data.trial.status === "failed" ? (
+          <Empty>
+            This trial failed and produced no usable trace.
+            {data.trial.failure_reason ? ` ${data.trial.failure_reason}` : ""}
+          </Empty>
+        ) : data.trial.status === "pending" ? (
+          <Empty>This trial has not started — the runtime has not claimed it yet.</Empty>
         ) : (
-          /* A planned trial with no trace is a real state, not an error: the
-             runtime has not pushed it yet, or it failed before producing one. */
           <Empty>No trace has arrived for this trial.</Empty>
         )}
       </section>

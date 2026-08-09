@@ -60,6 +60,24 @@ describe("the endpoints match the contract table", () => {
   });
 });
 
+describe("the run + suite lifecycle endpoints exist and use the right verbs", () => {
+  it("maps create/delete/list/cancel/confirm to their documented routes", async () => {
+    vi.stubGlobal("fetch", respond(200, {}));
+    await api.createSuite({ id: "s" });
+    await api.deleteSuite("s");
+    await api.runs();
+    await api.cancelRun("r1");
+    await api.confirmRun("r1");
+    expect(calls.map((c) => `${c.init.method} ${c.url}`)).toEqual([
+      "POST /suites",
+      "DELETE /suites/s",
+      "GET /runs",
+      "POST /runs/r1/cancel",
+      "POST /runs/r1/confirm",
+    ]);
+  });
+});
+
 describe("the control token", () => {
   it("is sent when set and absent when not", async () => {
     vi.stubGlobal("fetch", respond(200, {}));

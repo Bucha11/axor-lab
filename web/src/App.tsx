@@ -46,8 +46,10 @@ function Screen({ route }: { route: string }) {
   if (parts.length === 0) return <Home />;
   switch (head) {
     case "suites":
-      if (first && second === "builder") return <Builder suiteId={first} />;
-      if (first) return <Builder suiteId={first} />;
+      // key by the suite id so navigating between suites REMOUNTS the Builder —
+      // without it the load effect kept the previous suite's error/manifest and
+      // a bad-suite URL left every later suite stuck on that error screen
+      if (first) return <Builder key={first} suiteId={first} />;
       return <Suites />;
     case "playground":
       return <Playground />;

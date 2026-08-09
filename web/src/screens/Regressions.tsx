@@ -87,6 +87,15 @@ export function RegressionScreen({ id }: { id: string }) {
             <p className="muted small">
               {outcome.trials_checked} trial(s) checked, {outcome.trials_failed} failing
             </p>
+            {/* which trials failed — the server returns the ids, and a failure
+                you cannot trace to a trial is only half a report */}
+            {outcome.failing_trial_ids?.length > 0 && (
+              <ul className="rows">
+                {outcome.failing_trial_ids.map((id) => (
+                  <li key={id}><code>{id}</code></li>
+                ))}
+              </ul>
+            )}
             {/* `error` is not `failed`: the invariant could not be EVALUATED.
                 Saying which is the difference between "your change broke this"
                 and "nobody measured the thing this bounds". */}

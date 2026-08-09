@@ -121,9 +121,13 @@ class TestTheStreamIsLive(LiveEventsTestCase):
         thread.join(timeout=15)
         self.assertFalse(thread.is_alive(), "the stream did not close")
         states = [payload["state"] for name, payload in collected if name == "state"]
-        # the initial snapshot, then the claim, then the completion — a snapshot
-        # endpoint would have produced only the first
-        self.assertEqual(states, ["waiting_for_runtime", "running", "completed"])
+        # the initial snapshot, the claim, then finalize's analyzing→completed —
+        # a snapshot endpoint would have produced only the first. `analyzing` is
+        # the real state between the last trial and the terminal `completed`
+        # (the run is being collected), published so the UI can show it.
+        self.assertEqual(states[0], "waiting_for_runtime")
+        self.assertIn("running", states)
+        self.assertEqual(states[-1], "completed")
 
     def test_it_reports_progress_against_the_plan(self) -> None:
         collected, thread = self._listen()

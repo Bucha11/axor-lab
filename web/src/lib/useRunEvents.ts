@@ -60,8 +60,16 @@ export function useRunEvents(runId: string, enabled = true): RunProgress | null 
       done.current = true;
       source.close();
     });
+    source.addEventListener("timeout", () => {
+      // the server caps a live stream and closes it with a `timeout` frame for
+      // a run that never reached terminal (a stuck runtime). Treat it as an end,
+      // not an error — otherwise EventSource silently reconnects forever and
+      // re-opens a fresh server-side stream each time.
+      done.current = true;
+      source.close();
+    });
     source.onerror = () => {
-      // a closed stream after `done` is the normal end, not a failure
+      // a closed stream after `done`/`timeout` is the normal end, not a failure
       if (done.current) source.close();
     };
     return () => source.close();

@@ -526,7 +526,19 @@ export function Builder({ suiteId }: { suiteId: string }) {
       setOk(result.ok);
       setErrors(result.errors);
       if (!result.ok) return;
-      await api.saveSuite(String(document.id ?? suiteId), document);
+      const id = String(document.id ?? suiteId);
+      // an id change is a NEW suite (the server upserts by path id). Create it,
+      // then navigate to its route — otherwise the URL kept saying the old id
+      // while the form edited the new one, and reloading showed the pristine
+      // original, so the edits looked lost.
+      if (id !== suiteId) {
+        await api.createSuite(document);
+        setManifest(document);
+        setSaved(true);
+        navigate(`/suites/${id}`);
+        return;
+      }
+      await api.saveSuite(id, document);
       setManifest(document);
       setSaved(true);
     } catch (exc) {
