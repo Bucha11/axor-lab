@@ -81,7 +81,10 @@ class SuiteRun:
             evidence_cases=list(self.evidence_cases),
             regressions=regressions + list(self.pinned),
             reproduce={
-                "command": command or f"axor-lab run {self.resolved.id}",
+                # `axor-lab run` takes an .axl file; a suite is reproduced with
+                # `run-suite <id>`, which is an actual command form that exists.
+                # The old default named a command that errored on every artifact.
+                "command": command or f"axor-lab run-suite {self.resolved.id}",
                 "requires": [],
                 "reproducibility": reproducibility_of(bundle, True),
             },

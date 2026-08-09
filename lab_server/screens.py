@@ -98,7 +98,10 @@ def _summary(document: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any
 
 EVIDENCE_ROW = ("id", "kind", "title", "status", "severity", "created", "trial_ref")
 REGRESSION_ROW = ("id", "name", "status", "created", "expectation")
-ARTIFACT_ROW = ("artifact_id", "created", "suite")
+# NOT "suite" — that embedded the entire suite/v1 manifest (scenarios,
+# fixtures, tool schemas) in every list row for a field the list screen shows
+# only as an id. The detail screen carries the full suite.
+ARTIFACT_ROW = ("artifact_id", "created")
 
 
 def home_payload(
@@ -276,7 +279,14 @@ def regression_list(store: ScreenStore) -> dict[str, Any]:
 
 
 def artifact_list(store: ScreenStore) -> dict[str, Any]:
-    return {"artifacts": [_summary(a, ARTIFACT_ROW) for a in store.list("artifact")]}
+    rows = []
+    for artifact in store.list("artifact"):
+        row = _summary(artifact, ARTIFACT_ROW)
+        suite = artifact.get("suite")
+        if isinstance(suite, dict):
+            row["suite_id"] = suite.get("id")  # a scalar label, not the manifest
+        rows.append(row)
+    return {"artifacts": rows}
 
 
 def run_regression(

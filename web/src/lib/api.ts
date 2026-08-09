@@ -143,7 +143,7 @@ export interface RegressionRow {
 export interface ArtifactRow {
   artifact_id: string;
   created?: string;
-  suite?: Json;
+  suite_id?: string;
 }
 
 export interface InvariantOutcome {
