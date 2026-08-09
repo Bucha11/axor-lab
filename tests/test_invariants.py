@@ -13,7 +13,6 @@ from lab_runner.invariants import (
     STATUS_ERROR,
     STATUS_FAILED,
     STATUS_PASSED,
-    STATUS_SKIPPED,
     check_invariant,
     check_invariants,
 )

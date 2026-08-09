@@ -184,6 +184,32 @@ def finalize_suite_run(jobs: "RuntimeJobStore", shelf: ScreenStore, run_id: str)
         pass
 
 
+def _verify_artifact_integrity(artifact: dict[str, object]) -> None:
+    """The artifact story is hash-spined so a reader can check the numbers. An
+    artifact whose embedded body contradicts its own hashes is refused rather
+    than stored and served as if the figures were genuine — schema validation
+    alone let a forged aggregate estimate through.
+    """
+    from lab_contracts import content_hash
+
+    bundle = artifact.get("bundle")
+    hashes: dict[str, object] = artifact.get("content_hashes") or {}  # type: ignore[assignment]
+    if not isinstance(bundle, dict) or not isinstance(hashes, dict):
+        return  # schema validation (run by ScreenStore.put) owns shape errors
+    if hashes.get("bundle") != content_hash(bundle):
+        raise RuntimeJobsError(
+            422, "artifact bundle does not match its content hash — the embedded "
+                 "body was edited after the artifact was sealed")
+    # the bundle's own spine covers environment/trials/meta; a mismatch there is
+    # a body edited under a stale hash
+    inner: dict[str, object] = bundle.get("content_hashes") or {}  # type: ignore[assignment]
+    for field_name in ("environment", "trials"):
+        if field_name in inner and field_name in bundle:
+            if inner[field_name] != content_hash(bundle[field_name]):
+                raise RuntimeJobsError(
+                    422, f"artifact bundle.{field_name} does not match its content hash")
+
+
 def _run_environment(manifest: dict[str, object]) -> dict[str, object]:
     return {"model": {"provider": "connected_runtime",
                       "id": str(manifest.get("id", "suite"))}}
@@ -561,7 +587,10 @@ class RuntimeJobStore:
                 trial.events = []
                 trial.trace = None
             trial.events.extend(events)
-            if job.state == "running":
+            # a trial back in flight means the run is not done — reopen a run
+            # that had reached `completed`, so it is never `completed` with a
+            # pending trial inside it (the self-contradiction P5-6 flagged)
+            if job.state in ("running", "completed", "analyzing"):
                 job.state = "receiving_traces"
             self._publish_locked(job)
             return {"trial_id": trial_id, "events": len(trial.events), "attempt": trial.attempt}
@@ -639,14 +668,15 @@ class RuntimeJobStore:
             raise RuntimeJobsError(403, "this runtime does not own that run")
         return job
 
-    def _require_active(self, job: _Job) -> None:
-        """A run only accepts trials while a claimed runtime is executing it.
+    # states in which a run does not accept trials: it was never claimed
+    # (waiting_for_runtime), never confirmed (awaiting_confirmation), or is dead
+    # (cancelled). Completing into any of these bypassed the claim/confirm gate.
+    # A run that already reached `completed` DOES still accept a superseding
+    # retry (TrialAttempt idempotency) — which reopens it, see below.
+    _CLOSED_TO_TRIALS = frozenset({"waiting_for_runtime", "awaiting_confirmation", "cancelled"})
 
-        Ingesting into `waiting_for_runtime` completed trials on an unclaimed
-        run; into `awaiting_confirmation` it drove the run to `completed` without
-        the operator ever confirming the estimate — the confirmation gate,
-        bypassed. Trials belong to a run that is running."""
-        if job.state not in ("running", "receiving_traces"):
+    def _require_active(self, job: _Job) -> None:
+        if job.state in self._CLOSED_TO_TRIALS:
             raise RuntimeJobsError(
                 409, f"run {job.job_id!r} is not accepting trials (state {job.state})")
 
@@ -892,6 +922,37 @@ def make_runtime_server(
             cards.extend(saved[key] for key in sorted(saved))
             return cards
 
+        def _announced_reason(self, suite_id: str) -> str | None:
+            """The catalog reason for an announced-but-unavailable suite, if any."""
+            from lab_suite import suite_catalog
+
+            for card in suite_catalog():
+                if str(card.get("id")) == suite_id and not card.get("available", True):
+                    return str(card.get("reason", "not yet available"))
+            return None
+
+        def _save_suite(self, document: dict[str, object]) -> str:
+            """Store a suite after the SAME semantic check the Builder runs.
+
+            The store validated only the JSON Schema, so a direct API client
+            could persist a manifest that is structurally valid and semantically
+            broken (no scenarios, governance without arms) that the Builder would
+            then refuse to run. And a suite this workspace authored is stamped
+            `workspace`: a fork of a built-in kept `origin: built_in`, so the
+            catalog could not tell a user's suite from the shipped one."""
+            from lab_suite import builtin_registry, validate_manifest
+            from lab_suite.errors import SuiteNotFound
+
+            errors = validate_manifest(document)
+            if errors:
+                raise RuntimeJobsError(422, "; ".join(errors[:5]))
+            suite_id = str(document.get("id", ""))
+            try:
+                builtin_registry().get(suite_id)
+            except SuiteNotFound:
+                document = {**document, "origin": "workspace"}
+            return shelf.put("suite", document)
+
         def _document(self, key: str) -> dict[str, object]:
             """The document a Builder/screen POSTs, under its own key.
 
@@ -1057,8 +1118,14 @@ def make_runtime_server(
                         manifest = self._resolve_suite(m.group(1))
                     except SuiteNotFound as exc:
                         # an ANNOUNCED-but-unavailable suite has a catalog card
-                        # and no manifest; 404 with the reason beats an empty
-                        # 200 that the Builder would try to open
+                        # and a reason but no manifest — return the announced
+                        # reason, not a raw "registered: [...]" registry dump the
+                        # Builder would show as an internals error
+                        announced = self._announced_reason(m.group(1))
+                        if announced is not None:
+                            raise RuntimeJobsError(
+                                404, f"'{m.group(1)}' is announced but not yet "
+                                     f"available: {announced}") from None
                         raise RuntimeJobsError(404, str(exc)) from None
                     self._send(200, manifest)
                     return
@@ -1143,12 +1210,29 @@ def make_runtime_server(
                             f"the path {m.group(1)!r} — saving it would silently "
                             "create a second suite",
                         )
-                    self._send(200, {"id": shelf.put("suite", document)})
+                    self._send(200, {"id": self._save_suite(document)})
                     return
                 self._send(404, {"error": "not found"})
             except (RuntimeJobsError, ScreenStoreError) as exc:
                 self._send(exc.status, {"error": exc.message})
             except Exception as exc:  # noqa: BLE001 — never leak a traceback
+                self._send(500, {"error": f"{type(exc).__name__}"})
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            try:
+                path = unquote(self.path.split("?", 1)[0])
+                m = _SUITE_RE.match(path)
+                if m:
+                    self._require_control()
+                    # a built-in cannot be deleted — only the workspace copy
+                    # layered over it. Deleting an unknown id is a no-op (idempotent).
+                    shelf.delete("suite", m.group(1))
+                    self._send(200, {"id": m.group(1), "deleted": True})
+                    return
+                self._send(404, {"error": "not found"})
+            except (RuntimeJobsError, ScreenStoreError) as exc:
+                self._send(exc.status, {"error": exc.message})
+            except Exception as exc:  # noqa: BLE001
                 self._send(500, {"error": f"{type(exc).__name__}"})
 
         def do_POST(self) -> None:  # noqa: N802
@@ -1183,7 +1267,7 @@ def make_runtime_server(
                     return
                 if path == "/suites":
                     self._require_control()
-                    self._send(201, {"id": shelf.put("suite", self._document("suite"))})
+                    self._send(201, {"id": self._save_suite(self._document("suite"))})
                     return
                 if path == "/evidence":
                     self._require_control()
@@ -1199,8 +1283,10 @@ def make_runtime_server(
                     return
                 if path == "/artifacts":
                     self._require_control()
+                    document = self._document("artifact")
+                    _verify_artifact_integrity(document)
                     self._send(201, {"id": shelf.put(
-                        "artifact", self._document("artifact"), id_field="artifact_id",
+                        "artifact", document, id_field="artifact_id",
                     )})
                     return
                 m = _REGRESSION_RUN_RE.match(path)

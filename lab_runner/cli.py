@@ -41,6 +41,8 @@ from .bundle_io import (
     write_bundle_dir,
     write_superseded_attempts,
 )
+from lab_suite.errors import SuiteError
+
 from .errors import ExperimentFileError, RunnerError
 from .invariants import STATUS_ERROR, STATUS_FAILED
 from .verdicts import contained
@@ -114,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_FAILURE
     except ContractsError as exc:
         # claim typing / contract-layer errors surface as validation failures
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    except SuiteError as exc:
+        # an unknown suite id / invalid manifest from the suite commands is the
+        # user's to fix — a clean message + exit code, not a raw traceback
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
 

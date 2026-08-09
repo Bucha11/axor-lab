@@ -18,6 +18,20 @@ from http.server import ThreadingHTTPServer
 from lab_server import RuntimeJobStore, make_runtime_server, plan_experiment
 
 
+def _valid_trace(marker: int = 1) -> dict:
+    """A schema-valid trace/v1 the store now requires for a completed trial.
+
+    Built once from the budget suite; `marker` varies the value ledger so two
+    traces differ (for supersede tests) while both stay valid."""
+    from lab_suite import builtin_registry, run_suite
+
+    suite = builtin_registry().get("budget")
+    run = run_suite(suite.manifest(), run_id=f"fixture{marker}", suite=suite)
+    trace = dict(next(iter(run.traces.values())))
+    trace["inputs_digest"] = f"sha256:{marker:064d}"  # a valid-shaped, distinct value
+    return trace
+
+
 class _Base(unittest.TestCase):
     control_token: str | None = "ctl"
 
@@ -84,7 +98,7 @@ class TestRuntimeJobsFlow(_Base):
         self.assertEqual(status, 200, ev)
         status, done = self._req(
             "POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
-            {"trace": {"schema_version": "trace/v1", "trial": {"trial_id": "t0"}}},
+            {"trace": _valid_trace()},
             token=ingest_key)
         self.assertEqual(status, 200, done)
         # the plan had exactly one trial → the run is now completed
@@ -203,7 +217,7 @@ class TestUiFacingSurface(_Base):
         run_id = run["run_id"]
         self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=conn["ingest_key"])
         self._req("POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
-                  {"trace": {"schema_version": "trace/v1", "trial": {"trial_id": "t0"}}},
+                  {"trace": _valid_trace()},
                   token=conn["ingest_key"])
         # attach runner-computed aggregates (Lab renders, does not compute them)
         aggs = [{"metric": "ASR", "condition": "gov", "successes": 1, "n": 4}]
@@ -228,7 +242,7 @@ class TestUiFacingSurface(_Base):
         }, token="ctl")
         run_id = run["run_id"]
         self._req("POST", f"/runtime/jobs/{run_id}/claim", {}, token=conn["ingest_key"])
-        trace = {"schema_version": "trace/v1", "trial": {"trial_id": "t0"}}
+        trace = _valid_trace()
         self._req("POST", f"/runtime/jobs/{run_id}/trials/t0/complete",
                   {"trace": trace}, token=conn["ingest_key"])
         status, got = self._req("GET", f"/runs/{run_id}/trials/t0/trace", token="ctl")
@@ -246,7 +260,7 @@ class TestStoreDirect(unittest.TestCase):
         conn = store.connect_runtime(model="x")
         run = store.create_run(conn["runtime_ref"], {"id": "e"})
         store.claim(run["run_id"], conn["runtime_ref"])
-        out = store.complete_trial(run["run_id"], "t0", conn["runtime_ref"], {"schema_version": "trace/v1"})
+        out = store.complete_trial(run["run_id"], "t0", conn["runtime_ref"], _valid_trace())
         self.assertEqual(out["run_state"], "analyzing")
 
     def test_trial_attempt_supersede_idempotency(self) -> None:
@@ -257,20 +271,21 @@ class TestStoreDirect(unittest.TestCase):
         run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
         rid, ref = run["run_id"], conn["runtime_ref"]
         store.claim(rid, ref)
-        first = store.complete_trial(rid, "t0", ref, {"trace": 1})
+        trace_a, trace_b = _valid_trace(1), _valid_trace(2)
+        first = store.complete_trial(rid, "t0", ref, trace_a)
         self.assertEqual((first["attempt"], first["superseded"]), (1, 0))
         # identical re-delivery → idempotent, no supersede
-        dup = store.complete_trial(rid, "t0", ref, {"trace": 1})
+        dup = store.complete_trial(rid, "t0", ref, trace_a)
         self.assertTrue(dup["idempotent"])
         self.assertEqual((dup["attempt"], dup["superseded"]), (1, 0))
         # a different trace → supersede
-        redo = store.complete_trial(rid, "t0", ref, {"trace": 2})
+        redo = store.complete_trial(rid, "t0", ref, trace_b)
         self.assertEqual((redo["attempt"], redo["superseded"]), (2, 1))
         results = store.results(rid)
         self.assertEqual(results["trials"][0]["attempt"], 2)
         self.assertEqual(results["trials"][0]["superseded"], 1)
         # only the latest trace is retained
-        self.assertEqual(results["traces"], [{"trace": 2}])
+        self.assertEqual(results["traces"], [trace_b])
 
     def test_streaming_events_after_complete_starts_new_attempt(self) -> None:
         store = RuntimeJobStore()
@@ -278,7 +293,7 @@ class TestStoreDirect(unittest.TestCase):
         run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
         rid, ref = run["run_id"], conn["runtime_ref"]
         store.claim(rid, ref)
-        store.complete_trial(rid, "t0", ref, {"trace": 1})
+        store.complete_trial(rid, "t0", ref, _valid_trace())
         # a runtime re-runs the unit: streaming events resets it to a new attempt
         out = store.append_events(rid, "t0", ref, [{"seq": 0}])
         self.assertEqual(out["attempt"], 2)

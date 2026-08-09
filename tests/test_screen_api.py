@@ -170,7 +170,9 @@ class TestTheBuilderCanSave(ScreenApiTestCase):
             "POST", "/suites", {"suite": {"schema_version": "suite/v1"}},
         )
         self.assertEqual(status, 422)
-        self.assertIn("not conformant", payload["error"])
+        # the full semantic validator now runs on save, catching the schema
+        # failure with its own message before the store's conformance check
+        self.assertIn("[schema]", payload["error"])
 
     def test_a_put_whose_id_disagrees_with_the_path_is_refused(self) -> None:
         """Saving it anyway silently creates a SECOND suite, and the Builder
@@ -303,6 +305,65 @@ class TestTheBuilderCanDispatch(ScreenApiTestCase):
             "POST", "/suites/budget/dispatch", {"runtime_ref": "rt"}, token=None,
         )
         self.assertEqual(status, 401)
+
+
+class TestSuiteLifecycle(ScreenApiTestCase):
+    def _manifest(self) -> dict:
+        return builtin_registry().get("budget").manifest()
+
+    def test_a_workspace_suite_is_stamped_workspace_not_built_in(self) -> None:
+        """A fork of a built-in kept origin: built_in, so the catalog could not
+        tell a user's suite from the shipped one."""
+        mine = {**self._manifest(), "id": "my-fork", "origin": "built_in"}
+        self.call("POST", "/suites", {"suite": mine})
+        _, fetched = self.call("GET", "/suites/my-fork")
+        self.assertEqual(fetched["origin"], "workspace")
+
+    def test_a_semantically_broken_suite_is_refused_on_save(self) -> None:
+        """Structurally valid JSON Schema, semantically incoherent (no
+        scenarios) — the store validated only the schema, so a direct client
+        could persist a suite the Builder would then refuse to run."""
+        broken = {**self._manifest(), "scenarios": []}
+        status, payload = self.call("POST", "/suites", {"suite": broken})
+        self.assertEqual(status, 422)
+        self.assertIn("scenario", payload["error"].lower())
+
+    def test_a_workspace_suite_can_be_deleted(self) -> None:
+        self.call("POST", "/suites", {"suite": {**self._manifest(), "id": "trash"}})
+        status, _ = self.call("DELETE", "/suites/trash")
+        self.assertEqual(status, 200)
+        _, catalog = self.call("GET", "/suites")
+        self.assertNotIn("trash", [c["id"] for c in catalog["suites"]])
+
+    def test_an_announced_suite_returns_its_reason_not_a_registry_dump(self) -> None:
+        status, payload = self.call("GET", "/suites/prompt_injection")
+        self.assertEqual(status, 404)
+        self.assertIn("announced", payload["error"])
+        self.assertNotIn("registered:", payload["error"])
+
+
+class TestArtifactIntegrity(ScreenApiTestCase):
+    def _artifact(self) -> dict:
+        from lab_suite import run_suite
+        suite = builtin_registry().get("budget")
+        run = run_suite(suite.manifest(), run_id="seed", suite=suite)
+        return run.artifact("a_seed", CREATED, ENVIRONMENT)
+
+    def test_a_consistent_artifact_is_stored(self) -> None:
+        status, payload = self.call("POST", "/artifacts", {"artifact": self._artifact()})
+        self.assertEqual(status, 201, payload)
+
+    def test_a_tampered_artifact_is_refused(self) -> None:
+        """The artifact is hash-spined so a reader can check the numbers; a body
+        edited under a stale hash is refused, not stored and served as genuine."""
+        artifact = self._artifact()
+        artifact["bundle"]["aggregates"] = [
+            {"metric": "task_success", "condition_id": "ungoverned", "estimate": 1.0,
+             "interval": {"method": "wilson", "low": 1.0, "high": 1.0},
+             "n": 1, "unit_of_analysis": "trial"}]
+        status, payload = self.call("POST", "/artifacts", {"artifact": artifact})
+        self.assertEqual(status, 422)
+        self.assertIn("content hash", payload["error"])
 
 
 class TestEvidenceAndRegressionsAndArtifacts(ScreenApiTestCase):

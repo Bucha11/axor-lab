@@ -70,6 +70,11 @@ class ScreenStore:
             raise ScreenStoreError(404, f"no {kind} {identifier!r}")
         return document
 
+    def delete(self, kind: str, identifier: str) -> bool:
+        """Remove a stored document. Missing is a no-op (idempotent delete)."""
+        with self._lock:
+            return self._by_kind.get(kind, {}).pop(identifier, None) is not None
+
     def list(self, kind: str) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(d) for d in self._by_kind.get(kind, {}).values()]
@@ -176,6 +181,10 @@ def run_report(results: dict[str, Any]) -> dict[str, Any]:
         # metric is absent from this map, never zero-with-a-value.
         "metric_coverage": measured,
         "aggregates": list(results.get("aggregates", [])),
+        # the plan/cost estimate — what the operator confirms before an
+        # awaiting_confirmation run starts. It was carried by /results but
+        # dropped here, so the Run screen had nothing to base a confirmation on.
+        "estimate": dict(results.get("estimate", {})),
     }
 
 
