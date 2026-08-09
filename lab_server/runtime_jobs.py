@@ -1296,14 +1296,22 @@ def make_runtime_server(
                 if path == "/playground/trial":
                     # ONE trial for inspection (RFC §13). Not a Run: nothing is
                     # stored, nothing is aggregated, and the payload says so.
+                    from lab_suite.errors import SuiteError
+
                     self._require_control()
                     body = self._read_json()
                     manifest, suite = self._playground_suite(body)
-                    self._send(200, playground_trial(
-                        manifest, suite,
-                        scenario_name=body.get("scenario"),  # type: ignore[arg-type]
-                        seed=body.get("seed"),  # type: ignore[arg-type]
-                    ))
+                    try:
+                        result = playground_trial(
+                            manifest, suite,
+                            scenario_name=body.get("scenario"),  # type: ignore[arg-type]
+                            seed=body.get("seed"),  # type: ignore[arg-type]
+                        )
+                    except SuiteError as exc:
+                        # e.g. a multi-agent topology: authorable, not runnable —
+                        # a clean 422, not a 500
+                        raise RuntimeJobsError(422, str(exc)) from None
+                    self._send(200, result)
                     return
                 if path == "/suites":
                     self._require_control()

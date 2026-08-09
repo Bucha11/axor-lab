@@ -100,6 +100,32 @@ class TestManifestValidation(unittest.TestCase):
         errors = validate_manifest(manifest)
         self.assertTrue(any("say which" in e for e in errors), errors)
 
+    def test_a_multi_agent_topology_validates_but_will_not_run(self) -> None:
+        """The manifest is authorable and valid (the platform is agent-count
+        agnostic by design), but executing a topology needs a scheduler that
+        does not exist yet — so a RUN is refused rather than silently executing
+        a single agent and mislabelling the artifact a planner_workers run."""
+        from lab_suite import run_suite
+        from lab_suite.errors import SuiteError
+        from lab_suite.manifest import topology_execution_error
+
+        manifest = _budget()
+        manifest["agents"] = [{"ref": "planner", "role": "planner"},
+                              {"ref": "worker", "role": "worker"}]
+        manifest["topology"] = {"kind": "planner_workers"}
+        # VALID — authoring is unblocked
+        self.assertEqual(validate_manifest(manifest), [])
+        # but NOT executable
+        self.assertIsNotNone(topology_execution_error(manifest))
+        with self.assertRaises(SuiteError) as ctx:
+            run_suite(manifest, run_id="x",
+                      suite=builtin_registry().get("budget"))
+        self.assertIn("planner_workers", str(ctx.exception))
+
+    def test_single_topology_has_no_execution_error(self) -> None:
+        from lab_suite.manifest import topology_execution_error
+        self.assertIsNone(topology_execution_error(_budget()))
+
     def test_a_stand_in_agent_may_not_advertise_a_model(self) -> None:
         """The Builder renders `agents[]` verbatim and the artifact carries it,
         so `{"ref": "scripted@0.6", "model": "claude-opus-4-8"}` presents a

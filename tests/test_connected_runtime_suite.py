@@ -380,6 +380,21 @@ class TestCollectionParity(unittest.TestCase):
         self.assertEqual(governed_asr["test"]["vs"], "ungoverned")
 
 
+class TestMultiAgentDispatchIsRefused(unittest.TestCase):
+    def test_a_multi_agent_suite_cannot_be_dispatched(self) -> None:
+        """A topology no runtime can execute must not be handed out — the
+        runtime would run a single agent and report it as the topology."""
+        import copy
+
+        manifest = copy.deepcopy(builtin_registry().get("budget").manifest())
+        manifest["agents"] = [{"ref": "planner", "role": "planner"},
+                              {"ref": "worker", "role": "worker"}]
+        manifest["topology"] = {"kind": "planner_workers"}
+        with self.assertRaises(DispatchError) as ctx:
+            build_assignment(manifest, "rt_x")
+        self.assertIn("planner_workers", str(ctx.exception))
+
+
 class TestLabNeverExecutes(unittest.TestCase):
     def test_dispatch_does_not_run_anything(self) -> None:
         """assign_suite hands out work; it must not execute a single trial.

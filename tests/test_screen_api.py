@@ -300,6 +300,21 @@ class TestTheBuilderCanDispatch(ScreenApiTestCase):
         )
         self.assertEqual(status, 404)
 
+    def test_a_multi_agent_suite_dispatch_is_a_clean_422(self) -> None:
+        """A topology that validates but cannot run is refused at dispatch with
+        a 422 the user can read, not a 500 or a mislabelled single-agent run."""
+        connection = self._connect()
+        manifest = builtin_registry().get("budget").manifest()
+        manifest["agents"] = [{"ref": "planner", "role": "planner"},
+                              {"ref": "worker", "role": "worker"}]
+        manifest["topology"] = {"kind": "planner_workers"}
+        self.call("PUT", "/suites/budget", {"suite": manifest})
+        status, payload = self.call(
+            "POST", "/suites/budget/dispatch",
+            {"runtime_ref": connection["runtime_ref"]})
+        self.assertEqual(status, 422, payload)
+        self.assertIn("planner_workers", payload["error"])
+
     def test_dispatch_is_gated_by_the_control_token(self) -> None:
         status, _ = self.call(
             "POST", "/suites/budget/dispatch", {"runtime_ref": "rt"}, token=None,

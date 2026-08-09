@@ -3,18 +3,30 @@
 **Status:** Phase 0 done. **Phase 1 done** — schemas green and the four contract
 docs rewritten around Suite→Run→Trial→EvidenceCase→Regression→Artifact.
 **Phase 2 done** — the Suite SDK with three built-in suites, per-trial metrics,
-`artifact/v1`, generic EvidenceCase extraction, three of four regression rule
-kinds executing in the spine (`verdict_sequence` runs in the capability), the
-YAML editing mode, and CLI + screen-endpoint entry points for all of it.
-Governance is a separated capability under `lab_capabilities/governance/`.
-**Phase 3 done** — every screen in §5 has a named endpoint returning a
-schema-conforming payload, pinned over real HTTP by
+`artifact/v1`, generic EvidenceCase extraction, **all four** regression rule
+kinds executing end to end from the UI (`evaluator_outcome` resolves the
+evaluator table from the run's own suite; `verdict_sequence` reads recorded
+gate-decision verdicts — the kernel-replay-drift variant stays in the
+capability), the YAML editing mode, and CLI + screen-endpoint entry points for
+all of it. Governance is a separated capability under
+`lab_capabilities/governance/`. **Phase 3 done** — every screen in §5 has a
+named endpoint returning a schema-conforming payload, pinned over real HTTP by
 `tests/test_screen_api.py`. Storage is in memory; durable storage is a swap of
-`lab_server/screens.py`, not of the endpoints. **Phase 4 landed** — `web/` (React + Vite +
-TypeScript) implements every screen against the real endpoints, and
-`axor-lab serve` runs the API and the built app from one process — including all
-three Builder modes and live run progress over SSE. **Phases 5-6 are not
-started.**
+`lab_server/screens.py`, not of the endpoints. **Phase 4 landed** — `web/`
+(React + Vite + TypeScript) implements every screen against the real endpoints,
+and `axor-lab serve` runs the API and the built app from one process — including
+suite creation/deletion, all three Builder modes, live run progress over SSE,
+server-side collection of a finished dispatched run (aggregates, metrics,
+EvidenceCases, artifact), the confirm/estimate flow, and a hardened untrusted-
+runtime ingest surface.
+
+**Multi-agent (Phase 6) is gated honestly, not executed:** a `topology` other
+than `single` is accepted, validated and stored (authoring is unblocked and the
+platform stays agent-count agnostic), but a RUN of one is refused at execution
+and dispatch (`topology_execution_error`) rather than silently executing a
+single agent and mislabelling the artifact. **Phase 5 (open-core packaging) and
+Phase 6 (multi-agent execution) are not started** — Phase 5 gates nothing until
+hosted features ship, and Phase 6 needs a multi-agent scheduler.
 
 **Authority:** the Experiment Suite Platform RFC in this directory is the
 governing spec. Where it and `docs/spec-v0.3/` disagree, **the new spec wins**.

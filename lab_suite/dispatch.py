@@ -39,7 +39,12 @@ from lab_capabilities.governance.runner import (
 
 from .errors import SuiteError
 from .execute import SuiteRun, _aggregate
-from .manifest import ResolvedSuite, declared_evaluators, resolve_suite
+from .manifest import (
+    ResolvedSuite,
+    declared_evaluators,
+    resolve_suite,
+    topology_execution_error,
+)
 
 if TYPE_CHECKING:
     from .sdk import BaseSuite, SuiteRegistry
@@ -92,6 +97,12 @@ def build_assignment(
     edit from changing what a finished run claims to have executed.
     """
     resolved = resolve_suite(manifest, scenario_registry, tool_manifests)
+    # a multi-agent topology is authorable and valid, but no runtime can execute
+    # one yet — refuse the dispatch rather than hand a runtime an assignment it
+    # would run as a single agent and report as a topology run
+    unrunnable_topology = topology_execution_error(manifest)
+    if unrunnable_topology:
+        raise DispatchError(unrunnable_topology)
     # A connected runtime IS the wrap: the agent runs under axor-core whether
     # or not gates enforce. So a suite that declares no conditions gets the
     # UNGOVERNED arm — enforcement off, kernel present — and never a

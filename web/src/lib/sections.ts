@@ -125,6 +125,9 @@ export const SECTIONS: SectionSpec[] = [
           "single", "planner_workers", "reviewer_pipeline",
           "negotiation", "swarm", "attacker_defender",
         ],
+        help:
+          "only 'single' runs today — multi-agent topologies are accepted and " +
+          "saved, but a run of one is refused until multi-agent execution ships",
       },
     ],
   },

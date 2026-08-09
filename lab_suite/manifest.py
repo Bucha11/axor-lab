@@ -26,6 +26,33 @@ GOVERNANCE_CAPABILITY = "governance"
 # aggregations that compare arms; each needs >= 2 conditions to be meaningful
 _COMPARISON_TESTS = frozenset({"mcnemar", "two_proportion"})
 
+# the only topology the runner EXECUTES. A manifest may declare any of the
+# others (planner_workers, reviewer_pipeline, …) — the schema accepts them and
+# the platform is agent-count agnostic by design (RFC §11) — but executing them
+# is a later phase. Absence defaults to single.
+EXECUTABLE_TOPOLOGIES = frozenset({"single"})
+
+
+def topology_execution_error(manifest: dict[str, object]) -> str | None:
+    """Why a manifest cannot be EXECUTED yet, or None if it can.
+
+    A topology is validated and stored (so a Builder can author one and it round-
+    trips), but running a multi-agent topology needs a scheduler that does not
+    exist yet. Refusing to run it is the honest behaviour: the alternative —
+    silently executing a single scripted agent and labelling the artifact a
+    successful planner_workers run — claims a run that never happened. This is an
+    EXECUTION gate, not a validation error, so authoring stays unblocked.
+    """
+    topology: dict[str, object] = manifest.get("topology") or {}  # type: ignore[assignment]
+    kind = str(topology.get("kind", "single"))
+    if kind in EXECUTABLE_TOPOLOGIES:
+        return None
+    return (
+        f"topology {kind!r} is accepted and validated but not yet executable — "
+        "multi-agent execution (planner/workers, reviewer pipelines, "
+        "attacker/defender) is a later phase. Only 'single' runs today."
+    )
+
 
 @dataclass(frozen=True)
 class ResolvedSuite:

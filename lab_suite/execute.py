@@ -27,7 +27,13 @@ from lab_runner.loop import LoopOutcome, run_loop_trial
 from lab_capabilities.governance import observe_only_condition
 from lab_runner.trials import trial_id_for
 
-from .manifest import ResolvedSuite, declared_evaluators, resolve_suite
+from .errors import SuiteError
+from .manifest import (
+    ResolvedSuite,
+    declared_evaluators,
+    resolve_suite,
+    topology_execution_error,
+)
 from .sdk import BaseSuite, SuiteRegistry, builtin_registry
 
 _STATS_AGGREGATORS = {
@@ -113,6 +119,12 @@ def run_suite(
     answer what a model would actually do.
     """
     resolved = resolve_suite(manifest, scenario_registry, tool_manifests)
+    # a topology the runner cannot execute is refused HERE, at run time — the
+    # manifest resolves (it is valid and authorable) but running it would execute
+    # a single scripted agent and mislabel the artifact a multi-agent run
+    unrunnable = topology_execution_error(manifest)
+    if unrunnable:
+        raise SuiteError(f"[suite] {unrunnable}")
     if suite is None:
         suite = (registry or builtin_registry()).get(resolved.id)
 
