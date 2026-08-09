@@ -75,6 +75,16 @@ describe("the Builder is a form, not a wall of JSON textareas", () => {
     }
   });
 
+  it("boolean fields are toggles, never a dropdown containing the word 'true'", () => {
+    const all = [...IDENTITY, ...SECTIONS.flatMap((section) => section.fields)];
+    for (const path of ["environment.simulation.enabled", "artifact.include_traces"]) {
+      expect(all.find((field) => field.path === path)?.widget, path).toBe("checkbox");
+    }
+    for (const field of all.filter((f) => f.widget === "select")) {
+      expect(field.options, field.path).not.toContain("true");
+    }
+  });
+
   it("basic mode shows no raw JSON editor at all", () => {
     // JSON stays available — in Advanced and YAML. Basic is the mode for
     // someone who does not want to hand-balance brackets.

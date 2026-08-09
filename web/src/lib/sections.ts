@@ -21,6 +21,7 @@ export type Widget =
   | "textarea"
   | "number"
   | "select"
+  | "checkbox"
   | "json"
   | "tags"
   | "chips"
@@ -126,15 +127,13 @@ export const SECTIONS: SectionSpec[] = [
       {
         path: "environment.simulation.enabled",
         label: "Simulated tools",
-        widget: "select",
-        options: ["true", "false"],
-        help: "true replays declared fixtures instead of calling anything real",
+        widget: "checkbox",
+        help: "replay declared fixtures instead of calling anything real",
       },
       {
         path: "environment.simulation.strict_manifest",
         label: "Strict tool manifests",
-        widget: "select",
-        options: ["true", "false"],
+        widget: "checkbox",
         advanced: true,
       },
       { path: "environment.tools", label: "Tool manifests", widget: "json", advanced: true },
@@ -250,9 +249,8 @@ export const SECTIONS: SectionSpec[] = [
       {
         path: "artifact.include_traces",
         label: "Include traces",
-        widget: "select",
-        options: ["true", "false"],
-        help: "false yields a metrics-only artifact that cannot support an EvidenceCase",
+        widget: "checkbox",
+        help: "off yields a metrics-only artifact that cannot support an EvidenceCase",
       },
       {
         path: "artifact.sections",

@@ -99,6 +99,17 @@ function Widget({
           onChange={(e) => onChange(clear(e.target.value))}
         />
       );
+    case "checkbox":
+      return (
+        <span className="toggle">
+          <input
+            type="checkbox"
+            checked={value === true}
+            onChange={(e) => onChange(e.target.checked)}
+          />
+          <span className="toggle-track" aria-hidden="true" />
+        </span>
+      );
     case "chips":
       return (
         <ChipsField value={value} options={spec.options ?? []} onChange={onChange} />
@@ -398,13 +409,21 @@ function Fields({
   return (
     <div className="builder-fields">
       {shown.map((spec) => (
-        <label key={spec.path} className="field">
-          <span className="field-label">{spec.label}</span>
+        <label
+          key={spec.path}
+          className={spec.widget === "checkbox" ? "field field-inline" : "field"}
+        >
+          {/* a toggle reads as "[switch] label", not a label floating over a
+              lone control — so the checkbox renders before its text */}
+          {spec.widget !== "checkbox" && (
+            <span className="field-label">{spec.label}</span>
+          )}
           <Widget
             spec={spec}
             value={readPath(manifest, spec.path)}
             onChange={(next) => onChange(writePath(manifest, spec.path, next))}
           />
+          {spec.widget === "checkbox" && <span>{spec.label}</span>}
           {spec.help && <span className="muted small">{spec.help}</span>}
         </label>
       ))}
@@ -617,7 +636,12 @@ export function Builder({ suiteId }: { suiteId: string }) {
               onChange={edited}
             />
           </Card>
-          {SECTIONS.map((section) => (
+          {SECTIONS.filter(
+            // a section whose every field is Advanced does not render an
+            // empty card in Basic — a card with nothing to do is not a form
+            (section) =>
+              mode === "advanced" || section.fields.some((field) => !field.advanced),
+          ).map((section) => (
             <Card key={section.id}>
               <h3>{section.title}</h3>
               {section.description && (
