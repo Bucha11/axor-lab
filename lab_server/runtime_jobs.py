@@ -93,6 +93,8 @@ _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/tr
 _SUITE_RE = re.compile(r"^/suites/(?!validate$)([A-Za-z0-9_-]+)$")
 _SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
 _SUITE_DISPATCH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/dispatch$")
+_SUITE_PUBLISH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/publish$")
+_REGISTRY_SUITE_RE = re.compile(r"^/registry/suites/([A-Za-z0-9_-]+)$")
 _RUN_REPORT_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/report$")
 _RUN_TRIAL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)$")
 _EVIDENCE_RE = re.compile(r"^/evidence/([A-Za-z0-9_.:-]+)$")
@@ -1195,6 +1197,19 @@ def make_runtime_server(
                     self._require_control()
                     self._send(200, {"suites": self._catalog(suite_catalog())})
                     return
+                if path == "/registry/suites":
+                    # the ORG's private registry — suites shared across the
+                    # company's workspaces, isolated from other orgs. A workspace
+                    # with no org sees an empty registry, not another org's.
+                    self._require_control()
+                    org = self._current_workspace().org
+                    suites = workspaces.org_registry(org).list("suite") if org else []
+                    self._send(200, {"suites": [
+                        {"id": s.get("id"), "name": s.get("name"),
+                         "description": s.get("description", ""),
+                         "origin": s.get("origin", "workspace")}
+                        for s in suites]})
+                    return
                 m = _SUITE_YAML_RE.match(path)
                 if m:
                     # the Builder's YAML mode reads the SAME manifest the Basic
@@ -1498,6 +1513,31 @@ def make_runtime_server(
                         scenarios=body.get("scenarios") or context["scenarios"],  # type: ignore[arg-type]
                         evaluators=body.get("evaluators") or context["evaluators"],  # type: ignore[arg-type]
                     ))
+                    return
+                m = _SUITE_PUBLISH_RE.match(path)
+                if m:
+                    # PUBLISH a suite to the org's private registry (gated by the
+                    # private_registry capability). It copies the workspace's own
+                    # suite into the shared org store, where every workspace in the
+                    # org can see it — the company's internal catalog.
+                    from lab_suite.errors import SuiteNotFound
+                    from lab_server.workspaces import require_capability
+
+                    self._require_control()
+                    workspace = self._current_workspace()
+                    require_capability(workspace, "private_registry")
+                    if not workspace.org:
+                        raise RuntimeJobsError(
+                            409, "this workspace belongs to no org — nothing to publish to")
+                    try:
+                        suite = self._resolve_suite(m.group(1))
+                    except SuiteNotFound as exc:
+                        raise RuntimeJobsError(404, str(exc)) from None
+                    # keep the suite's own origin (the schema's enum has no
+                    # 'org'); org-visibility is a property of WHERE it is stored,
+                    # not a field on the document
+                    workspaces.org_registry(workspace.org).put("suite", dict(suite))
+                    self._send(201, {"id": m.group(1), "org": workspace.org})
                     return
                 m = _SUITE_DISPATCH_RE.match(path)
                 if m:

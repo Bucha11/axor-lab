@@ -93,12 +93,14 @@ class Workspace:
     token: str
     plan: dict[str, object] = field(default_factory=lambda: dict(DEFAULT_PLAN))
     is_admin: bool = False  # may create/list other workspaces
+    org: str | None = None  # workspaces in the same org share a private registry
     created_at: float = field(default_factory=time.time)
 
     def public(self) -> dict[str, object]:
         """What is safe to show a client — never the token."""
         return {"id": self.id, "name": self.name, "plan": self.plan,
-                "is_admin": self.is_admin, "created_at": self.created_at}
+                "is_admin": self.is_admin, "org": self.org,
+                "created_at": self.created_at}
 
 
 class Workspaces:
@@ -111,6 +113,7 @@ class Workspaces:
         self._by_token: dict[str, Workspace] = {}
         self._by_id: dict[str, Workspace] = {}
         self._stores: dict[str, tuple[RuntimeJobStore, ScreenStore]] = {}
+        self._org_stores: dict[str, ScreenStore] = {}  # org id -> shared registry
         self._key_ws: dict[str, str] = {}   # runtime ingest_key -> workspace id
         self._current = threading.local()
 
@@ -150,6 +153,19 @@ class Workspaces:
             pair = (RuntimeJobStore(), ScreenStore(persist_dir=persist))
             self._stores[ws_id] = pair
             return pair
+
+    def org_registry(self, org_id: str) -> ScreenStore:
+        """The shared suite registry for an ORG — private to it, visible to every
+        workspace whose `org` matches (RFC §16 private registries). Rooted in its
+        own durable subdir, so one org's registry never leaks to another's."""
+        with self._lock:
+            existing = self._org_stores.get(org_id)
+            if existing is not None:
+                return existing
+            persist = str(self._data_dir / "org" / org_id) if self._data_dir else None
+            shelf = ScreenStore(persist_dir=persist)
+            self._org_stores[org_id] = shelf
+            return shelf
 
     # -- runtime ingest-key routing --------------------------------------
     def bind_key(self, ingest_key: str, ws_id: str) -> None:
