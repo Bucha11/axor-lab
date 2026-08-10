@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 
+from lab_server.workspaces import EntitlementError
+
 if TYPE_CHECKING:
     from lab_server.workspaces import Workspace, Workspaces
 
@@ -1026,15 +1028,23 @@ def make_runtime_server(
             catalog could not tell a user's suite from the shipped one."""
             from lab_suite import builtin_registry, validate_manifest
             from lab_suite.errors import SuiteNotFound
+            from lab_server.workspaces import require_within
 
             errors = validate_manifest(document)
             if errors:
                 raise RuntimeJobsError(422, "; ".join(errors[:5]))
             suite_id = str(document.get("id", ""))
+            # a NEW workspace suite counts against the plan's max_suites; an edit
+            # of an existing one does not (the count is unchanged). Built-in ids
+            # are not workspace suites and are never gated.
+            is_new = suite_id not in shelf.ids("suite")
             try:
                 builtin_registry().get(suite_id)
             except SuiteNotFound:
                 document = {**document, "origin": "workspace"}
+                if is_new:
+                    require_within(self._current_workspace(), "max_suites",
+                                   len(shelf.ids("suite")))
             return shelf.put("suite", document)
 
         def _document(self, key: str) -> dict[str, object]:
@@ -1264,7 +1274,7 @@ def make_runtime_server(
                 if self._serve_static():
                     return
                 self._send(404, {"error": "not found"})
-            except (RuntimeJobsError, ScreenStoreError) as exc:
+            except (RuntimeJobsError, ScreenStoreError, EntitlementError) as exc:
                 self._send(exc.status, {"error": exc.message})
             except Exception as exc:  # noqa: BLE001 — never leak a traceback
                 self._send(500, {"error": f"{type(exc).__name__}"})
@@ -1311,7 +1321,7 @@ def make_runtime_server(
                     self._send(200, {"id": self._save_suite(document)})
                     return
                 self._send(404, {"error": "not found"})
-            except (RuntimeJobsError, ScreenStoreError) as exc:
+            except (RuntimeJobsError, ScreenStoreError, EntitlementError) as exc:
                 self._send(exc.status, {"error": exc.message})
             except Exception as exc:  # noqa: BLE001 — never leak a traceback
                 self._send(500, {"error": f"{type(exc).__name__}"})
@@ -1328,7 +1338,7 @@ def make_runtime_server(
                     self._send(200, {"id": m.group(1), "deleted": True})
                     return
                 self._send(404, {"error": "not found"})
-            except (RuntimeJobsError, ScreenStoreError) as exc:
+            except (RuntimeJobsError, ScreenStoreError, EntitlementError) as exc:
                 self._send(exc.status, {"error": exc.message})
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"error": f"{type(exc).__name__}"})
@@ -1641,7 +1651,7 @@ def make_runtime_server(
                     self._send(200, result)
                     return
                 self._send(404, {"error": "not found"})
-            except (RuntimeJobsError, ScreenStoreError) as exc:
+            except (RuntimeJobsError, ScreenStoreError, EntitlementError) as exc:
                 self._send(exc.status, {"error": exc.message})
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"error": f"{type(exc).__name__}"})

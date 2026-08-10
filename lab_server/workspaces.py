@@ -24,13 +24,65 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lab_server.runtime_jobs import RuntimeJobStore
+from typing import TYPE_CHECKING
+
 from lab_server.screens import ScreenStore
 
-# The default entitlement plan (feature 3 fills this with real limits). A
-# workspace with no explicit plan gets this — generous, so tenancy alone changes
-# nothing about what a workspace may do until an entitlement is actually set.
-DEFAULT_PLAN: dict[str, object] = {"name": "default"}
+if TYPE_CHECKING:
+    from lab_server.runtime_jobs import RuntimeJobStore
+
+# The default entitlement plan. `None` limits mean UNLIMITED and an empty
+# capability list means every gated feature is off — but the default grants all
+# capabilities, so tenancy alone changes nothing until a restricted plan is set.
+# A restricted plan sets a numeric limit (e.g. max_suites: 2) or drops a
+# capability.
+ALL_CAPABILITIES = ("hosted_execution", "private_registry")
+
+DEFAULT_PLAN: dict[str, object] = {
+    "name": "default",
+    "max_suites": None,       # None = unlimited
+    "max_artifacts": None,    # artifact retention (feature 5)
+    "capabilities": list(ALL_CAPABILITIES),
+}
+
+
+class EntitlementError(Exception):
+    """A gated action refused by the workspace's plan. 402 Payment Required —
+    the request is well-formed and authorised, the PLAN does not include it."""
+
+    status = 402  # Payment Required
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def plan_limit(workspace: "Workspace", key: str) -> int | None:
+    """The numeric ceiling for `key`, or None for unlimited/unset."""
+    value = workspace.plan.get(key)
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def has_capability(workspace: "Workspace", capability: str) -> bool:
+    caps = workspace.plan.get("capabilities")
+    return isinstance(caps, list) and capability in caps
+
+
+def require_within(workspace: "Workspace", key: str, current_count: int) -> None:
+    """Refuse when adding one more would exceed the plan's `key` limit."""
+    ceiling = plan_limit(workspace, key)
+    if ceiling is not None and current_count >= ceiling:
+        raise EntitlementError(
+            f"plan '{workspace.plan.get('name', '?')}' allows {ceiling} for {key}; "
+            f"this workspace already has {current_count}. Upgrade the plan to add more."
+        )
+
+
+def require_capability(workspace: "Workspace", capability: str) -> None:
+    if not has_capability(workspace, capability):
+        raise EntitlementError(
+            f"capability {capability!r} is not in plan '{workspace.plan.get('name', '?')}'"
+        )
 
 
 @dataclass
@@ -87,6 +139,8 @@ class Workspaces:
         """The (jobs, shelf) for a workspace, created on first use. A workspace's
         ScreenStore is rooted in its OWN subdirectory, so one tenant's suites
         never land in another's."""
+        from lab_server.runtime_jobs import RuntimeJobStore  # lazy: avoids an import cycle
+
         with self._lock:
             existing = self._stores.get(ws_id)
             if existing is not None:
