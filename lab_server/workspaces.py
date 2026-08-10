@@ -40,8 +40,9 @@ ALL_CAPABILITIES = ("hosted_execution", "private_registry")
 
 DEFAULT_PLAN: dict[str, object] = {
     "name": "default",
-    "max_suites": None,       # None = unlimited
-    "max_artifacts": None,    # artifact retention (feature 5)
+    "max_suites": None,           # None = unlimited
+    "max_artifacts": None,        # artifact retention (feature 5)
+    "max_hosted_runtimes": None,  # hosted execution pool size (feature 4)
     "capabilities": list(ALL_CAPABILITIES),
 }
 

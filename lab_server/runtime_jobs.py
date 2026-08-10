@@ -301,21 +301,27 @@ class RuntimeJobStore:
         return f"{prefix}_{self._n:04d}_{secrets.token_hex(6)}"
 
     # -- control surface --------------------------------------------------
-    def connect_runtime(self, model: str = "", agent_ref: str | None = None) -> dict[str, object]:
+    def connect_runtime(self, model: str = "", agent_ref: str | None = None,
+                        hosted: bool = False) -> dict[str, object]:
         with self._lock:
             runtime_ref = self._next("rt")
             ingest_key = secrets.token_hex(24)
             self._runtimes[runtime_ref] = {
                 "runtime_ref": runtime_ref, "agent_ref": agent_ref,
                 "model": model, "status": "connected", "ingest_key": ingest_key,
+                # a HOSTED runtime is one the platform provisions and manages
+                # (RFC §16 hosted execution), as opposed to one the customer
+                # connects. It counts against the plan and is listed separately.
+                "hosted": hosted,
             }
             self._by_key[ingest_key] = runtime_ref
             return {"runtime_ref": runtime_ref, "ingest_key": ingest_key}
 
-    def list_runtimes(self) -> list[dict[str, object]]:
+    def list_runtimes(self, hosted: bool | None = None) -> list[dict[str, object]]:
         with self._lock:
             return [{k: v for k, v in r.items() if k != "ingest_key"}
-                    for r in self._runtimes.values()]
+                    for r in self._runtimes.values()
+                    if hosted is None or bool(r.get("hosted")) == hosted]
 
     def runtime_for_key(self, ingest_key: str) -> str | None:
         with self._lock:
@@ -1241,6 +1247,13 @@ def make_runtime_server(
                     self._require_control()
                     self._send(200, {"runtimes": jobs.list_runtimes()})
                     return
+                if path == "/hosted-runtimes":
+                    # the workspace's MANAGED runtime pool (RFC §16 hosted
+                    # execution) — the runtimes the platform provisions, distinct
+                    # from ones the customer connects
+                    self._require_control()
+                    self._send(200, {"hosted_runtimes": jobs.list_runtimes(hosted=True)})
+                    return
                 if path == "/runs":
                     # the Runs screen's source — every run, not the home
                     # payload's 5-most-recent slice.
@@ -1372,6 +1385,30 @@ def make_runtime_server(
                         plan=plan if isinstance(plan, dict) else dict(DEFAULT_PLAN),
                     ))
                     self._send(201, {**created.public(), "token": created.token})
+                    return
+                if path == "/hosted-runtimes":
+                    # PROVISION a managed runtime — gated by the hosted_execution
+                    # capability and the plan's pool size. This is the API +
+                    # lifecycle + entitlement of hosted execution; the compute
+                    # backend that claims its jobs is a deployment concern (in a
+                    # hosted deployment, a managed worker pool; the record here is
+                    # the tenant-facing contract for one).
+                    from lab_server.workspaces import require_capability, require_within
+
+                    self._require_control()
+                    workspace = self._current_workspace()
+                    require_capability(workspace, "hosted_execution")
+                    require_within(workspace, "max_hosted_runtimes",
+                                   len(jobs.list_runtimes(hosted=True)))
+                    body = self._read_json()
+                    connection = jobs.connect_runtime(
+                        model=str(body.get("model", "")),
+                        agent_ref=body.get("agent_ref"),  # type: ignore[arg-type]
+                        hosted=True,
+                    )
+                    workspaces.bind_key(str(connection["ingest_key"]),
+                                        workspaces.current_id() or "default")
+                    self._send(201, connection)
                     return
                 if path == "/runtimes/connect":
                     self._require_control()
