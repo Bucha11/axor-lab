@@ -927,14 +927,19 @@ def make_runtime_server(
             return auth[7:] if auth.startswith("Bearer ") else None
 
         def _require_control(self) -> None:
-            """Resolve the request's WORKSPACE from its control token and make it
-            current, so the store routers serve that tenant. Open mode (no token)
-            is the single default workspace, always current."""
+            """Resolve the request's WORKSPACE and ROLE from its token, make the
+            workspace current, and apply the RBAC read/write gate: a viewer may
+            not mutate. Mutations are recorded to the workspace audit log
+            (compliance). Open mode (no token) is the single owner default."""
+            from lab_server.workspaces import role_at_least
+
             if control_token is None:
                 workspaces.set_current("default")
+                self._role = "owner"
                 return
             token = self._bearer()
             workspace = workspaces.resolve_token(token)
+            role = workspaces.role_of(token)
             if workspace is None and _RUN_EVENTS_RE.match(self.path.split("?", 1)[0]):
                 # `EventSource` cannot set a header, so the SSE stream — and only
                 # it — accepts the token as a query parameter. A token in a URL
@@ -944,9 +949,26 @@ def make_runtime_server(
 
                 supplied = parse_qs(urlparse(self.path).query).get("token", [""])[0]
                 workspace = workspaces.resolve_token(supplied)
+                role = workspaces.role_of(supplied)
             if workspace is None:
                 raise RuntimeJobsError(401, "control token required")
             workspaces.set_current(workspace.id)
+            self._role = role or "viewer"
+            path = self.path.split("?", 1)[0]
+            if self.command in ("POST", "PUT", "DELETE"):
+                if not role_at_least(self._role, "member"):
+                    raise RuntimeJobsError(403, f"role {self._role!r} is read-only")
+                # compliance: who changed what. The role, not the token — an audit
+                # log is not a place to leak credentials.
+                workspaces.audit(workspace.id, self._role,
+                                 f"{self.command} {path}", time.time())
+
+        def _require_role(self, minimum: str) -> None:
+            from lab_server.workspaces import role_at_least
+
+            if not role_at_least(getattr(self, "_role", "viewer"), minimum):
+                raise RuntimeJobsError(
+                    403, f"role {getattr(self, '_role', 'viewer')!r} lacks {minimum} rights")
 
         def _current_workspace(self) -> "Workspace":
             from lab_server.workspaces import Workspace
@@ -1250,10 +1272,23 @@ def make_runtime_server(
                     self._send(200, manifest)
                     return
                 if path == "/workspaces/current":
-                    # identity: WHICH workspace this token is. The one surface a
-                    # client uses to know who it is and what its plan allows.
+                    # identity: WHICH workspace this token is, and — RBAC — what
+                    # ROLE the caller holds within it.
                     self._require_control()
-                    self._send(200, self._current_workspace().public())
+                    self._send(200, {**self._current_workspace().public(),
+                                     "role": getattr(self, "_role", "viewer")})
+                    return
+                if path == "/workspaces/current/members":
+                    self._require_control()
+                    self._send(200, {
+                        "members": workspaces.members_of(self._current_workspace().id)})
+                    return
+                if path == "/workspaces/current/audit":
+                    # the compliance surface: who changed what. Admin+ only.
+                    self._require_control()
+                    self._require_role("admin")
+                    self._send(200, {
+                        "audit": workspaces.audit_log(self._current_workspace().id)})
                     return
                 if path == "/workspaces":
                     # listing every workspace is an ADMIN act — a tenant must not
@@ -1429,6 +1464,27 @@ def make_runtime_server(
                     workspaces.bind_key(str(connection["ingest_key"]),
                                         workspaces.current_id() or "default")
                     self._send(201, connection)
+                    return
+                if path == "/workspaces/current/members":
+                    # provision a MEMBER of this workspace with a role, returning
+                    # a token shown once. This is the substrate SSO/OIDC drives:
+                    # an external IdP maps a login to a workspace + role and mints
+                    # exactly this. Admin+ within the workspace.
+                    import secrets
+
+                    from lab_server.workspaces import ROLES
+
+                    self._require_control()
+                    self._require_role("admin")
+                    body = self._read_json()
+                    role = str(body.get("role", "member"))
+                    if role not in ROLES or role == "owner":
+                        raise RuntimeJobsError(
+                            400, f"role must be one of {ROLES[1:]} (owner is the workspace)")
+                    member_token = secrets.token_hex(24)
+                    workspaces.add_member(
+                        self._current_workspace().id, member_token, role)
+                    self._send(201, {"role": role, "token": member_token})
                     return
                 if path == "/runtimes/connect":
                     self._require_control()

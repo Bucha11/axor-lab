@@ -38,6 +38,18 @@ if TYPE_CHECKING:
 # capability.
 ALL_CAPABILITIES = ("hosted_execution", "private_registry")
 
+# RBAC roles, most-privileged first. A member's token carries a role within its
+# workspace; SSO/OIDC is the identity source that MINTS these member tokens (the
+# external IdP maps a login to a workspace + role) — modelled here as member
+# provisioning, so the authorization substrate is real even without an IdP wired.
+ROLES = ("owner", "admin", "member", "viewer")
+_ROLE_RANK = {role: i for i, role in enumerate(ROLES)}  # lower rank = more power
+
+
+def role_at_least(role: str, minimum: str) -> bool:
+    """Whether `role` is at least as privileged as `minimum`."""
+    return _ROLE_RANK.get(role, len(ROLES)) <= _ROLE_RANK.get(minimum, -1)
+
 DEFAULT_PLAN: dict[str, object] = {
     "name": "default",
     "max_suites": None,           # None = unlimited
@@ -110,25 +122,76 @@ class Workspaces:
     def __init__(self, data_dir: str | Path | None = None) -> None:
         self._data_dir = Path(data_dir) if data_dir is not None else None
         self._lock = threading.Lock()
-        self._by_token: dict[str, Workspace] = {}
+        # a token maps to (workspace id, role) — the workspace's own token is its
+        # owner; member tokens carry lesser roles
+        self._by_token: dict[str, tuple[str, str]] = {}
         self._by_id: dict[str, Workspace] = {}
         self._stores: dict[str, tuple[RuntimeJobStore, ScreenStore]] = {}
         self._org_stores: dict[str, ScreenStore] = {}  # org id -> shared registry
         self._key_ws: dict[str, str] = {}   # runtime ingest_key -> workspace id
+        self._members: dict[str, dict[str, str]] = {}  # ws id -> {token: role}
+        self._audit: dict[str, list[dict[str, object]]] = {}  # ws id -> entries
         self._current = threading.local()
 
     # -- registry ---------------------------------------------------------
     def add(self, workspace: Workspace) -> Workspace:
         with self._lock:
-            self._by_token[workspace.token] = workspace
+            self._by_token[workspace.token] = (workspace.id, "owner")
             self._by_id[workspace.id] = workspace
+            self._members.setdefault(workspace.id, {})
         return workspace
 
     def resolve_token(self, token: str | None) -> Workspace | None:
+        entry = self._resolve(token)
+        return entry[0] if entry else None
+
+    def role_of(self, token: str | None) -> str | None:
+        entry = self._resolve(token)
+        return entry[1] if entry else None
+
+    def _resolve(self, token: str | None) -> tuple[Workspace, str] | None:
         if not token:
             return None
         with self._lock:
-            return self._by_token.get(token)
+            binding = self._by_token.get(token)
+            if binding is None:
+                return None
+            ws_id, role = binding
+            workspace = self._by_id.get(ws_id)
+        return (workspace, role) if workspace is not None else None
+
+    # -- members (RBAC) ---------------------------------------------------
+    def add_member(self, ws_id: str, token: str, role: str) -> None:
+        with self._lock:
+            self._by_token[token] = (ws_id, role)
+            self._members.setdefault(ws_id, {})[token] = role
+
+    def remove_member(self, ws_id: str, token: str) -> bool:
+        with self._lock:
+            existed = self._members.get(ws_id, {}).pop(token, None) is not None
+            if existed:
+                self._by_token.pop(token, None)
+            return existed
+
+    def members_of(self, ws_id: str) -> list[dict[str, object]]:
+        """Roles present, WITHOUT the tokens — a member list is not a key dump."""
+        with self._lock:
+            roles = list(self._members.get(ws_id, {}).values())
+        counts: dict[str, int] = {}
+        for role in ["owner", *roles]:  # the workspace's own token is the owner
+            counts[role] = counts.get(role, 0) + 1
+        return [{"role": r, "count": n} for r, n in counts.items()]
+
+    # -- audit log (compliance) ------------------------------------------
+    def audit(self, ws_id: str, actor_role: str, action: str, at: float,
+              detail: str = "") -> None:
+        with self._lock:
+            self._audit.setdefault(ws_id, []).append(
+                {"at": at, "actor_role": actor_role, "action": action, "detail": detail})
+
+    def audit_log(self, ws_id: str) -> list[dict[str, object]]:
+        with self._lock:
+            return list(self._audit.get(ws_id, []))
 
     def get(self, ws_id: str) -> Workspace | None:
         with self._lock:

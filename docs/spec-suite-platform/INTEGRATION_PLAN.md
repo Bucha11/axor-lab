@@ -674,15 +674,30 @@ importing the open SDK + replay surface pulls in zero `lab_server` modules. So
 `import lab_suite` / `import lab_runner` is installable and runnable with no
 hosted server present, today.
 
-**Deferred, with reason:**
-- *Two installable distributions* (`axor-lab-core` open + `axor-lab` commercial
-  depending on it) — the boundary that makes the split CORRECT is enforced; the
-  `pyproject` split that makes it PACKAGED is mechanical and lands when there is
-  a release to cut.
-- *Entitlement / licensing gate* — the plan gates the commercial half only "if
-  Phase 4 actually ships hosted features." It hasn't: the server is a
-  single-process demo with in-memory storage. There is nothing to gate, and a
-  gate over nothing is theatre.
+**The commercial half now has features to gate — built in order (§16):**
+
+| # | Feature | What landed | Test |
+|---|---|---|---|
+| 1 | Durable workspace | `ScreenStore(persist_dir=…)` — atomic writes, reload on restart; `serve --data-dir` | `test_durable_workspace.py` |
+| 2 | Multi-tenant identity | `workspaces.py` — token→workspace, per-tenant isolated stores, thread-local routing; `GET /workspaces/current`, admin provisioning | `test_multitenancy.py` |
+| 3 | Entitlement gate | plans with numeric limits + capability flags; `require_within`/`require_capability`; `max_suites` enforced (402) | `test_entitlements.py` |
+| 4 | Hosted execution | managed runtime pool — `POST /hosted-runtimes` gated by `hosted_execution` + `max_hosted_runtimes` | `test_hosted_execution.py` |
+| 5 | Artifact registry | durable + newest-first version history + `?suite=` filter + `max_artifacts` retention | `test_artifact_registry.py` |
+| 6 | Private registries | per-org shared suite catalog; `POST /suites/{id}/publish`, `GET /registry/suites`, org isolation, `private_registry` cap | `test_private_registry.py` |
+| 7 | SSO/RBAC + compliance | roles (owner>admin>member>viewer), read/write gate, member provisioning (the SSO substrate), per-workspace audit log | `test_rbac.py` |
+
+The entitlement gate is now real: a restricted plan bounds suites, artifacts and
+the hosted pool, and refuses over-plan requests with 402. SSO itself (a wired
+OIDC/SAML IdP) remains external — the server models the identity substrate it
+would drive (member tokens + roles), and a real IdP plugs in at member
+provisioning.
+
+**Still deferred, with reason:**
+- *Two installable distributions* (`axor-lab-core` + `axor-lab`) — the boundary
+  that makes the split CORRECT is enforced (`test_open_core_boundary.py`); the
+  `pyproject` split that makes it PACKAGED is mechanical, for a release to cut.
+- *A wired external IdP* — the RBAC/authorization substrate is built and tested;
+  binding a specific OIDC/SAML provider is deployment integration.
 
 ### Phase 6 — Multi-agent · unscheduled
 
