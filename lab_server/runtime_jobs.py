@@ -48,6 +48,10 @@ import time
 from urllib.parse import unquote
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lab_server.workspaces import Workspace, Workspaces
 
 from lab_server.static import (
     content_type as static_content_type,
@@ -790,6 +794,7 @@ def make_runtime_server(
     screens: "ScreenStore | None" = None,
     web_root: "pathlib.Path | None" = None,
     data_dir: "str | pathlib.Path | None" = None,
+    workspaces: "Workspaces | None" = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs + screen-API server. `control_token`, if set,
     gates the control surface (runtime registration, run assignment, every
@@ -798,9 +803,24 @@ def make_runtime_server(
 
     `data_dir` makes the workspace DURABLE: suites, evidence, regressions and
     artifacts are persisted there and reloaded on restart (the hosted-workspace
-    half of the open-core split). Omitted, storage is in-memory."""
-    jobs = store or RuntimeJobStore()
-    shelf = screens if screens is not None else ScreenStore(persist_dir=data_dir)
+    half of the open-core split). Omitted, storage is in-memory.
+
+    `workspaces` runs the server MULTI-TENANT: many workspaces, each with its own
+    token and isolated stores. Omitted, a single default workspace is built from
+    `control_token` — every existing single-token client is that one tenant."""
+    from lab_server.workspaces import _JobsRouter, _ShelfRouter, single_workspace
+
+    if workspaces is None:
+        workspaces = single_workspace(control_token, data_dir)
+        # honour an explicitly-passed store/screens by seeding the default
+        # workspace's stores with them (the in-process test path)
+        default_jobs = store or RuntimeJobStore()
+        default_shelf = screens if screens is not None else ScreenStore(persist_dir=data_dir)
+        workspaces._stores["default"] = (default_jobs, default_shelf)  # noqa: SLF001
+    # the handler's `jobs`/`shelf` become routers to the CURRENT request's
+    # workspace, set by _require_control / _runtime_ref after authentication
+    jobs = _JobsRouter(workspaces)
+    shelf = _ShelfRouter(workspaces)
     # The built app, when there is one. Absent, every API route still answers
     # and only the browser surface is missing — the server never pretends to
     # serve a frontend that was not built.
@@ -897,30 +917,49 @@ def make_runtime_server(
             return auth[7:] if auth.startswith("Bearer ") else None
 
         def _require_control(self) -> None:
+            """Resolve the request's WORKSPACE from its control token and make it
+            current, so the store routers serve that tenant. Open mode (no token)
+            is the single default workspace, always current."""
             if control_token is None:
+                workspaces.set_current("default")
                 return
-            if self._bearer() == control_token:
-                return
-            # `EventSource` cannot set a header, so the SSE stream — and only it —
-            # also accepts the token as a query parameter. A token in a URL can
-            # land in a proxy log, which is a real cost; the alternative is an
-            # unauthenticated stream of run contents to anyone who can reach the
-            # port. Restricted to this one route so the trade is not quietly
-            # extended to endpoints that have a header available.
-            if _RUN_EVENTS_RE.match(self.path.split("?", 1)[0]):
+            token = self._bearer()
+            workspace = workspaces.resolve_token(token)
+            if workspace is None and _RUN_EVENTS_RE.match(self.path.split("?", 1)[0]):
+                # `EventSource` cannot set a header, so the SSE stream — and only
+                # it — accepts the token as a query parameter. A token in a URL
+                # can land in a proxy log, a real cost; the alternative is an
+                # unauthenticated stream of run contents. Scoped to this one route.
                 from urllib.parse import parse_qs, urlparse
 
                 supplied = parse_qs(urlparse(self.path).query).get("token", [""])[0]
-                if supplied == control_token:
-                    return
-            raise RuntimeJobsError(401, "control token required")
+                workspace = workspaces.resolve_token(supplied)
+            if workspace is None:
+                raise RuntimeJobsError(401, "control token required")
+            workspaces.set_current(workspace.id)
+
+        def _current_workspace(self) -> "Workspace":
+            from lab_server.workspaces import Workspace
+
+            ws = workspaces.get(workspaces.current_id() or "")
+            if ws is None:  # only reachable if a caller skipped _require_control
+                raise RuntimeJobsError(401, "control token required")
+            assert isinstance(ws, Workspace)
+            return ws
 
         def _runtime_ref(self) -> str:
             key = self._bearer()
-            ref = jobs.runtime_for_key(key) if key else None
-            if ref is None:
-                raise RuntimeJobsError(401, "a valid runtime ingest_key is required")
-            return ref
+            # a runtime carries only its ingest key; resolve the workspace that
+            # issued it, make it current, then find the runtime within it
+            ws_id = workspaces.workspace_for_key(key)
+            if ws_id is None and control_token is None:
+                ws_id = "default"  # open mode: keys live in the one workspace
+            if ws_id is not None:
+                workspaces.set_current(ws_id)
+                ref = jobs.runtime_for_key(key) if key else None
+                if ref is not None:
+                    return ref
+            raise RuntimeJobsError(401, "a valid runtime ingest_key is required")
 
         def _resolve_suite(self, suite_id: str) -> dict[str, object]:
             """A SAVED suite wins over the built-in of the same id.
@@ -1174,6 +1213,20 @@ def make_runtime_server(
                         raise RuntimeJobsError(404, str(exc)) from None
                     self._send(200, manifest)
                     return
+                if path == "/workspaces/current":
+                    # identity: WHICH workspace this token is. The one surface a
+                    # client uses to know who it is and what its plan allows.
+                    self._require_control()
+                    self._send(200, self._current_workspace().public())
+                    return
+                if path == "/workspaces":
+                    # listing every workspace is an ADMIN act — a tenant must not
+                    # enumerate the others
+                    self._require_control()
+                    if not self._current_workspace().is_admin:
+                        raise RuntimeJobsError(403, "listing workspaces requires admin")
+                    self._send(200, {"workspaces": [w.public() for w in workspaces.list()]})
+                    return
                 if path == "/runtimes":
                     self._require_control()
                     self._send(200, {"runtimes": jobs.list_runtimes()})
@@ -1290,13 +1343,39 @@ def make_runtime_server(
                 # ...and DECODED: the client percent-encodes every path segment
                 # (a trial unit carries colons), so without unquote a trial link
                 # that works when typed raw 404s when the app follows it
+                if path == "/workspaces":
+                    # provision a new tenant (ADMIN only) → returns its token,
+                    # shown once. Its stores are created lazily on first use.
+                    import secrets
+
+                    from lab_server.workspaces import DEFAULT_PLAN, Workspace, new_id
+
+                    self._require_control()
+                    if not self._current_workspace().is_admin:
+                        raise RuntimeJobsError(403, "creating a workspace requires admin")
+                    body = self._read_json()
+                    ws_id = new_id("ws", {w.id for w in workspaces.list()})
+                    plan = body.get("plan")
+                    created = workspaces.add(Workspace(
+                        id=ws_id, name=str(body.get("name", ws_id)),
+                        token=secrets.token_hex(24),
+                        plan=plan if isinstance(plan, dict) else dict(DEFAULT_PLAN),
+                    ))
+                    self._send(201, {**created.public(), "token": created.token})
+                    return
                 if path == "/runtimes/connect":
                     self._require_control()
                     body = self._read_json()
-                    self._send(201, jobs.connect_runtime(
+                    connection = jobs.connect_runtime(
                         model=str(body.get("model", "")),
                         agent_ref=body.get("agent_ref"),  # type: ignore[arg-type]
-                    ))
+                    )
+                    # the ingest key belongs to THIS workspace, so a later runtime
+                    # call (which carries only the key) resolves back to it
+                    workspaces.bind_key(
+                        str(connection["ingest_key"]),
+                        workspaces.current_id() or "default")
+                    self._send(201, connection)
                     return
                 if path == "/playground/trial":
                     # ONE trial for inspection (RFC §13). Not a Run: nothing is
