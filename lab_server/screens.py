@@ -332,15 +332,42 @@ def regression_list(store: ScreenStore) -> dict[str, Any]:
     return {"regressions": [_summary(r, REGRESSION_ROW) for r in store.list("regression")]}
 
 
-def artifact_list(store: ScreenStore) -> dict[str, Any]:
+def artifact_list(store: ScreenStore, suite_id: str | None = None) -> dict[str, Any]:
+    """The artifact registry: newest first, optionally the version history of ONE
+    suite (`suite_id`). Ordering by `created` makes a suite's row list its
+    successive artifact versions, latest at the top."""
     rows = []
     for artifact in store.list("artifact"):
-        row = _summary(artifact, ARTIFACT_ROW)
         suite = artifact.get("suite")
-        if isinstance(suite, dict):
-            row["suite_id"] = suite.get("id")  # a scalar label, not the manifest
+        this_suite = suite.get("id") if isinstance(suite, dict) else None
+        if suite_id is not None and this_suite != suite_id:
+            continue
+        row = _summary(artifact, ARTIFACT_ROW)
+        row["suite_id"] = this_suite
         rows.append(row)
+    rows.sort(key=lambda r: str(r.get("created", "")), reverse=True)
     return {"artifacts": rows}
+
+
+def enforce_artifact_retention(store: ScreenStore, keep: int | None) -> list[str]:
+    """A registry retains the newest `keep` artifacts; older ones are evicted.
+
+    `keep` is the workspace plan's `max_artifacts` (None = unlimited). Returns the
+    ids evicted. This is a REGISTRY's retention, not a hard refusal: a new
+    artifact is always stored, and the oldest beyond the plan's window fall off —
+    the honest behaviour for a store the customer keeps writing to."""
+    if keep is None:
+        return []
+    artifacts = sorted(
+        store.list("artifact"),
+        key=lambda a: str(a.get("created", "")), reverse=True,
+    )
+    evicted: list[str] = []
+    for stale in artifacts[keep:]:
+        identifier = str(stale.get("artifact_id", ""))
+        if identifier and store.delete("artifact", identifier):
+            evicted.append(identifier)
+    return evicted
 
 
 def run_regression(

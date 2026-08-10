@@ -1143,8 +1143,13 @@ def make_runtime_server(
                     self._send(200, regression_list(shelf))
                     return
                 if path == "/artifacts":
+                    # the artifact registry: newest first, optionally the version
+                    # history of one suite via ?suite=<id>
+                    from urllib.parse import parse_qs, urlparse
+
                     self._require_control()
-                    self._send(200, artifact_list(shelf))
+                    suite_q = parse_qs(urlparse(self.path).query).get("suite", [None])[0]
+                    self._send(200, artifact_list(shelf, suite_id=suite_q))
                     return
                 m = _EVIDENCE_RE.match(path)
                 if m:
@@ -1461,12 +1466,18 @@ def make_runtime_server(
                     })
                     return
                 if path == "/artifacts":
+                    from lab_server.screens import enforce_artifact_retention
+                    from lab_server.workspaces import plan_limit
+
                     self._require_control()
                     document = self._document("artifact")
                     _verify_artifact_integrity(document)
-                    self._send(201, {"id": shelf.put(
-                        "artifact", document, id_field="artifact_id",
-                    )})
+                    artifact_id = shelf.put("artifact", document, id_field="artifact_id")
+                    # registry retention: the plan's max_artifacts window, oldest
+                    # beyond it evicted
+                    enforce_artifact_retention(
+                        shelf, plan_limit(self._current_workspace(), "max_artifacts"))
+                    self._send(201, {"id": artifact_id})
                     return
                 m = _REGRESSION_RUN_RE.match(path)
                 if m:
@@ -1685,6 +1696,16 @@ def make_runtime_server(
                     if result.get("run_state") == "analyzing":
                         finalize_suite_run(jobs, shelf, m.group(1))
                         result["run_state"] = jobs.run_state(m.group(1))
+                        # finalize stored an artifact — apply the registry's
+                        # retention window (the runtime is authed by its ingest
+                        # key, so the current workspace is resolved)
+                        from lab_server.screens import enforce_artifact_retention
+                        from lab_server.workspaces import plan_limit
+
+                        ws = workspaces.get(workspaces.current_id() or "")
+                        if ws is not None:
+                            enforce_artifact_retention(
+                                shelf, plan_limit(ws, "max_artifacts"))
                     self._send(200, result)
                     return
                 self._send(404, {"error": "not found"})
