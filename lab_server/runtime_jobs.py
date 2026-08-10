@@ -805,6 +805,7 @@ def make_runtime_server(
     web_root: "pathlib.Path | None" = None,
     data_dir: "str | pathlib.Path | None" = None,
     workspaces: "Workspaces | None" = None,
+    billing_webhook_secret: str | None = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs + screen-API server. `control_token`, if set,
     gates the control surface (runtime registration, run assignment, every
@@ -1290,6 +1291,20 @@ def make_runtime_server(
                     self._send(200, {
                         "audit": workspaces.audit_log(self._current_workspace().id)})
                     return
+                if path == "/billing/plans":
+                    # the plan CATALOG — what a customer can buy, with prices and
+                    # limits. This is what a "choose a plan" screen renders.
+                    from lab_server.workspaces import PLAN_CATALOG
+
+                    self._require_control()
+                    self._send(200, {"plans": list(PLAN_CATALOG.values())})
+                    return
+                if path == "/workspaces/current/subscription":
+                    self._require_control()
+                    ws = self._current_workspace()
+                    self._send(200, {"subscription": ws.subscription,
+                                     "plan": ws.plan})
+                    return
                 if path == "/workspaces":
                     # listing every workspace is an ADMIN act — a tenant must not
                     # enumerate the others
@@ -1485,6 +1500,78 @@ def make_runtime_server(
                     workspaces.add_member(
                         self._current_workspace().id, member_token, role)
                     self._send(201, {"role": role, "token": member_token})
+                    return
+                if path == "/billing/checkout":
+                    # BUY a plan: open a checkout session. In a real deployment
+                    # the returned url is the provider's hosted payment page; the
+                    # server never touches a card. Payment confirmation arrives
+                    # later at /billing/webhook. Admin+ (whoever manages billing).
+                    import secrets
+
+                    from lab_server.workspaces import PLAN_CATALOG
+
+                    self._require_control()
+                    self._require_role("admin")
+                    body = self._read_json()
+                    plan_id = str(body.get("plan_id", ""))
+                    if plan_id not in PLAN_CATALOG:
+                        raise RuntimeJobsError(400, f"unknown plan {plan_id!r}")
+                    session_id = f"cs_{secrets.token_hex(12)}"
+                    workspaces.open_checkout(
+                        self._current_workspace().id, plan_id, session_id)
+                    self._send(201, {
+                        "session_id": session_id,
+                        # the provider's hosted page in production; a placeholder
+                        # here — the server issues no payment UI of its own
+                        "checkout_url": f"https://billing.example/checkout/{session_id}",
+                        "plan_id": plan_id,
+                    })
+                    return
+                if path == "/billing/webhook":
+                    # the PAYMENT PROVIDER calls this on a settled payment. Gated
+                    # by a shared secret, NOT the control token — it is server↔
+                    # provider, not a workspace. This is where a real Stripe/etc.
+                    # webhook wires in; on 'payment_succeeded' the subscription
+                    # goes active and the bought plan is applied, opening the gate.
+                    if not billing_webhook_secret:
+                        raise RuntimeJobsError(501, "billing webhook is not configured")
+                    if self.headers.get("X-Billing-Secret") != billing_webhook_secret:
+                        raise RuntimeJobsError(401, "invalid billing webhook secret")
+                    body = self._read_json()
+                    session = workspaces.checkout(str(body.get("session_id", "")))
+                    if session is None:
+                        raise RuntimeJobsError(404, "unknown checkout session")
+                    event = str(body.get("event", ""))
+                    if event == "payment_succeeded":
+                        workspaces.apply_plan(str(session["ws_id"]),
+                                              str(session["plan_id"]), "active")
+                        workspaces.settle_checkout(str(body.get("session_id")))
+                    elif event in ("payment_failed", "subscription_canceled"):
+                        # lapse to free — paid features close
+                        workspaces.apply_plan(str(session["ws_id"]),
+                                              str(session["plan_id"]),
+                                              "past_due" if event == "payment_failed"
+                                              else "canceled")
+                    self._send(200, {"received": True})
+                    return
+                if path == "/workspaces/current/plan":
+                    # a MANUAL grant — an operator comps a plan (enterprise deals,
+                    # trials) without a payment. Server-admin only.
+                    from lab_server.workspaces import PLAN_CATALOG
+
+                    self._require_control()
+                    if not self._current_workspace().is_admin:
+                        raise RuntimeJobsError(403, "granting a plan requires admin")
+                    body = self._read_json()
+                    plan_id = str(body.get("plan_id", ""))
+                    target = str(body.get("workspace_id", self._current_workspace().id))
+                    if plan_id not in PLAN_CATALOG:
+                        raise RuntimeJobsError(400, f"unknown plan {plan_id!r}")
+                    ws = workspaces.apply_plan(target, plan_id, "active")
+                    if ws is None:
+                        raise RuntimeJobsError(404, f"unknown workspace {target!r}")
+                    self._send(200, {"workspace_id": target,
+                                     "subscription": ws.subscription})
                     return
                 if path == "/runtimes/connect":
                     self._require_control()

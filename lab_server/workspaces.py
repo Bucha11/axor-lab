@@ -58,6 +58,30 @@ DEFAULT_PLAN: dict[str, object] = {
     "capabilities": list(ALL_CAPABILITIES),
 }
 
+# The billing plan CATALOG — what a customer can buy. "free" is the fallback a
+# workspace drops to when its subscription is not active, so a lapsed payment
+# loses the paid features rather than keeping them. The gate reads a workspace's
+# ACTIVE plan (set from this catalog by the billing webhook), so these numbers
+# are the actual product tiers, not decoration.
+PLAN_CATALOG: dict[str, dict[str, object]] = {
+    "free": {
+        "name": "free", "price_usd": 0,
+        "max_suites": 3, "max_artifacts": 10, "max_hosted_runtimes": 0,
+        "capabilities": [],
+    },
+    "starter": {
+        "name": "starter", "price_usd": 49,
+        "max_suites": 25, "max_artifacts": 200, "max_hosted_runtimes": 2,
+        "capabilities": ["private_registry"],
+    },
+    "pro": {
+        "name": "pro", "price_usd": 199,
+        "max_suites": None, "max_artifacts": None, "max_hosted_runtimes": 10,
+        "capabilities": list(ALL_CAPABILITIES),
+    },
+}
+FREE_PLAN = "free"
+
 
 class EntitlementError(Exception):
     """A gated action refused by the workspace's plan. 402 Payment Required —
@@ -106,13 +130,17 @@ class Workspace:
     plan: dict[str, object] = field(default_factory=lambda: dict(DEFAULT_PLAN))
     is_admin: bool = False  # may create/list other workspaces
     org: str | None = None  # workspaces in the same org share a private registry
+    # the billing subscription that DRIVES `plan`. status in
+    # active/past_due/canceled; a non-active subscription falls back to free.
+    subscription: dict[str, object] = field(
+        default_factory=lambda: {"plan_id": "free", "status": "active"})
     created_at: float = field(default_factory=time.time)
 
     def public(self) -> dict[str, object]:
         """What is safe to show a client — never the token."""
         return {"id": self.id, "name": self.name, "plan": self.plan,
                 "is_admin": self.is_admin, "org": self.org,
-                "created_at": self.created_at}
+                "subscription": self.subscription, "created_at": self.created_at}
 
 
 class Workspaces:
@@ -131,7 +159,42 @@ class Workspaces:
         self._key_ws: dict[str, str] = {}   # runtime ingest_key -> workspace id
         self._members: dict[str, dict[str, str]] = {}  # ws id -> {token: role}
         self._audit: dict[str, list[dict[str, object]]] = {}  # ws id -> entries
+        self._checkouts: dict[str, dict[str, object]] = {}  # session id -> pending buy
         self._current = threading.local()
+
+    # -- billing ----------------------------------------------------------
+    def apply_plan(self, ws_id: str, plan_id: str, status: str = "active") -> Workspace | None:
+        """Set a workspace's ACTIVE plan from the catalog and its subscription
+        state. An 'active' subscription applies the bought plan; anything else
+        falls back to free — a lapsed payment loses paid features, never keeps
+        them. This is the ONE place `plan` changes after creation, called by the
+        billing webhook (payment confirmed) or an admin (manual grant)."""
+        with self._lock:
+            workspace = self._by_id.get(ws_id)
+            if workspace is None:
+                return None
+            effective = plan_id if status == "active" else FREE_PLAN
+            workspace.plan = dict(PLAN_CATALOG.get(effective, PLAN_CATALOG[FREE_PLAN]))
+            workspace.subscription = {"plan_id": plan_id, "status": status}
+            return workspace
+
+    def open_checkout(self, ws_id: str, plan_id: str, session_id: str) -> dict[str, object]:
+        """Record a PENDING purchase. In a real deployment the provider hosts the
+        payment page; here the session id is what the webhook later references."""
+        with self._lock:
+            self._checkouts[session_id] = {"ws_id": ws_id, "plan_id": plan_id,
+                                           "status": "pending"}
+            return dict(self._checkouts[session_id])
+
+    def checkout(self, session_id: str) -> dict[str, object] | None:
+        with self._lock:
+            found = self._checkouts.get(session_id)
+            return dict(found) if found else None
+
+    def settle_checkout(self, session_id: str) -> None:
+        with self._lock:
+            if session_id in self._checkouts:
+                self._checkouts[session_id]["status"] = "settled"
 
     # -- registry ---------------------------------------------------------
     def add(self, workspace: Workspace) -> Workspace:

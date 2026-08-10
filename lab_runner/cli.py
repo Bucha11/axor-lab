@@ -173,8 +173,11 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     token = args.control_token or os.environ.get("AXOR_LAB_CONTROL_TOKEN")
     data_dir = getattr(args, "data_dir", None) or os.environ.get("AXOR_LAB_DATA_DIR")
+    billing_secret = (getattr(args, "billing_webhook_secret", None)
+                      or os.environ.get("AXOR_LAB_BILLING_WEBHOOK_SECRET"))
     server = make_runtime_server(
-        host=args.host, port=args.port, control_token=token, data_dir=data_dir)
+        host=args.host, port=args.port, control_token=token, data_dir=data_dir,
+        billing_webhook_secret=billing_secret)
     site = default_root()
     print(f"axor-lab on http://{args.host}:{args.port}")
     print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
@@ -1709,6 +1712,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="persist the workspace (suites, evidence, regressions, artifacts) "
              "in this directory and reload it on restart (or AXOR_LAB_DATA_DIR); "
              "omitted, storage is in-memory",
+    )
+    p_serve.add_argument(
+        "--billing-webhook-secret", default=None,
+        help="shared secret the payment provider sends on /billing/webhook "
+             "(or AXOR_LAB_BILLING_WEBHOOK_SECRET); omitted, the webhook is off",
     )
     p_serve.set_defaults(func=_cmd_serve)
 
