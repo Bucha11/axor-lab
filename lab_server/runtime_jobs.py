@@ -806,6 +806,7 @@ def make_runtime_server(
     data_dir: "str | pathlib.Path | None" = None,
     workspaces: "Workspaces | None" = None,
     billing_webhook_secret: str | None = None,
+    plan_catalog: "dict[str, dict[str, object]] | None" = None,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs + screen-API server. `control_token`, if set,
     gates the control surface (runtime registration, run assignment, every
@@ -822,7 +823,7 @@ def make_runtime_server(
     from lab_server.workspaces import _JobsRouter, _ShelfRouter, single_workspace
 
     if workspaces is None:
-        workspaces = single_workspace(control_token, data_dir)
+        workspaces = single_workspace(control_token, data_dir, plan_catalog)
         # honour an explicitly-passed store/screens by seeding the default
         # workspace's stores with them (the in-process test path)
         default_jobs = store or RuntimeJobStore()
@@ -1294,10 +1295,8 @@ def make_runtime_server(
                 if path == "/billing/plans":
                     # the plan CATALOG — what a customer can buy, with prices and
                     # limits. This is what a "choose a plan" screen renders.
-                    from lab_server.workspaces import PLAN_CATALOG
-
                     self._require_control()
-                    self._send(200, {"plans": list(PLAN_CATALOG.values())})
+                    self._send(200, {"plans": list(workspaces.plan_catalog.values())})
                     return
                 if path == "/workspaces/current/subscription":
                     self._require_control()
@@ -1508,13 +1507,11 @@ def make_runtime_server(
                     # later at /billing/webhook. Admin+ (whoever manages billing).
                     import secrets
 
-                    from lab_server.workspaces import PLAN_CATALOG
-
                     self._require_control()
                     self._require_role("admin")
                     body = self._read_json()
                     plan_id = str(body.get("plan_id", ""))
-                    if plan_id not in PLAN_CATALOG:
+                    if plan_id not in workspaces.plan_catalog:
                         raise RuntimeJobsError(400, f"unknown plan {plan_id!r}")
                     session_id = f"cs_{secrets.token_hex(12)}"
                     workspaces.open_checkout(
@@ -1557,15 +1554,13 @@ def make_runtime_server(
                 if path == "/workspaces/current/plan":
                     # a MANUAL grant — an operator comps a plan (enterprise deals,
                     # trials) without a payment. Server-admin only.
-                    from lab_server.workspaces import PLAN_CATALOG
-
                     self._require_control()
                     if not self._current_workspace().is_admin:
                         raise RuntimeJobsError(403, "granting a plan requires admin")
                     body = self._read_json()
                     plan_id = str(body.get("plan_id", ""))
                     target = str(body.get("workspace_id", self._current_workspace().id))
-                    if plan_id not in PLAN_CATALOG:
+                    if plan_id not in workspaces.plan_catalog:
                         raise RuntimeJobsError(400, f"unknown plan {plan_id!r}")
                     ws = workspaces.apply_plan(target, plan_id, "active")
                     if ws is None:

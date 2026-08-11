@@ -20,8 +20,15 @@ import urllib.error
 import urllib.request
 
 from lab_server.runtime_jobs import make_runtime_server
-from lab_server.workspaces import PLAN_CATALOG, Workspace, Workspaces, plan_limit
+from lab_server.workspaces import (
+    EXAMPLE_PLAN_CATALOG,
+    Workspace,
+    Workspaces,
+    plan_limit,
+)
 from lab_suite import builtin_registry
+
+PLAN_CATALOG = EXAMPLE_PLAN_CATALOG  # the tests exercise the example catalog
 
 ADMIN = "admin-token"
 WEBHOOK = "whsec_test"
@@ -72,6 +79,33 @@ class TestCatalog(BillingTestCase):
         self.assertEqual(status, 200)
         names = {p["name"] for p in payload["plans"]}
         self.assertEqual(names, {"free", "starter", "pro"})
+
+
+class TestTheCatalogIsOperatorSupplied(unittest.TestCase):
+    """The prices and limits are NOT baked into the product — an operator
+    supplies their own catalog, and the billing gate reads whatever is
+    configured. The code makes no pricing claim of its own."""
+
+    def test_a_custom_catalog_replaces_the_example_entirely(self) -> None:
+        catalog = {
+            "free": {"name": "free", "price_usd": 0, "max_suites": 1,
+                     "max_artifacts": 0, "max_hosted_runtimes": 0, "capabilities": []},
+            "enterprise": {"name": "enterprise", "price_usd": 5000,
+                           "max_suites": None, "max_artifacts": None,
+                           "max_hosted_runtimes": 100,
+                           "capabilities": ["hosted_execution", "private_registry"]},
+        }
+        workspaces = Workspaces(plan_catalog=catalog)
+        workspaces.add(Workspace(id="w", name="w", token="wt"))
+        workspaces.apply_plan("w", "enterprise", "active")
+        self.assertEqual(plan_limit(workspaces.get("w"), "max_hosted_runtimes"), 100)
+        self.assertEqual(workspaces.get("w").plan["price_usd"], 5000)
+
+    def test_the_example_catalog_is_a_placeholder_not_a_price(self) -> None:
+        # documented as an example; the module exports it under a name that says so
+        from lab_server import workspaces as ws_mod
+        self.assertTrue(hasattr(ws_mod, "EXAMPLE_PLAN_CATALOG"))
+        self.assertFalse(hasattr(ws_mod, "PLAN_CATALOG"))  # no authoritative catalog
 
 
 class TestPurchaseFlow(BillingTestCase):

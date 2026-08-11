@@ -58,12 +58,18 @@ DEFAULT_PLAN: dict[str, object] = {
     "capabilities": list(ALL_CAPABILITIES),
 }
 
-# The billing plan CATALOG — what a customer can buy. "free" is the fallback a
-# workspace drops to when its subscription is not active, so a lapsed payment
-# loses the paid features rather than keeping them. The gate reads a workspace's
-# ACTIVE plan (set from this catalog by the billing webhook), so these numbers
-# are the actual product tiers, not decoration.
-PLAN_CATALOG: dict[str, dict[str, object]] = {
+# The fallback tier a workspace drops to when its subscription is not active, so
+# a lapsed payment loses paid features rather than keeping them. The catalog MUST
+# contain a plan with this id.
+FREE_PLAN = "free"
+
+# An EXAMPLE plan catalog — placeholder numbers with NO pricing authority. The
+# prices, tier names and limits here are invented for a runnable default and a
+# test fixture; they are not a product's real pricing. An operator supplies the
+# real catalog (make_runtime_server(plan_catalog=…) / `serve --plans-file`), and
+# the billing gate reads whatever catalog is configured. Baking real tiers into
+# code would be a pricing decision this code has no business making.
+EXAMPLE_PLAN_CATALOG: dict[str, dict[str, object]] = {
     "free": {
         "name": "free", "price_usd": 0,
         "max_suites": 3, "max_artifacts": 10, "max_hosted_runtimes": 0,
@@ -80,7 +86,6 @@ PLAN_CATALOG: dict[str, dict[str, object]] = {
         "capabilities": list(ALL_CAPABILITIES),
     },
 }
-FREE_PLAN = "free"
 
 
 class EntitlementError(Exception):
@@ -147,8 +152,14 @@ class Workspaces:
     """The tenant registry: tokens, per-workspace stores, and the current-request
     workspace (thread-local, set by the handler after it authenticates)."""
 
-    def __init__(self, data_dir: str | Path | None = None) -> None:
+    def __init__(self, data_dir: str | Path | None = None,
+                 plan_catalog: dict[str, dict[str, object]] | None = None) -> None:
         self._data_dir = Path(data_dir) if data_dir is not None else None
+        # the operator's plan catalog. Defaults to the EXAMPLE (placeholder
+        # pricing) so a bare server runs, but a real deployment supplies its own —
+        # the code makes no pricing claim of its own.
+        self.plan_catalog = plan_catalog if plan_catalog is not None else dict(
+            EXAMPLE_PLAN_CATALOG)
         self._lock = threading.Lock()
         # a token maps to (workspace id, role) — the workspace's own token is its
         # owner; member tokens carry lesser roles
@@ -174,7 +185,8 @@ class Workspaces:
             if workspace is None:
                 return None
             effective = plan_id if status == "active" else FREE_PLAN
-            workspace.plan = dict(PLAN_CATALOG.get(effective, PLAN_CATALOG[FREE_PLAN]))
+            fallback = self.plan_catalog.get(FREE_PLAN, dict(DEFAULT_PLAN))
+            workspace.plan = dict(self.plan_catalog.get(effective, fallback))
             workspace.subscription = {"plan_id": plan_id, "status": status}
             return workspace
 
@@ -344,13 +356,14 @@ class _ShelfRouter:
         return getattr(shelf, name)
 
 
-def single_workspace(token: str | None, data_dir: str | Path | None = None) -> Workspaces:
+def single_workspace(token: str | None, data_dir: str | Path | None = None,
+                     plan_catalog: dict[str, dict[str, object]] | None = None) -> Workspaces:
     """A one-tenant registry from a lone control token — the back-compat path.
 
     When no token is set the workspace is OPEN (the existing unauthenticated
     local-dev mode); its fixed token is a sentinel the handler treats as the
     always-current default rather than a credential to check."""
-    workspaces = Workspaces(data_dir=data_dir)
+    workspaces = Workspaces(data_dir=data_dir, plan_catalog=plan_catalog)
     # the lone workspace is admin, so a single-token operator can provision more
     workspaces.add(Workspace(id="default", name="Default workspace",
                              token=token or "\x00open\x00", is_admin=True))

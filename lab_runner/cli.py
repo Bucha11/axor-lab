@@ -175,9 +175,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     data_dir = getattr(args, "data_dir", None) or os.environ.get("AXOR_LAB_DATA_DIR")
     billing_secret = (getattr(args, "billing_webhook_secret", None)
                       or os.environ.get("AXOR_LAB_BILLING_WEBHOOK_SECRET"))
+    plans_file = getattr(args, "plans_file", None) or os.environ.get("AXOR_LAB_PLANS_FILE")
+    plan_catalog = None
+    if plans_file:
+        import json
+
+        plan_catalog = json.loads(Path(plans_file).read_text())
     server = make_runtime_server(
         host=args.host, port=args.port, control_token=token, data_dir=data_dir,
-        billing_webhook_secret=billing_secret)
+        billing_webhook_secret=billing_secret, plan_catalog=plan_catalog)
     site = default_root()
     print(f"axor-lab on http://{args.host}:{args.port}")
     print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
@@ -1717,6 +1723,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--billing-webhook-secret", default=None,
         help="shared secret the payment provider sends on /billing/webhook "
              "(or AXOR_LAB_BILLING_WEBHOOK_SECRET); omitted, the webhook is off",
+    )
+    p_serve.add_argument(
+        "--plans-file", default=None,
+        help="a JSON plan catalog {plan_id: {name, price_usd, max_suites, "
+             "max_artifacts, max_hosted_runtimes, capabilities}} — YOUR pricing "
+             "(or AXOR_LAB_PLANS_FILE). Omitted, a placeholder example catalog is "
+             "used with no pricing authority",
     )
     p_serve.set_defaults(func=_cmd_serve)
 
