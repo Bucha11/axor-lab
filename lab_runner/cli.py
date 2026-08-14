@@ -181,9 +181,28 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         import json
 
         plan_catalog = json.loads(Path(plans_file).read_text())
+    # axor-identity login: verify human access tokens against the identity JWKS,
+    # supplied as a URL (fetched once at boot) or a file. Absent, only static
+    # control/member tokens authenticate.
+    jwks_url = (getattr(args, "identity_jwks_url", None)
+                or os.environ.get("AXOR_LAB_IDENTITY_JWKS_URL"))
+    jwks_file = (getattr(args, "identity_jwks_file", None)
+                 or os.environ.get("AXOR_LAB_IDENTITY_JWKS_FILE"))
+    identity_jwks = None
+    if jwks_file:
+        import json
+
+        identity_jwks = json.loads(Path(jwks_file).read_text())
+    elif jwks_url:
+        from lab_server.identity_client import fetch_jwks
+
+        identity_jwks = fetch_jwks(jwks_url)
+    identity_issuer = (getattr(args, "identity_issuer", None)
+                       or os.environ.get("AXOR_LAB_IDENTITY_ISSUER") or "axor-identity")
     server = make_runtime_server(
         host=args.host, port=args.port, control_token=token, data_dir=data_dir,
-        billing_webhook_secret=billing_secret, plan_catalog=plan_catalog)
+        billing_webhook_secret=billing_secret, plan_catalog=plan_catalog,
+        identity_jwks=identity_jwks, identity_issuer=identity_issuer)
     site = default_root()
     print(f"axor-lab on http://{args.host}:{args.port}")
     print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
@@ -1730,6 +1749,21 @@ def _build_parser() -> argparse.ArgumentParser:
              "max_artifacts, max_hosted_runtimes, capabilities}} — YOUR pricing "
              "(or AXOR_LAB_PLANS_FILE). Omitted, a placeholder example catalog is "
              "used with no pricing authority",
+    )
+    p_serve.add_argument(
+        "--identity-jwks-url", default=None,
+        help="URL of the axor-identity JWKS (or AXOR_LAB_IDENTITY_JWKS_URL); "
+             "enables login with identity access tokens, verified against it",
+    )
+    p_serve.add_argument(
+        "--identity-jwks-file", default=None,
+        help="path to a JWKS document (or AXOR_LAB_IDENTITY_JWKS_FILE), an "
+             "alternative to --identity-jwks-url for an air-gapped deployment",
+    )
+    p_serve.add_argument(
+        "--identity-issuer", default=None,
+        help="expected token issuer (or AXOR_LAB_IDENTITY_ISSUER); "
+             "default 'axor-identity'",
     )
     p_serve.set_defaults(func=_cmd_serve)
 
