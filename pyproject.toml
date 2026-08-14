@@ -55,6 +55,10 @@ yaml = ["pyyaml>=6.0"]
 byok = []
 # Ed25519 license + bundle signing (same crypto as the Control Plane license)
 crypto = ["pynacl>=1.5"]
+# Accepting axor-identity login tokens (hosted workspace SSO substrate). The
+# open-core runner never needs it; only a hosted lab_server that authenticates
+# humans against the shared identity service verifies its EdDSA access tokens.
+identity = ["pyjwt[crypto]>=2.8", "cryptography>=42.0"]
 # `kernel` is retired: axor-core moved to [project.dependencies]. Kept as an
 # empty alias so `pip install axor-lab[kernel]` in an existing script keeps
 # working instead of erroring on an unknown extra.

@@ -19,6 +19,7 @@ every existing single-token client and test is that one tenant, unchanged.
 
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -214,6 +215,31 @@ class Workspaces:
             self._by_token[workspace.token] = (workspace.id, "owner")
             self._by_id[workspace.id] = workspace
             self._members.setdefault(workspace.id, {})
+        return workspace
+
+    def ensure_org_workspace(self, org_id: str, name: str | None = None,
+                             tier: str | None = None) -> Workspace:
+        """Get (or provision) the workspace an axor-identity org maps to.
+
+        A login token IS the credential — verified per request against the
+        identity JWKS — so this workspace carries no usable static token; its
+        `id` is the org id and its `org` is set, so same-org logins share one
+        tenant and its private registry. If `tier` names a plan in the operator
+        catalog, the workspace is put on it (so identity's tier drives the Lab's
+        entitlement gate); otherwise it stays on free. Unknown tier ≠ full
+        access — it fails closed to free."""
+        with self._lock:
+            workspace = self._by_id.get(org_id)
+            created = workspace is None
+            if workspace is None:
+                workspace = Workspace(id=org_id, name=name or org_id,
+                                      token=secrets.token_hex(24), org=org_id)
+                self._by_id[org_id] = workspace
+                self._members.setdefault(org_id, {})
+            current_plan = str(workspace.subscription.get("plan_id", FREE_PLAN))
+        if tier is not None and (created or current_plan != tier):
+            plan_id = tier if tier in self.plan_catalog else FREE_PLAN
+            self.apply_plan(org_id, plan_id)
         return workspace
 
     def resolve_token(self, token: str | None) -> Workspace | None:

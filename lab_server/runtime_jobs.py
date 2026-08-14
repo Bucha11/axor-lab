@@ -813,6 +813,8 @@ def make_runtime_server(
     workspaces: "Workspaces | None" = None,
     billing_webhook_secret: str | None = None,
     plan_catalog: "dict[str, dict[str, object]] | None" = None,
+    identity_jwks: "dict[str, object] | None" = None,
+    identity_issuer: str = "axor-identity",
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs + screen-API server. `control_token`, if set,
     gates the control surface (runtime registration, run assignment, every
@@ -825,7 +827,15 @@ def make_runtime_server(
 
     `workspaces` runs the server MULTI-TENANT: many workspaces, each with its own
     token and isolated stores. Omitted, a single default workspace is built from
-    `control_token` — every existing single-token client is that one tenant."""
+    `control_token` — every existing single-token client is that one tenant.
+
+    `identity_jwks` turns on axor-identity LOGIN: a request may authenticate with
+    an EdDSA access token from the identity service instead of a static
+    workspace token. The token is verified locally against this JWKS (no call
+    back to identity); its `org` claim maps to a workspace (provisioned on first
+    login), its `role` claim drives RBAC, and its `tier` selects the plan. Static
+    tokens keep working — identity is tried only when a token is not a known
+    static one. Requires the `axor-lab[identity]` extra."""
     from lab_server.workspaces import _JobsRouter, _ShelfRouter, single_workspace
 
     if workspaces is None:
@@ -946,8 +956,7 @@ def make_runtime_server(
                 self._role = "owner"
                 return
             token = self._bearer()
-            workspace = workspaces.resolve_token(token)
-            role = workspaces.role_of(token)
+            workspace, role = self._resolve_credential(token)
             if workspace is None and _RUN_EVENTS_RE.match(self.path.split("?", 1)[0]):
                 # `EventSource` cannot set a header, so the SSE stream — and only
                 # it — accepts the token as a query parameter. A token in a URL
@@ -956,8 +965,7 @@ def make_runtime_server(
                 from urllib.parse import parse_qs, urlparse
 
                 supplied = parse_qs(urlparse(self.path).query).get("token", [""])[0]
-                workspace = workspaces.resolve_token(supplied)
-                role = workspaces.role_of(supplied)
+                workspace, role = self._resolve_credential(supplied)
             if workspace is None:
                 raise RuntimeJobsError(401, "control token required")
             workspaces.set_current(workspace.id)
@@ -970,6 +978,29 @@ def make_runtime_server(
                 # log is not a place to leak credentials.
                 workspaces.audit(workspace.id, self._role,
                                  f"{self.command} {path}", time.time())
+
+        def _resolve_credential(
+                self, token: str | None) -> "tuple[Workspace | None, str | None]":
+            """Resolve a bearer to (workspace, role): a known STATIC token first,
+            then — if identity login is configured — an axor-identity access
+            token, whose org provisions/selects a workspace and whose role and
+            tier come from the verified claims. A malformed or untrusted token
+            simply resolves to (None, None); the caller turns that into a 401."""
+            workspace = workspaces.resolve_token(token)
+            if workspace is not None:
+                return workspace, workspaces.role_of(token)
+            if identity_jwks is None or not token:
+                return None, None
+            from lab_server.identity_client import IdentityError, verify_access_token
+
+            try:
+                claims = verify_access_token(token, identity_jwks,
+                                             issuer=identity_issuer)
+            except IdentityError:
+                return None, None
+            workspace = workspaces.ensure_org_workspace(
+                claims.org, name=claims.org, tier=claims.tier)
+            return workspace, claims.role
 
         def _require_role(self, minimum: str) -> None:
             from lab_server.workspaces import role_at_least
