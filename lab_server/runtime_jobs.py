@@ -1742,6 +1742,14 @@ def make_runtime_server(
                         manifest = self._resolve_suite(m.group(1))
                     except SuiteNotFound as exc:
                         raise RuntimeJobsError(404, str(exc)) from None
+                    # a suite that DECLARES governance may only RUN where the plan
+                    # includes the governance entitlement (Security tier+). The
+                    # open format still validates and stores anywhere — the gate
+                    # is on execution, not authorship.
+                    if "governance" in (manifest.get("capabilities") or []):
+                        from lab_server.workspaces import require_capability
+
+                        require_capability(self._current_workspace(), "governance")
                     try:
                         planned = build_assignment(manifest, runtime_ref)
                     except SuiteError as exc:

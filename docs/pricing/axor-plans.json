@@ -1,0 +1,38 @@
+{
+  "free": {
+    "name": "Community",
+    "price_usd": 0,
+    "price_period": "month",
+    "max_suites": null,
+    "max_artifacts": null,
+    "max_hosted_runtimes": 0,
+    "capabilities": []
+  },
+  "team": {
+    "name": "Team Workspace",
+    "price_usd": 299,
+    "price_period": "month",
+    "max_suites": null,
+    "max_artifacts": null,
+    "max_hosted_runtimes": null,
+    "capabilities": ["hosted_execution"]
+  },
+  "security": {
+    "name": "Security Workspace",
+    "price_usd": 1500,
+    "price_period": "month",
+    "max_suites": null,
+    "max_artifacts": null,
+    "max_hosted_runtimes": null,
+    "capabilities": ["hosted_execution", "private_registry", "governance"]
+  },
+  "enterprise": {
+    "name": "Enterprise Platform",
+    "price_usd": 30000,
+    "price_period": "year",
+    "max_suites": null,
+    "max_artifacts": null,
+    "max_hosted_runtimes": null,
+    "capabilities": ["hosted_execution", "private_registry", "governance", "control_plane"]
+  }
+}

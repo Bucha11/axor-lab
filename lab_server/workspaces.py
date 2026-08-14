@@ -37,7 +37,12 @@ if TYPE_CHECKING:
 # capabilities, so tenancy alone changes nothing until a restricted plan is set.
 # A restricted plan sets a numeric limit (e.g. max_suites: 2) or drops a
 # capability.
-ALL_CAPABILITIES = ("hosted_execution", "private_registry")
+ALL_CAPABILITIES = (
+    "hosted_execution",   # the platform provisions/runs managed runtimes (feature 4)
+    "private_registry",   # an org-private shared suite registry (feature 6)
+    "governance",         # may RUN suites that declare a governance capability
+    "control_plane",      # the Control Plane add-on: governed-node operation
+)
 
 # RBAC roles, most-privileged first. A member's token carries a role within its
 # workspace; SSO/OIDC is the identity source that MINTS these member tokens (the
@@ -84,7 +89,7 @@ EXAMPLE_PLAN_CATALOG: dict[str, dict[str, object]] = {
     "pro": {
         "name": "pro", "price_usd": 199,
         "max_suites": None, "max_artifacts": None, "max_hosted_runtimes": 10,
-        "capabilities": list(ALL_CAPABILITIES),
+        "capabilities": ["hosted_execution", "private_registry"],
     },
 }
 
