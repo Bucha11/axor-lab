@@ -39,8 +39,8 @@ class _Connector:
         self.runtime_ref: str | None = None
         self.ingest_key: str | None = None
 
-    def connect(self, model: str = "", agent_ref: str | None = None) -> dict[str, object]:
-        body: dict[str, object] = {"model": model}
+    def connect(self, runtime_label: str = "", agent_ref: str | None = None) -> dict[str, object]:
+        body: dict[str, object] = {"runtime_label": runtime_label}
         if agent_ref is not None:
             body["agent_ref"] = agent_ref
         payload = self._request("POST", "/runtimes/connect", body, token=self._control_token)
@@ -94,7 +94,7 @@ class RuntimeHttpTestCase(unittest.TestCase):
 
     def _connected(self) -> _Connector:
         connector = _Connector(self.base, control_token=CONTROL)
-        connector.connect(model="gpt-4o", agent_ref="acme/support-bot")
+        connector.connect(runtime_label="gpt-4o", agent_ref="acme/support-bot")
         return connector
 
     def _execute(self, connector: _Connector, job_id: str, claimed: dict[str, object],
@@ -222,7 +222,7 @@ class TestAuthorizationOverTheWire(RuntimeHttpTestCase):
     def test_assignment_requires_the_control_token(self) -> None:
         connector = _Connector(self.base, control_token=None)
         with self.assertRaises(urllib.error.HTTPError) as ctx:
-            connector.connect(model="x")
+            connector.connect(runtime_label="x")
         self.assertIn(ctx.exception.code, (401, 403))
 
     def test_one_runtime_cannot_claim_anothers_job(self) -> None:

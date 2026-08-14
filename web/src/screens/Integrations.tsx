@@ -5,11 +5,11 @@ import { Button, Card, Empty, Failed, Field, Loading, Tag } from "../components/
 
 export function Integrations() {
   const { data, error, loading, reload } = useAsync(() => api.runtimes());
-  const [model, setModel] = useState("");
+  const [label, setLabel] = useState("");
   const [issued, setIssued] = useState<string | null>(null);
 
   async function connect() {
-    const result = await api.connectRuntime(model);
+    const result = await api.connectRuntime(label);
     setIssued(result.ingest_key);
     reload();
   }
@@ -27,10 +27,10 @@ export function Integrations() {
         </p>
       </header>
       <Card>
-        <Field label="Model">
-          <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="gpt-4o" />
+        <Field label="Runtime label" hint="A name to recognize this connection — e.g. your agent's build. Lab does not call any model; the label is just for display.">
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="support-bot v3" />
         </Field>
-        <Button onClick={connect} disabled={!model}>
+        <Button onClick={connect} disabled={!label}>
           Connect a runtime
         </Button>
         {issued && (
@@ -47,7 +47,7 @@ export function Integrations() {
           {(data?.runtimes ?? []).map((runtime) => (
             <li key={runtime.runtime_ref}>
               <code>{runtime.runtime_ref}</code>
-              <span className="muted">{runtime.model}</span>
+              <span className="muted">{runtime.runtime_label}</span>
               {runtime.status && <Tag>{runtime.status}</Tag>}
             </li>
           ))}

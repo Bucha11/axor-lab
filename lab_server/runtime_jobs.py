@@ -303,14 +303,20 @@ class RuntimeJobStore:
         return f"{prefix}_{self._n:04d}_{secrets.token_hex(6)}"
 
     # -- control surface --------------------------------------------------
-    def connect_runtime(self, model: str = "", agent_ref: str | None = None,
+    def connect_runtime(self, runtime_label: str = "", agent_ref: str | None = None,
                         hosted: bool = False) -> dict[str, object]:
+        # `runtime_label` is a free-form display name for the connection (e.g.
+        # which agent build is attached). The platform NEVER calls a model API —
+        # the connected agent makes its own inference calls on its own side and
+        # posts trial results back via the ingest key. This is a label, not a
+        # provider selector.
         with self._lock:
             runtime_ref = self._next("rt")
             ingest_key = secrets.token_hex(24)
             self._runtimes[runtime_ref] = {
                 "runtime_ref": runtime_ref, "agent_ref": agent_ref,
-                "model": model, "status": "connected", "ingest_key": ingest_key,
+                "runtime_label": runtime_label, "status": "connected",
+                "ingest_key": ingest_key,
                 # a HOSTED runtime is one the platform provisions and manages
                 # (RFC §16 hosted execution), as opposed to one the customer
                 # connects. It counts against the plan and is listed separately.
@@ -1471,7 +1477,8 @@ def make_runtime_server(
                                    len(jobs.list_runtimes(hosted=True)))
                     body = self._read_json()
                     connection = jobs.connect_runtime(
-                        model=str(body.get("model", "")),
+                        runtime_label=str(body.get("runtime_label",
+                                                   body.get("model", ""))),
                         agent_ref=body.get("agent_ref"),  # type: ignore[arg-type]
                         hosted=True,
                     )
@@ -1572,7 +1579,10 @@ def make_runtime_server(
                     self._require_control()
                     body = self._read_json()
                     connection = jobs.connect_runtime(
-                        model=str(body.get("model", "")),
+                        # `model` is the legacy key for an older connector; the
+                        # field is now `runtime_label` and is purely a display name.
+                        runtime_label=str(body.get("runtime_label",
+                                                   body.get("model", ""))),
                         agent_ref=body.get("agent_ref"),  # type: ignore[arg-type]
                     )
                     # the ingest key belongs to THIS workspace, so a later runtime

@@ -48,7 +48,7 @@ def _drive(report_hash):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         runtime = LabRuntimeConnector(base, control_token="c")
-        connected = runtime.connect(model="byo", agent_ref="acme/bot")
+        connected = runtime.connect(runtime_label="byo", agent_ref="acme/bot")
         assignment = assign_suite(
             builtin_registry().get("budget").manifest(),
             str(connected["runtime_ref"]), store,

@@ -728,7 +728,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
               <option value="">— choose an agent —</option>
               {runtimes.map((runtime) => (
                 <option key={runtime.runtime_ref} value={runtime.runtime_ref}>
-                  {runtime.model || runtime.agent_ref || "agent"} (
+                  {runtime.runtime_label || runtime.agent_ref || "agent"} (
                   {runtime.runtime_ref})
                 </option>
               ))}

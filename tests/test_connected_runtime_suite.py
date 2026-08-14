@@ -37,7 +37,7 @@ ENVIRONMENT = {"model": {"provider": "byo", "id": "wrapped-agent"}}
 
 def _store_with_runtime() -> tuple[RuntimeJobStore, str]:
     store = RuntimeJobStore()
-    connected = store.connect_runtime(model="gpt-4o", agent_ref="acme/support-bot")
+    connected = store.connect_runtime(runtime_label="gpt-4o", agent_ref="acme/support-bot")
     return store, str(connected["runtime_ref"])
 
 

@@ -257,7 +257,7 @@ class TestStoreDirect(unittest.TestCase):
         # with no planned-trial set, a completed trial moves the run to analyzing
         # (the runtime signals overall completion out of band in this simple form)
         store = RuntimeJobStore()
-        conn = store.connect_runtime(model="x")
+        conn = store.connect_runtime(runtime_label="x")
         run = store.create_run(conn["runtime_ref"], {"id": "e"})
         store.claim(run["run_id"], conn["runtime_ref"])
         out = store.complete_trial(run["run_id"], "t0", conn["runtime_ref"], _valid_trace())
@@ -267,7 +267,7 @@ class TestStoreDirect(unittest.TestCase):
         # re-completing a trial with the SAME trace is idempotent; a DIFFERENT
         # trace supersedes the prior attempt (a retry), bumping attempt/superseded.
         store = RuntimeJobStore()
-        conn = store.connect_runtime(model="x")
+        conn = store.connect_runtime(runtime_label="x")
         run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
         rid, ref = run["run_id"], conn["runtime_ref"]
         store.claim(rid, ref)
@@ -289,7 +289,7 @@ class TestStoreDirect(unittest.TestCase):
 
     def test_streaming_events_after_complete_starts_new_attempt(self) -> None:
         store = RuntimeJobStore()
-        conn = store.connect_runtime(model="x")
+        conn = store.connect_runtime(runtime_label="x")
         run = store.create_run(conn["runtime_ref"], {"id": "e"}, planned=["t0"])
         rid, ref = run["run_id"], conn["runtime_ref"]
         store.claim(rid, ref)

@@ -95,11 +95,14 @@ export function Empty({ children }: { children: ReactNode }) {
   return <p className="muted empty">{children}</p>;
 }
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field(
+  { label, hint, children }: { label: string; hint?: string; children: ReactNode },
+) {
   return (
     <label className="field">
       <span className="field-label">{label}</span>
       {children}
+      {hint && <span className="field-hint muted small">{hint}</span>}
     </label>
   );
 }

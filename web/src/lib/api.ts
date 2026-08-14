@@ -161,7 +161,9 @@ export interface InvariantOutcome {
 export interface RuntimeRow {
   runtime_ref: string;
   agent_ref?: string;
-  model?: string;
+  /** free-form display name for the connection — NOT a model the platform
+   * calls. The connected agent runs its own inference; this only labels it. */
+  runtime_label?: string;
   status?: string;
 }
 
@@ -236,9 +238,9 @@ export const api = {
     call<PlaygroundResult>("POST", "/playground/trial", request),
 
   runtimes: () => call<{ runtimes: RuntimeRow[] }>("GET", "/runtimes"),
-  connectRuntime: (model: string, agentRef?: string) =>
+  connectRuntime: (runtimeLabel: string, agentRef?: string) =>
     call<{ runtime_ref: string; ingest_key: string }>("POST", "/runtimes/connect", {
-      model,
+      runtime_label: runtimeLabel,
       agent_ref: agentRef,
     }),
 
