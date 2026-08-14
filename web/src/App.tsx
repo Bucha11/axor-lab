@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { currentToken, setToken, setUnauthorizedHandler } from "./lib/api";
+import { api, currentToken, setToken, setUnauthorizedHandler } from "./lib/api";
 import { rememberRefresh, refreshAccess } from "./lib/identity";
 import { navigate, segments, useRoute } from "./lib/router";
 import { Login } from "./screens/Login";
@@ -82,6 +82,20 @@ function Screen({ route }: { route: string }) {
 export function App() {
   const route = useRoute();
   const [token, setLocal] = useState(restoreToken);
+  // null = still asking the server. Told once, before the login gate, so a local
+  // (open) server never shows a login screen and a hosted one can offer a guest.
+  const [authInfo, setAuthInfo] = useState<{ auth_required: boolean; guest: boolean } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    api
+      .authStatus()
+      .then(setAuthInfo)
+      // if the probe itself fails, assume auth is required — safer than
+      // rendering screens that will 401
+      .catch(() => setAuthInfo({ auth_required: true, guest: false }));
+  }, []);
 
   useEffect(() => {
     if (token) sessionStorage.setItem(TOKEN_KEY, token);
@@ -111,14 +125,18 @@ export function App() {
     rememberRefresh(null);
   }
 
-  if (!currentToken()) {
-    // No token, no requests. Every screen endpoint is gated, so firing them
-    // first produces a wall of 401s that reads like a broken server — when what
-    // is missing is a login.
+  if (authInfo === null) {
+    return <div className="app" />; // brief: waiting on GET /auth/status
+  }
+
+  if (authInfo.auth_required && !currentToken()) {
+    // A hosted server gates every screen endpoint; show the login (with a guest
+    // option when the deployment offers one). An OPEN server skips this branch —
+    // running locally needs no login at all.
     return (
       <div className="app">
         <main>
-          <Login onAuthenticated={authenticate} />
+          <Login onAuthenticated={authenticate} guestAvailable={authInfo.guest} />
         </main>
       </div>
     );
@@ -144,9 +162,11 @@ export function App() {
           </a>
         ))}
         <div className="spacer" />
-        <button className="linklike" onClick={logout}>
-          Log out
-        </button>
+        {currentToken() && (
+          <button className="linklike" onClick={logout}>
+            Log out
+          </button>
+        )}
       </nav>
       <main>
         {/* Keyed by the token: a new credential REMOUNTS the screen tree, so

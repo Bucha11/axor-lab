@@ -69,6 +69,19 @@ DEFAULT_PLAN: dict[str, object] = {
 # contain a plan with this id.
 FREE_PLAN = "free"
 
+# The plan a GUEST (anonymous, unregistered) hosted session runs on. It is a
+# product mechanism, not a priced tier, so it is fixed in code rather than the
+# operator catalog: enough to TRY hosted execution once, nothing that persists
+# (max_artifacts 0 — and a guest workspace's stores are in-memory anyway, so a
+# guest session saves nothing and vanishes on expiry/restart).
+TRIAL_PLAN: dict[str, object] = {
+    "name": "trial",
+    "max_suites": 3,
+    "max_artifacts": 0,
+    "max_hosted_runtimes": 1,
+    "capabilities": ["hosted_execution"],
+}
+
 # An EXAMPLE plan catalog — placeholder numbers with NO pricing authority. The
 # prices, tier names and limits here are invented for a runnable default and a
 # test fixture; they are not a product's real pricing. An operator supplies the
@@ -177,6 +190,7 @@ class Workspaces:
         self._members: dict[str, dict[str, str]] = {}  # ws id -> {token: role}
         self._audit: dict[str, list[dict[str, object]]] = {}  # ws id -> entries
         self._checkouts: dict[str, dict[str, object]] = {}  # session id -> pending buy
+        self._guest_expiry: dict[str, float] = {}  # guest ws id -> expiry epoch
         self._current = threading.local()
 
     # -- billing ----------------------------------------------------------
@@ -263,8 +277,46 @@ class Workspaces:
             if binding is None:
                 return None
             ws_id, role = binding
+            # an expired guest session resolves to nothing — and is reaped so its
+            # in-memory data cannot be reached again
+            expiry = self._guest_expiry.get(ws_id)
+            if expiry is not None and time.time() > expiry:
+                self._evict_guest(ws_id, token)
+                return None
             workspace = self._by_id.get(ws_id)
         return (workspace, role) if workspace is not None else None
+
+    def create_guest(self, ttl_seconds: int = 1800) -> dict[str, object]:
+        """Mint an anonymous, EPHEMERAL hosted session — no user, no
+        registration. Its workspace is on the fixed TRIAL_PLAN and its stores are
+        in-memory (it persists nothing, even when the server has a data_dir), and
+        it expires after `ttl_seconds`. Returns the one-time token the browser
+        carries as its bearer."""
+        from lab_server.runtime_jobs import RuntimeJobStore  # lazy: import cycle
+
+        with self._lock:
+            ws_id = "guest_" + secrets.token_hex(6)
+            token = secrets.token_hex(24)
+            workspace = Workspace(
+                id=ws_id, name="Guest session", token=token,
+                plan=dict(TRIAL_PLAN),
+                subscription={"plan_id": "trial", "status": "active"})
+            self._by_id[ws_id] = workspace
+            self._by_token[token] = (ws_id, "owner")
+            self._members.setdefault(ws_id, {})
+            self._stores[ws_id] = (RuntimeJobStore(), ScreenStore(persist_dir=None))
+            expires = time.time() + ttl_seconds
+            self._guest_expiry[ws_id] = expires
+        return {"token": token, "workspace_id": ws_id, "expires_at": expires,
+                "plan": dict(TRIAL_PLAN)}
+
+    def _evict_guest(self, ws_id: str, token: str) -> None:
+        """Drop an expired guest session (caller holds the lock)."""
+        self._by_token.pop(token, None)
+        self._by_id.pop(ws_id, None)
+        self._stores.pop(ws_id, None)
+        self._members.pop(ws_id, None)
+        self._guest_expiry.pop(ws_id, None)
 
     # -- members (RBAC) ---------------------------------------------------
     def add_member(self, ws_id: str, token: str, role: str) -> None:

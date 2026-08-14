@@ -815,6 +815,7 @@ def make_runtime_server(
     plan_catalog: "dict[str, dict[str, object]] | None" = None,
     identity_jwks: "dict[str, object] | None" = None,
     identity_issuer: str = "axor-identity",
+    guest_sessions: bool = False,
 ) -> ThreadingHTTPServer:
     """A threaded runtime-jobs + screen-API server. `control_token`, if set,
     gates the control surface (runtime registration, run assignment, every
@@ -1185,6 +1186,13 @@ def make_runtime_server(
                 # ...and DECODED: the client percent-encodes every path segment
                 # (a trial unit carries colons), so without unquote a trial link
                 # that works when typed raw 404s when the app follows it
+                if path == "/auth/status":
+                    # UNAUTHENTICATED: the web app asks this before gating, so it
+                    # can skip the login screen when the server is open (local dev)
+                    # and offer a guest session only when one is available.
+                    self._send(200, {"auth_required": control_token is not None,
+                                     "guest": bool(guest_sessions)})
+                    return
                 if path == "/home":
                     # the Launchpad: the NEXT action, not the past. A catalog of
                     # what has already been published is a different screen.
@@ -1472,6 +1480,14 @@ def make_runtime_server(
                 # ...and DECODED: the client percent-encodes every path segment
                 # (a trial unit carries colons), so without unquote a trial link
                 # that works when typed raw 404s when the app follows it
+                if path == "/guest-session":
+                    # UNAUTHENTICATED: mint an anonymous, ephemeral hosted trial —
+                    # no registration. Opt-in (a deployment enables it); off, the
+                    # route does not exist so no one can spin up free compute.
+                    if not guest_sessions:
+                        raise RuntimeJobsError(404, "guest sessions are not enabled")
+                    self._send(201, workspaces.create_guest())
+                    return
                 if path == "/workspaces":
                     # provision a new tenant (ADMIN only) → returns its token,
                     # shown once. Its stores are created lazily on first use.

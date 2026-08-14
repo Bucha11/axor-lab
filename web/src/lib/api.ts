@@ -206,6 +206,16 @@ export interface ValidationResult {
 // ── endpoints ────────────────────────────────────────────────────────────────
 
 export const api = {
+  /** Unauthenticated: whether the server requires a login at all (open/local
+   * mode does not) and whether it offers anonymous guest sessions. */
+  authStatus: () => call<{ auth_required: boolean; guest: boolean }>("GET", "/auth/status"),
+  /** Start an anonymous, ephemeral hosted session — no registration. */
+  guestSession: () =>
+    call<{ token: string; workspace_id: string; expires_at: number }>(
+      "POST",
+      "/guest-session",
+    ),
+
   home: () => call<HomePayload>("GET", "/home"),
 
   suites: () => call<{ suites: SuiteCard[] }>("GET", "/suites"),

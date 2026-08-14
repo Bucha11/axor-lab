@@ -199,10 +199,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         identity_jwks = fetch_jwks(jwks_url)
     identity_issuer = (getattr(args, "identity_issuer", None)
                        or os.environ.get("AXOR_LAB_IDENTITY_ISSUER") or "axor-identity")
+    guest_sessions = (getattr(args, "guest_sessions", False)
+                      or os.environ.get("AXOR_LAB_GUEST_SESSIONS") == "1")
     server = make_runtime_server(
         host=args.host, port=args.port, control_token=token, data_dir=data_dir,
         billing_webhook_secret=billing_secret, plan_catalog=plan_catalog,
-        identity_jwks=identity_jwks, identity_issuer=identity_issuer)
+        identity_jwks=identity_jwks, identity_issuer=identity_issuer,
+        guest_sessions=guest_sessions)
     site = default_root()
     print(f"axor-lab on http://{args.host}:{args.port}")
     print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
@@ -1764,6 +1767,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--identity-issuer", default=None,
         help="expected token issuer (or AXOR_LAB_IDENTITY_ISSUER); "
              "default 'axor-identity'",
+    )
+    p_serve.add_argument(
+        "--guest-sessions", action="store_true",
+        help="allow anonymous, ephemeral hosted trial sessions via "
+             "POST /guest-session (or AXOR_LAB_GUEST_SESSIONS=1); off by default",
     )
     p_serve.set_defaults(func=_cmd_serve)
 

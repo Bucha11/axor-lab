@@ -1,11 +1,19 @@
 import { useState } from "react";
 import { Button, Card, Field } from "../components/ui";
+import { api } from "../lib/api";
 import { IdentityError, login, rememberRefresh, signup } from "../lib/identity";
 
 /** The login gate. A human signs in (or signs up) against the axor-identity
  * service and the access token becomes this session's credential. Operators who
- * hold a static control token can still paste one directly. */
-export function Login({ onAuthenticated }: { onAuthenticated: (accessToken: string) => void }) {
+ * hold a static control token can still paste one directly. When the deployment
+ * offers it, a guest can start an ephemeral session with no account at all. */
+export function Login({
+  onAuthenticated,
+  guestAvailable = false,
+}: {
+  onAuthenticated: (accessToken: string) => void;
+  guestAvailable?: boolean;
+}) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -28,6 +36,20 @@ export function Login({ onAuthenticated }: { onAuthenticated: (accessToken: stri
       onAuthenticated(session.access_token);
     } catch (err) {
       setError(err instanceof IdentityError ? err.message : "login failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function guest() {
+    setBusy(true);
+    setError(null);
+    try {
+      const session = await api.guestSession();
+      rememberRefresh(null); // a guest session has no refresh token
+      onAuthenticated(session.token);
+    } catch {
+      setError("could not start a guest session");
     } finally {
       setBusy(false);
     }
@@ -101,6 +123,18 @@ export function Login({ onAuthenticated }: { onAuthenticated: (accessToken: stri
           </a>
         </p>
       </Card>
+
+      {guestAvailable && (
+        <Card>
+          <p className="muted small">
+            Just want to try it? Start a guest session — nothing is saved and it
+            expires.
+          </p>
+          <Button variant="secondary" onClick={guest} disabled={busy}>
+            Try without an account
+          </Button>
+        </Card>
+      )}
 
       <p className="muted small">
         <a
