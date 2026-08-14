@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { currentToken, setToken } from "./lib/api";
+import { currentToken, setToken, setUnauthorizedHandler } from "./lib/api";
+import { rememberRefresh, refreshAccess } from "./lib/identity";
 import { navigate, segments, useRoute } from "./lib/router";
+import { Login } from "./screens/Login";
 import { Home } from "./screens/Home";
 import { Suites } from "./screens/Suites";
 import { Playground } from "./screens/Playground";
@@ -86,6 +88,42 @@ export function App() {
     else sessionStorage.removeItem(TOKEN_KEY);
   }, [token]);
 
+  // When a request comes back 401, try to refresh the access token (identity
+  // login) once and continue; if that fails the user is dropped to the login
+  // screen. Static control tokens have no refresh and simply fall through.
+  useEffect(() => {
+    setUnauthorizedHandler(async () => {
+      const next = await refreshAccess();
+      if (next) setLocal(next);
+      return next;
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  function authenticate(accessToken: string): void {
+    setToken(accessToken);
+    setLocal(accessToken);
+  }
+
+  function logout(): void {
+    setToken(null);
+    setLocal("");
+    rememberRefresh(null);
+  }
+
+  if (!currentToken()) {
+    // No token, no requests. Every screen endpoint is gated, so firing them
+    // first produces a wall of 401s that reads like a broken server — when what
+    // is missing is a login.
+    return (
+      <div className="app">
+        <main>
+          <Login onAuthenticated={authenticate} />
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <nav className="nav">
@@ -106,38 +144,14 @@ export function App() {
           </a>
         ))}
         <div className="spacer" />
-        <input
-          className="token"
-          type="password"
-          placeholder="control token"
-          value={token}
-          onChange={(event) => {
-            setToken(event.target.value);
-            setLocal(event.target.value);
-          }}
-        />
+        <button className="linklike" onClick={logout}>
+          Log out
+        </button>
       </nav>
       <main>
-        {/* No token, no requests. Every screen endpoint is gated, so firing
-            them first produces a wall of 401s and an error panel that reads
-            like the server is broken — when what is actually missing is one
-            field the user has not filled in yet. */}
-        {currentToken() ? (
-          // Keyed by the token: entering one REMOUNTS the screen tree, so every
-          // `useAsync` re-runs. Without it a user who typed a token sat looking
-          // at whatever the first render produced, with no way forward but a
-          // manual reload.
-          <Screen key={token} route={route} />
-        ) : (
-          <div className="screen">
-            <h1>Control token</h1>
-            <p className="muted">
-              Every screen endpoint requires the control token this server was
-              started with (<code>axor-lab serve --control-token …</code>). Paste
-              it above.
-            </p>
-          </div>
-        )}
+        {/* Keyed by the token: a new credential REMOUNTS the screen tree, so
+            every `useAsync` re-runs against it. */}
+        <Screen key={token} route={route} />
       </main>
     </div>
   );

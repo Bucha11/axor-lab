@@ -35,7 +35,17 @@ export function currentToken(): string | null {
   return token;
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+/** An optional hook that tries to obtain a fresh token when a request comes
+ * back 401 (identity login registers it to refresh an expired access token).
+ * Returns the new token, or null if the caller must re-authenticate. Kept as a
+ * registered callback so this module stays unaware of the identity service. */
+let onUnauthorized: (() => Promise<string | null>) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => Promise<string | null>) | null): void {
+  onUnauthorized = handler;
+}
+
+async function call<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const response = await fetch(path, {
@@ -43,6 +53,14 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  // an expired access token: refresh once, transparently, then retry
+  if (response.status === 401 && !retried && onUnauthorized) {
+    const refreshed = await onUnauthorized();
+    if (refreshed) {
+      setToken(refreshed);
+      return call<T>(method, path, body, true);
+    }
+  }
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (!response.ok) {
