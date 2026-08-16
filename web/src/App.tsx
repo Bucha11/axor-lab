@@ -103,13 +103,21 @@ export function App() {
   }, [token]);
 
   // When a request comes back 401, try to refresh the access token (identity
-  // login) once and continue; if that fails the user is dropped to the login
-  // screen. Static control tokens have no refresh and simply fall through.
+  // login) once and continue. If that fails — an identity refresh token that is
+  // itself expired, or a guest session that has no refresh token and has expired
+  // — drop the credential so the app returns cleanly to the login screen instead
+  // of leaving every screen erroring until a manual reload.
   useEffect(() => {
     setUnauthorizedHandler(async () => {
       const next = await refreshAccess();
-      if (next) setLocal(next);
-      return next;
+      if (next) {
+        setLocal(next);
+        return next;
+      }
+      setToken(null);
+      setLocal("");
+      rememberRefresh(null);
+      return null;
     });
     return () => setUnauthorizedHandler(null);
   }, []);
