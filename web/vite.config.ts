@@ -21,5 +21,8 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
+    // unit tests live in src/; e2e/ is Playwright (@playwright/test), a
+    // different runner — keep vitest from collecting those specs
+    include: ["src/**/*.{test,spec}.ts"],
   },
 });
