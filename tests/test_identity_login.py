@@ -15,18 +15,21 @@ import unittest
 import urllib.error
 import urllib.request
 
-import pytest
+from lab_server.runtime_jobs import make_runtime_server
+from lab_server.workspaces import Workspace, Workspaces
 
-jwt = pytest.importorskip("jwt")
-pytest.importorskip("cryptography")
+# The identity-login path needs pyjwt + cryptography (the axor-lab[identity]
+# extra). The suite runs under `unittest`, not pytest, so guard the import with
+# a plain try/except + skipUnless rather than pytest.importorskip — otherwise a
+# bare `import pytest` breaks `unittest discover` wherever pytest isn't present.
+try:
+    import jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cryptography.hazmat.primitives import serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
-    Ed25519PrivateKey,
-)
-
-from lab_server.runtime_jobs import make_runtime_server  # noqa: E402
-from lab_server.workspaces import Workspace, Workspaces  # noqa: E402
+    _HAS_IDENTITY = True
+except ImportError:
+    _HAS_IDENTITY = False
 
 ADMIN = "static-admin-token"
 KID = "k1"
@@ -49,6 +52,7 @@ _CATALOG = {
 }
 
 
+@unittest.skipUnless(_HAS_IDENTITY, "requires the axor-lab[identity] extra (pyjwt + cryptography)")
 class IdentityLoginTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._priv = Ed25519PrivateKey.generate()
