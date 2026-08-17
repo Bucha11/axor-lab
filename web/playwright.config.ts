@@ -34,7 +34,10 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run dev -- --port 5173 --strictPort",
+    // bind explicitly to 127.0.0.1: on a CI runner Vite otherwise listens on
+    // localhost (IPv6 ::1) while the readiness probe hits 127.0.0.1 (IPv4), and
+    // the mismatch times the webServer out.
+    command: "npm run dev -- --port 5173 --strictPort --host 127.0.0.1",
     url: "http://127.0.0.1:5173",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
