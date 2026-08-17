@@ -18,7 +18,7 @@ requires-python = ">=3.11"
 #
 # Everything else stays stdlib: the contract validator, replay and the
 # statistics engine pull in nothing.
-dependencies = ["axor-core>=0.10,<0.11"]
+dependencies = ["axor-core>=0.10.2,<0.11"]
 
 [project.scripts]
 axor-lab = "lab_runner.cli:main"
