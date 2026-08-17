@@ -366,7 +366,8 @@ jobs:
           set +e
           python -m unittest -v \
             tests.test_yaml_mode_round_trip \
-            tests.test_suite_entry_points > yaml.log 2>&1
+            tests.test_suite_entry_points \
+            tests.test_screen_api > yaml.log 2>&1
           rc=$?
           set -e
           cat yaml.log

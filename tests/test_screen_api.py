@@ -19,6 +19,7 @@ underneath it is an island with a longer bridge.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import threading
 import unittest
@@ -29,6 +30,12 @@ from lab_contracts import validate_artifact
 from lab_server.runtime_jobs import RuntimeJobStore, make_runtime_server
 from lab_server.screens import ScreenStore
 from lab_suite import builtin_registry, run_suite
+
+# The YAML-view endpoint needs the `yaml` extra (PyYAML); without it `from_yaml`
+# raises YamlUnavailable instead of skipping, so the one test that drives it is
+# skipUnless-gated (it RUNS in the dedicated `yaml` CI job, SKIPS in base).
+_HAS_YAML = importlib.util.find_spec("yaml") is not None
+_YAML_REASON = "requires the axor-lab[yaml] extra (PyYAML)"
 
 CONTROL = "control-token-for-tests"
 CREATED = "2026-08-08T00:00:00+00:00"
@@ -213,6 +220,7 @@ class TestTheBuilderCanSave(ScreenApiTestCase):
         # catalog reads the same way it did before the workspace had any
         self.assertEqual(ids[-1], "mine")
 
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_the_yaml_view_serves_the_saved_document_too(self) -> None:
         from lab_suite import from_yaml
 
