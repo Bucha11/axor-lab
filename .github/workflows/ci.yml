@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Re-run when a new axor-core is published: the kernel is a required
+  # dependency, so a release can change what Lab resolves and how the
+  # real-kernel evidence behaves. axor-core's publish job fans this out.
+  repository_dispatch:
+    types: [axor-core-published]
+  workflow_dispatch:
 
 jobs:
   contracts:
