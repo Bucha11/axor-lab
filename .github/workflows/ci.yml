@@ -273,3 +273,81 @@ jobs:
           print('schemas loaded from package data:', len(s))
           "
           cd / && /tmp/venv/bin/axor-lab --help >/dev/null && echo 'axor-lab console script works'
+
+  identity:
+    name: Identity-login tests actually run (pyjwt + cryptography)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The identity-login suite is @importorskip-gated on pyjwt + cryptography
+      # (the `identity` extra). The acceptance job installs the base package, so
+      # those tests SKIP there — this job installs the extra so they RUN, the
+      # same "a gated suite must not silently skip in CI" posture as the crypto
+      # and wrap jobs.
+      - name: Install Lab with the identity extra
+        run: |
+          pip install -e ".[identity]"
+          python -c "import jwt, cryptography; print('pyjwt', jwt.__version__)"
+      - name: The identity token + serve-flag tests must RUN, not skip
+        run: |
+          set +e
+          python -m unittest -v \
+            tests.test_identity_login \
+            tests.test_serve_identity_cli > identity.log 2>&1
+          rc=$?
+          set -e
+          cat identity.log
+          test "$rc" -eq 0 || { echo "::error::identity suites failed"; exit "$rc"; }
+          python - <<'PY'
+          import re, sys
+          log = open("identity.log").read()
+          skipped = int((re.search(r"skipped=(\d+)", log) or [0, 0])[1] or 0)
+          ran = int((re.search(r"^Ran (\d+) test", log, re.M) or [0, 0])[1] or 0)
+          if skipped or not ran:
+              print(f"::error::{skipped} skipped / {ran} ran — pyjwt/cryptography missing",
+                    file=sys.stderr)
+              sys.exit(1)
+          print(f"{ran} identity test(s) ran, none skipped")
+          PY
+
+  web:
+    name: Web (vitest + build + Playwright e2e)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Unit tests (vitest)
+        run: npm test
+      # `npm run build` is `tsc -b && vite build`, so a type error fails here —
+      # not only the app but the strict build the earlier login regression hid
+      # behind `tsc --noEmit`.
+      - name: Typecheck + build
+        run: npm run build
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      # The Playwright webServer starts the Vite dev server; every screen is
+      # stubbed per test (page.route), so no lab_server is needed.
+      - name: Playwright e2e
+        run: npm run e2e
+        env:
+          CI: "1"
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-playwright-traces
+          path: web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
