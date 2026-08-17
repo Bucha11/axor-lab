@@ -20,6 +20,7 @@ function underneath it is the same island with a longer bridge.
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import threading
@@ -36,6 +37,14 @@ from lab_server.runtime_jobs import RuntimeJobStore, make_runtime_server
 from lab_suite import UNAVAILABLE_SUITES, builtin_registry, suite_catalog
 
 CONTROL = "control-token-for-tests"
+
+# The YAML editing mode is the `yaml` extra (PyYAML). Its CLI/server entry points
+# 501/exit-1 with a "pip install axor-lab[yaml]" instruction when it is absent, so
+# every test that drives a REAL YAML round trip is skipUnless-gated — it RUNS in
+# the dedicated `yaml` CI job and SKIPS in the base acceptance job, rather than
+# hard-failing there. JSON validate/catalog/token tests need nothing extra.
+_HAS_YAML = importlib.util.find_spec("yaml") is not None
+_YAML_REASON = "requires the axor-lab[yaml] extra (PyYAML)"
 
 
 def _run_cli(*argv: str) -> tuple[int, str, str]:
@@ -176,6 +185,7 @@ class TestTheCliRunsASuite(unittest.TestCase):
             self.assertFalse(out_dir.exists())
 
 
+@unittest.skipUnless(_HAS_YAML, _YAML_REASON)
 class TestTheYamlModeIsReachableToo(unittest.TestCase):
     """A third editing mode nobody can open is the same island the SDK was."""
 
@@ -332,6 +342,7 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         self.assertEqual(status, 404)
         self.assertNotIn("no suite", json.dumps(payload))
 
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_the_yaml_endpoint_serves_the_same_manifest(self) -> None:
         from lab_contracts import content_hash
         from lab_suite import from_yaml
@@ -346,6 +357,7 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
             content_hash(builtin_registry().get("budget").manifest()),
         )
 
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_validate_yaml_reports_a_parse_error_as_an_error_not_a_500(self) -> None:
         """A user editing YAML types invalid YAML constantly. That is feedback,
         not a server fault."""
@@ -356,6 +368,7 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         self.assertFalse(payload["ok"])
         self.assertTrue(payload["errors"])
 
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_validate_yaml_applies_the_same_rules_as_the_json_validator(self) -> None:
         """Same verdict, same errors. The YAML path additionally returns the
         PARSED manifest, so the Builder can switch modes without becoming a
@@ -373,6 +386,7 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         )
         self.assertEqual(from_text["suite"], manifest)
 
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_the_serializer_round_trips_an_EDITED_manifest(self) -> None:
         """The Builder's mode switch serializes the document it is HOLDING, not
         the one on disk. Serializing the stored suite would silently discard the
@@ -392,6 +406,7 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
             text = response.read().decode()
         self.assertEqual(from_yaml(text), edited)
 
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_validate_yaml_returns_the_parsed_manifest_so_the_client_need_not_parse(
         self,
     ) -> None:
@@ -403,6 +418,7 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         )
         self.assertEqual(payload["suite"], manifest)
 
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_unparseable_yaml_returns_no_manifest_to_switch_to(self) -> None:
         """No parse, no document — there is nothing for a form to hold."""
         _, payload = self._request(
@@ -411,6 +427,7 @@ class TestTheSuiteEndpoints(SuiteEndpointTestCase):
         self.assertFalse(payload["ok"])
         self.assertNotIn("suite", payload)
 
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_a_parsed_but_invalid_manifest_comes_back_with_its_errors(self) -> None:
         """A semantically invalid document is still THE document. Withholding
         it trapped the user in YAML mode: introduce one semantic error there

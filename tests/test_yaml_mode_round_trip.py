@@ -17,11 +17,20 @@ of this file; the built-in suites round-tripping is the easy half.
 
 from __future__ import annotations
 
+import importlib.util
 import unittest
 
 from lab_contracts import content_hash
 from lab_suite import builtin_registry, from_yaml, round_trips, to_yaml, validate_manifest
 from lab_suite.errors import SuiteError
+
+# PyYAML is the `yaml` extra (`pip install axor-lab[yaml]`). The suite runs under
+# `unittest`, so a bare use of the YAML mode without it raises YamlUnavailable
+# mid-test rather than skipping — guard every test that needs a REAL parser with
+# skipUnless. The absent-path behavior is proven separately, with PyYAML mocked
+# away (`TestTheModesEditOneDocument.test_yaml_is_optional_and_says_so_when_absent`).
+_HAS_YAML = importlib.util.find_spec("yaml") is not None
+_YAML_REASON = "requires the axor-lab[yaml] extra (PyYAML)"
 
 # Values that are ordinary JSON strings and YAML 1.1 landmines.
 LANDMINES = [
@@ -34,6 +43,7 @@ LANDMINES = [
 ]
 
 
+@unittest.skipUnless(_HAS_YAML, _YAML_REASON)
 class TestEveryBuiltInSurvivesTheRoundTrip(unittest.TestCase):
     def test_each_manifest_comes_back_byte_identical(self) -> None:
         for suite_id in builtin_registry().ids():
@@ -50,6 +60,7 @@ class TestEveryBuiltInSurvivesTheRoundTrip(unittest.TestCase):
                 self.assertEqual(validate_manifest(from_yaml(to_yaml(manifest))), [])
 
 
+@unittest.skipUnless(_HAS_YAML, _YAML_REASON)
 class TestYamlLandminesStayStrings(unittest.TestCase):
     def _manifest(self, **extra: object) -> dict[str, object]:
         return {
@@ -90,6 +101,7 @@ class TestYamlLandminesStayStrings(unittest.TestCase):
         self.assertIsNone(values["nil"])
 
 
+@unittest.skipUnless(_HAS_YAML, _YAML_REASON)
 class TestUnrepresentableYamlIsRefusedAtTheEdge(unittest.TestCase):
     """YAML can express things a manifest cannot. Accepting one turns a
     losslessness bug into a serialization crash three steps later, in a place
@@ -119,6 +131,7 @@ class TestUnrepresentableYamlIsRefusedAtTheEdge(unittest.TestCase):
 
 
 class TestTheModesEditOneDocument(unittest.TestCase):
+    @unittest.skipUnless(_HAS_YAML, _YAML_REASON)
     def test_a_manifest_edited_as_yaml_is_the_same_object_the_sdk_runs(self) -> None:
         """The whole point of the rule: what the YAML mode produces goes
         straight into the runner, with no second parser and no adapter."""

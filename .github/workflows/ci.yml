@@ -59,7 +59,7 @@ jobs:
         run: |
           python - <<'PY'
           import io, sys, unittest
-          from lab_runner import axor_available
+          from lab_capabilities.governance import axor_available
           assert axor_available(), "axor-core is a required dependency but did not import"
           result = unittest.TextTestRunner(stream=io.StringIO()).run(
               unittest.TestLoader().discover("tests", top_level_dir=".")
@@ -96,6 +96,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Replay drives the REAL kernel (the fixtures pin `real_kernel_version()`),
+      # so axor-core must be installed here too — otherwise the replay worker
+      # subprocess resolves a None kernel and dies before it can be bit-identical.
+      - name: Install (pulls axor-core, the pinned kernel)
+        run: pip install -e .
       - name: Replay must be bit-identical (pinned kernel, cross-OS)
         run: python -m unittest tests.test_acceptance_05_replay_exact -v
 
@@ -107,6 +112,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # axor-core is a REQUIRED dependency: the AgentDojo fixtures pin the REAL
+      # kernel (`support.KERNEL_PINNED = real_kernel_version()`), which is None
+      # without axor-core installed — so every condition's `kernel`/`config_hash`
+      # goes NoneType and validation fails. Install the package so the kernel is
+      # a real build, not absent.
+      - name: Install (pulls axor-core, the required kernel)
+        run: pip install -e .
       - name: A schema change that breaks the slice examples or AgentDojo import fails CI
         run: |
           cd contracts && python validate_slice.py && cd ..
@@ -142,7 +154,7 @@ jobs:
           pip install "axor-core==0.10.2"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
           python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.10.2' else 'axor-core version drift: expected 0.10.2, got ' + axor_core.__version__)"
-          python -c "from lab_runner import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
+          python -c "from lab_capabilities.governance import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.
           # the WHOLE suite, not a hand-listed subset. The list here named three
@@ -191,6 +203,11 @@ jobs:
         # portable receipt, server acceptance, reproduction-package and
         # verification-outcome proofs, not just the two original suites (r18).
         run: |
+          # axor-core is a REQUIRED dependency and the signing fixtures pin the
+          # REAL kernel (`support.KERNEL_PINNED`), so the package must be installed
+          # or every bundle the signing tests publish fails schema validation with
+          # a NoneType kernel — long before any signature is checked.
+          pip install -e .
           pip install "pynacl>=1.5"
           python -c "import importlib.util as u; assert u.find_spec('nacl'), 'PyNaCl must be present so the crypto tests RUN, not skip'"
           # capture the run's exit code AND output (no pipe, so a FAILURE still
@@ -235,9 +252,16 @@ jobs:
       # A schema change on either side would pass both suites and break the one
       # path that matters — bring your own agent.
       - name: Install Lab + axor-wrap
+        # The cross-repo trace test needs the CURRENT wrap surface
+        # (`toolset_for_arm`, `trial_of`), which the published axor-wrap 0.1.0 on
+        # PyPI predates — installing `axor-wrap>=0.1` there imports a wrap without
+        # it and every test in the suite errors at setUp. Pin the integration
+        # branch (axor-wrap is public, so this clones tokenless); its own
+        # `axor-core>=0.10.2,<0.11` resolves to the same 0.10.2 Lab pins.
+        # Switch back to a PyPI pin once axor-wrap cuts a release carrying it.
         run: |
           pip install -e .
-          pip install "axor-wrap>=0.1"
+          pip install "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m"
           python -c "import axor_wrap, axor_core; print('axor-wrap', axor_wrap.__version__, '| axor-core', axor_core.__version__)"
       - name: The cross-repo acceptance test must RUN, not skip
         run: |
@@ -319,6 +343,46 @@ jobs:
                     file=sys.stderr)
               sys.exit(1)
           print(f"{ran} identity test(s) ran, none skipped")
+          PY
+
+  yaml:
+    name: YAML-mode tests actually run (PyYAML installed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # PyYAML is the `yaml` extra, so the round-trip + entry-point YAML tests
+      # SKIP in the base acceptance job — this job installs the extra so they
+      # RUN, the same "a gated suite must not silently skip in CI" posture as the
+      # crypto, wrap and identity jobs.
+      - name: Install Lab with the yaml extra
+        run: |
+          pip install -e ".[yaml]"
+          python -c "import yaml; print('PyYAML', yaml.__version__)"
+      - name: The YAML round-trip + entry-point tests must RUN, not skip
+        run: |
+          set +e
+          python -m unittest -v \
+            tests.test_yaml_mode_round_trip \
+            tests.test_suite_entry_points > yaml.log 2>&1
+          rc=$?
+          set -e
+          cat yaml.log
+          test "$rc" -eq 0 || { echo "::error::yaml suites failed"; exit "$rc"; }
+          python - <<'PY'
+          import re, sys
+          log = open("yaml.log").read()
+          # a YAML test that skips here means PyYAML did not import — the exact
+          # false-green (a silent skip on a gated suite) this job exists to catch.
+          offenders = [line for line in log.splitlines()
+                       if "skipped" in line and "yaml" in line.lower()]
+          for line in offenders:
+              print(f"::error::{line}", file=sys.stderr)
+          if offenders:
+              sys.exit("YAML test(s) skipped with PyYAML installed")
+          print("no YAML skips")
           PY
 
   web:
