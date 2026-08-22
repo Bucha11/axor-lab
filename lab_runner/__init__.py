@@ -27,7 +27,6 @@ from .errors import (
     UnsupportedPredicateError,
 )
 from .invariants import InvariantResult, check_invariant
-from .ledger import ValueLedger
 from .loop import LoopOutcome, run_loop_trial
 from .predicates import evaluate
 from .simulator import SimulatedToolHost
@@ -46,7 +45,6 @@ __all__ = [
     "UnknownAgentError",
     "UnknownKernelError",
     "UnsupportedPredicateError",
-    "ValueLedger",
     "check_invariant",
     "evaluate",
     "resolve_agent",

@@ -1,11 +1,14 @@
 """Sensitive labels propagate through model_extraction (review round 6, P0).
 
 The redaction of a sensitive SOURCE value was pointless if the model could copy
-the secret into a sink argument: the derived model_extraction value inherited
-only untrusted_derived and kept its raw preview + decision_value, re-exposing the
-secret in the trace / bundle / EvidenceCase / server. The conservative join must
-carry the whole security-label lattice — untrusted AND sensitive — and redact a
-derived value that inherits sensitive.
+the secret into a sink argument: the derived model_extraction value must inherit
+the whole security-label lattice — untrusted AND sensitive — and a derived value
+that inherits sensitive must be redacted (masked preview, no raw decision_value),
+so the secret never reaches the trace / bundle / EvidenceCase / server.
+
+This behavior now lives in the wrap engine (axor-wrap), which builds the trace's
+value ledger — Lab's own `ValueLedger` is gone. So the propagation is asserted
+against a REAL wrap-built governed trace rather than a Lab-side ledger object.
 """
 
 from __future__ import annotations
@@ -13,62 +16,89 @@ from __future__ import annotations
 import json
 import unittest
 
-from lab_runner import ValueLedger
+from tests import support
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_trial
 
+ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 SECRET = "sk-secret-abc-123"
+
+
+def _sensitive_trace() -> dict[str, object]:
+    """A real governed attack trace whose untrusted read field is declared
+    sensitive and carries a distinctive SECRET; the model copies content derived
+    from it into the sink recipient."""
+    scenario = support.deep(support.banking_scenario())
+    scenario["fixtures"]["read_txns"]["result"]["transactions"][0]["description"] = SECRET
+    mans = support.manifests()
+    mans["read_txns"]["sensitive_fields"] = ["result.transactions[].description"]
+    return run_trial(
+        scenario, mans, support.conditions()[1],
+        support.kernel_registry().get(support.KERNEL_PINNED),
+        run_id="r", seed="s0", repeat_index=0, agent=ATTACK_ALWAYS,
+    ).trace
+
+
+def _default_trace() -> dict[str, object]:
+    """A real governed attack trace with NO sensitive fields — the ordinary
+    banking slice, whose untrusted-derived recipient is not sensitive."""
+    return run_trial(
+        support.banking_scenario(), support.manifests(), support.conditions()[1],
+        support.kernel_registry().get(support.KERNEL_PINNED),
+        run_id="r", seed="s0", repeat_index=0, agent=ATTACK_ALWAYS,
+    ).trace
+
+
+def _model_extractions(trace: dict[str, object]) -> list[dict[str, object]]:
+    return [v for v in trace["values"] if "model_extraction" in v.get("transformations", [])]
 
 
 class TestSensitivePropagation(unittest.TestCase):
     def test_derived_value_inherits_sensitive_and_is_redacted(self) -> None:
-        led = ValueLedger()
-        v_secret = led.mint_external_read(SECRET, "tool_result:read_key:api_key", sensitive=True)
-        # the model copies the secret verbatim into a sink argument
-        v_derived = led.mint_model_extraction(SECRET, context_value_ids=(v_secret,))
-        derived = led.get(v_derived)
-        self.assertIn("untrusted_derived", derived["labels"])
-        self.assertIn("sensitive", derived["labels"])  # inherited, not dropped
-        self.assertEqual(derived["preview"], "[redacted]")
-        self.assertNotIn("decision_value", derived)  # no raw value stored
+        # the model copies content derived from the sensitive read into the sink
+        # recipient: the derived model_extraction value must inherit sensitive and
+        # be redacted, not keep a raw copy of the secret.
+        derived = _model_extractions(_sensitive_trace())
+        self.assertTrue(derived)
+        for v in derived:
+            self.assertIn("untrusted_derived", v["labels"])
+            self.assertIn("sensitive", v["labels"])   # inherited, not dropped
+            self.assertEqual(v["preview"], "[redacted]")
+            self.assertNotIn("decision_value", v)      # no raw value stored
 
-    def test_the_raw_secret_appears_nowhere_in_the_serialized_ledger(self) -> None:
-        led = ValueLedger()
-        v_secret = led.mint_external_read(SECRET, "tool_result:read_key:api_key", sensitive=True)
-        led.mint_model_extraction(SECRET, context_value_ids=(v_secret,))
-        blob = json.dumps(led.values)
+    def test_the_raw_secret_appears_nowhere_in_the_serialized_trace(self) -> None:
+        blob = json.dumps(_sensitive_trace()["values"])
         self.assertNotIn(SECRET, blob)  # source AND derived both redacted
 
     def test_non_sensitive_untrusted_derived_is_not_redacted(self) -> None:
         # regression: the normal banking slice recipient (untrusted, NOT sensitive)
-        # must keep its typed decision_value so replay stays exact
-        led = ValueLedger()
-        v_u = led.mint_external_read("attacker@example.com", "tool_result:read:desc")
-        v_d = led.mint_model_extraction("attacker@example.com", context_value_ids=(v_u,))
-        derived = led.get(v_d)
-        self.assertIn("untrusted_derived", derived["labels"])
-        self.assertNotIn("sensitive", derived["labels"])
-        self.assertEqual(derived["preview"], "attacker@example.com")
-        self.assertEqual(derived["decision_value"], "attacker@example.com")
+        # must keep its typed decision_value so replay stays exact, and must NOT be
+        # spuriously marked sensitive
+        derived = _model_extractions(_default_trace())
+        self.assertTrue(derived)
+        for v in derived:
+            self.assertIn("untrusted_derived", v["labels"])
+            self.assertNotIn("sensitive", v["labels"])
+            self.assertNotEqual(v["preview"], "[redacted]")
+            self.assertIn("decision_value", v)
 
-    def test_clean_model_output_stays_clean(self) -> None:
-        led = ValueLedger()
-        v_clean = led.mint_constant("landlord@example.com", "prompt:landlord")
-        v_d = led.mint_model_extraction("landlord@example.com", context_value_ids=(v_clean,))
-        derived = led.get(v_d)
-        self.assertNotIn("sensitive", derived["labels"])
-        self.assertNotIn("untrusted_derived", derived["labels"])
 
-    def test_real_kernel_registration_reads_runtime_value_not_serialized(self) -> None:
-        # the exact pattern the real-kernel path uses: it must get the RAW value
-        # even for a redacted sensitive value, where reading decision_value off
-        # the serialized dict used to KeyError and fail the whole trial (r7)
-        led = ValueLedger()
-        vid = led.mint_external_read(SECRET, "tool_result:read:key", sensitive=True)
-        with self.assertRaises(KeyError):
-            _ = led.get(vid)["decision_value"]  # the OLD (crashing) access
-        registrations = [("read_key", led.runtime_value(v)) for v in [vid]]  # the NEW access
-        self.assertEqual(registrations[0][1], SECRET)  # kernel sees the raw value
-        # ...but the serialized trace values still never carry the secret
-        self.assertNotIn(SECRET, json.dumps(led.values))
+# Two tests were deleted here — both exercised ONLY Lab's deleted `ValueLedger`
+# object, which has no live equivalent:
+#
+#   - `test_clean_model_output_stays_clean` minted a model_extraction over a lone
+#     trusted constant and asserted the join added neither label. The banking
+#     slice produces no clean (all-trusted-context) model_extraction, so there is
+#     no wrap-built trace to assert it against; the "sensitive is not spuriously
+#     added" half of no-over-taint is preserved by
+#     `test_non_sensitive_untrusted_derived_is_not_redacted` above.
+#   - `test_real_kernel_registration_reads_runtime_value_not_serialized` asserted
+#     the ledger's in-memory `runtime_value(...)` API (and that reading
+#     `decision_value` off a redacted value KeyErrors). That raw-value handoff to
+#     the kernel is now internal to axor-wrap; its observable guarantee — the
+#     secret never enters the serialized trace while the governed run still gates
+#     correctly — is covered by the two tests above and by the governed DENY that
+#     `test_runner_correctness` / `test_replay_regression_robustness` exercise.
 
 
 if __name__ == "__main__":

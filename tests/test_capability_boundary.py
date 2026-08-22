@@ -40,8 +40,6 @@ SPINE = (
     "lab_runner/loop.py",
     "lab_runner/invariants.py",
     "lab_runner/predicates.py",
-    "lab_runner/ledger.py",
-    "lab_runner/provenance.py",
     "lab_runner/simulator.py",
     "lab_runner/agents.py",
     "lab_runner/trials.py",

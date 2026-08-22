@@ -19,7 +19,7 @@ from .subset_validator import validate_against
 EGRESS_CLASSES = frozenset({"EXPORT", "EXEC"})
 SINK_CLASSES = EGRESS_CLASSES | {"WRITE"}
 # the confidentiality label whose value is redacted in the trace — the ONLY case
-# in which a value may omit its decision_value (mirrors lab_runner.ledger)
+# in which a value may omit its decision_value (mirrors the wrap engine's ledger)
 LABEL_SENSITIVE = "sensitive"
 KNOWN_MATCHERS = frozenset(
     {"equal", "not_equal", "in", "not_in", "matches", "provenance_is", "gt", "lt"}
