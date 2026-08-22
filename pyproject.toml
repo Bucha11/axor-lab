@@ -30,11 +30,12 @@ dependencies = [
     "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m",
     # axor-eval is the shared fault-injection evaluator (silent_fail deprivation,
     # the ToolAuditLayer that emits FABRICATED_TOOL_RESULT). Lab reuses it for the
-    # tool-fabrication experiment rather than re-implementing the deviation
-    # machinery — the same "one engine, no duplicate" rule the wrap migration
-    # followed. Public repo, pinned to main (the fabrication API is stable there);
-    # its own axor-core>=0.8,<0.11 is satisfied by Lab's 0.10.2 pin.
-    "axor-eval @ git+https://github.com/Bucha11/axor-eval@main",
+    # tool-fabrication experiment (silent_fail + ToolAuditLayer + the shared
+    # reconstruct_claim in axor_eval.claims) rather than re-implementing the
+    # deviation machinery — the same "one engine, no duplicate" rule the wrap
+    # migration followed. Public repo, pinned to the integration branch (which
+    # carries axor_eval.claims); its axor-core>=0.8,<0.11 is met by Lab's 0.10.2.
+    "axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m",
 ]
 
 [project.scripts]

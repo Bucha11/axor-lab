@@ -161,7 +161,7 @@ jobs:
           # axor-eval too: the tool-fabrication experiment (and its test, picked up
           # by discovery here) imports it. Same public-repo git pin as everywhere
           # else; its axor-core>=0.8,<0.11 is satisfied by the pinned 0.10.2.
-          pip install "axor-eval @ git+https://github.com/Bucha11/axor-eval@main"
+          pip install "axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
           python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.10.2' else 'axor-core version drift: expected 0.10.2, got ' + axor_core.__version__)"
           python -c "from lab_capabilities.governance import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
