@@ -29,7 +29,7 @@ from lab_contracts import (
 )
 from lab_capabilities.governance import run_experiment_suite
 from lab_runner.invariants import STATUS_ERROR, STATUS_FAILED, STATUS_PASSED, check_invariant
-from lab_capabilities.governance.kernel import KernelRegistry
+from lab_capabilities.governance.axor_backend import KernelRegistry
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "contracts" / "examples" / "slice-examples.json"
 CREATED = "2026-08-02T00:00:00+00:00"

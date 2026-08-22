@@ -31,7 +31,7 @@ from lab_contracts import (
 
 from lab_runner.agents import AgentAdapter, resolve_agent
 from lab_runner.errors import ExperimentFileError, UnknownAgentError
-from .kernel import KernelRegistry, default_registry, unsupported_reference_policy_fields
+from .axor_backend import KernelRegistry, default_registry
 
 
 @dataclass(frozen=True)
@@ -52,16 +52,6 @@ class ResolvedExperiment:
     @property
     def trial_count(self) -> int:
         return len(self.scenarios) * len(self.conditions) * self.repeats
-
-
-def _pins_real_kernel(condition: dict[str, object]) -> bool:
-    """True when the condition pins an installed axor-core build that executes
-    its own policy (so the reference-kernel parity check does not apply)."""
-    from .axor_backend import HAS_AXOR_CORE, real_kernel_version
-
-    if not HAS_AXOR_CORE:
-        return False
-    return str(condition.get("kernel", "")) == real_kernel_version()
 
 
 def _apply_run_mode(
@@ -225,22 +215,11 @@ def resolve(document: dict[str, object]) -> ResolvedExperiment:
                 f"[validating] condition '{entry.get('id')}': config_hash {entry['config_hash']} "
                 f"does not match its kernel+policy ({computed})"
             )
-        # policy/runtime parity: reject a policy field the reference kernel does
-        # not execute (would be hashed but ignored) unless the condition pins a
-        # real axor-core build that executes its own policy (review r4).
-        #
-        # The exemption is only sound while Lab actually HANDS the real kernel
-        # every policy field it compiles. It did not: `criticality_overrides`
-        # entered the config hash and was then dropped on the way to the
-        # governor, so the one branch that skips this check was running the
-        # exact failure the check exists to catch. Now compiled and passed
-        # through (`_consequence_classes`), which is what makes this exemption
-        # true rather than merely stated.
-        if str(entry.get("enforcement")) == "on" and not _pins_real_kernel(entry):
-            errors += [
-                f"[validating] condition '{entry.get('id')}': {e}"
-                for e in unsupported_reference_policy_fields(entry.get("policy"))  # type: ignore[arg-type]
-            ]
+        # The real kernel executes its own policy — every field the condition
+        # compiles (allowlist, criticality_overrides) is passed through to the
+        # governor (`governor_config`), so there is no "hashed but ignored"
+        # policy field to reject. The reference-kernel parity check that guarded
+        # this is gone with the reference kernel.
         entry["config_hash"] = computed
         pinned.append(entry)
 

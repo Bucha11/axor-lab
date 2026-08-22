@@ -22,7 +22,7 @@ from lab_analysis import binary_aggregate, mcnemar_test, two_proportion_test
 from lab_contracts import build_artifact, build_bundle, content_hash, reproducibility_of
 from lab_capabilities.governance import gate_for_condition
 from lab_runner.invariants import InvariantResult, check_invariant
-from lab_capabilities.governance.kernel import KernelRegistry
+from lab_capabilities.governance.axor_backend import KernelRegistry
 from lab_runner.loop import LoopOutcome, run_loop_trial
 from lab_capabilities.governance import observe_only_condition
 from lab_runner.trials import trial_id_for

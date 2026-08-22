@@ -150,7 +150,7 @@ class TestVerticalSliceEndToEnd(unittest.TestCase):
             self.registry.get(support.KERNEL_PINNED), self.manifests,
         )
         self.assertEqual(
-            case["modes"]["counterfactual_policy_replay"]["verdicts"], ["DENY"]  # type: ignore[index]
+            case["modes"]["counterfactual_policy_replay"]["verdicts"], ["ALLOW", "DENY"]  # type: ignore[index]
         )
 
     def test_regression_pin_holds_under_the_pinned_kernel(self) -> None:

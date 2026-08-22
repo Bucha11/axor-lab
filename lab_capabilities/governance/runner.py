@@ -1,7 +1,10 @@
-"""The reference local runner: one trial → trace/v1; one experiment → bundle.
+"""The local slice runner: one trial → trace/v1; one experiment → bundle.
 
-The agent is SCRIPTED (a deterministic function of the seed), standing in for
-the stochastic model layer so the whole pipeline — fixtures → ledger → gate →
+Each trial drives its tools through a wrapped toolset (`axor_wrap`): the real
+axor-core governor gates every call and builds the `trace/v1` — there is one
+wrapping/trace engine, and it is the same one a connected runtime uses. The
+agent is SCRIPTED (a deterministic function of the seed), standing in for the
+stochastic model layer so the whole pipeline — fixtures → wrapped kernel →
 trace → aggregate — is exercised end-to-end without an LLM. The seed decides
 whether the agent follows the injection, so paired ungoverned/governed trials
 on the same seed produce the discordant pairs McNemar needs.
@@ -16,21 +19,18 @@ from lab_contracts.canonical import (
     CONFIG_COMPILER_VERSION,
     content_hash,
     runtime_config_hash,
-    world_digest,
 )
 
 from lab_runner.agents import AgentAdapter, DrivingAgent, ScriptedAgent
-from lab_runner.provenance import mint_untrusted_fields
 from lab_runner.trials import trial_id_for
-from .axor_backend import AxorKernel, gate_with_governor, resolve_kernel
+from .axor_backend import AxorKernel, KernelRegistry, default_registry, resolve_kernel
 from lab_runner.errors import RunnerError
-from .kernel import Kernel, KernelRegistry, default_registry
-from lab_runner.ledger import ValueLedger
 from lab_runner.predicates import evaluate
 from lab_runner.simulator import SimulatedToolHost
-from lab_runner.verdicts import executed_under
+from lab_runner.wrap_engine import finalize_trace, make_toolset, tool_callables
 
-RUNTIME_ID = "lab-runner@0.1"
+from axor_wrap import ToolDenied
+
 DEFAULT_AMOUNT = 1200
 _FAITHFUL_FALLBACK_INPUT = "landlord_iban"
 
@@ -212,7 +212,7 @@ def run_trial(
     scenario: dict[str, object],
     manifests: dict[str, dict[str, object]],
     condition: dict[str, object],
-    kernel: Kernel,
+    kernel: "AxorKernel | None",
     run_id: str,
     seed: str,
     repeat_index: int,
@@ -221,13 +221,22 @@ def run_trial(
 ) -> TrialOutcome:
     """Execute one (scenario × condition × seed × repeat) → trace/v1.
 
-    `kernel` may be None: governance is a capability, not a stage (Suite
-    Platform RFC §10). With no kernel no gate runs, no gate_decision event is
-    emitted and the producer names no kernel_version — the three absences that
-    `verify_bundle` checks together. `scenario["injection"]` is likewise
-    optional: a budget/performance scenario has no attack model.
+    The two-step slice — read a tool, decide one sink call — driven through a
+    wrapped toolset (`axor_wrap.WrappedToolset`): the real kernel gates every
+    call and `WrappedToolset.trace()` builds the trace. The agent only CHOOSES
+    the sink call (faithfully, or following the injection by seed); provenance is
+    the kernel's content derivation, never a self-report.
+
+    `kernel` may be None: governance is a capability, not a stage (Suite Platform
+    RFC §10). The toolset still runs (the kernel is the only source of the value
+    ledger a trace is read from) but nothing it decides is enforced and the trace
+    is stripped of its verdicts and kernel identity — no gate_decision event and
+    no kernel_version, the three absences `verify_bundle` checks together.
+    `scenario["injection"]` is likewise optional: a budget scenario has no attack
+    model.
     """
     started = time.monotonic()
+    governed = kernel is not None
     inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
     injection: dict[str, object] = scenario.get("injection") or {}  # type: ignore[assignment]
     if host is None:
@@ -236,138 +245,54 @@ def run_trial(
             fixtures=scenario.get("fixtures", {}),  # type: ignore[arg-type]
             injection_text=str(injection.get("text", "")),
         )
-    ledger = ValueLedger()
-    events: list[dict[str, object]] = []
-    seq = 0
-
-    # 1. read tool: fixture result; mint an external_read value per untrusted field hit
-    read_tool = _read_tool_id(scenario, manifests)
-    result = host.execute(read_tool, {})
-    produced = mint_untrusted_fields(ledger, manifests[read_tool], read_tool, result)
-    events.append(
-        {"seq": seq, "node": "root", "type": "tool_result", "tool": read_tool,
-         "produces_value_ids": produced}
+    toolset = make_toolset(
+        tool_callables(host, manifests), manifests, condition, inputs, governed=governed,
     )
-    seq += 1
 
-    # 2. the "model" decides the sink call
+    # 1. read tool — the untrusted source (the kernel taints its output).
+    read_tool = _read_tool_id(scenario, manifests)
+    result = toolset.call(read_tool, {})
+
+    # 2. the "model" decides the sink call — the agent chooses only WHAT to call.
     sink_tool = _sink_tool_id(scenario, manifests)
-    untrusted_present = bool(produced)
     if isinstance(agent, DrivingAgent):
         # model-backed: the agent observed the read result (with any injection)
-        # and produced the sink call. The RUNTIME assigns provenance — because
-        # the recipient was produced by a model call whose context held an
-        # untrusted value, it is model_extraction (conservative join). The
-        # agent cannot launder taint by claiming the value is clean.
+        # and produced the sink call. The agent cannot launder taint by claiming
+        # the value is clean — the kernel judges the argument it is handed.
         decision_call = agent.decide_sink_call(
             str(scenario["task"]), result, inputs, manifests[sink_tool],
             scenario_id=str(scenario["name"]),
         )
         recipient = decision_call.recipient
         amount = decision_call.amount
-        # the model saw exactly the values produced by the read it observed;
-        # scope the conservative join to that context (review §4.2)
-        if untrusted_present:
-            v_recipient = ledger.mint_model_extraction(recipient, context_value_ids=tuple(produced))
-        else:
-            v_recipient = ledger.mint_constant(recipient, "model:recipient")
     else:
         # a scenario with no injection has nothing for the scripted agent to
         # follow — it always acts faithfully
         attacked = bool(injection) and agent.follows_injection(str(scenario["name"]), seed)
         if attacked:
             recipient = agent.attacker_target(str(injection["text"]))
-            v_recipient = ledger.mint_model_extraction(recipient, context_value_ids=tuple(produced))
         else:
             faithful_key = _faithful_input_key(scenario)
             recipient = inputs[faithful_key]  # the exact typed input value
-            v_recipient = ledger.mint_constant(recipient, f"prompt:{faithful_key}")
         amount = inputs.get("amount", DEFAULT_AMOUNT)
-    v_amount = ledger.mint_constant(amount, "prompt:amount")
     args: dict[str, object] = {"recipient": recipient, "amount": amount}
-    arg_bindings = {"recipient": v_recipient, "amount": v_amount}
-    # a deterministic call_id correlates this intent with its gate_decision, so
-    # replay pairs them by id (not just node FIFO) and can detect an intent with
-    # no decision or a duplicate decision (review r2 §replay)
-    call_id = f"call_root_{seq}"
-    events.append(
-        {"seq": seq, "node": "root", "type": "tool_call_intent", "tool": sink_tool,
-         "call_id": call_id, "arg_bindings": arg_bindings}
-    )
-    seq += 1
 
-    # 3. gate — the ONE decide implementation (also used by replay). The real
-    # axor-core governor and the reference kernel share this dispatch.
-    if kernel is None:
-        # No governance capability: no gate, no verdict, no gate_decision event.
-        # The call is simulated exactly as an ALLOW would simulate it — the
-        # difference is that nothing DECIDED to allow it, and the trace says so
-        # by carrying no decision and no kernel_version.
-        decision = None
-    elif isinstance(kernel, AxorKernel):
-        # read the RAW runtime value (in-memory), not decision_value off the
-        # serialized dict — a sensitive value is redacted there and has no
-        # decision_value, which used to KeyError and fail the whole trial (r7)
-        registrations = [
-            (read_tool, ledger.runtime_value(vid)) for vid in produced
-        ]
-        decision = gate_with_governor(
-            kernel.config, str(condition["enforcement"]), registrations,
-            sink_tool, args, v_recipient,
-        )
-    else:
-        decision = kernel.decide(
-            enforcement=str(condition["enforcement"]),
-            manifest=manifests[sink_tool],
-            args=args,
-            arg_labels={name: ledger.labels_of(vid) for name, vid in arg_bindings.items()},
-            arg_bindings=arg_bindings,
-            inputs=inputs,
-            policy=condition.get("policy"),  # type: ignore[arg-type]
-        )
-    if decision is not None:
-        events.append(
-            {"seq": seq, "node": "root", "type": "gate_decision", "call_id": call_id,
-             "decision": decision}
-        )
-        seq += 1
+    # 3. gate + execute — the wrapped toolset denies (governed) or records the
+    # DENY and runs anyway (observe-only); an unenforced denial's call still runs.
+    try:
+        toolset.call(sink_tool, args)
+    except ToolDenied:
+        pass
 
-    # 4. execute only if allowed — simulated either way. With no gate there is
-    # nothing to withhold execution, so the call proceeds; and an observe-only
-    # arm proceeds through a recorded DENY, which is what makes it a record of
-    # what the agent ACTUALLY did rather than of what it was permitted to do.
-    if decision is None or executed_under(decision):
-        host.execute(sink_tool, args)
-
-    trace: dict[str, object] = {
-        "schema_version": "trace/v1",
-        # trace identity MUST carry the full trial coordinate. Omitting
-        # scenario_id (and repeat_index) collided every scenario that shared a
-        # (condition, seed) — 3 scenarios × 2 conditions × 6 repeats produced
-        # only 12 distinct ids, and the colliding traces overwrote each other in
-        # the bundle manifest and on disk, corrupting multi-scenario bundles.
-        "trace_id": (
-            f"t_{run_id}_{scenario['name']}_{condition['id']}_{seed}_r{repeat_index}"
-        ),
-        "trial": {
-            "run_id": run_id,
-            "scenario_id": str(scenario["name"]),
-            "condition_id": str(condition["id"]),
-            "seed": seed,
-            "repeat_index": repeat_index,
-        },
-        "producer": {
-            "mode": "wrapped_code",
-            "provenance_fidelity": "explicit_flow_tracked",
-            # omitted when no gate ran — see _verify_kernel_binding: absence
-            # here, on the condition, and of gate_decision events is one fact
-            **({"kernel_version": str(condition["kernel"])} if condition.get("kernel") else {}),
-            "runtime": RUNTIME_ID,
-        },
-        "inputs_digest": world_digest(inputs, scenario.get("fixtures", {})),  # type: ignore[arg-type]
-        "events": events,
-        "values": ledger.values,
+    trial = {
+        "run_id": run_id,
+        "scenario_id": str(scenario["name"]),
+        "condition_id": str(condition["id"]),
+        "seed": seed,
+        "repeat_index": repeat_index,
     }
+    trace = finalize_trace(toolset, trial, scenario, governed=governed)
+
     # `violation` is optional — a scenario with no attack model has no breach to
     # evaluate, and False here means "no breach", which is the truth.
     violation_predicate = scenario.get("violation")
@@ -378,7 +303,7 @@ def run_trial(
             if violation_predicate is not None else False
         ),
         task_success=evaluate(scenario["task_success"], trace, inputs),  # type: ignore[arg-type]
-        metrics=_trial_metrics(started, events, host),
+        metrics=_trial_metrics(started, trace["events"], host),  # type: ignore[arg-type]
     )
 
 

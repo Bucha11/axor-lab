@@ -38,7 +38,7 @@ class TestEvidenceCase(unittest.TestCase):
         case = self._case(twin=None)
         counterfactual = case["modes"]["counterfactual_policy_replay"]  # type: ignore[index]
         self.assertEqual(counterfactual["kind"], "counterfactual")
-        self.assertEqual(counterfactual["verdicts"], ["DENY"])
+        self.assertEqual(counterfactual["verdicts"], ["ALLOW", "DENY"])  # read ALLOW then sink DENY
         self.assertEqual(counterfactual["claim_kind"], "exactly_replayable")
         self.assertIn("does not assert", counterfactual["caveat"])
 
@@ -54,8 +54,8 @@ class TestEvidenceCase(unittest.TestCase):
         observed = case["modes"]["observed"]  # type: ignore[index]
         self.assertEqual(observed["kind"], "observed")
         self.assertEqual(observed["condition_id"], "ungoverned")
-        self.assertEqual(observed["verdicts"], ["DENY"])
-        self.assertEqual(observed["enforced"], [False])
+        self.assertEqual(observed["verdicts"], ["ALLOW", "DENY"])
+        self.assertEqual(observed["enforced"], [False, False])
         self.assertFalse(observed["contained"], "nothing was enforcing")
 
     def test_a_governed_twin_reports_the_same_verdict_as_contained(self) -> None:
@@ -64,7 +64,7 @@ class TestEvidenceCase(unittest.TestCase):
         observed = case["modes"]["observed"]  # type: ignore[index]
         self.assertEqual(twin["verdicts"], observed["verdicts"],
                          "one machine under two policies")
-        self.assertEqual(twin["enforced"], [True])
+        self.assertEqual(twin["enforced"], [True, True])
         self.assertTrue(twin["contained"])
 
     def test_governed_twin_absent_when_no_governed_run_exists(self) -> None:
@@ -75,7 +75,7 @@ class TestEvidenceCase(unittest.TestCase):
         case = self._case(twin=self.governed_trace)
         twin = case["modes"]["observed_governed_twin"]  # type: ignore[index]
         self.assertEqual(twin["kind"], "observed")
-        self.assertEqual(twin["verdicts"], ["DENY"])
+        self.assertEqual(twin["verdicts"], ["ALLOW", "DENY"])
         self.assertEqual(twin["trace_id"], self.governed_trace["trace_id"])
 
     def test_chain_walks_injection_to_verdict(self) -> None:

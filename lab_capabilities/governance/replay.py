@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from lab_contracts.canonical import canonical_json
 
-from .kernel import Kernel
+from .axor_backend import AxorKernel
 from lab_runner.verdicts import was_enforced
 
 # Replay outcome per trace — a single bool conflated "the recomputed verdict
@@ -75,7 +75,7 @@ class ReplayReport:
 def replay_trace(
     trace: dict[str, object],
     condition: dict[str, object],
-    kernel: Kernel,
+    kernel: AxorKernel,
     manifests: dict[str, dict[str, object]],
     inputs: dict[str, object],
 ) -> tuple[tuple[dict[str, object], ...], bool]:
@@ -91,7 +91,7 @@ def replay_trace(
 def replay_trace_status(
     trace: dict[str, object],
     condition: dict[str, object],
-    kernel: Kernel,
+    kernel: AxorKernel,
     manifests: dict[str, dict[str, object]],
     inputs: dict[str, object],
 ) -> tuple[tuple[dict[str, object], ...], str]:
@@ -176,42 +176,22 @@ def replay_trace_status(
                 redacted_required = True
                 continue
             args = resolve_args(bindings, values)
-            if isinstance(kernel, AxorKernel):
-                # the driving value comes from the MANIFEST's declared
-                # driving_args, exactly as the live gate resolves it. This read
-                # the hardcoded name "recipient" and fell back to the literal
-                # string "v_none" — so any tool whose driving arg is named
-                # anything else, and every call with no driving args at all,
-                # replayed with a driving value the live run never recorded and
-                # that the ledger does not contain. Replay reported MISMATCH on
-                # traces it had reproduced perfectly, and `exact_replay` — the
-                # capability's headline claim — failed for the real kernel.
-                tool = str(pending_call["tool"])
-                effect: dict[str, object] = manifests[tool].get("effect", {})  # type: ignore[assignment]
-                declared = [str(a) for a in effect.get("driving_args", [])]  # type: ignore[union-attr]
-                driving = bindings.get(declared[0]) if declared else None
-                decision = gate_with_governor(
-                    kernel.config, str(condition["enforcement"]), registrations,
-                    tool, args, driving,
-                )
-                if driving is None:
-                    decision["driving_unresolved"] = (
-                        {"kind": "no_driving_args"} if not declared
-                        else {"kind": "unresolved_argument", "arg": declared[0]}
-                    )
-            else:
-                labels = {
-                    name: tuple(values[vid]["labels"])  # type: ignore[arg-type]
-                    for name, vid in bindings.items()
-                }
-                decision = kernel.decide(
-                    enforcement=str(condition["enforcement"]),
-                    manifest=manifests[str(pending_call["tool"])],
-                    args=args,
-                    arg_labels=labels,
-                    arg_bindings=bindings,
-                    inputs=inputs,
-                    policy=condition.get("policy"),  # type: ignore[arg-type]
+            # the driving value comes from the MANIFEST's declared driving_args,
+            # exactly as the live gate resolves it — for a tool with no driving
+            # args at all it is None, carrying a typed reason rather than an
+            # invented ledger id.
+            tool = str(pending_call["tool"])
+            effect: dict[str, object] = manifests[tool].get("effect", {})  # type: ignore[assignment]
+            declared = [str(a) for a in effect.get("driving_args", [])]  # type: ignore[union-attr]
+            driving = bindings.get(declared[0]) if declared else None
+            decision = gate_with_governor(
+                kernel.config, str(condition["enforcement"]), registrations,
+                tool, args, driving,
+            )
+            if driving is None:
+                decision["driving_unresolved"] = (
+                    {"kind": "no_driving_args"} if not declared
+                    else {"kind": "unresolved_argument", "arg": declared[0]}
                 )
             recomputed.append(decision)
             recorded = event["decision"]
@@ -259,7 +239,7 @@ def _match_intent(
 def replay_bundle(
     bundle: dict[str, object],
     traces: dict[str, dict[str, object]],
-    kernels: dict[str, Kernel],
+    kernels: dict[str, AxorKernel],
 ) -> ReplayReport:
     """Replay every trace referenced by the bundle's trials."""
     from .axor_backend import resolve_kernel

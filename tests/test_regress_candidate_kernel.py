@@ -54,42 +54,53 @@ def _a_governed_trace(bundle, traces):
 
 class TestCandidateResolver(unittest.TestCase):
     def test_candidate_ignores_the_traces_recorded_condition(self) -> None:
-        # the recorded trace ran under "governed" (reference kernel). The candidate
-        # resolver, handed a DIFFERENT candidate condition + version, must build the
-        # CANDIDATE kernel — not the trace's recorded one.
+        # the recorded trace ran under "governed" (strict, NO allowlist). The
+        # candidate resolver, handed a DIFFERENT candidate CONDITION, must build
+        # the CANDIDATE kernel from the candidate's policy — not the trace's
+        # recorded one. With one installed build the difference that shows is the
+        # policy: the candidate's input-backed allowlist compiles into
+        # value_policies, the recorded (no-allowlist) governed policy does not.
         bundle, traces = _slice_bundle()
         trace = _a_governed_trace(bundle, traces)
+        version = str(support.KERNEL_PINNED)
         candidate = {
-            "id": "future", "enforcement": "on", "kernel": support.KERNEL_NO_TAINT_FLOOR,
-            "policy": {"profile": "strict"},
+            "id": "future", "enforcement": "on", "kernel": version,
+            "policy": {"profile": "strict", "trust_model": "content-ledger",
+                       "allowlist": ["$inputs.known_ibans"]},
         }
         kernel = resolve_candidate_kernel_for_trace(
-            bundle, trace, candidate, candidate_version=support.KERNEL_NO_TAINT_FLOOR
+            bundle, trace, candidate, candidate_version=version
         )
-        self.assertEqual(kernel.version, support.KERNEL_NO_TAINT_FLOOR)
-        # the RECORDED resolver, by contrast, returns the kernel the trace ran under
+        self.assertEqual(kernel.version, version)
+        self.assertIn("value_policies", kernel.config)  # the CANDIDATE's allowlist
+        # the RECORDED resolver, by contrast, returns the kernel the trace ran
+        # under — the governed policy, which declares no allowlist
         recorded = resolve_recorded_kernel_for_trace(bundle, trace)
         self.assertEqual(recorded.version, support.KERNEL_PINNED)
+        self.assertNotIn("value_policies", recorded.config)
 
     def test_regress_selected_condition_does_not_use_trace_original_kernel(self) -> None:
-        # check_pins with a candidate kernel_for must report the CANDIDATE kernel's
-        # fingerprint for each replayed pin, not the fallback/recorded one
+        # check_pins with a candidate kernel_for must report the CANDIDATE
+        # kernel's fingerprint for each replayed pin, not the recorded one. The
+        # candidate here is the taint-floor-DISARMED variant of the installed
+        # build (same version, config with the egress floor dropped) — a genuine
+        # behavioral variant whose fingerprint is +taint_floor=off.
         bundle, traces = _slice_bundle()
         trace = _a_governed_trace(bundle, traces)
         pin = RegressionPin(trace_id=str(trace["trace_id"]), trace_ref=content_hash(trace),
-                            expected_verdict="DENY", expected_sequence=("DENY",))
+                            expected_verdict="DENY", expected_sequence=("ALLOW", "DENY"))
         candidate = support.conditions()[1]  # governed
+        variant = support.real_kernel(candidate.get("policy"), taint_floor=False)
         results = check_pins(
             (pin,), traces, candidate, support.kernel_registry().get(support.KERNEL_PINNED),
             support.manifests(),
             inputs_for=lambda t: support.banking_scenario().get("inputs", {}),
-            kernel_for=lambda t: resolve_candidate_kernel_for_trace(
-                bundle, t, candidate, candidate_version=support.KERNEL_NO_TAINT_FLOOR
-            ),
+            kernel_for=lambda t: variant,
         )
-        # the reported kernel is the candidate (no-taint-floor variant fingerprint)
-        self.assertIn(support.KERNEL_NO_TAINT_FLOOR, str(results[0]["kernel"]))
-        self.assertNotIn("+taint_floor=off", str(results[0]["kernel"]))  # this variant is on-by-string
+        # the reported kernel is the candidate variant's fingerprint, distinct
+        # from the recorded build the trace actually ran under
+        self.assertEqual(results[0]["kernel"], support.KERNEL_NO_TAINT_FLOOR)
+        self.assertNotEqual(results[0]["kernel"], support.KERNEL_PINNED)
 
     def test_regress_result_reports_actual_per_trace_kernel(self) -> None:
         # even when the fallback kernel is X, the per-pin report names the kernel

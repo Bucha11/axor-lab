@@ -14,8 +14,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lab_capabilities.governance.axor_backend import AxorKernel, gate_with_governor, resolve_kernel
-from lab_capabilities.governance.kernel import Kernel, KernelRegistry, default_registry
+from lab_capabilities.governance.axor_backend import (
+    AxorKernel,
+    KernelRegistry,
+    default_registry,
+    gate_with_governor,
+    resolve_kernel,
+)
 from lab_runner.ledger import ValueLedger
 
 
@@ -23,7 +28,7 @@ from lab_runner.ledger import ValueLedger
 class KernelGate:
     """Gates a call with a resolved kernel under one condition."""
 
-    kernel: Kernel
+    kernel: AxorKernel
     condition: dict[str, object]
 
     def decide(
@@ -35,58 +40,39 @@ class KernelGate:
         ledger: ValueLedger,
         inputs: dict[str, object],
     ) -> dict[str, object] | None:
-        if isinstance(self.kernel, AxorKernel):
-            # The producing TOOL, never the value id. axor-core's governor roots
-            # taint from the tool name — `register_output` looks it up in
-            # `untrusted_sources` and registers nothing for a name it does not
-            # recognise. This passed `str(vid)`, so every registration was a
-            # no-op, the governor's taint ledger stayed empty, and the governed
-            # arm of the general loop ALLOWED the exfiltration it exists to
-            # deny. A root whose producer is unknown is dropped rather than
-            # registered under a wrong name.
-            registrations = [
-                (producer, ledger.runtime_value(vid))
-                for vid in ledger.untrusted_ids()
-                if ledger.has_runtime_value(vid)
-                and (producer := ledger.producing_tool(vid)) is not None
-            ]
-            # The driving value is the one the MANIFEST declares drives this
-            # tool's effect — the same rule the reference kernel applies. An
-            # earlier version guessed "first untrusted binding", which invented a
-            # subject the manifest never nominated and, for a no-argument tool,
-            # produced an empty driving id that failed trace validation outright.
-            driving_args: list[str] = list(manifest["effect"].get("driving_args", []))  # type: ignore[union-attr]
-            unresolved: dict[str, object] | None = None
-            if driving_args and driving_args[0] in arg_bindings:
-                driving: str | None = arg_bindings[driving_args[0]]
-            elif not driving_args:
-                # nothing about this call can be driven by tainted data
-                driving, unresolved = None, {"kind": "no_driving_args"}
-            else:
-                driving = None
-                unresolved = {"kind": "unresolved_argument", "arg": driving_args[0]}
+        # The producing TOOL, never the value id. axor-core's governor roots
+        # taint from the tool name — `register_output` looks it up in
+        # `untrusted_sources` and registers nothing for a name it does not
+        # recognise. A root whose producer is unknown is dropped rather than
+        # registered under a wrong name.
+        registrations = [
+            (producer, ledger.runtime_value(vid))
+            for vid in ledger.untrusted_ids()
+            if ledger.has_runtime_value(vid)
+            and (producer := ledger.producing_tool(vid)) is not None
+        ]
+        # The driving value is the one the MANIFEST declares drives this tool's
+        # effect. For a no-argument tool it is None, carrying a typed reason
+        # rather than a fabricated `v_none` ledger id (review r14).
+        driving_args: list[str] = list(manifest["effect"].get("driving_args", []))  # type: ignore[union-attr]
+        unresolved: dict[str, object] | None = None
+        if driving_args and driving_args[0] in arg_bindings:
+            driving: str | None = arg_bindings[driving_args[0]]
+        elif not driving_args:
+            driving, unresolved = None, {"kind": "no_driving_args"}
+        else:
+            driving = None
+            unresolved = {"kind": "unresolved_argument", "arg": driving_args[0]}
 
-            decision = gate_with_governor(
-                self.kernel.config, str(self.condition["enforcement"]), registrations,
-                str(manifest["id"]), args, driving or "",
-            )
-            if driving is None:
-                # never a fabricated `v_none` ledger id: a fail-closed decision
-                # that invents a value makes the most interesting incidents
-                # unpublishable (review r14). The typed reason goes instead.
-                decision["driving_value_id"] = None
-                if unresolved is not None:
-                    decision["driving_unresolved"] = unresolved
-            return decision
-        return self.kernel.decide(
-            enforcement=str(self.condition["enforcement"]),
-            manifest=manifest,
-            args=args,
-            arg_labels={name: ledger.labels_of(vid) for name, vid in arg_bindings.items()},
-            arg_bindings=arg_bindings,
-            inputs=inputs,
-            policy=self.condition.get("policy"),  # type: ignore[arg-type]
+        decision = gate_with_governor(
+            self.kernel.config, str(self.condition["enforcement"]), registrations,
+            str(manifest["id"]), args, driving or "",
         )
+        if driving is None:
+            decision["driving_value_id"] = None
+            if unresolved is not None:
+                decision["driving_unresolved"] = unresolved
+        return decision
 
 
 def gate_for_condition(

@@ -54,13 +54,14 @@ from .verdicts import contained
 # here and nowhere else in `lab_runner`. That is why this file is a declared
 # wiring point in `tests/test_capability_boundary.py`.
 from lab_capabilities.governance import (
-    Kernel,
+    AxorKernel,
     RegressionPin,
     ResolvedExperiment,
     build_evidence_case,
     check_pins,
     default_registry,
     evidence_condition,
+    governor_config,
     load_axl,
     pin,
     replay_bundle,
@@ -707,9 +708,17 @@ def _cmd_regress(args: argparse.Namespace) -> int:
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     kernel_for = None
     if args.disable_taint_floor:
-        # explicit variant demonstration: force the reference kernel with the
-        # gate off (the fingerprint marks it a different kernel, review r4)
-        kernel: object = Kernel(version=version, taint_floor_enabled=False)
+        # An explicit real-kernel VARIANT demonstration: the same installed
+        # build, but with its egress-sink declarations dropped so the taint /
+        # confidentiality floor is never armed — the exfiltration the pinned run
+        # DENIED is now ALLOWED, which is exactly the regression a pin exists to
+        # catch. The fingerprint marks it a different kernel (behavior_version
+        # gains `+taint_floor=off`), so the report names the variant, not the
+        # pinned build (review r4).
+        cfg = governor_config(manifests, condition.get("policy"), None)  # type: ignore[arg-type]
+        cfg.pop("egress_sinks", None)
+        cfg.pop("value_policies", None)
+        kernel: object = AxorKernel(version=version, config=cfg, taint_floor_enabled=False)
     else:
         # regress under the CANDIDATE kernel — the one named by --kernel or the
         # chosen regression condition — NOT the kernel the trace was recorded

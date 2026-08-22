@@ -6,7 +6,7 @@ import unittest
 
 from tests import support
 from lab_runner import ScriptedAgent
-from lab_capabilities.governance import Kernel, REPLAY_MALFORMED_TRACE, REPLAY_MATCH, check_pins, pin, replay_trace, replay_trace_status, run_trial
+from lab_capabilities.governance import REPLAY_MALFORMED_TRACE, REPLAY_MATCH, check_pins, pin, replay_trace, replay_trace_status, run_trial
 from lab_capabilities.governance.regression import (
     STATUS_DIFFERS,
     STATUS_MATCHES,
@@ -59,7 +59,7 @@ class TestReplayMultiCall(unittest.TestCase):
         }
         self.assertEqual(support.schema_errors(trace, "trace"), [])
         recomputed, matches = replay_trace(
-            trace, support.conditions()[1], Kernel(version=support.KERNEL_PINNED),
+            trace, support.conditions()[1], support.real_kernel(),
             support.manifests(), support.banking_scenario()["inputs"],
         )
         self.assertTrue(matches)  # first intent (attacker) → DENY, second (landlord) → ALLOW
@@ -74,7 +74,7 @@ class TestMalformedTraceIsNotReproduced(unittest.TestCase):
     def setUp(self) -> None:
         self.trace = _governed_trace()
         self.condition = support.conditions()[1]
-        self.kernel = Kernel(version=support.KERNEL_PINNED)
+        self.kernel = support.real_kernel()
         self.manifests = support.manifests()
         self.inputs = support.banking_scenario()["inputs"]
 
@@ -120,8 +120,8 @@ class TestKernelBehaviorIsPartOfIdentity(unittest.TestCase):
     an identity, and regression must report the behavior fingerprint."""
 
     def test_same_version_different_flag_is_a_different_identity(self) -> None:
-        standard = Kernel(version=support.KERNEL_PINNED)
-        variant = Kernel(version=support.KERNEL_PINNED, taint_floor_enabled=False)
+        standard = support.real_kernel()
+        variant = support.real_kernel(taint_floor=False)
         self.assertEqual(standard.version, variant.version)  # same version string
         self.assertNotEqual(standard.behavior_version, variant.behavior_version)
         self.assertIn("taint_floor=off", variant.behavior_version)
@@ -129,7 +129,7 @@ class TestKernelBehaviorIsPartOfIdentity(unittest.TestCase):
     def test_regression_reports_the_behavior_fingerprint(self) -> None:
         trace = _governed_trace()
         p = pin(trace, "DENY")
-        variant = Kernel(version=support.KERNEL_PINNED, taint_floor_enabled=False)
+        variant = support.real_kernel(taint_floor=False)
         results = check_pins(
             (p,), {"t": trace}, support.conditions()[1], variant,
             support.manifests(), support.banking_scenario()["inputs"],
@@ -173,7 +173,10 @@ class TestRegressionRobustness(unittest.TestCase):
         self.assertEqual(results[0]["status"], STATUS_TAMPERED)
 
     def test_expected_sequence_is_pinned_not_just_last(self) -> None:
-        self.assertEqual(self.pin.expected_sequence, ("DENY",))
+        # the whole verdict sequence is pinned: the wrap engine gates the read
+        # too, so a governed attack trace records the read's ALLOW then the
+        # sink's DENY — both, in order, not just the last one.
+        self.assertEqual(self.pin.expected_sequence, ("ALLOW", "DENY"))
 
 
 if __name__ == "__main__":

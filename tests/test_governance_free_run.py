@@ -27,7 +27,7 @@ from tests import support
 from lab_contracts import build_bundle, validate_artifact, verify_bundle
 from lab_contracts.errors import BundleIntegrityError
 from lab_capabilities.governance import run_experiment_suite
-from lab_capabilities.governance.kernel import KernelRegistry
+from lab_capabilities.governance.axor_backend import KernelRegistry
 from lab_capabilities.governance.axor_backend import real_kernel_version
 from lab_runner.predicates import TraceView
 from lab_capabilities.governance.runner import (

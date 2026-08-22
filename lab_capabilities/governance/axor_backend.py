@@ -2,9 +2,9 @@
 
 Instead of the reference taint_floor reimplementation, this drives the actual
 production `axor_core.governor.ToolCallGovernor` — the same per-value taint
-engine and 9-gate sequence the Control Plane enforces. A condition selects it
-by pinning a real kernel version (e.g. `axor-core@0.9.2`); the reference kernel
-stays the fallback for environments without axor-core installed.
+engine and 9-gate sequence the Control Plane enforces. It is the ONLY kernel: a
+condition pins a real kernel version (e.g. `axor-core@0.10.2`) and there is no
+reference reimplementation to fall back to.
 
 The governor is stateful (a session ledger built from tool outputs), so ONE
 function — `gate_with_governor` — drives `evaluate` + `register_output` over a
@@ -66,8 +66,6 @@ class AxorKernel:
 
     Carries the governor CONFIG derived from the scenario's manifests + the
     condition policy; a fresh governor is built per trial (session isolation).
-    Shares the reference kernel's surface (`version`) so the registry is
-    uniform, but run_trial/replay dispatch to the governor path for it.
     """
 
     version: str
@@ -79,12 +77,42 @@ class AxorKernel:
 
     @property
     def behavior_version(self) -> str:
-        """Identity that reflects behavior-changing flags (mirrors the reference
-        Kernel), so the trial can record the ACTUAL resolved backend it ran under,
-        not just the declared version string (review r20)."""
+        """Identity that reflects behavior-changing flags, so the trial can
+        record the ACTUAL resolved backend it ran under, not just the declared
+        version string (review r20)."""
         if not self.taint_floor_enabled:
             return f"{self.version}+taint_floor=off"
         return self.version
+
+
+@dataclass(frozen=True)
+class KernelRegistry:
+    """Maps pinned kernel version strings to real-kernel backends.
+
+    The reference kernel is gone: the ONLY kernel is the installed axor-core, so
+    a registry holds `AxorKernel` handles. It is retained for API compatibility
+    (callers that build `{version: kernel}` maps and pass them to `replay_bundle`)
+    — `resolve_kernel` rebuilds a real kernel's config from the manifests
+    directly and never consults the registry for it, so a registry entry's empty
+    config is only ever a placeholder identity."""
+
+    kernels: tuple[AxorKernel, ...]
+
+    def get(self, version: str) -> AxorKernel:
+        for kernel in self.kernels:
+            if kernel.version == version:
+                return kernel
+        raise UnknownKernelError(version)
+
+
+def default_registry(versions: tuple[str, ...]) -> KernelRegistry:
+    """A registry naming the real kernel for every pinned version.
+
+    Yields the real kernel only — there is no reference variant to build. A
+    version that is not the installed build is still surfaced here (as a handle);
+    it is `resolve_kernel` that refuses to run a build that is missing or does
+    not match, never a silent substitution."""
+    return KernelRegistry(kernels=tuple(AxorKernel(version=v) for v in dict.fromkeys(versions)))
 
 
 def resolve_kernel(
@@ -95,31 +123,28 @@ def resolve_kernel(
     inputs: dict[str, object] | None = None,
 ) -> object:
     """Pick the kernel for a condition. A REAL-kernel pin (`axor-core@X`) is
-    satisfied ONLY by the exact installed build; the reference kernel is used
-    ONLY for a genuine reference version — it NEVER masquerades as `axor-core@X`.
+    satisfied ONLY by the exact installed build.
 
-    The round-15 code fell through to `registry.get(version)` for any version,
-    and `default_registry` builds a reference `Kernel(version=...)` for ANY string
-    — so a bundle pinning `axor-core@0.9.2` on a machine without it replayed under
-    the one-gate reference kernel yet still claimed the pinned build (review r16
-    P0). Now a real-kernel pin that is missing or mismatched raises
-    UnknownKernelError, which the replay layer surfaces as
-    REPLAY_UNSUPPORTED_KERNEL — never a silent substitution."""
-    if is_real_kernel_version(version):
-        if not HAS_AXOR_CORE:
-            raise UnknownKernelError(
-                f"{version} is pinned but axor-core is not installed — refusing to "
-                "substitute the reference kernel under a real-kernel version label"
-            )
-        if version != real_kernel_version():
-            raise UnknownKernelError(
-                f"{version} is pinned but the installed build is {real_kernel_version()} — "
-                "refusing to run a different build than pinned"
-            )
-        return AxorKernel(version=version, config=governor_config(manifests, policy, inputs))
-    # a genuine reference version → the reference registry (which raises
-    # UnknownKernelError for a version it does not know)
-    return registry.get(version)  # type: ignore[attr-defined]
+    The real kernel is the ONLY kernel: a version that is not an `axor-core@X`
+    pin, or a real pin that is missing or does not match the installed build,
+    raises UnknownKernelError — which the replay layer surfaces as
+    REPLAY_UNSUPPORTED_KERNEL — rather than falling back to anything. `registry`
+    is retained for signature compatibility and is not consulted."""
+    if not is_real_kernel_version(version):
+        raise UnknownKernelError(
+            f"{version} is not an installed axor-core build; the reference kernel "
+            "was removed — a run governs through the real kernel or not at all"
+        )
+    if not HAS_AXOR_CORE:
+        raise UnknownKernelError(
+            f"{version} is pinned but axor-core is not installed"
+        )
+    if version != real_kernel_version():
+        raise UnknownKernelError(
+            f"{version} is pinned but the installed build is {real_kernel_version()} — "
+            "refusing to run a different build than pinned"
+        )
+    return AxorKernel(version=version, config=governor_config(manifests, policy, inputs))
 
 
 def _scenario_inputs_for(bundle: dict[str, object], trace: dict[str, object]) -> dict[str, object]:
@@ -138,7 +163,6 @@ def resolve_recorded_kernel_for_trace(
     scenario inputs, so `$inputs.*` allowlists expand against the world the trace
     was produced in. This is the RECORDED-kernel resolver: it answers "what
     decided this?", never "what WOULD a candidate decide?"."""
-    from .kernel import default_registry
 
     trial: dict[str, object] = trace.get("trial", {})  # type: ignore[assignment]
     conditions = {str(c["id"]): c for c in bundle["conditions"]}  # type: ignore[union-attr]
@@ -173,7 +197,6 @@ def resolve_candidate_kernel_for_trace(
     --kernel axor-core@X` actually runs axor-core@X, not the reference kernel the
     trace was recorded under. Conflating this with the recorded resolver silently
     replayed under the wrong backend while labelling the result with the other."""
-    from .kernel import default_registry
 
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     version = str(candidate_version) if candidate_version else str(candidate_condition["kernel"])

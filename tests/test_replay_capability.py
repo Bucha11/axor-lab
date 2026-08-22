@@ -48,9 +48,10 @@ def _redact_bound_recipient(trace: dict) -> dict:
 class TestRedactedInputUnavailable(unittest.TestCase):
     def setUp(self) -> None:
         self.condition = support.conditions()[1]
-        self.kernel = default_registry((str(self.condition["kernel"]),)).get(
-            str(self.condition["kernel"])
-        )
+        # a real kernel with a COMPILED config (a registry handle carries only a
+        # placeholder identity — `resolve_kernel` builds the config from the
+        # manifests, which is what replay drives the governor with)
+        self.kernel = support.real_kernel(self.condition.get("policy"))
         self.inputs = support.banking_scenario().get("inputs", {})
 
     def test_clean_trace_replays_match(self) -> None:
@@ -86,7 +87,7 @@ class TestRedactedInputUnavailable(unittest.TestCase):
         here — and claiming exact replay over a hash sentinel would be claiming
         to have reproduced a verdict that turned on a value replay never had."""
         ungoverned = support.conditions()[0]
-        kernel = default_registry((str(ungoverned["kernel"]),)).get(str(ungoverned["kernel"]))
+        kernel = support.real_kernel()
         clean = run_trial(
             support.banking_scenario(), support.manifests(), ungoverned, kernel,
             run_id="r", seed="s000", repeat_index=0, agent=ScriptedAgent(attack_rate=1.0),

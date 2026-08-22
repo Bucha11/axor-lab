@@ -54,27 +54,46 @@ class TestPerScenarioInputs(unittest.TestCase):
         return scen
 
     def test_pin_replays_against_its_own_scenario_inputs(self) -> None:
-        cond, kernel = self._governed()
+        # the real kernel BAKES an `$inputs.x` allowlist into its config at
+        # RESOLVE time (the reference kernel re-expanded it from `inputs` at
+        # replay). So per-scenario inputs are threaded via `kernel_for`, which
+        # resolves each trace's own kernel — a fixed `inputs_for` alone can no
+        # longer change an already-compiled governor.
+        from lab_capabilities.governance import governor_config
+        from lab_capabilities.governance.axor_backend import AxorKernel
+
         manifests = support.manifests()
-        # scenario B: the attacker IBAN is NOT allowlisted → egress → DENY
+        # an input-backed allowlist, so the verdict genuinely depends on the
+        # scenario's known_ibans
+        policy = {"profile": "strict", "trust_model": "content-ledger",
+                  "allowlist": ["$inputs.known_ibans"]}
+        cond = {**support.conditions()[1], "policy": policy}
+
+        def kernel_for(inputs):
+            return AxorKernel(version=support.KERNEL_PINNED,
+                              config=governor_config(manifests, policy, inputs))
+
+        # scenario B: the attacker IBAN is NOT allowlisted → untrusted egress → DENY
         scen_b = self._scenario([support.LANDLORD_IBAN])
-        trace = run_trial(scen_b, manifests, cond, kernel, run_id="r", seed="s000",
+        kernel_b = kernel_for(scen_b["inputs"])
+        trace = run_trial(scen_b, manifests, cond, kernel_b, run_id="r", seed="s000",
                           repeat_index=0, agent=ATTACK).trace
         traces = {str(trace["trace_id"]): trace}
         p = pin(trace, "DENY")
         self.assertEqual(p.expected_sequence[-1], "DENY")
 
-        # replay under B's OWN inputs → matches
-        ok = check_pins((p,), traces, cond, kernel, manifests,
-                        inputs_for=lambda t: scen_b["inputs"])
+        # replay under B's OWN kernel (its inputs) → matches
+        ok = check_pins((p,), traces, cond, kernel_b, manifests,
+                        kernel_for=lambda t: kernel_b)
         self.assertEqual(ok[0]["status"], "matches_pinned_expected")
 
-        # replay under a DIFFERENT scenario's inputs (attacker IBAN allowlisted →
-        # effect resolves to WRITE, not egress → ALLOW) → a FALSE regression, the
-        # exact bug when one shared inputs dict is used for every pin
+        # replay under a DIFFERENT scenario's kernel (attacker IBAN allowlisted →
+        # value-policy supersession → ALLOW) → a FALSE regression, the exact bug
+        # when one shared inputs/kernel is used for every pin
         scen_a_inputs = {**scen_b["inputs"], "known_ibans": [support.ATTACKER_IBAN]}  # type: ignore[dict-item]
-        wrong = check_pins((p,), traces, cond, kernel, manifests,
-                           inputs_for=lambda t: scen_a_inputs)
+        kernel_a = kernel_for(scen_a_inputs)
+        wrong = check_pins((p,), traces, cond, kernel_b, manifests,
+                           kernel_for=lambda t: kernel_a)
         self.assertEqual(wrong[0]["status"], "differs_from_pinned_expected")
         self.assertEqual(wrong[0]["actual"], "ALLOW")
 
@@ -106,7 +125,8 @@ class TestRegressionHonorsReplayStatus(unittest.TestCase):
         scen["inputs"]["known_ibans"] = [support.LANDLORD_IBAN]  # type: ignore[index]
         trace = run_trial(scen, manifests, cond, kernel, run_id="r", seed="s000",
                           repeat_index=0, agent=ATTACK).trace
-        self.assertEqual(pin(trace, "DENY").expected_sequence, ("DENY",))
+        # read ALLOW then sink DENY (the wrap engine gates the read too)
+        self.assertEqual(pin(trace, "DENY").expected_sequence, ("ALLOW", "DENY"))
 
         # corrupt it: append a leftover tool_call_intent with no matching
         # decision → replay flags MALFORMED_TRACE, yet the recomputed verdict

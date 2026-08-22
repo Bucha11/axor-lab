@@ -33,8 +33,9 @@ class TestReplayExact(unittest.TestCase):
             trace, governed, kernel, support.manifests(), scenario["inputs"]  # type: ignore[arg-type]
         )
         self.assertTrue(matches)
-        self.assertEqual([d["verdict"] for d in recomputed], ["DENY"])
-        self.assertEqual(recomputed[0]["gate"], "taint_floor")
+        # the wrap engine gates the read too: read ALLOW then sink DENY
+        self.assertEqual([d["verdict"] for d in recomputed], ["ALLOW", "DENY"])
+        self.assertEqual(recomputed[-1]["gate"], "taint_floor")
 
     def test_replay_is_deterministic_within_process(self) -> None:
         scenario = support.banking_scenario()

@@ -83,7 +83,11 @@ class TestTheLoopGovernsThroughAxorCore(unittest.TestCase):
         governor recognises, the sink call looks clean and is allowed."""
         denial = self._decisions(self._run("on"))[-1]
         self.assertEqual(denial["verdict"], "DENY")
-        self.assertIn("axor-core governor", str(denial["reason"]))
+        # the trace now carries the kernel's OWN denial reason (axor-wrap builds
+        # it from the governor's trace events), and a taint enforcement denial is
+        # the proof the registration reached the governor's per-value ledger — a
+        # registration that named nothing would leave the sink looking clean.
+        self.assertIn("taint", str(denial["reason"]).lower())
         self.assertTrue(contained(denial))
 
     def test_an_unrelated_recipient_is_allowed(self) -> None:

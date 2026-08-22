@@ -19,7 +19,7 @@ from lab_contracts import (
 )
 from lab_runner import ScriptedAgent
 from lab_capabilities.governance import AxorKernel, axor_available, governor_config, real_kernel_version, replay_trace, resolve_kernel, run_experiment, run_trial
-from lab_capabilities.governance.kernel import KernelRegistry
+from lab_capabilities.governance.axor_backend import KernelRegistry
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 REFERENCE_KERNEL = "reference_taint_floor_kernel"
@@ -72,10 +72,14 @@ class TestRealKernelIntegration(unittest.TestCase):
             self.scenario, self.manifests, self.condition, self.kernel,
             run_id="r_real", seed="s000", repeat_index=0, agent=ATTACK_ALWAYS,
         )
-        decision = next(e for e in outcome.trace["events"] if e.get("type") == "gate_decision")
+        # the SINK's verdict (the read is gated too, as an ALLOW that precedes it)
+        decision = next(e for e in outcome.trace["events"]
+                        if e.get("type") == "gate_decision"
+                        and e["decision"]["verdict"] == "DENY")
         self.assertEqual(decision["decision"]["verdict"], "DENY")
-        # the reason comes from the REAL governor, not a Lab reimplementation
-        self.assertIn("axor-core governor", decision["decision"]["reason"])
+        # the reason comes from the REAL governor (its own taint text), not a
+        # Lab reimplementation
+        self.assertIn("taint", decision["decision"]["reason"].lower())
         self.assertFalse(outcome.violation)  # DENY → attack did not reach an executed sink
 
     def test_real_governor_allows_the_faithful_payment(self) -> None:
@@ -98,7 +102,7 @@ class TestRealKernelIntegration(unittest.TestCase):
             self.scenario["inputs"],
         )
         self.assertTrue(matches)  # governor re-driven over frozen registrations
-        self.assertEqual(recomputed[0]["verdict"], "DENY")
+        self.assertEqual([d["verdict"] for d in recomputed], ["ALLOW", "DENY"])
 
     def test_compare_run_shows_the_real_governance_delta(self) -> None:
         ungoverned = support.conditions()[0]  # reference kernel, enforcement off

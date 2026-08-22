@@ -22,8 +22,7 @@ comparison machinery. It does not mean this package can be uninstalled and have
 `run_suite` still work.
 
   gate.py             the Gate a suite's condition resolves to
-  kernel.py           the reference taint-floor kernel + registry
-  axor_backend.py     the real axor-core kernel, and config compilation
+  axor_backend.py     the real axor-core kernel, the registry, config compilation
   replay.py           recompute verdicts over a frozen trace
   evidence.py         the injection -> provenance -> gate -> verdict chain
   regression.py       verdict-sequence pins
@@ -37,7 +36,9 @@ from __future__ import annotations
 
 from .axor_backend import (
     AxorKernel,
+    KernelRegistry,
     axor_available,
+    default_registry,
     gate_with_governor,
     governor_config,
     real_kernel_version,
@@ -49,7 +50,6 @@ from .axor_backend import (
 from .evidence import build_evidence_case, evidence_condition, validate_twin
 from .experiment_file import ResolvedExperiment, load_axl, resolve
 from .gate import KernelGate, gate_for_condition
-from .kernel import Kernel, KernelRegistry, default_registry
 from .regression import RegressionPin, check_pins, pin
 from .replay import (
     REPLAY_MALFORMED_TRACE,
@@ -77,7 +77,6 @@ from .runner import (
 __all__ = [
     "AxorKernel",
     "ExperimentResult",
-    "Kernel",
     "KernelGate",
     "KernelRegistry",
     "REPLAY_MALFORMED_TRACE",

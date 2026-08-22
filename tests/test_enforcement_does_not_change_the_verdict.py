@@ -70,9 +70,11 @@ class TestTheReferenceKernel(_ArmsMixin, unittest.TestCase):
         )
 
     def test_the_ungoverned_arm_records_the_denial_it_did_not_obey(self) -> None:
+        # the wrap engine gates the read too, so the sequence is the read's ALLOW
+        # then the sink's DENY — and in an observe-only arm NOTHING is enforced.
         decisions = _decisions(self._arms()["ungoverned"])
-        self.assertEqual([d["verdict"] for d in decisions], ["DENY"])
-        self.assertEqual([was_enforced(d) for d in decisions], [False])
+        self.assertEqual([d["verdict"] for d in decisions], ["ALLOW", "DENY"])
+        self.assertEqual([was_enforced(d) for d in decisions], [False, False])
 
     def test_the_ungoverned_arm_still_executes_the_denied_call(self) -> None:
         """Otherwise it is not observe-only, it is governed under another name —
@@ -93,7 +95,8 @@ class TestTheReferenceKernel(_ArmsMixin, unittest.TestCase):
         arms = self._arms(FAITHFUL)
         for arm, trace in arms.items():
             with self.subTest(arm=arm):
-                self.assertEqual([d["verdict"] for d in _decisions(trace)], ["ALLOW"])
+                # read ALLOW then a faithful sink ALLOW
+                self.assertEqual([d["verdict"] for d in _decisions(trace)], ["ALLOW", "ALLOW"])
 
     def test_both_arms_produce_a_valid_trace(self) -> None:
         for arm, trace in self._arms().items():
@@ -116,9 +119,11 @@ class TestTheRealKernel(_ArmsMixin, unittest.TestCase):
 
     def test_the_ungoverned_arm_actually_reaches_axor_core(self) -> None:
         decisions = _decisions(self._arms()["ungoverned"])
-        self.assertEqual([d["verdict"] for d in decisions], ["DENY"])
-        self.assertIn("axor-core governor", str(decisions[0]["reason"]))
-        self.assertFalse(was_enforced(decisions[0]))
+        self.assertEqual([d["verdict"] for d in decisions], ["ALLOW", "DENY"])
+        # the trace carries the kernel's OWN denial reason (axor-wrap builds it
+        # from the governor's events); a taint denial is proof it reached axor-core
+        self.assertIn("taint", str(decisions[-1]["reason"]).lower())
+        self.assertFalse(was_enforced(decisions[-1]))
 
     def test_both_arms_reach_the_same_verdicts(self) -> None:
         arms = self._arms()

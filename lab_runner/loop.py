@@ -39,14 +39,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, Union
 
-from lab_contracts.canonical import world_digest
+from axor_wrap import ToolDenied
 
-from .ledger import ValueLedger
 from .predicates import evaluate
 from .simulator import SimulatedToolHost
-from .verdicts import executed_under
+from .wrap_engine import finalize_trace, last_verdict, make_toolset, tool_callables
 
-RUNTIME_ID = "lab-runner@0.1"
 DEFAULT_MAX_STEPS = 24
 DEFAULT_MAX_TOOL_CALLS = 16
 
@@ -102,26 +100,22 @@ class LoopContext:
 
 
 class Gate(Protocol):
-    """Decides whether a proposed tool call may execute.
+    """The presence of the governance capability for this trial.
 
     The loop knows this much and no more. It does not know what a kernel is,
-    what a policy is, or that governance exists — a gate is simply something
-    that may return a decision. That is what makes governance a capability
-    rather than a stage: with no gate there is no gate_decision event, no
-    kernel_version on the producer, and nothing to strip out.
+    what a policy is, or how a call is decided — a gate is simply the marker
+    that governance is active, and the wrapped toolset the loop runs on does the
+    deciding through the real kernel. That is what makes governance a capability
+    rather than a stage: with no gate there is no gate_decision event and no
+    kernel_version on the producer — a run nothing governed.
 
-    Returning None means "no opinion", which the loop treats as allowed.
+    A gate carries the resolved `kernel` and its `condition` so a caller (e.g.
+    exact replay) can recompute the trace's verdicts; the loop itself reads
+    neither, only whether a gate is present at all.
     """
 
-    def decide(
-        self,
-        tool: str,
-        manifest: dict[str, object],
-        args: dict[str, object],
-        arg_bindings: dict[str, str],
-        ledger: ValueLedger,
-        inputs: dict[str, object],
-    ) -> dict[str, object] | None: ...
+    kernel: object
+    condition: dict[str, object]
 
 
 class AgentProgram(Protocol):
@@ -191,10 +185,19 @@ def run_loop_trial(
 ) -> LoopOutcome:
     """Run one trial as a general multi-step loop → trace/v1.
 
-    `gate` may be None (no governance capability): nothing decides, no
-    gate_decision is emitted, and the producer names no kernel_version.
+    The agent proposes tool calls; each is gated and executed by a wrapped
+    toolset (`axor_wrap.WrappedToolset`) — the real kernel decides, and
+    `WrappedToolset.trace()` builds the `trace/v1`. Provenance is content
+    derivation from the kernel's own reading, not a self-report from the agent.
+
+    `gate` may be None (no governance capability): the toolset still runs (the
+    kernel is what builds the value ledger a trace is read from) but nothing it
+    decides is enforced and the trace is stripped of its verdicts and kernel
+    identity — a run nothing governed emits no gate_decision and names no
+    kernel_version.
     """
     started = time.monotonic()
+    governed = gate is not None
     inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
     injection: dict[str, object] = scenario.get("injection") or {}  # type: ignore[assignment]
     if host is None:
@@ -203,17 +206,21 @@ def run_loop_trial(
             fixtures=scenario.get("fixtures", {}),  # type: ignore[arg-type]
             injection_text=str(injection.get("text", "")),
         )
+    toolset = make_toolset(
+        tool_callables(host, manifests), manifests, condition, inputs, governed=governed,
+    )
 
-    ledger = ValueLedger()
-    events: list[dict[str, object]] = []
     observations: list[Observation] = []
-    seq = 0
+    # `emitted` mirrors what the toolset's trace will carry — intent (+ decision
+    # when governed) per call, plus a result for a call that ran — so the loop's
+    # max_steps budget stays a budget on the SIZE of the trace it will produce.
+    emitted = 0
     tool_calls = 0
     model_calls = 0
     stop_reason = STOP_FINISHED
 
     while True:
-        if len(events) >= max_steps:
+        if emitted >= max_steps:
             stop_reason = STOP_MAX_STEPS
             break
         ctx = LoopContext(
@@ -223,9 +230,6 @@ def run_loop_trial(
         model_calls += 1
         action = program.next_action(ctx)
         if isinstance(action, Finish):
-            if action.output is not None:
-                events.append({"seq": seq, "node": "root", "type": "final_output"})
-                seq += 1
             break
         if tool_calls >= max_tool_calls:
             stop_reason = STOP_MAX_TOOL_CALLS
@@ -235,68 +239,29 @@ def run_loop_trial(
                 f"agent proposed tool {action.tool!r} which the scenario does not declare"
             )
 
-        arg_bindings = {
-            name: _mint_argument(ledger, name, value, inputs)
-            for name, value in action.args.items()
-        }
-        call_id = f"call_root_{seq}"
-        events.append({
-            "seq": seq, "node": "root", "type": "tool_call_intent",
-            "tool": action.tool, "call_id": call_id, "arg_bindings": arg_bindings,
-        })
-        seq += 1
         tool_calls += 1
-
-        decision = (
-            gate.decide(action.tool, manifests[action.tool], action.args,
-                        arg_bindings, ledger, inputs)
-            if gate is not None else None
-        )
-        if decision is not None:
-            events.append({
-                "seq": seq, "node": "root", "type": "gate_decision",
-                "call_id": call_id, "decision": decision,
-            })
-            seq += 1
-
-        allowed = decision is None or executed_under(decision)
         result: object = None
-        if allowed:
-            result = host.execute(action.tool, action.args)
-            produced = _mint_untrusted(ledger, manifests[action.tool], action.tool, result)
-            events.append({
-                "seq": seq, "node": "root", "type": "tool_result",
-                "tool": action.tool, "produces_value_ids": produced,
-            })
-            seq += 1
+        try:
+            result = toolset.call(action.tool, action.args)
+            executed = True
+        except ToolDenied:
+            executed = False
+        verdict = last_verdict(toolset) if governed else None
+        # intent (+ gate_decision when governed) + a tool_result when it ran
+        emitted += 1 + (1 if governed else 0) + (1 if executed else 0)
         observations.append(Observation(
             tool=action.tool, args=dict(action.args), result=result,
-            allowed=allowed,
-            verdict=None if decision is None else str(decision["verdict"]),
+            allowed=executed, verdict=verdict,
         ))
 
-    trace: dict[str, object] = {
-        "schema_version": "trace/v1",
-        "trace_id": (
-            f"t_{run_id}_{scenario['name']}_{condition['id']}_{seed}_r{repeat_index}"
-        ),
-        "trial": {
-            "run_id": run_id,
-            "scenario_id": str(scenario["name"]),
-            "condition_id": str(condition["id"]),
-            "seed": seed,
-            "repeat_index": repeat_index,
-        },
-        "producer": {
-            "mode": "wrapped_code",
-            "provenance_fidelity": "explicit_flow_tracked",
-            **({"kernel_version": str(condition["kernel"])} if condition.get("kernel") else {}),
-            "runtime": RUNTIME_ID,
-        },
-        "inputs_digest": world_digest(inputs, scenario.get("fixtures", {})),  # type: ignore[arg-type]
-        "events": events,
-        "values": ledger.values,
+    trial = {
+        "run_id": run_id,
+        "scenario_id": str(scenario["name"]),
+        "condition_id": str(condition["id"]),
+        "seed": seed,
+        "repeat_index": repeat_index,
     }
+    trace = finalize_trace(toolset, trial, scenario, governed=governed)
 
     violation_predicate = scenario.get("violation")
     return LoopOutcome(
@@ -312,51 +277,11 @@ def run_loop_trial(
         metrics={
             **program_metrics(program),
             "duration_ms": round((time.monotonic() - started) * 1000.0, 3),
-            "steps": len(events),
+            "steps": len(trace["events"]),  # type: ignore[arg-type]
             "tool_calls": tool_calls,
             "model_calls": model_calls,
         },
         stop_reason=stop_reason,
     )
-
-
-def _mint_argument(
-    ledger: ValueLedger, name: str, value: object, inputs: dict[str, object]
-) -> str:
-    """Assign provenance to one agent-supplied argument. See the module docstring.
-
-    The declared-input check is on WHOLE-VALUE typed equality, deliberately: a
-    substring or partial-structure match would let an attacker smuggle tainted
-    data inside an otherwise-legitimate-looking argument and have it read as
-    prompt_given.
-    """
-    for key, declared in inputs.items():
-        if _same_value(value, declared):
-            return ledger.mint_constant(value, f"prompt:{key}")
-        if isinstance(declared, list) and any(_same_value(value, item) for item in declared):
-            return ledger.mint_constant(value, f"prompt:{key}")
-    untrusted = ledger.untrusted_ids()
-    if untrusted:
-        # conservative join: the agent produced this AFTER reading untrusted
-        # content, so the value is untrusted-derived regardless of how it looks
-        return ledger.mint_model_extraction(value, context_value_ids=tuple(untrusted))
-    return ledger.mint_constant(value, f"model:{name}")
-
-
-def _same_value(a: object, b: object) -> bool:
-    """Typed equality: 1 is not True, and 1 is not "1"."""
-    if isinstance(a, bool) != isinstance(b, bool):
-        return False
-    if isinstance(a, str) != isinstance(b, str):
-        return False
-    return a == b
-
-
-def _mint_untrusted(
-    ledger: ValueLedger, manifest: dict[str, object], tool_id: str, result: object
-) -> list[str]:
-    from .provenance import mint_untrusted_fields
-
-    return mint_untrusted_fields(ledger, manifest, tool_id, result)
 
 

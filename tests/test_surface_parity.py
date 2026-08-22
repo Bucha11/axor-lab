@@ -1,8 +1,9 @@
 """Surface parity (review r17): a valid artifact must survive EVERY surface.
 
-A mixed-kernel publication renders (not a 400 KeyError); the acceptance report
-lists only the checks that actually ran; and a durable tombstone fsyncs the file
-CONTENTS before the rename, not just the directory entry.
+The acceptance report lists only the checks that actually ran; and a durable
+tombstone fsyncs the file CONTENTS before the rename, not just the directory
+entry. (The mixed-kernel publication case is gone with the reference kernel —
+see the module note below.)
 """
 
 from __future__ import annotations
@@ -15,65 +16,47 @@ from unittest import mock
 
 from tests import support
 from lab_analysis import binary_aggregate
-from lab_contracts import build_bundle, condition_config_hash, content_hash
+from lab_contracts import build_bundle, content_hash
 from lab_capabilities.governance import run_experiment_suite
-from lab_capabilities.governance.kernel import Kernel, KernelRegistry
 from lab_server import store as store_mod
-from lab_server.html import render_publication
 from lab_server.store import PublicationStore
 
 CREATED = "2026-07-20T12:00:00+00:00"
 
-# two DISTINCT reference version strings that behave identically (both taint_floor
-# on), so a mixed-kernel bundle round-trips through the server's default_registry
-KERNEL_A = support.KERNEL_PINNED                      # reference_taint_floor_kernel
-KERNEL_B = "reference_taint_floor_kernel@alt"         # same behavior, different id
+# NOTE: the mixed-kernel PUBLICATION render test that used to live here is gone
+# with the reference kernel. It built a bundle whose two arms pinned two DISTINCT
+# resolvable kernel version strings — a property only the reference kernel had
+# (`default_registry` returned the same behavior for any string). The real kernel
+# is one installed build: `store.publish` re-runs exact replay over every trace
+# and refuses a bundle whose second kernel is not installed to replay against, so
+# a mixed-kernel bundle is no longer PUBLISHABLE on a single-kernel machine (a
+# genuine capability change, not a rendering bug). The plural-`kernel_versions`
+# render path in `lab_server/html.py` is kept defensively for a bundle assembled
+# from two installed builds' traces off-machine.
 
 
-def _mixed_kernel_bundle():
+def _bundle_with_aggregates():
+    """A single-(real-)kernel bundle that carries aggregates — enough for the
+    acceptance/tombstone surface checks below, which need statistics present and
+    a publishable bundle, not a mix of kernels."""
     scenario = support.banking_scenario()
     conditions = support.conditions()
-    # both conditions enforce/observe under the SAME taint-floor behavior but pin
-    # DIFFERENT kernel version strings → a genuinely mixed-kernel bundle whose
-    # environment omits the singular kernel_version and carries kernel_versions
-    conditions[0] = {**conditions[0], "kernel": KERNEL_A,
-                     "config_hash": condition_config_hash(KERNEL_A, None)}
-    conditions[1] = {**conditions[1], "kernel": KERNEL_B,
-                     "config_hash": condition_config_hash(KERNEL_B, conditions[1]["policy"])}
-    registry = KernelRegistry(kernels=(Kernel(version=KERNEL_A), Kernel(version=KERNEL_B)))
     result = run_experiment_suite(
-        [scenario], support.manifests(), conditions, registry, repeats=8, run_id="r_mixed",
+        [scenario], support.manifests(), conditions, support.kernel_registry(),
+        repeats=8, run_id="r_agg",
     )
     pairs = result.pairs("ungoverned", "governed", metric="ASR")
     aggregates = [
         binary_aggregate("ASR", "ungoverned", sum(1 for b, _ in pairs if b), len(pairs)),
         binary_aggregate("ASR", "governed", sum(1 for _, t in pairs if t), len(pairs)),
     ]
-    env = {
-        "model": {"provider": "scripted", "id": "labref-scripted-agent"},
-        "kernel_versions": sorted({KERNEL_A, KERNEL_B}),
-    }
     bundle = build_bundle(
-        bundle_id="b_mixed", created=CREATED, scenarios=[scenario], conditions=conditions,
-        tool_manifests=list(support.manifests().values()), environment=env,
+        bundle_id="b_agg", created=CREATED, scenarios=[scenario], conditions=conditions,
+        tool_manifests=list(support.manifests().values()), environment=support.environment(),
         trials=result.trials, aggregates=aggregates, traces=result.traces,
     )
     traces = {str(t["trace_id"]): t for t in result.traces.values()}
     return bundle, traces
-
-
-class TestMixedKernelPage(unittest.TestCase):
-    def test_mixed_kernel_publication_page_renders(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        store = PublicationStore(root=Path(tmp.name))
-        bundle, traces = _mixed_kernel_bundle()
-        self.assertNotIn("kernel_version", bundle["environment"])  # genuinely mixed
-        stored = store.publish(bundle, traces, question="mixed kernels?")
-        html = render_publication(stored)  # must NOT raise KeyError
-        # both kernels are shown in the methodology
-        self.assertIn(KERNEL_A, html)
-        self.assertIn(KERNEL_B, html)
 
 
 class TestDynamicAcceptanceReport(unittest.TestCase):
@@ -109,7 +92,7 @@ class TestDynamicAcceptanceReport(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         store = PublicationStore(root=Path(tmp.name))
-        bundle, traces = _mixed_kernel_bundle()  # has aggregates
+        bundle, traces = _bundle_with_aggregates()  # has aggregates
         stored = store.publish(bundle, traces, question="with stats")
         verified = store.acceptance(stored)["semantic_report"]["verified"]
         self.assertIn("statistics_recomputed", verified)
@@ -149,7 +132,7 @@ class TestTombstoneDurability(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         store = PublicationStore(root=root)
-        bundle, traces = _mixed_kernel_bundle()
+        bundle, traces = _bundle_with_aggregates()
         stored = store.publish(bundle, traces, question="q")
         store.takedown(str(stored.publication["publication_id"]))
         lin_dir = root / "_lineage_tombstones"

@@ -11,7 +11,7 @@ Three modes, per claims.md — never two, because "governed" is ambiguous:
 
 from __future__ import annotations
 
-from .kernel import Kernel
+from .axor_backend import AxorKernel
 from lab_runner.verdicts import contained, was_enforced
 from .replay import (
     REPLAY_MALFORMED_TRACE,
@@ -44,7 +44,7 @@ def build_evidence_case(
     trace: dict[str, object],
     scenario: dict[str, object],
     governed_condition: dict[str, object],
-    kernel: Kernel,
+    kernel: AxorKernel,
     manifests: dict[str, dict[str, object]],
     governed_twin: dict[str, object] | None = None,
 ) -> dict[str, object]:

@@ -115,7 +115,7 @@ class TestCPExport(unittest.TestCase):
         bundle, traces = _bundle_and_traces()
         trace = _denied_trace(traces)
         pin = {"trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
-               "expected_verdict": "DENY", "expected_sequence": ["DENY"]}
+               "expected_verdict": "DENY", "expected_sequence": ["ALLOW", "DENY"]}
         export = export_cp(bundle, regressions=[pin], traces=traces)
         carried = export.config["regressions"]
         self.assertEqual(len(carried), 1)  # type: ignore[arg-type]
@@ -123,7 +123,7 @@ class TestCPExport(unittest.TestCase):
         self.assertEqual(got["trace_id"], str(trace["trace_id"]))
         self.assertEqual(got["trace_ref"], content_hash(trace))
         self.assertEqual(got["expected_verdict"], "DENY")
-        self.assertEqual(got["expected_sequence"], ["DENY"])
+        self.assertEqual(got["expected_sequence"], ["ALLOW", "DENY"])
         # the pin now records WHICH scenario/condition it re-runs, from the trial
         self.assertEqual(got["condition_id"], "governed")
         self.assertIn("scenario_id", got)
@@ -175,7 +175,7 @@ class TestCPExport(unittest.TestCase):
             pins = root / "pins.json"
             pins.write_text(json.dumps([{
                 "trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
-                "expected_verdict": "DENY", "expected_sequence": ["DENY"],
+                "expected_verdict": "DENY", "expected_sequence": ["ALLOW", "DENY"],
             }]))
             out = root / "cp"
             result = subprocess.run(
