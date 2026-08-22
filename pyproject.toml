@@ -28,6 +28,13 @@ requires-python = ">=3.11"
 dependencies = [
     "axor-core>=0.10.2,<0.11",
     "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m",
+    # axor-eval is the shared fault-injection evaluator (silent_fail deprivation,
+    # the ToolAuditLayer that emits FABRICATED_TOOL_RESULT). Lab reuses it for the
+    # tool-fabrication experiment rather than re-implementing the deviation
+    # machinery — the same "one engine, no duplicate" rule the wrap migration
+    # followed. Public repo, pinned to main (the fabrication API is stable there);
+    # its own axor-core>=0.8,<0.11 is satisfied by Lab's 0.10.2 pin.
+    "axor-eval @ git+https://github.com/Bucha11/axor-eval@main",
 ]
 
 [project.scripts]
