@@ -190,7 +190,11 @@ class TestDependencyDirectionIsOneWay(unittest.TestCase):
     def test_the_capability_is_importable_and_wired(self) -> None:
         from lab_capabilities.governance import KernelGate, gate_for_condition
         self.assertTrue(callable(gate_for_condition))
-        self.assertTrue(hasattr(KernelGate, "decide"))
+        # KernelGate is the governed-arm presence MARKER (kernel + condition);
+        # it carries no `decide` — the verdict comes from the real governor in
+        # the wrap engine, never a Lab-side re-implementation.
+        self.assertEqual(KernelGate.__dataclass_fields__.keys(), {"kernel", "condition"})
+        self.assertFalse(hasattr(KernelGate, "decide"))
 
 
 class TestAGovernanceFreeRunEnforcesNothing(unittest.TestCase):
