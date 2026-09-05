@@ -23,15 +23,16 @@ from lab_contracts import compiled_governor_config
 
 from .errors import UnknownKernelError
 
-try:
-    import axor_core  # noqa: F401
-    from axor_core.governor import ToolCallGovernor
+# axor-core is a hard dependency now (see pyproject): a missing kernel is an
+# INSTALL error, not a runtime state to branch on. The flag stays because
+# callers read it, and because keeping one name for "is the real governor
+# available" is cheaper than auditing every call site for a condition that is
+# now always true.
+import axor_core  # noqa: F401
+from axor_core.governor import ToolCallGovernor
 
-    HAS_AXOR_CORE = True
-    AXOR_CORE_VERSION = getattr(axor_core, "__version__", "unknown")
-except ImportError:  # pragma: no cover - environment without axor-core
-    HAS_AXOR_CORE = False
-    AXOR_CORE_VERSION = None
+HAS_AXOR_CORE = True
+AXOR_CORE_VERSION = getattr(axor_core, "__version__", "unknown")
 
 GATE_CATEGORY_MAP = {
     "taint_enforcement": "taint_floor",

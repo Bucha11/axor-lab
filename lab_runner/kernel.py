@@ -1,30 +1,52 @@
-"""A REFERENCE `decide`, not the production axor-core kernel (review P0.2).
+"""The reference `decide` — a THIN ADAPTER over axor-core's gate, not a copy.
 
 Honest scope: this is `reference_taint_floor_kernel` — a single pure `decide`
 used by BOTH the live runner and replay (so the two never diverge and
-counterfactual replay cannot silently lie), implementing ONE gate: `taint_floor`
-(DENY an egress-class call whose driving argument carries `untrusted_derived`,
-with allowlist enum-supersession). It is NOT the paper's full 9-gate kernel,
-and `default_registry` returns the SAME behavior for every pinned version
-string — the version is recorded metadata, not a loaded historical kernel.
+counterfactual replay cannot silently lie), covering ONE gate: `taint_floor`.
+It is NOT the paper's full 9-gate kernel, and `default_registry` returns the SAME
+behavior for every pinned version string — the version is recorded metadata, not
+a loaded historical kernel. For the real 9-gate sequence a condition pins an
+installed axor-core build and `lab_runner.axor_backend` drives
+`ToolCallGovernor` (`resolve_kernel` refuses a pin it cannot satisfy exactly,
+never substituting this one).
 
-Therefore Lab currently verifies *this reference kernel*, not a specific
-production axor-core build. Real cross-version fidelity (loading
-axor-core@X.Y.Z and replaying under it) is the integration tracked in
-POST_MVP_PLAN.md; until then, a bundle's `kernel_version` documents intent, and
-a KernelRegistry with genuinely different behaviors per version must be
-constructed explicitly (regression checks do exactly that).
+What changed: the taint verdict itself is no longer written here. It used to be —
+a second implementation of a predicate axor-core already owns, which nothing held
+in agreement with the original and which the Control Plane then mirrored a THIRD
+time for its incident export. `decide` now calls
+`axor_core.policy.gates.taint_gate`.
+
+That is possible because the gate never needed content. `ToolCallGovernor` needs
+content because it is the LEDGER — the part that derives a value's provenance as
+a session runs. The gate is a pure predicate over `(NormalizedIntent,
+CausalRoot)`, and `CausalRoot` is `{sources, sensitive}` with
+`is_tainted = bool(sources)` — which is exactly what Lab's ledger already knows
+per argument (`arg_labels`). So the label world and the content world meet at
+the same predicate; only the way the labels were derived differs.
+
+What stays here, deliberately, is everything that is NOT the taint predicate:
+the effect-class resolution from a manifest, the per-argument allowlist
+supersession, the decision dict's shape (`trace/v1` validates it), and the two
+fail-closed preconditions this kernel adds — an egress sink that declares no
+driving args, and a driving arg with no resolvable provenance. Those are
+admission checks Lab makes before the taint question is even meaningful; the
+production kernel refuses the same situations earlier, through STRICT role
+completeness on an unclassified tool.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from axor_core.contracts.anomaly import NormalizedIntent
+from axor_core.contracts.taint import TaintSource
+from axor_core.policy.gates import taint_gate
+from axor_core.taint.causal_root import CausalRoot
 from lab_contracts.inputs import expand_list
 
 from .effects import EGRESS_CLASSES, resolve_effect_class
 from .errors import UnknownKernelError
-from .ledger import LABEL_UNTRUSTED
+from .ledger import LABEL_SENSITIVE, LABEL_UNTRUSTED
 
 GATE_TAINT_FLOOR = "taint_floor"
 PROJECTION_UNTRUSTED = "untrusted-derived"
@@ -62,6 +84,43 @@ def unsupported_reference_policy_fields(policy: dict[str, object] | None) -> lis
             "remove it or run a kernel that executes it"
         )
     return errors
+
+
+# Lab's ledger labels a value; axor-core's gate decides on a CausalRoot. They are
+# the same statement — "this value carries an external source" — in two
+# vocabularies, so the translation is total and carries no judgement of its own.
+def _root_of(labels: tuple[str, ...]) -> CausalRoot:
+    sources = (
+        frozenset({TaintSource.UNKNOWN_EXTERNAL})
+        if LABEL_UNTRUSTED in labels else frozenset()
+    )
+    return CausalRoot(sources=sources, sensitive=LABEL_SENSITIVE in labels)
+
+
+# The structural projection an egress decision needs. Lab carries the egress
+# signal in the manifest's effect class, not in a normalizer's output, so it is
+# passed to the gate as the operator's `egress_sinks` declaration and the
+# structural fields stay neutral.
+def _neutral_intent(tool: str) -> NormalizedIntent:
+    return NormalizedIntent(
+        tool=tool, operation="other", target_kind="workdir",
+        destination_kind="none", provenance="unknown",
+        reads_secret_like_data=False, writes_outside_workdir=False,
+        executes_generated_code=False, after_external_read=False,
+        after_secret_access=False, data_flow="none",
+    )
+
+
+def _kernel_denies(tool: str, labels: tuple[str, ...], *, superseded: bool) -> bool:
+    """Would axor-core's taint floor deny this egress call on this value?"""
+    return taint_gate(
+        tool,
+        _neutral_intent(tool),
+        _root_of(labels),
+        floor_active=False,
+        egress_sinks=frozenset({tool}),
+        integrity_superseded=superseded,
+    ) is not None
 
 
 def _resolve_allowlist(
@@ -143,6 +202,7 @@ class Kernel:
 
         if enforcement == "off":
             return _decision("ALLOW", "enforcement off (observe-only); observation stays on")
+        manifest_id = str(manifest["id"])
         effect_class = resolve_effect_class(manifest, args, inputs)
         allowlist = _resolve_allowlist(policy, inputs)
         if self.taint_floor_enabled and effect_class in EGRESS_CLASSES:
@@ -178,8 +238,13 @@ class Kernel:
                         else {"kind": "unresolved_argument", "arg": arg_name},
                         projection=PROJECTION_UNTRUSTED,
                     )
-                if LABEL_UNTRUSTED in labels and args.get(arg_name) not in allowlist:
-                    # untrusted AND not operator-allowlisted → DENY on this arg
+                # THE taint question, asked of axor-core's gate rather than
+                # answered here. Allowlisting supersedes the integrity axis for
+                # THIS arg only — it must not short-circuit ALLOW and leave a
+                # later tainted arg (an exfiltrated body) unexamined (review r6),
+                # so the gate is asked once per driving arg.
+                allowlisted = args.get(arg_name) in allowlist
+                if _kernel_denies(manifest_id, labels, superseded=allowlisted):
                     return _decision(
                         "DENY",
                         f"egress sink {manifest['id']}: driving arg '{arg_name}' is "

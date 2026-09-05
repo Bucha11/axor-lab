@@ -11,7 +11,13 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 # deliberately dependency-free: the contract validator, runner, replay and
 # statistics engine are stdlib-only (see contracts/ and the acceptance suite)
-dependencies = []
+# The kernel is not optional. Governance verdicts are axor-core's — this package
+# decides nothing on its own, and the reference `decide` is a thin adapter over
+# `axor_core.policy.gates.taint_gate`, not a second implementation of it. Making
+# it an extra meant an install could silently fall back to a private copy of a
+# gate, which is how three copies of one predicate came to exist across this
+# ecosystem.
+dependencies = ["axor-core>=0.10,<0.11"]
 
 [project.scripts]
 axor-lab = "lab_runner.cli:main"
@@ -38,9 +44,9 @@ lab_contracts = ["schemas/*.schema.json"]
 byok = ["anthropic>=0.40"]
 # Ed25519 license + bundle signing (same crypto as the Control Plane license)
 crypto = ["pynacl>=1.5"]
-# the REAL production kernel: govern with axor_core.ToolCallGovernor instead of
-# the reference taint_floor. Without it, Lab falls back to the reference kernel.
-kernel = ["axor-core>=0.9"]
+# Kept as an empty alias so `pip install axor-lab[kernel]` keeps working; the
+# kernel moved into the hard dependencies and is no longer optional.
+kernel = []
 
 [tool.ruff]
 target-version = "py311"
