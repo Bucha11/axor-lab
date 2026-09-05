@@ -17,7 +17,7 @@ requires-python = ">=3.11"
 # it an extra meant an install could silently fall back to a private copy of a
 # gate, which is how three copies of one predicate came to exist across this
 # ecosystem.
-dependencies = ["axor-core>=0.10,<0.11"]
+dependencies = ["axor-core>=0.11,<0.12"]
 
 [project.scripts]
 axor-lab = "lab_runner.cli:main"

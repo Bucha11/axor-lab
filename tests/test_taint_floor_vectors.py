@@ -1,8 +1,8 @@
 """Lab's reference `decide`, against the kernel's shared taint-floor vectors.
 
 `axor_core/vectors/taint_floor.json` is the ecosystem's statement of what the
-taint floor decides. Until recently three implementations of that predicate
-existed — axor-core's gate, this reference kernel, and a hand-written mirror of
+taint floor decides, read from the installed kernel — there is no copy of it
+here. Until recently three implementations of that predicate existed — axor-core's gate, this reference kernel, and a hand-written mirror of
 this one inside the Control Plane's incident export — with nothing holding them
 in agreement and no shared file to check against.
 
@@ -23,19 +23,11 @@ from __future__ import annotations
 
 import pytest
 
+from axor_core.vectors import TAINT_FLOOR
 from lab_runner.kernel import Kernel
 from lab_runner.ledger import LABEL_SENSITIVE, LABEL_UNTRUSTED
 
-try:
-    from axor_core.vectors import TAINT_FLOOR
-
-    CASES = TAINT_FLOOR()["vectors"]
-except ImportError:  # installed axor-core predates the shipped vectors
-    CASES = []
-
-pytestmark = pytest.mark.skipif(
-    not CASES, reason="installed axor-core does not ship the taint-floor vectors"
-)
+CASES = TAINT_FLOOR()["vectors"]
 
 # Signals this reference kernel has no way to express. It resolves an effect
 # class from a manifest, so the normalizer's structural fields never reach it,
