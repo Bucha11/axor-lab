@@ -21,11 +21,14 @@ The spec changes two different kinds of thing, handled differently:
    dropping them would silently regress the earned-bridge soundness the repo just
    built. Because the spec's ownership table makes `bundle/condition/experiment/
    publication` **Lab-owned**, Lab legitimately keeps these as an **extension layer**
-   on top of the spec baseline. `trace`/`tool-manifest` are axor-core-owned; the
-   repo keeps its richer, replay-load-bearing versions as the de-facto axor-core
-   baseline (the spec's `_shared_from_axor_core/` copies are stubs and dropping the
-   `call_id` / `decision_value` / event discriminators they omit would break replay,
-   gating, and EvidenceCase — all explicitly *in* scope).
+   on top of the spec baseline. `trace`/`tool-manifest` are axor-core-owned and
+   **now actually live there**: this repo's richer, replay-load-bearing versions
+   were moved into `axor_core.contracts.schemas` unchanged and are imported from
+   it. The spec's `_shared_from_axor_core/` stubs are deleted: they omitted `call_id`,
+   `decision_value` and the event discriminators, so they were never the baseline,
+   and keeping a third statement of a format around as documentation is how the
+   second one got written. `predicate` went with them, because a `tool-manifest`
+   embeds one and an artifact whose reference does not resolve is not owned.
 
 If the intent is instead to strip those fields to the spec's exact schemas, that is
 a clean, separate follow-up — say so and it happens.
@@ -42,6 +45,13 @@ crypto jobs; `contracts/endpoint-protocol.md` retired.
 `contracts/architecture-boundary.md` + `ui-backend-contract.md` +
 `_shared_from_axor_core/` reference schemas + the `docs/spec-v0.3/` narrative,
 authoring, business and mock docs.
+
+**Schema ownership carried out** (later): the ownership table stopped being a
+description and became the layout. `trace`, `tool-manifest` and `predicate` moved
+into `axor_core.contracts.schemas`; this repo's copies, the
+`_shared_from_axor_core/` stubs, and the standalone `contracts/validate.py`
+engine are all deleted, and `lab_contracts.load_schemas()` merges the kernel's
+three over the Lab's six.
 
 **Phase 4 (docs) — contract docs adopted** (this commit):
 `control-plane-handoff.md`, `domain-model.md`, `lifecycle.md`, `mvp-contract.md`,

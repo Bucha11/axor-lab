@@ -3,7 +3,8 @@
 Author-time scenario validation (acceptance test 1): every failure is a
 specific, actionable message tied to the `validating` stage; a scenario
 failing any check never reaches `queued` (lifecycle.md). Trace referential
-integrity mirrors contracts/validate.py's trace_semantics.
+integrity is this module's; it was once mirrored in a standalone
+contracts/validate.py, which has been deleted.
 """
 
 from __future__ import annotations
@@ -261,7 +262,7 @@ def _normalize_path(path: str) -> str:
 
 
 def trace_semantics(trace: dict[str, object]) -> list[str]:
-    """Referential integrity + ledger unambiguity of a trace (contracts/validate.py).
+    """Referential integrity + ledger unambiguity of a trace.
 
     Beyond referential integrity (every id a binding/derivation names exists),
     this enforces the invariants the schema cannot (review r13):
