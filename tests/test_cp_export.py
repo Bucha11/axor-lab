@@ -320,3 +320,110 @@ class TestMultiConditionExport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _bundle_and_traces_with_symbolic_allowlist():
+    """A governed condition whose allowlist names `$inputs.landlord_iban` rather
+    than a literal — the case that separates the parametric config from the
+    concrete one."""
+    scenario = support.banking_scenario()
+    conditions = support.conditions()
+    governed = conditions[1]
+    governed["policy"] = {"profile": "strict", "trust_model": "content-ledger",
+                          "allowlist": ["$inputs.landlord_iban"]}
+    governed["config_hash"] = condition_config_hash(
+        support.KERNEL_PINNED, governed["policy"],
+    )
+    result = run_experiment_suite(
+        [scenario], support.manifests(), conditions, support.kernel_registry(),
+        repeats=24, run_id="r_symbolic",
+    )
+    pairs = result.pairs("ungoverned", "governed", metric="ASR")
+    aggregates = [
+        binary_aggregate("ASR", "ungoverned", sum(1 for b, _ in pairs if b), len(pairs)),
+        binary_aggregate("ASR", "governed", sum(1 for _, t in pairs if t), len(pairs),
+                         test=mcnemar_test(pairs, vs="ungoverned")),
+    ]
+    bundle = build_bundle(
+        bundle_id="b_symbolic", created=CREATED, scenarios=[scenario],
+        conditions=conditions, tool_manifests=list(support.manifests().values()),
+        environment=support.environment(), trials=result.trials,
+        aggregates=aggregates, traces=result.traces,
+    )
+    return bundle, result.traces
+
+class TestTheExportCarriesWhatTheConsumerReplaysWith(unittest.TestCase):
+    """Two keys the Control Plane's replay path reads and this exporter never
+    wrote.
+
+    The CP converts a pinned trace into kernel events and re-gates them under the
+    config that produced the verdict. It was built end to end. It never ran once,
+    because a pin arrived as a hash with no body, and a config as a hash with no
+    config — so every pin any real export ever carried was filed `skipped`, and
+    the two repositories each looked complete on their own.
+    """
+
+    def test_every_carried_pin_brings_its_trace_body(self) -> None:
+        bundle, traces = _bundle_and_traces()
+        trace = _denied_trace(traces)
+        pin = {"trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
+               "expected_verdict": "DENY", "expected_sequence": ["DENY"]}
+        export = export_cp(bundle, regressions=[pin], traces=traces)
+        bodies = export.config["regression_traces"]
+        carried = export.config["regressions"]
+        self.assertEqual(  # type: ignore[union-attr]
+            {str(p["trace_id"]) for p in carried}, set(bodies),  # type: ignore[union-attr]
+        )
+        body = bodies[str(trace["trace_id"])]  # type: ignore[index]
+        self.assertEqual(str(body["trace_id"]), str(trace["trace_id"]))
+
+    def test_a_carried_body_hashes_to_the_pin_that_names_it(self) -> None:
+        """Otherwise the consumer replays a different incident than the one
+        pinned — and it checks, so a mismatch costs the pin rather than passing."""
+        bundle, traces = _bundle_and_traces()
+        trace = _denied_trace(traces)
+        pin = {"trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
+               "expected_verdict": "DENY", "expected_sequence": ["DENY"]}
+        export = export_cp(bundle, regressions=[pin], traces=traces)
+        for carried in export.config["regressions"]:  # type: ignore[union-attr]
+            body = export.config["regression_traces"][str(carried["trace_id"])]  # type: ignore[index]
+            self.assertEqual(content_hash(body), carried["trace_ref"])
+
+    def test_a_template_carries_no_bodies_because_it_carries_no_pins(self) -> None:
+        export = export_cp_template(_bundle())
+        self.assertEqual(export.config["regressions"], [])
+        self.assertEqual(export.config["regression_traces"], {})
+
+    def test_every_executed_scenario_brings_the_config_it_ran_under(self) -> None:
+        bundle, traces = _bundle_and_traces()
+        export = export_cp(bundle, traces=traces)
+        hashes = export.config["runtime_config_hashes"]
+        configs = export.config["runtime_configs"]
+        self.assertTrue(hashes, "the run recorded no runtime config at all")
+        self.assertEqual(set(hashes), set(configs))  # type: ignore[arg-type]
+
+    def test_each_carried_config_hashes_to_its_recorded_fingerprint(self) -> None:
+        """The hash was already exported. Carrying the config next to it means a
+        consumer can prove the config is the one that ran, instead of compiling a
+        second one from the manifests — which is what the CP did, and its
+        compiler and this one disagreed on every point that mattered."""
+        bundle, traces = _bundle_and_traces()
+        export = export_cp(bundle, traces=traces)
+        for scenario_id, config in export.config["runtime_configs"].items():  # type: ignore[union-attr]
+            recorded = export.config["runtime_config_hashes"][scenario_id]  # type: ignore[index]
+            self.assertEqual(content_hash(config), recorded, scenario_id)
+
+    def test_the_carried_config_is_the_concrete_one_not_the_parametric_one(self) -> None:
+        """A trace ran under an allowlist with `$inputs` EXPANDED. Replaying it
+        against the symbolic carry-over config would compare a recipient to the
+        literal string `$inputs.landlord_iban` and deny the payment the trace
+        recorded as allowed. The parametric config is what transfers to
+        production; the concrete one is what a recorded verdict happened under,
+        and only one of the two can reproduce it."""
+        bundle, traces = _bundle_and_traces_with_symbolic_allowlist()
+        export = export_cp(bundle, traces=traces)
+        configs: dict = export.config["runtime_configs"]  # type: ignore[assignment]
+        self.assertTrue(configs)
+        rendered = json.dumps(configs)
+        self.assertNotIn("$inputs.", rendered, "the allowlist was left symbolic")
+        self.assertIn(support.LANDLORD_IBAN, rendered)

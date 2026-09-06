@@ -25,10 +25,10 @@ from dataclasses import dataclass
 
 from lab_contracts import (
     CONFIG_COMPILER_VERSION,
+    compiled_governor_config,
     condition_config_hash,
     content_hash,
     parametric_policy_hash,
-    runtime_config_hash,
     validate_artifact,
     verify_bundle,
 )
@@ -134,6 +134,7 @@ def export_cp(
         )
 
     carried_pins = _validate_pins(bundle, regressions or [], traces or {})
+    by_trace_id = {str(tr["trace_id"]): tr for tr in (traces or {}).values()}
     baseline_id = _baseline_condition_id(bundle)
     # the bridge is EARNED from RECOMPUTED evidence, not stored aggregates — so it
     # needs the traces. Without them it cannot be verified and is not earned (r16).
@@ -162,10 +163,22 @@ def export_cp(
         for t in bundle.get("trials", [])  # type: ignore[union-attr]
         if t.get("status") == "completed" and str(t.get("condition_id")) == governed_id
     })
-    runtime_hashes = {
-        sid: runtime_config_hash(kernel, policy, manifests, scen_by_id[sid].get("inputs", {}))
+    # The compiled config itself, not only its fingerprint. A consumer that
+    # wants to REPLAY a pin needs the control that produced its verdict; given
+    # only the manifests it has to compile a second one, and the Control Plane's
+    # hand-written compiler and this one disagreed completely — on the same
+    # manifests the CP made `side_effecting` tools egress sinks, never read
+    # `effect.resolve`, and dropped the allowlist value-policies it was never
+    # passed the policy for. `$inputs` are EXPANDED here: what carries over to
+    # production is the parametric policy, but what a recorded trace ran under
+    # is the concrete one, and that is what a replay must use.
+    runtime_configs = {
+        sid: compiled_governor_config(
+            kernel, policy, manifests, scen_by_id[sid].get("inputs", {}),
+        )
         for sid in executed if sid in scen_by_id
     }
+    runtime_hashes = {sid: content_hash(cfg) for sid, cfg in runtime_configs.items()}
     _verify_recorded_runtime_hashes(bundle, governed_id, runtime_hashes, require=True)
     fingerprint = _resolved_kernel_fingerprint(bundle, governed_id, kernel)
     source: dict[str, object] = {
@@ -196,8 +209,22 @@ def export_cp(
         # per-scenario concrete config identity (what actually ran) — NOT carried
         # over as the production config; recorded so a reader can pin it
         "runtime_config_hashes": runtime_hashes,
+        # the configs those hashes fingerprint, so a pin can be replayed under
+        # the control that produced its verdict rather than one re-derived
+        "runtime_configs": runtime_configs,
         "tool_manifests": bundle["tool_manifests"],
         "regressions": carried_pins,
+        # the pinned traces themselves. Without them a pin is a hash the Control
+        # Plane can record and never check: its whole replay path reads this key,
+        # and this exporter — which is handed the complete traces and validates
+        # every pin against them — has never written it, so every pin ever
+        # exported landed there as `skipped: "package carries no trace body for
+        # this pin"`. A consumer built against a producer that does not exist.
+        "regression_traces": {
+            str(pin["trace_id"]): by_trace_id[str(pin["trace_id"])]
+            for pin in carried_pins
+            if str(pin["trace_id"]) in by_trace_id
+        },
         "source": source,
     }
     return CPExport(
@@ -245,8 +272,10 @@ def export_cp_template(
         "config_hash": recorded,
         "parametric_config_hash": parametric_policy_hash(kernel, policy, manifests),
         "runtime_config_hashes": {},
+        "runtime_configs": {},
         "tool_manifests": bundle["tool_manifests"],
         "regressions": [],
+        "regression_traces": {},
         "source": {
             "bundle_id": bundle.get("bundle_id"),
             "condition_id": governed["id"],
