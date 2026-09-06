@@ -111,9 +111,13 @@ jobs:
           # lets a future axor-core release drift into the integration job, so a
           # green run no longer proves the SAME kernel the evidence was measured
           # against still behaves. Bump this deliberately, with the suites re-run.
-          pip install "axor-core==0.9.2"
+          # 0.11.0 is the release that took ownership of trace/tool-manifest/
+          # predicate and the validator, which this repo now imports rather than
+          # copies; pyproject requires >=0.11,<0.12 and this pin must agree with
+          # it, or the job installs one kernel and the package resolves another.
+          pip install "axor-core==0.11.0"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
-          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.9.2' else 'axor-core version drift: expected 0.9.2, got ' + axor_core.__version__)"
+          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.11.0' else 'axor-core version drift: expected 0.11.0, got ' + axor_core.__version__)"
           python -c "from lab_runner import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.
