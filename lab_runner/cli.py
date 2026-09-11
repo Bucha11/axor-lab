@@ -244,10 +244,11 @@ def _cmd_suite_yaml(args: argparse.Namespace) -> int:
     acceptance criterion 8.5 and it is pinned in
     `tests/test_yaml_mode_round_trip.py`.
     """
+    from lab_service import resolve_suite_target
     from lab_suite import to_yaml
     from lab_suite.yaml_mode import YamlUnavailable
 
-    manifest, _ = _suite_manifest(args.suite)
+    manifest, _ = resolve_suite_target(args.suite)
     try:
         print(to_yaml(manifest), end="")
     except YamlUnavailable as exc:
@@ -256,61 +257,26 @@ def _cmd_suite_yaml(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _suite_manifest(target: str) -> tuple[dict[str, object], object]:
-    """Resolve `target` — a registered suite id or a manifest path — to
-    (manifest, suite implementation).
-
-    A manifest file may name a suite the registry knows; then that suite's hooks
-    run over the file's manifest, which is exactly the Builder's edit-and-run
-    loop. A manifest whose `id` is unregistered runs on `BaseSuite` defaults —
-    no program, no metrics, no extractors — rather than being refused, because a
-    manifest is authorable long before an implementation exists.
-    """
-    from lab_suite import builtin_registry, load_manifest
-    from lab_suite.errors import SuiteNotFound
-    from lab_suite.sdk import BaseSuite
-
-    registry = builtin_registry()
-    path = Path(target)
-    if path.exists():
-        manifest = load_manifest(path)
-        try:
-            return manifest, registry.get(str(manifest.get("id", "")))
-        except SuiteNotFound:
-            unimplemented = BaseSuite()
-            unimplemented.id = str(manifest.get("id", ""))
-            unimplemented.manifest = lambda: manifest  # type: ignore[method-assign]
-            return manifest, unimplemented
-    suite = registry.get(target)
-    return suite.manifest(), suite
-
-
 def _cmd_run_suite(args: argparse.Namespace) -> int:
-    from lab_suite import run_suite, validate_manifest
+    """The suite lifecycle, printed as it goes. Plan and execution live in
+    `lab_service.suites`; the confirm gate is the face's."""
+    from lab_service import Outcome, execute_suite_run, plan_suite_run
 
     print("[validating]")
-    manifest, suite = _suite_manifest(args.suite)
-    errors = validate_manifest(manifest) + suite.validate(manifest)  # type: ignore[attr-defined]
-    if errors:
-        for error in errors:
+    plan = plan_suite_run(args.suite, run_id=args.run_id)
+    if plan.outcome is Outcome.VALIDATION:
+        for error in plan.errors:
             print(f"  {error}", file=sys.stderr)
         return EXIT_VALIDATION
-    execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
-    scenarios = list(manifest.get("scenarios") or []) or list(manifest.get("scenario_refs") or [])
-    conditions = list(execution.get("conditions") or [])
-    repeats = int(execution.get("repeats", 1))  # type: ignore[arg-type]
-    # a suite with NO conditions is single-arm — one trial per (scenario, repeat).
-    # That is the platform's default path, not a degenerate case.
-    trials = len(scenarios) * repeats * max(len(conditions), 1)
-    print(f"valid: {manifest.get('id')}")
+    print(f"valid: {plan.suite_id}")
     print(
-        f"  scenarios={len(scenarios)} conditions={len(conditions)} "
-        f"repeats={repeats} -> {trials} trials"
-        + ("  (single-arm: no governance)" if not conditions else "")
+        f"  scenarios={plan.scenarios} conditions={plan.conditions} "
+        f"repeats={plan.repeats} -> {plan.trials} trials"
+        + ("  (single-arm: no governance)" if plan.single_arm else "")
     )
 
     print("[estimate]")
-    print(f"  {trials} trial(s), local simulated tools, no paid inference")
+    print(f"  {plan.trials} trial(s), local simulated tools, no paid inference")
     if not _confirmed(args):
         print(
             "not confirmed — pass --yes (or answer y) to execute; nothing ran",
@@ -319,72 +285,46 @@ def _cmd_run_suite(args: argparse.Namespace) -> int:
         return EXIT_UNCONFIRMED
 
     print("[running_local]")
-    run_id = args.run_id or f"r_{content_hash(manifest)[7:39]}"
-    run = run_suite(manifest, run_id=run_id, suite=suite)  # type: ignore[arg-type]
-    by_status: dict[str, int] = {}
-    for trial in run.trials:
-        by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
+    result = execute_suite_run(
+        plan,
+        out=Path(args.out),
+        created=args.created,
+        overwrite=bool(getattr(args, "overwrite", False)),
+        command=f"axor-lab run-suite {args.suite}",
+    )
+    if result.schema_errors:
+        for error in result.schema_errors:
+            print(f"  [schema] {error}", file=sys.stderr)
+        return EXIT_FAILURE
     print(
-        f"  planned {len(run.trials)}: "
-        + ", ".join(f"{n} {status}" for status, n in sorted(by_status.items()))
+        f"  planned {result.planned}: "
+        + ", ".join(f"{n} {status}" for status, n in sorted(result.by_status.items()))
     )
 
     print("[analyzing]")
-    summary = missingness(run.trials)
-    print(f"  {summary.display()}")
-    for aggregate in run.aggregates:
+    print(f"  {result.missingness}")
+    for aggregate in result.aggregates:
         _print_aggregate(aggregate)
-    for result in run.invariants:
-        print(f"  invariant {result.regression_id}: {result.status}"
-              + (f" — {result.detail}" if result.detail else ""))
+    for entry in result.invariants:
+        print(f"  invariant {entry.regression_id}: {entry.status}"
+              + (f" — {entry.detail}" if entry.detail else ""))
 
     print("[uploading_artifacts]  (local: writing artifact + bundle)")
-    created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    environment = {
-        "model": {"provider": "scripted", "id": str(manifest.get("id", "")),
-                  "inference_params": {"suite_id": str(manifest.get("id", ""))}},
-    }
-    artifact = run.artifact(
-        artifact_id=f"a_{run_id}", created=created, environment=environment,
-        command=f"axor-lab run-suite {args.suite}",
-    )
-    schema_errors = validate_artifact(artifact, "artifact")
-    if schema_errors:
-        # the artifact IS the deliverable; writing an invalid one and finding out
-        # at publish time is how a run becomes unusable hours later
-        for error in schema_errors:
-            print(f"  [schema] {error}", file=sys.stderr)
-        return EXIT_FAILURE
-    out = Path(args.out)
-    write_bundle_dir(
-        out, artifact["bundle"], run.traces,  # type: ignore[arg-type]
-        overwrite=bool(getattr(args, "overwrite", False)),
-    )
-    (out / "artifact.json").write_text(json.dumps(artifact, indent=2, ensure_ascii=False))
-    # Three outcomes, three exit codes — collapsing them loses the distinction
-    # the whole invariant model rests on. `failed` is a violated invariant.
-    # `error` is one that could NOT be evaluated, which is not a pass either
-    # (an unmeasured latency is not a fast one, lifecycle.md) but is a different
-    # thing to tell a CI than "your change regressed". `skipped` IS fine: the
-    # rule kind executes elsewhere, and failing on it would fail every governed
-    # suite for carrying a verdict_sequence pin.
-    violated = [r for r in run.invariants if r.status == STATUS_FAILED]
-    unevaluable = [r for r in run.invariants if r.status == STATUS_ERROR]
-    print(f"[completed]  artifact: {out}/artifact.json ({len(run.traces)} traces)")
-    print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
-    if violated:
-        print(
-            "  invariants VIOLATED: "
-            + ", ".join(str(r.regression_id) for r in violated),
-            file=sys.stderr,
-        )
+    print(f"[completed]  artifact: {result.directory}/artifact.json "
+          f"({result.trace_count} traces)")
+    print(f"  reproduce verdicts (exact):    axor-lab replay {result.directory}")
+    # Three outcomes, three exit codes — collapsing them loses the distinction the
+    # whole invariant model rests on. `failed` is a violated invariant; `error` is
+    # one that could NOT be evaluated, which is not a pass either but is a
+    # different thing to tell a CI than "your change regressed".
+    if result.violated:
+        print("  invariants VIOLATED: "
+              + ", ".join(str(r.regression_id) for r in result.violated), file=sys.stderr)
         return EXIT_REGRESSION_DIFFERS
-    if unevaluable:
-        print(
-            "  invariants could not be evaluated: "
-            + ", ".join(f"{r.regression_id} ({r.detail})" for r in unevaluable),
-            file=sys.stderr,
-        )
+    if result.unevaluable:
+        print("  invariants could not be evaluated: "
+              + ", ".join(f"{r.regression_id} ({r.detail})" for r in result.unevaluable),
+              file=sys.stderr)
         return EXIT_FAILURE
     return EXIT_OK
 
@@ -720,47 +660,18 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
 
 
 def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
-    from lab_adapters import (
-        UnknownSuiteError,
-        available_suites,
-        build_experiment_document,
-    )
-    from lab_contracts import condition_config_hash
+    from lab_adapters import UnknownSuiteError, available_suites
+    from lab_service import build_agentdojo_experiment
 
-    kernel = "axor-core@0.4.2"
-    conditions = [
-        {
-            "schema_version": "condition/v1",
-            "id": "ungoverned",
-            "label": "ungoverned",
-            "enforcement": "off",
-            "kernel": kernel,
-            "config_hash": condition_config_hash(kernel, None),
-        },
-        {
-            "schema_version": "condition/v1",
-            "id": "governed",
-            "label": "governed",
-            "enforcement": "on",
-            "kernel": kernel,
-            "policy": {"profile": "strict", "trust_model": "content-ledger"},
-            "config_hash": condition_config_hash(
-                kernel, {"profile": "strict", "trust_model": "content-ledger"}
-            ),
-        },
-    ]
     try:
-        document = build_experiment_document(
-            args.suite, conditions, repeats=args.repeats, agent_ref=args.agent_ref
+        result = build_agentdojo_experiment(
+            args.suite, repeats=args.repeats, agent_ref=args.agent_ref
         )
     except UnknownSuiteError as exc:
         print(f"error: {exc}; available: {list(available_suites())}", file=sys.stderr)
         return EXIT_VALIDATION
-    # a materialized suite that cannot resolve is a bug — fail loudly, not silently
-    resolve(document)
-    Path(args.out).write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
-    scenarios = document["scenarios"]  # type: ignore[index]
-    print(f"imported AgentDojo '{args.suite}': {len(scenarios)} scenario(s) -> {args.out}")
+    Path(args.out).write_text(json.dumps(result.document, indent=2, ensure_ascii=False) + "\n")
+    print(f"imported AgentDojo '{args.suite}': {result.scenarios} scenario(s) -> {args.out}")
     print(f"  run: axor-lab run {args.out} --out ./bundle --yes")
     return EXIT_OK
 

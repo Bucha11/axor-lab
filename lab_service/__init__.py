@@ -21,6 +21,15 @@ from .checks import Check, CheckStatus
 from .errors import OutputRefused, ServiceError
 from .packages import PackageVerifyResult, verify_package, verify_package_document
 from .incidents import IncidentImportResult, import_incident
+from .suites import (
+    BenchmarkImportResult,
+    SuitePlan,
+    SuiteRunResult,
+    build_agentdojo_experiment,
+    execute_suite_run,
+    plan_suite_run,
+    resolve_suite_target,
+)
 from .publishing import (
     LocalPublishResult,
     UploadResult,
@@ -60,6 +69,13 @@ from .handoff import CPExportResult, CPVerifyResult, export_cp_package, verify_c
 from .outcomes import Outcome
 
 __all__ = [
+    "resolve_suite_target",
+    "plan_suite_run",
+    "execute_suite_run",
+    "build_agentdojo_experiment",
+    "SuiteRunResult",
+    "SuitePlan",
+    "BenchmarkImportResult",
     "upload_publication",
     "default_acceptance_path",
     "check_publishable",
