@@ -1,86 +1,117 @@
-# Axor Lab — UI ↔ Backend Contract (v1)
+# Axor Lab — UI ↔ Backend Contract (v2, Suite Platform)
 
-**Principle: every screen renders a schema-conforming payload from a named endpoint — a mock's inline data is a fixture standing in for that response.** No screen invents data the backend doesn't return; no backend returns a shape no schema defines. Trace/tool-manifest come from the **shared axor-core fabric** (architecture-boundary.md), not a Lab-owned copy.
+**Principle: every screen renders a schema-conforming payload from a named endpoint.** No screen invents data the backend does not return; no backend returns a shape no schema defines. Trace and tool-manifest come from the **shared axor-core fabric** (architecture-boundary.md), not a Lab-owned copy.
 
 ```
 screen  ←  API endpoint  ←  payload conforming to a schema (Lab-owned or axor-core-shared)
 ```
 
+**Rendered, never computed.** A screen displays aggregates, metrics and verdicts that the backend already stored; it never recomputes a rate, a threshold outcome or a verdict in the browser. Two implementations of the same statistic is how a published number and a displayed number diverge.
+
 ## 1. Connection model — one runtime, not a two-product ladder
 
-Lab does not connect to, execute, or proxy agents. The **Axor runtime adapter** (the same one that serves Control Plane) opens an outbound connection and pushes traces; Lab hands out experiment assignments and reads the resulting traces. A user connects a runtime **once** — both modules see it. (The old "climb the same onboarding shape twice" was the anti-pattern; it's gone.)
+Lab does not connect to, execute, or proxy agents. The **Axor runtime adapter** (the same one that serves the Control Plane) opens an outbound connection and pushes traces; Lab hands out assignments and reads the resulting traces. A user connects a runtime **once** — both products see it.
 
-| Mode | What happens | Trace source |
+| Mode | What happens | `TraceSource` |
 |---|---|---|
-| **Demo** | Axor-hosted template, no agent — zero-setup | Lab-hosted |
-| **Connected runtime** | an existing Axor runtime claims an assignment, runs locally, pushes events | runtime |
-| **Trace import** | analyze a production incident or a published run | import |
-| **Offline runner** | CI / air-gapped / private code | offline_runner |
+| **Simulated environment** | a Suite whose tools are Lab's simulator — zero setup, no agent | `demo` |
+| **Live agent runtime** | a connected Axor runtime claims an assignment, runs locally, pushes events | `runtime` |
+| **Uploaded traces** | analyse a production incident or a published run | `import` |
+| **Recorded bundle / offline runner** | CI, air-gapped, private code | `offline_runner` |
 
-"Connect runtime" issues a scoped ingest/job key for the shared adapter. Existing CP users **select** an already-connected runtime — no second integration. No Lab gateway, no MCP proxy, no black-box eval.
+There is deliberately **no remote-endpoint mode** — Lab never calls an agent out (INTEGRATION_PLAN §4.6). "Connect runtime" issues a scoped ingest/job key for the shared adapter. No Lab gateway, no MCP proxy, no black-box eval.
 
-## 2. API surface
+## 2. Screens
 
-**User/UI-facing:**
+Navigation (Web UX RFC): **Home · Suites · Runs · Evidence · Regressions · Artifacts · Playground · Integrations · Settings**. Home is the default landing page and is **about the next action, not the past** — a catalog of what has already been published is a different screen and does not belong there.
 
-| Endpoint | Method | Response conforms to |
+| Screen | Endpoint | Payload conforms to |
 |---|---|---|
-| `/experiments` | GET | list of `publication/v1` summaries |
-| `/e/{id}` | GET | `publication/v1` + resolved reproduction records |
-| `/runtimes` | GET | connected runtimes `[{ runtime_ref, agent_ref, model, status }]` |
-| `/runtimes/{id}` | GET | one runtime |
-| `/runtimes/{id}/manifests` | GET | `tool-manifest/v1[]` (**axor-core shared** schema) |
-| `/runtimes/connect` | POST | `{ ingest_key }` for the shared adapter |
-| `/scenarios/validate` | POST | `{ ok, errors[] }` |
-| `/scenarios` | POST | `{ scenario_id }` (`scenario/v1`, Lab-owned) |
-| `/experiments/plan` | POST | `{ trials, estimate }` from an `experiment/v1` |
-| `/runs` | POST | `{ run_id }` (binds experiment + runtime_ref) |
-| `/runs/{id}` | GET | `{ state }` (a `lifecycle` state) |
-| `/runs/{id}/events` | SSE | lifecycle transitions + trial progress |
-| `/runs/{id}/results` | GET | `bundle/v1.aggregates` (Lab-owned) |
-| `/runs/{id}/trials/{trial_id}/trace` | GET | `trace/v1` (**axor-core shared**) |
-| `/bundles` | POST | `{ bundle_ref }` (`bundle/v1`) |
-| `/publications` | POST | `publication/v1` |
+| Home / Launchpad | `GET /home` | onboarding step, quick actions, built-in suites, recent activity |
+| Suite Catalog | `GET /suites` | `[{ id, name, description, origin, available }]` |
+| Suite detail | `GET /suites/{id}` | `suite/v1` |
+| Suite Builder (save) | `PUT /suites/{id}`, `POST /suites` | `suite/v1` |
+| Suite Builder (validate) | `POST /suites/validate`, `POST /suites/validate-yaml` | `{ ok, errors[] }` |
+| Suite Builder (YAML mode) | `GET /suites/{id}/yaml` | the same `suite/v1`, serialized |
+| Playground — one trial | `POST /playground/trial` | one `trial` record + its `trace/v1` |
+| Run (live) | `POST /runs`, `GET /runs/{id}`, `SSE /runs/{id}/events` | a lifecycle state + trial progress |
+| Run Report | `GET /runs/{id}/report` | `bundle/v1.aggregates` + per-metric summaries |
+| Trial detail | `GET /runs/{id}/trials/{tid}` | trial record + `trace/v1` (**shared**) |
+| EvidenceCase | `GET /evidence`, `GET /evidence/{id}`, `POST /evidence` | `evidence-case/v1` |
+| Regression | `GET /regressions`, `GET /regressions/{id}`, `POST /regressions`, `POST /regressions/{id}/run` | `regression/v1` + an `InvariantResult` |
+| Artifacts | `GET /artifacts`, `GET /artifacts/{id}` | `artifact/v1` |
+| Integrations | `GET /runtimes`, `POST /runtimes/connect`, `GET /runtimes/{id}/manifests` | runtime list; `tool-manifest/v1[]` (**shared**) |
+| Published record | `GET /e/{id}`, `GET /api/publications` | `publication/v1` + reproduction records |
 
-**Runtime-facing execution contract (Lab assigns, runtime executes — never the reverse):**
+**The Suite Catalog shows an explicit unavailable state.** The design boards show six suite cards and three suites exist (Blank, AgentDojo, Budget). The catalog renders the other three as unavailable — never as a card that runs nothing.
 
-```
-GET  /runtime/jobs                                  poll for assignments
-POST /runtime/jobs/{id}/claim                        claim one
-POST /runtime/jobs/{id}/trials/{trial_id}/events     stream kernel events (shared trace/event schema)
-POST /runtime/jobs/{id}/trials/{trial_id}/complete   finalize the trial
-```
+**The Suite Builder's six sections — Agents · Scenarios · Environment & Tools · Execution · Evaluation · Artifact — and its three modes — Basic / Advanced / YAML — all edit ONE `suite/v1` document.** Every Builder field has a home in the manifest, or Basic mode owns state the YAML mode cannot see and the modes silently disagree about what the experiment is. That rule is testable without any frontend and is pinned twice: every Builder section maps to a manifest field (`tests/test_suite_platform_contracts.py`), and Basic → YAML → Basic is lossless by canonical hash over the YAML 1.1 landmines (`tests/test_yaml_mode_round_trip.py`). YAML mode needs the optional `axor-lab[yaml]` extra and answers 501 without it — the platform core stays stdlib-only.
 
-Enforcement, tool dispatch, and provenance construction happen in the runtime, not in Lab.
+## 3. Runtime-facing execution contract
 
-## 3. Screen → endpoint → schema (binding table)
-
-| Mock | Calls | Renders (schema → field) |
-|---|---|---|
-| **lab-landing** | `GET /experiments` | catalog cards ← `publication/v1` |
-| **lab-published** | `GET /e/{id}` | ← `publication/v1` + reproduction records; claims split by `claims[].kind` |
-| **lab-agent-ingest** | `GET /runtimes`, `POST /runtimes/connect`, `GET /runtimes/{id}/manifests` | connect/select runtime; tools ← `tool-manifest/v1` (**shared**) |
-| **lab-scenario-author** | `POST /scenarios/validate`, `POST /scenarios` | errors ← `{errors[]}`; emits `scenario/v1` |
-| **lab-builder** | `POST /experiments/plan` | trials+estimate; binds `runtime_ref` (a connected runtime, not a raw model) |
-| **lab-run-progress** | `POST /runs`, `SSE /runs/{id}/events` | pipeline ← `lifecycle` state per mode |
-| **lab-results** | `GET /runs/{id}/results` | table ← `bundle.aggregates` — **rendered, never computed** |
-| **lab-evidencecase** | `GET /runs/{id}/trials/{trial_id}/trace` (×pair) | chain ← `trace/v1` (**shared**); 3 modes over the pair |
-
-## 4. State binding (four lifecycles, per lifecycle.md)
+Lab assigns, the runtime executes — never the reverse.
 
 ```
-demo:               validating → queued → running → analyzing → completed
-connected_runtime:  validating → waiting_for_runtime → running → receiving_traces → analyzing → completed
-trace_import:       validating → importing → replaying → analyzing → completed
-offline_runner:     validating → waiting_for_upload → analyzing → completed
+GET  /runtime/jobs                                   poll for assignments
+POST /runtime/jobs/{id}/claim                         claim one
+POST /runtime/jobs/{id}/trials/{trial_id}/events      stream kernel events (shared trace/event schema)
+POST /runtime/jobs/{id}/trials/{trial_id}/complete    finalize the trial
 ```
 
-Delivered over `SSE /runs/{id}/events`; `ready/awaiting_confirmation` sits before run start, carrying the estimate the user confirms.
+Enforcement, tool dispatch and provenance construction happen in the runtime, not in Lab.
 
-## 5. Pairing (EvidenceCase + McNemar)
+## 4. Implemented today
 
-A run exposes `{ pair_id, ungoverned_trial_id, governed_trial_id }`. The UI fetches both traces: observed-ungoverned renders the ungoverned trace; counterfactual renders it + the replayed governed verdict as an overlay; observed-governed renders the governed trace. statistics.md reads discordant pairs off these records.
+`lab_server/runtime_jobs.py`:
 
-## 6. Real vs mock
+```
+GET  /home                           GET  /runs/{id}                 POST /suites
+GET  /suites                         GET  /runs/{id}/results         PUT  /suites/{id}
+GET  /suites/{id}                    GET  /runs/{id}/report          POST /suites/validate
+GET  /suites/{id}/yaml               GET  /runs/{id}/aggregates      POST /suites/validate-yaml
+GET  /evidence                       GET  /runs/{id}/trials/{tid}    POST /evidence
+GET  /evidence/{id}                  GET  /runs/{id}/trials/{tid}/trace   POST /regressions
+GET  /regressions                    SSE  /runs/{id}/events          POST /regressions/{id}/run
+GET  /regressions/{id}               GET  /runtimes                  POST /artifacts
+GET  /artifacts                      GET  /runtime/jobs              POST /playground/trial
+GET  /artifacts/{id}                                                 POST /runtimes/connect
+                                                                     POST /scenarios/validate
+POST /runtime/jobs/{id}/claim                                        POST /experiments/plan
+POST /runtime/jobs/{id}/trials/{tid}/events                          POST /runs
+POST /runtime/jobs/{id}/trials/{tid}/complete                        POST /runs/{id}/confirm
+```
 
-Mocks carry inline fixtures today. A screen is "integrated" when its fixture is deleted and it renders only endpoint output. Order: results (reads aggregates) and EvidenceCase (reads shared trace) first — fiction is most dangerous there.
+Every screen in §2 now has an endpoint. What each one is careful about:
+
+- `GET /home` derives the onboarding step from what the workspace HAS, in the
+  order the workflow needs it — not from a stored wizard position that can drift
+  from reality — and offers only suites that are `available`, because Home is a
+  launch surface and a card there is a button.
+- `GET /suites` serves `lab_suite.suite_catalog()`, the same function
+  `axor-lab suites` prints, so the terminal and the screen cannot disagree about
+  which suites exist. An announced-but-unimplemented suite has a catalog card and
+  a 404 on its manifest, which stops the Builder opening an empty document.
+- `PUT /suites/{id}` refuses a manifest whose own `id` differs from the path:
+  saving it would silently create a SECOND suite and leave the Builder editing
+  the one nobody runs.
+- `POST /playground/trial` runs ONE trial, on one scenario and one arm, with
+  aggregations and regressions stripped — neither has anything to operate on for
+  a single trial, and an aggregate over one trial is not a rate. Nothing is
+  stored, and the payload carries `counted_in_a_run: false` so a client cannot
+  quietly file it beside a Run's trials.
+- `GET /runs/{id}/report` states coverage (completed / planned) and per-metric
+  coverage BEFORE aggregates, and computes no rate of its own.
+- `POST /regressions/{id}/run` is a CHECK, not a Run: it consumes trials that
+  already exist, and `error` stays distinct from `failed`.
+- Every store write is schema-validated before it lands, and every screen
+  endpoint requires the control token.
+
+`lab_server/app.py`: `GET /` (catalog page), `GET /e/{id}`, `GET /e/{id}/evidence/{eid}`, `GET /api/publications`, `GET /api/publications/{id}` (+ `/bundle`, `/reproductions`, `/takedown`).
+
+Storage is in memory (`lab_server/screens.py`), like the runtime-job store beside it — durable storage is a swap of that class, not of the endpoints.
+
+## 5. Pairing (governance capability)
+
+A governed comparison run exposes `{ pair_id, ungoverned_trial_id, governed_trial_id }`. The EvidenceCase screen fetches both traces: *observed* renders the ungoverned trace; *counterfactual policy replay* renders it with the replayed governed verdict as an overlay; *observed governed twin* renders the governed trace and is present only if a governed run actually executed. statistics.md reads discordant pairs off these records.
+
+For a single-arm Suite there is no pair and no governance block — the EvidenceCase is a view over one trial, and the screen must render that without a second trace rather than showing an empty comparison.

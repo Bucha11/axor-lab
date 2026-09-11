@@ -13,12 +13,7 @@ from __future__ import annotations
 
 from html import escape
 
-from lab_runner import (
-    build_evidence_case,
-    default_registry,
-    evidence_condition,
-    resolve_kernel,
-)
+from lab_capabilities.governance import build_evidence_case, default_registry, evidence_condition, resolve_kernel
 
 from .errors import PublishRejected
 from .store import StoredPublication

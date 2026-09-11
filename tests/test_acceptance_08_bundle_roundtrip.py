@@ -11,7 +11,7 @@ import unittest
 
 from tests import support
 from lab_contracts import BundleIntegrityError, build_bundle, verify_bundle
-from lab_runner import replay_bundle, run_experiment
+from lab_capabilities.governance import replay_bundle, run_experiment
 
 REPEATS = 10
 CREATED = "2026-07-19T00:00:00Z"

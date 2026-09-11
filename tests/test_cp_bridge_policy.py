@@ -20,8 +20,9 @@ from lab_contracts import (
     runtime_config_hash,
     verify_bundle,
 )
-from lab_runner import ScriptedAgent, run_experiment_suite
-from lab_runner.cp_export import CPExportError, earned_bridge
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_experiment_suite
+from lab_capabilities.governance.cp_export import CPExportError, earned_bridge
 
 CREATED = "2026-07-20T12:00:00+00:00"
 
@@ -174,7 +175,7 @@ class TestEvidenceDerivedBridge(unittest.TestCase):
     def test_cp_export_verifies_bundle_before_bridge_analysis(self) -> None:
         # export_cp over a partial trace set raises rather than exporting a config
         # whose bridge was earned on incomplete evidence
-        from lab_runner.cp_export import export_cp
+        from lab_capabilities.governance.cp_export import export_cp
 
         bundle, traces = _bundle(24, 24, 0, 24)
         keys = list(traces)
@@ -184,7 +185,7 @@ class TestEvidenceDerivedBridge(unittest.TestCase):
 
     def test_cp_bridge_supporting_ref_names_recomputed_analysis(self) -> None:
         from lab_contracts import content_hash
-        from lab_runner.cp_export import bridge_analysis
+        from lab_capabilities.governance.cp_export import bridge_analysis
 
         bundle, traces = _bundle(24, 24, 0, 24)
         analysis = bridge_analysis(bundle, "governed", traces=traces)
@@ -314,7 +315,7 @@ class TestCausalValidity(unittest.TestCase):
                  + [(True, True)] * 80 + [(False, False)] * 75)
         bundle, traces = _controlled_bundle(pairs)
         self.assertTrue(earned_bridge(bundle, traces=traces))
-        from lab_runner.cp_export import bridge_analysis
+        from lab_capabilities.governance.cp_export import bridge_analysis
         analysis = bridge_analysis(bundle, "governed", traces=traces)
         self.assertGreaterEqual(analysis["paired"]["absolute_risk_reduction"], 0.10)
 
@@ -323,7 +324,7 @@ class TestCausalValidity(unittest.TestCase):
         # The planned denominator must include the failed pairs (review r20).
         pairs = [(True, False)] * 24 + [(None, None)] * 6
         bundle, traces = _controlled_bundle(pairs)
-        from lab_runner.cp_export import bridge_analysis
+        from lab_capabilities.governance.cp_export import bridge_analysis
         analysis = bridge_analysis(bundle, "governed", traces=traces)
         self.assertEqual(analysis["paired"]["planned_pairs"], 30)
         self.assertEqual(analysis["paired"]["completed_pairs"], 24)
@@ -582,7 +583,7 @@ class TestMissingnessAwareBridge(unittest.TestCase):
         self.assertFalse(earned_bridge(bundle, traces=traces))
 
     def test_matched_receipt_names_estimand_and_missingness(self) -> None:
-        from lab_runner.cp_export import bridge_analysis
+        from lab_capabilities.governance.cp_export import bridge_analysis
 
         pairs = [(True, False)] * 24 + [(None, None)] * 6  # 6 both-failed pairs
         bundle, traces = _controlled_bundle(pairs)
@@ -612,7 +613,7 @@ class TestDesignAwareBridge(unittest.TestCase):
         shared = [f"scn-{i}" for i in range(24)]
         bundle, traces = _two_scenario_bundle({"ungoverned": shared, "governed": shared})
         self.assertTrue(earned_bridge(bundle, traces=traces))
-        from lab_runner.cp_export import bridge_analysis
+        from lab_capabilities.governance.cp_export import bridge_analysis
         analysis = bridge_analysis(bundle, "governed", traces=traces)
         self.assertEqual(analysis["comparison_design"], "matched_pairs")
         self.assertEqual(analysis["paired"]["completed_pairs"], 24)
@@ -628,7 +629,7 @@ class TestDesignAwareBridge(unittest.TestCase):
     def test_analysis_records_scenario_balance(self) -> None:
         shared = [f"scn-{i}" for i in range(24)]
         bundle, traces = _two_scenario_bundle({"ungoverned": shared, "governed": shared})
-        from lab_runner.cp_export import bridge_analysis
+        from lab_capabilities.governance.cp_export import bridge_analysis
         analysis = bridge_analysis(bundle, "governed", traces=traces)
         # every scenario appears once per arm — the receipt records the balance so a
         # reader can see the arms tested the same composition
@@ -657,7 +658,7 @@ class TestDesignAwareBridge(unittest.TestCase):
         # handoff (schema + graph + bridge), and the confounded/disjoint fixtures are
         # refused there too — proving the design gate holds on the real path, not
         # only inside earned_bridge (review r20 finding #10)
-        from lab_runner.cp_export import export_cp
+        from lab_capabilities.governance.cp_export import export_cp
 
         earn_bundle, earn_traces = _controlled_bundle([(True, False)] * 24)
         export = export_cp(earn_bundle, condition_id="governed", traces=earn_traces)
@@ -933,7 +934,7 @@ class TestExportVerifiesGraph(unittest.TestCase):
         # a graph-invalid bundle (a completed trial whose trace's own coordinates
         # disagree) is refused by export_cp, which runs the full bundle graph
         # verification rather than trusting caller discipline (review r18)
-        from lab_runner.cp_export import CPExportError, export_cp
+        from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
         bundle, traces = _real_slice_bundle()
         export_cp(bundle, condition_id="governed", traces=traces)  # clean → ok
@@ -945,7 +946,7 @@ class TestExportVerifiesGraph(unittest.TestCase):
             export_cp(bundle, condition_id="governed", traces=traces)
 
     def test_export_cp_rejects_trial_trace_coordinate_mismatch(self) -> None:
-        from lab_runner.cp_export import CPExportError, export_cp
+        from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
         bundle, traces = _real_slice_bundle()
         for trial in bundle["trials"]:
@@ -1021,7 +1022,7 @@ class TestMandatoryRuntimeProvenance(unittest.TestCase):
         # and an evidence-backed export is refused — it cannot prove the runtime
         # config it ships actually ran (review r21)
         from lab_contracts import build_bundle
-        from lab_runner.cp_export import CPExportError, export_cp
+        from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
         bundle, traces = _real_slice_bundle()
         trials = [{k: v for k, v in t.items() if k != "runtime_provenance"}
@@ -1093,7 +1094,7 @@ class TestExecutionProvenanceEnforcement(unittest.TestCase):
     def test_cp_export_carries_the_resolved_kernel_fingerprint(self) -> None:
         # the handoff records the ACTUAL resolved kernel behaviour the evidence was
         # measured on, so a reader can see the deployed kernel reproduces it (r21)
-        from lab_runner.cp_export import export_cp
+        from lab_capabilities.governance.cp_export import export_cp
 
         bundle, traces = _powered_real_bundle()
         export = export_cp(bundle, condition_id="governed", traces=traces)
@@ -1106,7 +1107,7 @@ class TestExecutionProvenanceEnforcement(unittest.TestCase):
         # would deploy a different behaviour than the one that earned the bridge (r21)
         import copy
         from lab_contracts import build_bundle
-        from lab_runner.cp_export import CPExportError, export_cp
+        from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
         bundle, traces = _powered_real_bundle()
         kernel = str(next(c for c in bundle["conditions"] if c["id"] == "governed")["kernel"])

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Axor Lab</title>
+    <!-- Inline, so there is no second request to 404. A browser asks for
+         /favicon.ico unprompted and the server has no such file; the miss is
+         harmless but it lands in the console as an error, which makes "no
+         console errors" a claim with a footnote. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23080F14'/%3E%3Cpath d='M8 23 16 9l8 14' stroke='%2300D4A4' stroke-width='3' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

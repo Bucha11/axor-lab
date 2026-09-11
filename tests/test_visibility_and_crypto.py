@@ -15,7 +15,7 @@ from pathlib import Path
 
 from tests import support
 from lab_contracts import build_bundle
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_server.errors import PublishRejected
 from lab_server.store import PublicationStore
 

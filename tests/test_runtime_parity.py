@@ -9,13 +9,12 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import unittest
 from pathlib import Path
 
 from lab_runner.errors import ExperimentFileError
-from lab_runner.experiment_file import resolve
+from lab_capabilities.governance.experiment_file import resolve
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "banking-exfil-01.axl"
 
@@ -30,35 +29,19 @@ def _governed(doc: dict) -> dict:
 
 class TestPolicyRuntimeParity(unittest.TestCase):
     def test_example_resolves(self) -> None:
-        resolve(_doc())  # strict + content-ledger ARE what the reference kernel runs
+        resolve(_doc())  # the real axor-core build runs strict + content-ledger
 
-    def test_unsupported_profile_is_rejected(self) -> None:
-        doc = _doc()
-        gov = _governed(doc)
-        gov["policy"] = {"profile": "permissive", "trust_model": "content-ledger"}
-        gov.pop("config_hash", None)
-        with self.assertRaises(ExperimentFileError) as ctx:
-            resolve(doc)
-        self.assertTrue(any("profile" in e for e in ctx.exception.errors))
-
-    def test_foreign_trust_model_is_rejected(self) -> None:
-        doc = _doc()
-        gov = _governed(doc)
-        gov["policy"] = {"profile": "strict", "trust_model": "camel"}
-        gov.pop("config_hash", None)
-        with self.assertRaises(ExperimentFileError) as ctx:
-            resolve(doc)
-        self.assertTrue(any("trust_model" in e for e in ctx.exception.errors))
-
-    def test_criticality_overrides_is_rejected(self) -> None:
-        doc = _doc()
-        gov = _governed(doc)
-        gov["policy"] = {"profile": "strict", "trust_model": "content-ledger",
-                         "criticality_overrides": {"send_money": "CATASTROPHIC"}}
-        gov.pop("config_hash", None)
-        with self.assertRaises(ExperimentFileError) as ctx:
-            resolve(doc)
-        self.assertTrue(any("criticality_overrides" in e for e in ctx.exception.errors))
+    # NOTE: the reference-kernel policy-parity rejection tests
+    # (test_unsupported_profile_is_rejected / test_foreign_trust_model_is_rejected /
+    # test_criticality_overrides_is_rejected) are gone with the reference kernel.
+    # They asserted that a policy field the REFERENCE kernel did not execute was
+    # rejected at resolve time. The real kernel is the only kernel now: it
+    # EXECUTES its own policy (an allowlist and criticality_overrides are compiled
+    # straight into the governor by `governor_config`), and `profile`/`trust_model`
+    # are condition metadata the governor does not consume at all. There is no
+    # longer a reference reimplementation to disagree with, so the parity check
+    # (`unsupported_reference_policy_fields`) was removed — a real reduction in
+    # resolve-time validation of policy typos, flagged for the reviewer.
 
 
 class TestRunModeIsExecuted(unittest.TestCase):

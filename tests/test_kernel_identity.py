@@ -10,15 +10,9 @@ from __future__ import annotations
 
 import unittest
 
-from lab_runner import (
-    REPLAY_UNSUPPORTED_KERNEL,
-    ScriptedAgent,
-    default_registry,
-    real_kernel_version,
-    replay_bundle,
-    run_trial,
-)
-from lab_runner.axor_backend import AxorKernel, axor_available, resolve_kernel
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import REPLAY_UNSUPPORTED_KERNEL, default_registry, real_kernel_version, replay_bundle, run_trial
+from lab_capabilities.governance.axor_backend import AxorKernel, axor_available, resolve_kernel
 from lab_runner.errors import UnknownKernelError
 from tests import support
 
@@ -38,10 +32,12 @@ class TestResolveKernelIdentity(unittest.TestCase):
         with self.assertRaises(UnknownKernelError):
             resolve_kernel("axor-core@0.4.2", support.manifests(), None, registry)
 
-    def test_reference_version_still_resolves_to_the_reference_kernel(self) -> None:
+    def test_a_non_real_version_is_unsupported(self) -> None:
+        # the reference kernel is gone: a version that is not an installed
+        # axor-core build no longer resolves to anything, it raises.
         registry = default_registry(("reference_taint_floor_kernel",))
-        kernel = resolve_kernel("reference_taint_floor_kernel", support.manifests(), None, registry)
-        self.assertFalse(isinstance(kernel, AxorKernel))
+        with self.assertRaises(UnknownKernelError):
+            resolve_kernel("reference_taint_floor_kernel", support.manifests(), None, registry)
 
     @unittest.skipUnless(axor_available(), "axor-core not installed")
     def test_exact_installed_build_resolves_to_the_real_kernel(self) -> None:

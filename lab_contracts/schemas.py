@@ -19,13 +19,17 @@ ENV_CONTRACTS_DIR = "AXOR_LAB_CONTRACTS"
 _SCHEMA_SUFFIX = ".schema.json"
 
 SCHEMA_NAMES = (
+    "artifact",
     "attestation",
     "bundle",
     "condition",
+    "evidence-case",
     "experiment",
     "predicate",
     "publication",
+    "regression",
     "scenario",
+    "suite",
     "tool-manifest",
     "trace",
 )

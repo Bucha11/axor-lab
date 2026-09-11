@@ -14,8 +14,8 @@ from tests import support
 from lab_adapters import available_suites, build_experiment_document, import_suite, manifests
 from lab_adapters.errors import UnknownSuiteError
 from lab_contracts import validate_scenario
-from lab_runner import default_registry, run_experiment_suite
-from lab_runner.experiment_file import resolve
+from lab_capabilities.governance import default_registry, run_experiment_suite
+from lab_capabilities.governance.experiment_file import resolve
 
 
 class TestAgentDojoAdapter(unittest.TestCase):

@@ -11,10 +11,30 @@ from __future__ import annotations
 
 import unittest
 
-from lab_runner import ValueLedger, evaluate
+from lab_contracts import content_hash
+from lab_runner import evaluate
 from lab_runner.errors import UnsupportedPredicateError
 
 KERNEL = "reference_taint_floor@0.6.3"
+
+
+def _const(value_id: str, value: object, origin_ref: str = "prompt") -> dict[str, object]:
+    """A plain trace/v1 `constant` value — the prompt-given side, replay-authoritative.
+
+    This mirrors what the wrap engine's ledger records for a constant arg
+    (`preview` + typed `decision_value` + `canonical_value_hash`); the predicate
+    evaluator reads `decision_value` (never the truncated preview) and `labels`,
+    which is exactly what these fixtures exercise.
+    """
+    text = value if isinstance(value, str) else repr(value)
+    return {
+        "value_id": value_id,
+        "preview": text[:120],
+        "decision_value": value,
+        "canonical_value_hash": content_hash(value),
+        "labels": ["prompt_given"],
+        "sources": [{"kind": "constant", "origin_ref": origin_ref}],
+    }
 
 
 def _trace(events: list[dict[str, object]], values: list[dict[str, object]]) -> dict[str, object]:
@@ -40,10 +60,8 @@ def _decision(call_id: str, verdict: str, seq: int) -> dict[str, object]:
 
 class TestCompletionIsNotFailOpen(unittest.TestCase):
     def setUp(self) -> None:
-        led = ValueLedger()
-        self.v_r = led.mint_constant("DE-LANDLORD", "prompt:r")
-        self.v_a = led.mint_constant(1200, "prompt:a")
-        self.values = led.values
+        self.v_r, self.v_a = "v_const_r", "v_const_a"
+        self.values = [_const(self.v_r, "DE-LANDLORD"), _const(self.v_a, 1200)]
         self.bind = {"recipient": self.v_r, "amount": self.v_a}
         self.predicate = {"event": "tool_call", "tool": "send_money"}
 
@@ -64,15 +82,14 @@ class TestCompletionIsNotFailOpen(unittest.TestCase):
 
 class TestCountCardinality(unittest.TestCase):
     def _two_allowed_sends(self) -> dict[str, object]:
-        led = ValueLedger()
-        v_r = led.mint_constant("DE-LANDLORD", "prompt:r")
-        v_a = led.mint_constant(1200, "prompt:a")
+        v_r, v_a = "v_const_r", "v_const_a"
+        values = [_const(v_r, "DE-LANDLORD"), _const(v_a, 1200)]
         bind = {"recipient": v_r, "amount": v_a}
         events = [
             _send("c0", bind, 0), _decision("c0", "ALLOW", 1),
             _send("c1", bind, 2), _decision("c1", "ALLOW", 3),
         ]
-        return _trace(events, led.values)
+        return _trace(events, values)
 
     def test_default_is_at_least_one(self) -> None:
         self.assertTrue(evaluate({"event": "tool_call", "tool": "send_money"}, self._two_allowed_sends(), {}))
@@ -92,11 +109,10 @@ class TestCountCardinality(unittest.TestCase):
 
 class TestRegexAndTypedEquality(unittest.TestCase):
     def _trace_with_recipient(self, value: object) -> dict[str, object]:
-        led = ValueLedger()
-        v_r = led.mint_constant(value, "prompt:r")
-        v_a = led.mint_constant(1200, "prompt:a")
+        v_r, v_a = "v_const_r", "v_const_a"
+        values = [_const(v_r, value), _const(v_a, 1200)]
         bind = {"recipient": v_r, "amount": v_a}
-        return _trace([_send("c0", bind, 0), _decision("c0", "ALLOW", 1)], led.values)
+        return _trace([_send("c0", bind, 0), _decision("c0", "ALLOW", 1)], values)
 
     def test_invalid_regex_is_a_predicate_error_not_a_crash(self) -> None:
         pred = {"event": "tool_call", "tool": "send_money",

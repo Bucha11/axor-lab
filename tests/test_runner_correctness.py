@@ -5,25 +5,30 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import KernelRegistry, ScriptedAgent, run_experiment, run_trial
-from lab_runner.experiment_file import resolve
-from lab_runner.ledger import ValueLedger
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_experiment, run_trial
+from lab_capabilities.governance.experiment_file import resolve
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
+
+# The wrap engine's redaction marker for a sensitive value's preview — the same
+# string Lab's deleted ledger used, now emitted by axor-wrap into the trace.
+REDACTED_PREVIEW = "[redacted]"
 
 
 class TestProvenanceScoping(unittest.TestCase):
     """§4.2 — the conservative join is scoped to the call's context."""
 
-    def test_join_uses_only_context_values_not_all_untrusted(self) -> None:
-        ledger = ValueLedger()
-        v_in_context = ledger.mint_external_read("injection", "tool:read:a")
-        v_out_of_context = ledger.mint_external_read("other", "tool:read:b")
-        # a model call that only saw v_in_context
-        v_model = ledger.mint_model_extraction("DE89…", context_value_ids=(v_in_context,))
-        derived = ledger.get(v_model)["derived_from"]
-        self.assertIn(v_in_context, derived)
-        self.assertNotIn(v_out_of_context, derived)  # not joined over the whole ledger
+    # `test_join_uses_only_context_values_not_all_untrusted` was deleted: it
+    # exercised Lab's deleted `ValueLedger.mint_model_extraction(context_value_ids=…)`
+    # directly, feeding a model call a strict SUBSET of the minted untrusted
+    # values to prove the join scopes to the context the model saw rather than
+    # joining over the whole ledger. That scoping is now the wrap engine's, and
+    # no available scenario makes the model see only some of the reads (the
+    # banking slice's model consumes both reads), so there is no wrap-built trace
+    # to assert the subset case against. The live half — the recipient is
+    # untrusted-derived from the read it saw — is kept by
+    # `test_slice_trace_still_taints_the_recipient` below.
 
     def test_slice_trace_still_taints_the_recipient(self) -> None:
         outcome = run_trial(
@@ -171,9 +176,6 @@ class TestSensitiveFieldRedaction(unittest.TestCase):
     """§7.4 — a manifest-declared sensitive field is redacted in the trace."""
 
     def test_sensitive_untrusted_field_is_redacted(self) -> None:
-        from lab_runner import ValueLedger
-        from lab_runner.ledger import REDACTED_PREVIEW
-
         mans = support.manifests()
         mans["read_txns"]["sensitive_fields"] = ["result.transactions[].description"]
         outcome = run_trial(

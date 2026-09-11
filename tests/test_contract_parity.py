@@ -8,13 +8,12 @@ schema-valid yet runtime-invalid; and a wrong config_hash is caught on resolve.
 
 from __future__ import annotations
 
-import copy
 import unittest
 
 from tests import support
 from lab_contracts import ScenarioValidationError, load_schemas, validate_scenario
 from lab_contracts.subset_validator import validate_against
-from lab_runner.experiment_file import ExperimentFileError, resolve
+from lab_capabilities.governance.experiment_file import ExperimentFileError, resolve
 
 
 def _schemas():
@@ -31,11 +30,39 @@ class TestValidatorConstraints(unittest.TestCase):
         errors = validate_against(exp, "experiment", _schemas())
         self.assertTrue(any("minimum" in e for e in errors), errors)
 
-    def test_single_condition_is_rejected(self) -> None:
+    def test_no_conditions_is_a_valid_single_arm_experiment(self) -> None:
+        """Governance is optional (Suite Platform RFC §10).
+
+        The schema used to require ≥2 conditions, which made "just run my agent
+        and observe it" — the platform's primary workflow — unrepresentable.
+        Omitting conditions is now a single-arm run, not an error.
+        """
         exp = {
             "schema_version": "experiment/v1", "id": "e", "type": "benchmark",
             "scenario_ids": ["s"], "repeats": 5, "agent_ref": "scripted",
-            "conditions": [support.conditions()[0]],  # only 1, schema requires ≥2
+        }
+        self.assertEqual(validate_against(exp, "experiment", _schemas()), [])
+
+    def test_one_condition_is_valid(self) -> None:
+        """One condition pins a single configuration explicitly. It is a legal
+        experiment; what it cannot support is a COMPARISON claim, and that is
+        enforced where the claim is made (the analysis / bridge), not here."""
+        exp = {
+            "schema_version": "experiment/v1", "id": "e", "type": "benchmark",
+            "scenario_ids": ["s"], "repeats": 5, "agent_ref": "scripted",
+            "conditions": [support.conditions()[0]],
+        }
+        self.assertEqual(validate_against(exp, "experiment", _schemas()), [])
+
+    def test_empty_conditions_array_is_rejected(self) -> None:
+        """Relaxing to minItems 1 must not degrade into "anything goes": an
+        explicitly EMPTY array is an authoring mistake (omit the key instead),
+        and it is the one shape that would otherwise read as "I declared
+        conditions" while carrying none."""
+        exp = {
+            "schema_version": "experiment/v1", "id": "e", "type": "benchmark",
+            "scenario_ids": ["s"], "repeats": 5, "agent_ref": "scripted",
+            "conditions": [],
         }
         errors = validate_against(exp, "experiment", _schemas())
         self.assertTrue(any("minItems" in e for e in errors), errors)

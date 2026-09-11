@@ -27,7 +27,7 @@ from lab_contracts.signing import (
     signed_ref,
     verify_receipt,
 )
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_runner.bundle_io import read_bundle_package
 from lab_server import make_server
 
@@ -192,6 +192,23 @@ class TestCliVerify(unittest.TestCase):
             bad.write_text(json.dumps({"bundle": bundle, "traces": {"not": "a list"}}))
             with self.assertRaises(RunnerError):
                 read_bundle_package(bad)
+
+    def test_an_artifact_file_points_at_where_the_traces_are(self) -> None:
+        """`run-suite` prints the artifact as the deliverable, so a user aims
+        verify/replay at it. An artifact embeds trace hashes, not bodies — the
+        error says exactly that instead of the generic 'not a package'."""
+        from lab_runner.errors import RunnerError
+
+        bundle, _ = _publishable_bundle()
+        artifact = {"schema_version": "artifact/v1", "artifact_id": "a",
+                    "created": "2026-08-09T00:00:00Z", "bundle": bundle}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "artifact.json"
+            path.write_text(json.dumps(artifact))
+            with self.assertRaises(RunnerError) as ctx:
+                read_bundle_package(path)
+            self.assertIn("artifact/v1", str(ctx.exception))
+            self.assertIn("bundle", str(ctx.exception).lower())
 
 
 @unittest.skipUnless(_HAS_NACL, "PyNaCl not installed")

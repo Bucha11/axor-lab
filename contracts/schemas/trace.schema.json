@@ -57,8 +57,7 @@
       "description": "who produced this trace and with what provenance capability \u2014 this is the honesty boundary for what the trace can support",
       "required": [
         "mode",
-        "provenance_fidelity",
-        "kernel_version"
+        "provenance_fidelity"
       ],
       "additionalProperties": false,
       "properties": {
@@ -79,7 +78,7 @@
         },
         "kernel_version": {
           "type": "string",
-          "description": "e.g. axor-core@0.4.2 \u2014 load-bearing: the same trace under a different decide can yield a different verdict"
+          "description": "e.g. axor-core@0.4.2 \u2014 load-bearing: the same trace under a different decide can yield a different verdict. OPTIONAL: absent means no gate ran (an observe-only trial). A trace that omits it must carry no gate_decision events, and its condition must omit `kernel` too \u2014 the three travel together so a gate-free run can never be mistaken for an all-ALLOW governed one."
         },
         "runtime": {
           "type": "string",
@@ -117,17 +116,48 @@
       "additionalProperties": false,
       "allOf": [
         {
-          "$comment": "discriminated by type: each event variant requires its load-bearing fields, so a gate_decision without a decision or a tool_call_intent without tool/arg_bindings is rejected (review §3.4)",
-          "if": { "properties": { "type": { "const": "gate_decision" } } },
-          "then": { "required": ["decision"] }
+          "$comment": "discriminated by type: each event variant requires its load-bearing fields, so a gate_decision without a decision or a tool_call_intent without tool/arg_bindings is rejected (review \u00a73.4)",
+          "if": {
+            "properties": {
+              "type": {
+                "const": "gate_decision"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "decision"
+            ]
+          }
         },
         {
-          "if": { "properties": { "type": { "const": "tool_call_intent" } } },
-          "then": { "required": ["tool", "arg_bindings"] }
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tool_call_intent"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tool",
+              "arg_bindings"
+            ]
+          }
         },
         {
-          "if": { "properties": { "type": { "const": "tool_result" } } },
-          "then": { "required": ["tool"] }
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tool_result"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tool"
+            ]
+          }
         }
       ],
       "properties": {
@@ -202,7 +232,14 @@
         },
         "decision_value": {
           "description": "the EXACT typed value the gate evaluated (the replay-authoritative projection): string, number, boolean, null, array, or object. Distinct from `preview`, which is a truncated UI string. Replay reconstructs the gate's arguments from this, NEVER from `preview`. MAY be omitted for a sensitive value, in which case `canonical_value_hash` pins it and any effect/policy that turns on the value cannot be replayed exactly.",
-          "type": ["string", "number", "boolean", "null", "array", "object"]
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null",
+            "array",
+            "object"
+          ]
         },
         "canonical_value_hash": {
           "type": "string",
@@ -284,6 +321,10 @@
             "DENY"
           ]
         },
+        "enforced": {
+          "type": "boolean",
+          "description": "whether this verdict was OBEYED. Absent means true (every legacy trace was enforced). `verdict` is what the kernel decided; `enforced` is whether the runtime acted on it. An observe-only arm records the real DENY with enforced=false and executes anyway \u2014 which is what makes ungoverned/governed one machine under two policies rather than two different machines. A consumer asking 'did this call run?' reads verdict==ALLOW or enforced==false."
+        },
         "gate": {
           "enum": [
             "capability",
@@ -294,12 +335,17 @@
             "positional",
             "carrier",
             "taint_floor",
-            "adjudicator"
+            "adjudicator",
+            "message",
+            "budget"
           ],
-          "description": "the paper's 9-gate sequence; a DENY names the first gate that denied"
+          "description": "the gate that reached this verdict; a DENY names the first gate that denied. The names are axor-core's own (axor_core.governor.GATE_OF_CATEGORY maps its denial categories onto them), so a kernel that can deny for a reason has a gate name for it here \u2014 `budget` and `message` were missing, and a denial for either wrote a trace that failed this schema."
         },
         "driving_value_id": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "the argument value the verdict turned on; links the decision to its provenance in the ledger. null ONLY for a fail-closed DENY where no provenance value exists (see driving_unresolved)."
         },
         "projection": {
@@ -312,10 +358,19 @@
         "driving_unresolved": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind"],
+          "required": [
+            "kind"
+          ],
           "properties": {
-            "kind": { "enum": ["no_driving_args", "unresolved_argument"] },
-            "arg": { "type": "string" }
+            "kind": {
+              "enum": [
+                "no_driving_args",
+                "unresolved_argument"
+              ]
+            },
+            "arg": {
+              "type": "string"
+            }
           },
           "description": "present ONLY on a fail-closed DENY whose driving_value_id is null: why no provenance value could be resolved."
         }

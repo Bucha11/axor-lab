@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Re-run when a new axor-core is published: the kernel is a required
+  # dependency, so a release can change what Lab resolves and how the
+  # real-kernel evidence behaves. axor-core's publish job fans this out.
+  repository_dispatch:
+    types: [axor-core-published]
+  workflow_dispatch:
 
 jobs:
   contracts:
@@ -37,8 +43,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Run acceptance tests (stdlib only, no dependencies)
+      # axor-core is a REQUIRED dependency, so the acceptance suite must run
+      # with it present. It ran without it, which meant every real-kernel test
+      # SKIPPED here — and a bug on the loop's real-kernel gate that let the
+      # governed arm allow an exfiltration was invisible to this job.
+      - name: Install (pulls axor-core, the required kernel)
+        run: pip install -e .
+      - name: Run acceptance tests
         run: python -m unittest discover -s tests -t . -v
+      # No hand-maintained module list. Every @skipUnless(axor_available()) test
+      # is found by discovery, so a NEW real-kernel test is covered the moment it
+      # is written — a list is what let `test_general_loop_real_kernel` not exist
+      # for as long as it didn't.
+      - name: No axor-core test may skip with axor-core installed
+        run: |
+          python - <<'PY'
+          import io, sys, unittest
+          from lab_capabilities.governance import axor_available
+          assert axor_available(), "axor-core is a required dependency but did not import"
+          result = unittest.TextTestRunner(stream=io.StringIO()).run(
+              unittest.TestLoader().discover("tests", top_level_dir=".")
+          )
+          missing = [(t, r) for t, r in result.skipped if "axor-core" in r]
+          for test, reason in missing:
+              print(f"::error::skipped {test}: {reason}", file=sys.stderr)
+          sys.exit(bool(missing) and "a real-kernel test skipped with axor-core installed")
+          PY
       - name: Smoke-check the shipped example resolves
         run: python -m lab_runner validate examples/banking-exfil-01.axl
 
@@ -53,7 +83,7 @@ jobs:
       - name: ruff (pyflakes + bugbear; no style noise)
         run: |
           pip install ruff
-          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_agent
+          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_suite lab_capabilities
 
   determinism:
     name: Replay determinism matrix (${{ matrix.os }})
@@ -66,6 +96,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Replay drives the REAL kernel (the fixtures pin `real_kernel_version()`),
+      # so axor-core must be installed here too — otherwise the replay worker
+      # subprocess resolves a None kernel and dies before it can be bit-identical.
+      - name: Install (pulls axor-core, the pinned kernel)
+        run: pip install -e .
       - name: Replay must be bit-identical (pinned kernel, cross-OS)
         run: python -m unittest tests.test_acceptance_05_replay_exact -v
 
@@ -77,6 +112,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # axor-core is a REQUIRED dependency: the AgentDojo fixtures pin the REAL
+      # kernel (`support.KERNEL_PINNED = real_kernel_version()`), which is None
+      # without axor-core installed — so every condition's `kernel`/`config_hash`
+      # goes NoneType and validation fails. Install the package so the kernel is
+      # a real build, not absent.
+      - name: Install (pulls axor-core, the required kernel)
+        run: pip install -e .
       - name: A schema change that breaks the slice examples or AgentDojo import fails CI
         run: |
           cd contracts && python validate_slice.py && cd ..
@@ -100,38 +142,60 @@ jobs:
         # here — not just test_real_kernel — so a real-kernel regression on the
         # endpoint or replay surfaces cannot hide behind a stdlib-job skip.
         run: |
-          # PIN the kernel to an EXACT version (review r20): a floating ">=0.9"
+          # PIN the kernel to an EXACT version (review r20): a floating range
           # lets a future axor-core release drift into the integration job, so a
           # green run no longer proves the SAME kernel the evidence was measured
           # against still behaves. Bump this deliberately, with the suites re-run.
-          pip install "axor-core==0.9.2"
+          # Bumped 0.9.2 -> 0.10.0: axor-wrap requires >=0.10,<0.11, so pinning
+          # 0.9.2 here meant Lab's real-kernel evidence was measured against a
+          # kernel nobody in the ecosystem actually runs. Full suite re-run green.
+          # Bumped 0.10.0 -> 0.10.2: the governance extraction (gate_of) and the
+          # wrap trace (ToolCallGovernor.trace_events) need the 0.10.2 kernel.
+          pip install "axor-core==0.10.2"
+          # Lab's runner now imports axor-wrap (the shared wrapping engine), so it
+          # must be present for discovery to import at all. Install it AFTER the
+          # exact axor-core pin, from the same public branch the wrap-integration
+          # job uses; its own axor-core>=0.10.2,<0.11 is already satisfied by the
+          # pinned 0.10.2, so pip leaves the pinned kernel untouched.
+          pip install "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m"
+          # axor-eval too: the tool-fabrication experiment (and its test, picked up
+          # by discovery here) imports it. Same public-repo git pin as everywhere
+          # else; its axor-core>=0.8,<0.11 is satisfied by the pinned 0.10.2.
+          pip install "axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
-          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.9.2' else 'axor-core version drift: expected 0.9.2, got ' + axor_core.__version__)"
-          python -c "from lab_runner import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
+          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.10.2' else 'axor-core version drift: expected 0.10.2, got ' + axor_core.__version__)"
+          python -c "from lab_capabilities.governance import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.
+          # the WHOLE suite, not a hand-listed subset. The list here named three
+          # modules and silently excluded every real-kernel test written after it
+          # was last edited — which is how the general loop went unexercised
+          # against axor-core while this job stayed green.
           set +e
-          python -m unittest -v \
-            tests.test_real_kernel \
-            tests.test_replay_capability \
-            tests.test_regress_candidate_kernel > real_kernel.log 2>&1
+          python -m unittest discover -s tests -t . -v > real_kernel.log 2>&1
           rc=$?
           set -e
           cat real_kernel.log
           test "$rc" -eq 0 || { echo "::error::real-kernel suites failed"; exit "$rc"; }
-          # FAIL on an unexpected skip: with axor-core installed, none of these
-          # real-kernel-gated tests may skip. A silent skip here would hide a
+          # FAIL on an unexpected skip: with axor-core installed, no
+          # real-kernel-gated test may skip. A silent skip here would hide a
           # regression behind a green job, exactly what this job exists to prevent
-          # (review r19). (The stdlib job legitimately skips them; this one must not.)
+          # (review r19).
+          #
+          # Matched on the skip REASON, not on a total count: now that the whole
+          # suite runs here, unrelated skips (the PyNaCl-absent path) are expected
+          # and a bare count would either fail on them or have to be tuned to a
+          # magic number that drifts.
           python - <<'PY'
           import re, sys
           log = open("real_kernel.log").read()
-          m = re.search(r"skipped=(\d+)", log)
-          skipped = int(m.group(1)) if m else 0
-          if skipped:
-              print(f"::error::{skipped} real-kernel test(s) skipped with axor-core installed", file=sys.stderr)
-              sys.exit(1)
-          print("no unexpected skips in the real-kernel suites")
+          offenders = [line for line in log.splitlines()
+                       if "skipped" in line and "axor-core" in line]
+          for line in offenders:
+              print(f"::error::{line}", file=sys.stderr)
+          if offenders:
+              sys.exit("real-kernel test(s) skipped with axor-core installed")
+          print("no real-kernel skips")
           PY
 
   crypto:
@@ -149,6 +213,11 @@ jobs:
         # portable receipt, server acceptance, reproduction-package and
         # verification-outcome proofs, not just the two original suites (r18).
         run: |
+          # axor-core is a REQUIRED dependency and the signing fixtures pin the
+          # REAL kernel (`support.KERNEL_PINNED`), so the package must be installed
+          # or every bundle the signing tests publish fails schema validation with
+          # a NoneType kernel — long before any signature is checked.
+          pip install -e .
           pip install "pynacl>=1.5"
           python -c "import importlib.util as u; assert u.find_spec('nacl'), 'PyNaCl must be present so the crypto tests RUN, not skip'"
           # capture the run's exit code AND output (no pipe, so a FAILURE still
@@ -179,6 +248,51 @@ jobs:
           print("no unexpected skips in the crypto suites")
           PY
 
+  wrap-integration:
+    name: A trace built by axor-wrap is one Lab accepts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Lab is the CONSUMER of the trace a wrapped runtime pushes. Without this
+      # job the seam is untested from both sides: wrap checks the shape it emits
+      # against its own expectations, and Lab checks traces it produced itself.
+      # A schema change on either side would pass both suites and break the one
+      # path that matters — bring your own agent.
+      - name: Install Lab + axor-wrap
+        # The cross-repo trace test needs the CURRENT wrap surface
+        # (`toolset_for_arm`, `trial_of`), which the published axor-wrap 0.1.0 on
+        # PyPI predates — installing `axor-wrap>=0.1` there imports a wrap without
+        # it and every test in the suite errors at setUp. Pin the integration
+        # branch (axor-wrap is public, so this clones tokenless); its own
+        # `axor-core>=0.10.2,<0.11` resolves to the same 0.10.2 Lab pins.
+        # Switch back to a PyPI pin once axor-wrap cuts a release carrying it.
+        run: |
+          pip install -e .
+          pip install "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m"
+          python -c "import axor_wrap, axor_core; print('axor-wrap', axor_wrap.__version__, '| axor-core', axor_core.__version__)"
+      - name: The cross-repo acceptance test must RUN, not skip
+        run: |
+          set +e
+          python -m unittest -v tests.test_wrap_produced_trace > wrap.log 2>&1
+          rc=$?
+          set -e
+          cat wrap.log
+          test "$rc" -eq 0 || { echo "::error::wrap integration failed"; exit "$rc"; }
+          python - <<'PY'
+          import re, sys
+          log = open("wrap.log").read()
+          skipped = int((re.search(r"skipped=(\d+)", log) or [0, 0])[1] or 0)
+          ran = int((re.search(r"^Ran (\d+) test", log, re.M) or [0, 0])[1] or 0)
+          if skipped or not ran:
+              print(f"::error::{skipped} skipped / {ran} run — axor-wrap did not import",
+                    file=sys.stderr)
+              sys.exit(1)
+          print(f"{ran} cross-repo test(s) ran, none skipped")
+          PY
+
   packaging:
     name: Wheel installs and runs outside the checkout
     runs-on: ubuntu-latest
@@ -201,3 +315,122 @@ jobs:
           print('schemas loaded from package data:', len(s))
           "
           cd / && /tmp/venv/bin/axor-lab --help >/dev/null && echo 'axor-lab console script works'
+
+  identity:
+    name: Identity-login tests actually run (pyjwt + cryptography)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The identity-login suite is @importorskip-gated on pyjwt + cryptography
+      # (the `identity` extra). The acceptance job installs the base package, so
+      # those tests SKIP there — this job installs the extra so they RUN, the
+      # same "a gated suite must not silently skip in CI" posture as the crypto
+      # and wrap jobs.
+      - name: Install Lab with the identity extra
+        run: |
+          pip install -e ".[identity]"
+          python -c "import jwt, cryptography; print('pyjwt', jwt.__version__)"
+      - name: The identity token + serve-flag tests must RUN, not skip
+        run: |
+          set +e
+          python -m unittest -v \
+            tests.test_identity_login \
+            tests.test_serve_identity_cli > identity.log 2>&1
+          rc=$?
+          set -e
+          cat identity.log
+          test "$rc" -eq 0 || { echo "::error::identity suites failed"; exit "$rc"; }
+          python - <<'PY'
+          import re, sys
+          log = open("identity.log").read()
+          skipped = int((re.search(r"skipped=(\d+)", log) or [0, 0])[1] or 0)
+          ran = int((re.search(r"^Ran (\d+) test", log, re.M) or [0, 0])[1] or 0)
+          if skipped or not ran:
+              print(f"::error::{skipped} skipped / {ran} ran — pyjwt/cryptography missing",
+                    file=sys.stderr)
+              sys.exit(1)
+          print(f"{ran} identity test(s) ran, none skipped")
+          PY
+
+  yaml:
+    name: YAML-mode tests actually run (PyYAML installed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # PyYAML is the `yaml` extra, so the round-trip + entry-point YAML tests
+      # SKIP in the base acceptance job — this job installs the extra so they
+      # RUN, the same "a gated suite must not silently skip in CI" posture as the
+      # crypto, wrap and identity jobs.
+      - name: Install Lab with the yaml extra
+        run: |
+          pip install -e ".[yaml]"
+          python -c "import yaml; print('PyYAML', yaml.__version__)"
+      - name: The YAML round-trip + entry-point tests must RUN, not skip
+        run: |
+          set +e
+          python -m unittest -v \
+            tests.test_yaml_mode_round_trip \
+            tests.test_suite_entry_points \
+            tests.test_screen_api > yaml.log 2>&1
+          rc=$?
+          set -e
+          cat yaml.log
+          test "$rc" -eq 0 || { echo "::error::yaml suites failed"; exit "$rc"; }
+          python - <<'PY'
+          import re, sys
+          log = open("yaml.log").read()
+          # a YAML test that skips here means PyYAML did not import — the exact
+          # false-green (a silent skip on a gated suite) this job exists to catch.
+          offenders = [line for line in log.splitlines()
+                       if "skipped" in line and "yaml" in line.lower()]
+          for line in offenders:
+              print(f"::error::{line}", file=sys.stderr)
+          if offenders:
+              sys.exit("YAML test(s) skipped with PyYAML installed")
+          print("no YAML skips")
+          PY
+
+  web:
+    name: Web (vitest + build + Playwright e2e)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Unit tests (vitest)
+        run: npm test
+      # `npm run build` is `tsc -b && vite build`, so a type error fails here —
+      # not only the app but the strict build the earlier login regression hid
+      # behind `tsc --noEmit`.
+      - name: Typecheck + build
+        run: npm run build
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      # The Playwright webServer starts the Vite dev server; every screen is
+      # stubbed per test (page.route), so no lab_server is needed.
+      - name: Playwright e2e
+        run: npm run e2e
+        env:
+          CI: "1"
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-playwright-traces
+          path: web/test-results
+          if-no-files-found: ignore
+          retention-days: 7

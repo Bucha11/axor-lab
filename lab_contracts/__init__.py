@@ -7,6 +7,13 @@ publication claims. Execution lives in lab_runner; statistics in
 lab_analysis.
 """
 
+from .artifact import (
+    REPRODUCIBILITY_EXACT,
+    REPRODUCIBILITY_NONE,
+    REPRODUCIBILITY_STATISTICAL,
+    build_artifact,
+    reproducibility_of,
+)
 from .bundle import (
     build_bundle,
     config_provenance,
@@ -63,6 +70,11 @@ __all__ = [
     "add_reproduction",
     "derive_publication_id",
     "finalize_publication_id",
+    "REPRODUCIBILITY_EXACT",
+    "REPRODUCIBILITY_NONE",
+    "REPRODUCIBILITY_STATISTICAL",
+    "build_artifact",
+    "reproducibility_of",
     "build_bundle",
     "CONFIG_COMPILER_VERSION",
     "config_provenance",

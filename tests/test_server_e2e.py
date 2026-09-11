@@ -20,7 +20,7 @@ from pathlib import Path
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_server import make_server
 
 REPEATS = 8
@@ -118,8 +118,8 @@ class TestServerEndToEnd(unittest.TestCase):
         # the reproduce command on the page must actually work: the download
         # returns the bundle + every trace, and axor-lab replay consumes it (r13)
         from lab_runner.bundle_io import read_bundle_package
-        from lab_runner.replay import replay_bundle
-        from lab_runner import default_registry
+        from lab_capabilities.governance.replay import replay_bundle
+        from lab_capabilities.governance import default_registry
 
         pid = self._publish()
         status, pkg = self._get_json(f"/api/publications/{pid}/bundle")

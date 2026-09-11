@@ -16,8 +16,8 @@ import unittest
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle, condition_config_hash, content_hash
-from lab_runner import run_experiment_suite
-from lab_runner.cp_export import (
+from lab_capabilities.governance import run_experiment_suite
+from lab_capabilities.governance.cp_export import (
     PRODUCTION_TODO,
     CPExportError,
     earned_bridge,
@@ -62,10 +62,19 @@ def _bundle(governance_helps: bool = True) -> dict[str, object]:
 
 
 def _denied_trace(traces: dict) -> dict:
+    """A trace whose denial was ENFORCED — i.e. from the governed arm.
+
+    Matching on `verdict == "DENY"` alone used to be equivalent, because only a
+    governed arm produced denials. It no longer is: the observe-only arm records
+    the same verdicts and executes anyway, so a bare verdict match picks an
+    ungoverned trace and pins a CP regression on a run that contained nothing.
+    """
+    from lab_runner.verdicts import contained
+
     return next(
         t for t in traces.values()
         if any(
-            e.get("type") == "gate_decision" and e["decision"]["verdict"] == "DENY"
+            e.get("type") == "gate_decision" and contained(e["decision"])
             for e in t["events"]
         )
     )
@@ -106,7 +115,7 @@ class TestCPExport(unittest.TestCase):
         bundle, traces = _bundle_and_traces()
         trace = _denied_trace(traces)
         pin = {"trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
-               "expected_verdict": "DENY", "expected_sequence": ["DENY"]}
+               "expected_verdict": "DENY", "expected_sequence": ["ALLOW", "DENY"]}
         export = export_cp(bundle, regressions=[pin], traces=traces)
         carried = export.config["regressions"]
         self.assertEqual(len(carried), 1)  # type: ignore[arg-type]
@@ -114,7 +123,7 @@ class TestCPExport(unittest.TestCase):
         self.assertEqual(got["trace_id"], str(trace["trace_id"]))
         self.assertEqual(got["trace_ref"], content_hash(trace))
         self.assertEqual(got["expected_verdict"], "DENY")
-        self.assertEqual(got["expected_sequence"], ["DENY"])
+        self.assertEqual(got["expected_sequence"], ["ALLOW", "DENY"])
         # the pin now records WHICH scenario/condition it re-runs, from the trial
         self.assertEqual(got["condition_id"], "governed")
         self.assertIn("scenario_id", got)
@@ -166,7 +175,7 @@ class TestCPExport(unittest.TestCase):
             pins = root / "pins.json"
             pins.write_text(json.dumps([{
                 "trace_id": str(trace["trace_id"]), "trace_ref": content_hash(trace),
-                "expected_verdict": "DENY", "expected_sequence": ["DENY"],
+                "expected_verdict": "DENY", "expected_sequence": ["ALLOW", "DENY"],
             }]))
             out = root / "cp"
             result = subprocess.run(

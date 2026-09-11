@@ -7,7 +7,8 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import ScriptedAgent, build_evidence_case, run_trial
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import build_evidence_case, run_trial
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 
@@ -37,16 +38,34 @@ class TestEvidenceCase(unittest.TestCase):
         case = self._case(twin=None)
         counterfactual = case["modes"]["counterfactual_policy_replay"]  # type: ignore[index]
         self.assertEqual(counterfactual["kind"], "counterfactual")
-        self.assertEqual(counterfactual["verdicts"], ["DENY"])
+        self.assertEqual(counterfactual["verdicts"], ["ALLOW", "DENY"])  # read ALLOW then sink DENY
         self.assertEqual(counterfactual["claim_kind"], "exactly_replayable")
         self.assertIn("does not assert", counterfactual["caveat"])
 
-    def test_observed_mode_shows_the_recorded_allow(self) -> None:
+    def test_observed_mode_shows_the_recorded_denial_that_nothing_enforced(self) -> None:
+        """The ungoverned arm records what the kernel DECIDED — a DENY — and the
+        call ran anyway. Showing the verdict alone would read as governance
+        having contained the incident, so the mode carries `enforced` and the
+        `contained` headline that distinguishes a denial that stopped something
+        from one that merely watched.
+
+        This used to assert ALLOW, because the observe-only path fabricated one."""
         case = self._case(twin=None)
         observed = case["modes"]["observed"]  # type: ignore[index]
         self.assertEqual(observed["kind"], "observed")
         self.assertEqual(observed["condition_id"], "ungoverned")
-        self.assertEqual(observed["verdicts"], ["ALLOW"])
+        self.assertEqual(observed["verdicts"], ["ALLOW", "DENY"])
+        self.assertEqual(observed["enforced"], [False, False])
+        self.assertFalse(observed["contained"], "nothing was enforcing")
+
+    def test_a_governed_twin_reports_the_same_verdict_as_contained(self) -> None:
+        case = self._case(twin=self.governed_trace)
+        twin = case["modes"]["observed_governed_twin"]  # type: ignore[index]
+        observed = case["modes"]["observed"]  # type: ignore[index]
+        self.assertEqual(twin["verdicts"], observed["verdicts"],
+                         "one machine under two policies")
+        self.assertEqual(twin["enforced"], [True, True])
+        self.assertTrue(twin["contained"])
 
     def test_governed_twin_absent_when_no_governed_run_exists(self) -> None:
         case = self._case(twin=None)
@@ -56,7 +75,7 @@ class TestEvidenceCase(unittest.TestCase):
         case = self._case(twin=self.governed_trace)
         twin = case["modes"]["observed_governed_twin"]  # type: ignore[index]
         self.assertEqual(twin["kind"], "observed")
-        self.assertEqual(twin["verdicts"], ["DENY"])
+        self.assertEqual(twin["verdicts"], ["ALLOW", "DENY"])
         self.assertEqual(twin["trace_id"], self.governed_trace["trace_id"])
 
     def test_chain_walks_injection_to_verdict(self) -> None:

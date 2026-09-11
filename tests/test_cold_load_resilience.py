@@ -11,7 +11,6 @@ skipped.
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,7 +18,7 @@ from pathlib import Path
 from tests import support
 from lab_contracts import build_bundle
 from lab_contracts.publication import rebuild_reproduction_log
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_server.store import PublicationStore
 
 CREATED = "2026-07-19T12:00:00+00:00"

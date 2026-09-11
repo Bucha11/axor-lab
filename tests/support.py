@@ -12,14 +12,15 @@ CONTRACTS_DIR = REPO_ROOT / "contracts"
 sys.path.insert(0, str(REPO_ROOT))
 
 from lab_contracts import condition_config_hash, validate_artifact  # noqa: E402
-from lab_runner import Kernel, KernelRegistry  # noqa: E402
+from lab_capabilities.governance import AxorKernel, KernelRegistry
 
-# the standard slice runs the REFERENCE kernel and says so — it must not pin a
-# fake `axor-core@X` that (before r16) silently fell back to the reference kernel
-# while claiming a real build. Real-kernel behavior is exercised separately with
-# the actually-installed build (test_real_kernel).
-KERNEL_PINNED = "reference_taint_floor_kernel"
-KERNEL_NO_TAINT_FLOOR = "reference_taint_floor_kernel+variant-no-taint-floor"
+# The slice runs the REAL installed axor-core — the only kernel there is. The
+# reference kernel and its toggleable variants are gone; a genuine behavioral
+# variant (for regression demonstrations) is the same build with its taint floor
+# disarmed, and its fingerprint says so.
+from lab_capabilities.governance.axor_backend import governor_config, real_kernel_version
+KERNEL_PINNED = real_kernel_version()
+KERNEL_NO_TAINT_FLOOR = f"{KERNEL_PINNED}+taint_floor=off"
 
 
 def schema_errors(obj: dict[str, object], schema_name: str) -> list[str]:
@@ -153,11 +154,46 @@ def conditions() -> list[dict[str, object]]:
     ]
 
 
+def real_kernel(
+    policy: dict[str, object] | None = None,
+    *,
+    taint_floor: bool = True,
+    version: str | None = None,
+) -> AxorKernel:
+    """The installed axor-core as an `AxorKernel`, config compiled from the
+    banking scenario's manifests + `policy`.
+
+    `taint_floor=False` is the regression VARIANT: the SAME build (same version
+    string) with its egress-sink declarations dropped, so the governor never arms
+    the floor and the exfiltration a pinned run denied is allowed. Its behavior
+    fingerprint says so (`+taint_floor=off`) even though the version is
+    unchanged — a behavior-changing flag is part of identity."""
+    cfg = governor_config(manifests(), policy, banking_scenario()["inputs"])
+    if not taint_floor:
+        cfg = {k: v for k, v in cfg.items() if k not in ("egress_sinks", "value_policies")}
+    return AxorKernel(
+        version=str(version or KERNEL_PINNED), config=cfg, taint_floor_enabled=taint_floor,
+    )
+
+
 def kernel_registry() -> KernelRegistry:
+    """The real kernel, plus a taint-floor-disarmed VARIANT of it.
+
+    The variant is the same installed build with its egress-sink declarations
+    dropped, so the governor never arms the confidentiality/taint floor and the
+    exfiltration a pinned run denied is allowed — the genuine behavioral
+    difference regression checks need, produced by the real kernel rather than a
+    reference reimplementation. `resolve_kernel` ignores this registry for a real
+    version (it rebuilds the config from the manifests), so it is consulted only
+    where a caller asks for a handle by version."""
+    full = governor_config(manifests(), None, banking_scenario()["inputs"])
+    disarmed = {k: v for k, v in full.items() if k not in ("egress_sinks", "value_policies")}
     return KernelRegistry(
         kernels=(
-            Kernel(version=KERNEL_PINNED, taint_floor_enabled=True),
-            Kernel(version=KERNEL_NO_TAINT_FLOOR, taint_floor_enabled=False),
+            AxorKernel(version=KERNEL_PINNED, config=full, taint_floor_enabled=True),
+            # the variant is identified by its OWN version string (on-by-string),
+            # with a genuinely disarmed config behind it
+            AxorKernel(version=KERNEL_NO_TAINT_FLOOR, config=disarmed, taint_floor_enabled=True),
         )
     )
 
@@ -193,3 +229,30 @@ def environment() -> dict[str, object]:
 
 def deep(obj: dict[str, object]) -> dict[str, object]:
     return copy.deepcopy(obj)
+
+
+def budget_scenario() -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """The no-injection budget scenario + the tools it runs against.
+
+    Shared rather than copied per test file, because the copies drifted: the
+    sink manifest's `effect.resolve` rule reads `$inputs.known_ibans` to decide
+    whether a payment is WRITE or EXPORT, and a scenario omitting it cannot
+    classify its own egress call. Every copy omitted it and nothing noticed,
+    because the observe-only arm used to return ALLOW before the effect class
+    was ever resolved.
+    """
+    import json
+    from pathlib import Path
+
+    examples_path = Path(__file__).resolve().parent.parent / "contracts" / "examples" / "slice-examples.json"
+    examples = json.loads(examples_path.read_text())
+    scenario = copy.deepcopy(examples["scenario_budget_no_injection"][1])
+    read = examples["tool_read_txns"][1]
+    sink = next(m for m in manifests().values() if m.get("side_effecting"))
+    scenario["tools"] = [{"$ref": str(read["id"])}, {"$ref": str(sink["id"])}]
+    scenario["inputs"] = {
+        "landlord_iban": LANDLORD_IBAN,
+        "known_ibans": [LANDLORD_IBAN],
+    }
+    scenario["task_success"] = {"event": "tool_call", "tool": str(sink["id"])}
+    return scenario, {str(read["id"]): read, str(sink["id"]): sink}

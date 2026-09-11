@@ -20,7 +20,7 @@ from pathlib import Path
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
 from lab_contracts import build_bundle, content_hash
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_server.store import PublicationStore
 
 _HAS_NACL = importlib.util.find_spec("nacl") is not None

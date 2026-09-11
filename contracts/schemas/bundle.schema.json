@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lab.useaxor.net/schemas/bundle.schema.json",
   "title": "Axor Lab Reproducible Bundle",
-  "description": "bundle/v1 \u2014 everything needed to reproduce a run's governance verdicts exactly, and to re-run it live. 'config + seeds + traces' was shorthand; this is the real list. Kernel version and config hashes are load-bearing.",
+  "description": "bundle/v1 — everything needed to reproduce a run's governance verdicts exactly, and to re-run it live. 'config + seeds + traces' was shorthand; this is the real list. Kernel version and config hashes are load-bearing.",
   "type": "object",
   "required": [
     "schema_version",
@@ -64,15 +64,37 @@
         "experiment_design": {
           "type": "object",
           "description": "comparison-design/v1 — the FIRST-CLASS comparison design, recorded at run time and bound to the agent's actual determinism. The CP bridge reads the analysis method from HERE, never from an uploader-controlled aggregate that could self-select matched_pairs for a live run; a matched_pairs design requires agent_deterministic=true (review r21).",
-          "required": [ "schema_version", "kind", "agent_deterministic" ],
+          "required": [
+            "schema_version",
+            "kind",
+            "agent_deterministic"
+          ],
           "additionalProperties": false,
           "properties": {
-            "schema_version": { "const": "comparison-design/v1" },
-            "kind": { "enum": [ "matched_pairs", "independent_samples" ] },
-            "unit_key": { "type": "array", "items": { "type": "string" } },
-            "assignment": { "type": "string" },
-            "agent_deterministic": { "type": "boolean" },
-            "agent_fingerprint": { "type": "string" }
+            "schema_version": {
+              "const": "comparison-design/v1"
+            },
+            "kind": {
+              "enum": [
+                "matched_pairs",
+                "independent_samples"
+              ]
+            },
+            "unit_key": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "assignment": {
+              "type": "string"
+            },
+            "agent_deterministic": {
+              "type": "boolean"
+            },
+            "agent_fingerprint": {
+              "type": "string"
+            }
           }
         },
         "model": {
@@ -92,7 +114,7 @@
             "inference_params": {
               "type": "object",
               "additionalProperties": true,
-              "description": "temperature, top_p, etc \u2014 recorded, but note the model is still stochastic across calls"
+              "description": "temperature, top_p, etc — recorded, but note the model is still stochastic across calls"
             }
           }
         },
@@ -123,7 +145,11 @@
               "type": "string"
             },
             "provenance_status": {
-              "enum": [ "recorded_at_execution", "reconstructed_incident", "reconstructed_legacy" ],
+              "enum": [
+                "recorded_at_execution",
+                "reconstructed_incident",
+                "reconstructed_legacy"
+              ],
               "description": "recorded_at_execution when every completed trial DECLARED it recorded its own runtime_config_hash at execution; reconstructed_incident when an imported incident reconstructed it at import; reconstructed_legacy otherwise — an evidence-backed CP export refuses anything but recorded_at_execution (review r20/r21)"
             },
             "runtime_config_hashes": {
@@ -184,7 +210,7 @@
           },
           "failure_reason": {
             "type": "string",
-            "description": "for failed/excluded \u2014 so missingness can be judged non-random"
+            "description": "for failed/excluded — so missingness can be judged non-random"
           },
           "trace_ref": {
             "type": "string",
@@ -199,12 +225,60 @@
             "description": "the governor-config compiler version that produced runtime_config_hash at execution"
           },
           "runtime_provenance": {
-            "enum": [ "recorded_at_execution", "reconstructed_incident", "reconstructed_legacy" ],
+            "enum": [
+              "recorded_at_execution",
+              "reconstructed_incident",
+              "reconstructed_legacy"
+            ],
             "description": "HOW runtime_config_hash was obtained: recorded_at_execution (the runner hashed the config AT execution), reconstructed_incident (an imported production incident reconstructed it at import), or reconstructed_legacy (hand-built / no marker). config_provenance derives the bundle status from these — recorded_at_execution only if every completed trial declares it (review r21)"
           },
           "resolved_kernel_fingerprint": {
             "type": "string",
             "description": "the ACTUAL resolved kernel backend's behavior identity (incl. behavior-changing flags), recorded at execution — distinct from the declared condition.kernel string (review r20)"
+          },
+          "metrics": {
+            "type": "object",
+            "description": "what this trial COST and how it behaved, recorded at execution. The named properties below are platform-level; a suite contributes its own metrics under any other key (Suite Platform RFC §6 — suites define metrics). These are per-TRIAL observations, never aggregates: bundle.aggregates are recomputed from here and never trusted from an uploader. A metric_threshold regression (regression/v1) reads this object, which is why an unmeasured metric must be ABSENT rather than 0 — a missing measurement is not a measurement of zero.",
+            "additionalProperties": {
+              "type": [
+                "number",
+                "string",
+                "boolean"
+              ]
+            },
+            "properties": {
+              "duration_ms": {
+                "type": "number",
+                "minimum": 0,
+                "description": "wall-clock for the whole trial"
+              },
+              "steps": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "agent loop iterations"
+              },
+              "tool_calls": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "model_calls": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "type": "number",
+                "minimum": 0,
+                "description": "actual spend for this trial where the backend reports it; absent for a scripted/simulated agent that spends nothing measurable"
+              }
+            }
           },
           "execution_order": {
             "type": "integer",
@@ -214,13 +288,35 @@
         },
         "allOf": [
           {
-            "description": "a COMPLETED trial must carry its trace + the runtime config it ran under, recorded at execution (review r20) — provenance cannot be synthesized later",
+            "description": "A COMPLETED trial must carry its trace. If a KERNEL ran (runtime_provenance is present, i.e. the governance capability was active) it must also carry the runtime config it ran under, recorded at execution (review r20) — provenance cannot be synthesized later. A gate-free trial has no governor config to hash, so requiring one would make a governance-free run unrepresentable; what is NOT allowed is claiming execution-recorded provenance without the hash that proves it.",
             "if": {
-              "properties": { "status": { "const": "completed" } },
-              "required": [ "status" ]
+              "properties": {
+                "status": {
+                  "const": "completed"
+                }
+              },
+              "required": [
+                "status"
+              ]
             },
             "then": {
-              "required": [ "trace_ref", "runtime_config_hash", "config_compiler_version" ]
+              "required": [
+                "trace_ref"
+              ]
+            }
+          },
+          {
+            "description": "A trial that declares runtime_provenance is claiming a governor config identity; the hash and the compiler version that produced it are then mandatory.",
+            "if": {
+              "required": [
+                "runtime_provenance"
+              ]
+            },
+            "then": {
+              "required": [
+                "runtime_config_hash",
+                "config_compiler_version"
+              ]
             }
           }
         ]
@@ -275,7 +371,7 @@
           },
           "unit_of_analysis": {
             "type": "string",
-            "description": "e.g. 'run' not 'round' \u2014 rounds inside one run are not independent"
+            "description": "e.g. 'run' not 'round' — rounds inside one run are not independent"
           },
           "test": {
             "type": "object",
@@ -287,7 +383,7 @@
               "matched_pairs",
               "independent_samples"
             ],
-            "description": "matched_pairs \u2192 the treated/baseline pairs are real (deterministic agent), McNemar valid; independent_samples \u2192 live-model draws, a two-proportion comparison reported as exploratory"
+            "description": "matched_pairs → the treated/baseline pairs are real (deterministic agent), McNemar valid; independent_samples → live-model draws, a two-proportion comparison reported as exploratory"
           }
         }
       }
@@ -306,11 +402,11 @@
     },
     "signature": {
       "type": "string",
-      "description": "optional detached Ed25519 signature over the WHOLE canonical bundle with its own `signature` field removed (NOT only content_hashes) \u2014 signed_ref = content_hash(bundle minus signature); a KNOWN author key upgrades integrity to `signed` (see publication.integrity)"
+      "description": "optional detached Ed25519 signature over the WHOLE canonical bundle with its own `signature` field removed (NOT only content_hashes) — signed_ref = content_hash(bundle minus signature); a KNOWN author key upgrades integrity to `signed` (see publication.integrity)"
     },
     "canonicalization": {
       "const": "JCS/RFC8785",
-      "description": "content_hashes AND any signature are computed over the JCS-canonicalized (RFC 8785) serialization \u2014 the same canonicalization the control-plane protocol v0.2 uses (v2 Ch.6), so a hash/signature is stable across serializers."
+      "description": "content_hashes AND any signature are computed over the JCS-canonicalized (RFC 8785) serialization — the same canonicalization the control-plane protocol v0.2 uses (v2 Ch.6), so a hash/signature is stable across serializers."
     },
     "packaging": {
       "type": "object",

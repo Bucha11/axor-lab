@@ -58,10 +58,16 @@ class TestCliEndToEnd(unittest.TestCase):
         traces = [
             json.loads(p.read_text()) for p in sorted((cls.bundle_dir / "traces").glob("*.json"))
         ]
+        # a trace whose denial was ENFORCED: the observe-only arm records the
+        # same DENY verdicts and executes anyway, so matching on the verdict
+        # alone picks an ungoverned trace whose recorded sequence is
+        # [ALLOW, DENY] rather than the governed [DENY] the pin expects.
+        from lab_runner.verdicts import contained
+
         cls.denied_trace_id = next(
             str(t["trace_id"]) for t in traces
             if any(
-                e.get("type") == "gate_decision" and e["decision"]["verdict"] == "DENY"
+                e.get("type") == "gate_decision" and contained(e["decision"])
                 for e in t["events"]
             )
         )
@@ -102,7 +108,8 @@ class TestCliEndToEnd(unittest.TestCase):
         for state in ("[validating]", "[estimate]", "[running_local]",
                       "[analyzing]", "[uploading_artifacts]", "[completed]"):
             self.assertIn(state, self.run_stdout)
-        self.assertIn("$0.00", self.run_stdout)  # scripted → no paid inference
+        self.assertNotIn("$", self.run_stdout,
+                         "there is no spend to report: the agent is scripted")
         self.assertIn(f"n={REPEATS * 2}/{REPEATS * 2}", self.run_stdout)
 
     def test_run_wrote_a_schema_valid_bundle_dir(self) -> None:

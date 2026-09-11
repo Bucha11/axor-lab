@@ -13,7 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests import support  # noqa: E402
-from lab_runner import replay_bundle, run_experiment  # noqa: E402
+from lab_capabilities.governance import run_experiment
+from lab_capabilities.governance import replay_bundle
 from lab_contracts import build_bundle  # noqa: E402
 
 REPEATS = 12

@@ -23,7 +23,6 @@ from pathlib import Path
 
 from lab_analysis import binary_aggregate, mcnemar_test, missingness, two_proportion_test
 from lab_analysis.errors import AnalysisError
-from lab_agent.errors import AgentError
 from lab_contracts import (
     BundleIntegrityError,
     ContractsError,
@@ -35,7 +34,6 @@ from lab_contracts import (
     validate_artifact,
 )
 
-from .axor_backend import resolve_candidate_kernel_for_trace, resolve_kernel
 from .bundle_io import (
     PACKAGING,
     read_bundle_dir,
@@ -43,18 +41,42 @@ from .bundle_io import (
     write_bundle_dir,
     write_superseded_attempts,
 )
-from .claims import deny_claim_text
-from .errors import ExperimentFileError, RunnerError
-from .evidence import build_evidence_case, evidence_condition, validate_twin
-from .experiment_file import ResolvedExperiment, load_axl, resolve
-from .kernel import Kernel, default_registry
-from .regression import STATUS_DIFFERS, STATUS_MATCHES, RegressionPin, check_pins, pin
-from .replay import replay_bundle
-from .runner import run_experiment_suite
+from lab_suite.errors import SuiteError
 
-# BYOK backend + statistics failures are separate hierarchies from RunnerError;
+from .errors import ExperimentFileError, RunnerError
+from .invariants import STATUS_ERROR, STATUS_FAILED
+from .verdicts import contained
+
+# The CLI is a COMPOSITION ROOT, not part of the platform spine: it wires
+# whatever the user's command needs. Every governance command below —
+# validate/run/replay/pin/regress/evidence/export-cp on an `.axl` experiment —
+# is the governance capability's own surface, so it reaches into the capability
+# here and nowhere else in `lab_runner`. That is why this file is a declared
+# wiring point in `tests/test_capability_boundary.py`.
+from lab_capabilities.governance import (
+    AxorKernel,
+    RegressionPin,
+    ResolvedExperiment,
+    build_evidence_case,
+    check_pins,
+    default_registry,
+    evidence_condition,
+    governor_config,
+    load_axl,
+    pin,
+    replay_bundle,
+    resolve,
+    resolve_candidate_kernel_for_trace,
+    resolve_kernel,
+    run_experiment_suite,
+    validate_twin,
+)
+from lab_capabilities.governance.claims import deny_claim_text
+from lab_capabilities.governance.regression import STATUS_DIFFERS, STATUS_MATCHES
+
+# Statistics failures are a separate hierarchy from RunnerError;
 # main() maps them to stable exit codes instead of leaking a traceback
-_AGENT_ANALYSIS_ERRORS = (AgentError, AnalysisError)
+_AGENT_ANALYSIS_ERRORS = (RunnerError, AnalysisError)
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -87,14 +109,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAILURE
     except _AGENT_ANALYSIS_ERRORS as exc:
-        # BYOK backend / analysis failures (BackendUnavailable, CassetteExhausted,
+        # analysis failures (
         # ProtocolViolation, AnalysisError, InsufficientDataError) are their own
         # hierarchies, not RunnerError — catch them so the user gets a stable
-        # message + exit code instead of a Python traceback (review r2 §BYOK)
+        # message + exit code instead of a Python traceback
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAILURE
     except ContractsError as exc:
         # claim typing / contract-layer errors surface as validation failures
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    except SuiteError as exc:
+        # an unknown suite id / invalid manifest from the suite commands is the
+        # user's to fix — a clean message + exit code, not a raw traceback
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
 
@@ -112,13 +139,247 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _terminal_label(stopped_reason: str | None, n_completed: int) -> str:
-    """The honest terminal status line for a run (review r14). A run stopped by
-    the cost ceiling is never `[completed]`: it is `[completed_partial]` if it
-    produced any completed trials, else `[stopped_cost_ceiling]` (nothing ran)."""
-    if not stopped_reason:
-        return "[completed]"
-    return "[completed_partial]" if n_completed > 0 else "[stopped_cost_ceiling]"
+def _cmd_suites(args: argparse.Namespace) -> int:
+    """The Suite Catalog, from the terminal.
+
+    Same payload the screen endpoint serves (`lab_suite.suite_catalog`), so the
+    two cannot disagree about which suites exist.
+    """
+    from lab_suite import suite_catalog
+
+    for card in suite_catalog():
+        available = bool(card.get("available"))
+        mark = " " if available else "!"
+        caps = ",".join(str(c) for c in card.get("capabilities") or ()) or "-"
+        print(f"{mark} {card['id']:<18} {card['name']:<22} capabilities={caps}")
+        if card.get("description"):
+            print(f"    {card['description']}")
+        if not available:
+            print(f"    UNAVAILABLE: {card.get('reason', 'not implemented')}")
+    return EXIT_OK
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Run the screen API and the built web app from one process.
+
+    Without this the app had no documented way to start: `python -m lab_server`
+    runs the CATALOG server (publications), which is a different surface and
+    serves none of the screens. An interface a user cannot launch is the same
+    island the Suite SDK was.
+    """
+    import os
+
+    from lab_server.runtime_jobs import make_runtime_server
+    from lab_server.static import default_root
+
+    token = args.control_token or os.environ.get("AXOR_LAB_CONTROL_TOKEN")
+    data_dir = getattr(args, "data_dir", None) or os.environ.get("AXOR_LAB_DATA_DIR")
+    billing_secret = (getattr(args, "billing_webhook_secret", None)
+                      or os.environ.get("AXOR_LAB_BILLING_WEBHOOK_SECRET"))
+    plans_file = getattr(args, "plans_file", None) or os.environ.get("AXOR_LAB_PLANS_FILE")
+    plan_catalog = None
+    if plans_file:
+        import json
+
+        plan_catalog = json.loads(Path(plans_file).read_text())
+    # axor-identity login: verify human access tokens against the identity JWKS,
+    # supplied as a URL (fetched once at boot) or a file. Absent, only static
+    # control/member tokens authenticate.
+    jwks_url = (getattr(args, "identity_jwks_url", None)
+                or os.environ.get("AXOR_LAB_IDENTITY_JWKS_URL"))
+    jwks_file = (getattr(args, "identity_jwks_file", None)
+                 or os.environ.get("AXOR_LAB_IDENTITY_JWKS_FILE"))
+    identity_jwks = None
+    if jwks_file:
+        import json
+
+        identity_jwks = json.loads(Path(jwks_file).read_text())
+    elif jwks_url:
+        from lab_server.identity_client import fetch_jwks
+
+        identity_jwks = fetch_jwks(jwks_url)
+    identity_issuer = (getattr(args, "identity_issuer", None)
+                       or os.environ.get("AXOR_LAB_IDENTITY_ISSUER") or "axor-identity")
+    guest_sessions = (getattr(args, "guest_sessions", False)
+                      or os.environ.get("AXOR_LAB_GUEST_SESSIONS") == "1")
+    server = make_runtime_server(
+        host=args.host, port=args.port, control_token=token, data_dir=data_dir,
+        billing_webhook_secret=billing_secret, plan_catalog=plan_catalog,
+        identity_jwks=identity_jwks, identity_issuer=identity_issuer,
+        guest_sessions=guest_sessions)
+    site = default_root()
+    print(f"axor-lab on http://{args.host}:{args.port}")
+    print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
+    if site is None:
+        # said plainly rather than serving a 404 the user has to diagnose
+        print("  web app:  NOT BUILT — run `npm --prefix web install && "
+              "npm --prefix web run build`")
+    else:
+        print(f"  web app:  {site}")
+    print(
+        "  auth:     "
+        + ("token-gated" if token else
+           "OPEN — every screen endpoint is unauthenticated. Local dev only; "
+           "pass --control-token before exposing this.")
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+    return EXIT_OK
+
+
+def _cmd_suite_yaml(args: argparse.Namespace) -> int:
+    """Print a suite manifest as YAML — the Builder's third editing mode, from
+    the terminal.
+
+    Round-tripping through this and back must not change the manifest; that is
+    acceptance criterion 8.5 and it is pinned in
+    `tests/test_yaml_mode_round_trip.py`.
+    """
+    from lab_suite import to_yaml
+    from lab_suite.yaml_mode import YamlUnavailable
+
+    manifest, _ = _suite_manifest(args.suite)
+    try:
+        print(to_yaml(manifest), end="")
+    except YamlUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAILURE
+    return EXIT_OK
+
+
+def _suite_manifest(target: str) -> tuple[dict[str, object], object]:
+    """Resolve `target` — a registered suite id or a manifest path — to
+    (manifest, suite implementation).
+
+    A manifest file may name a suite the registry knows; then that suite's hooks
+    run over the file's manifest, which is exactly the Builder's edit-and-run
+    loop. A manifest whose `id` is unregistered runs on `BaseSuite` defaults —
+    no program, no metrics, no extractors — rather than being refused, because a
+    manifest is authorable long before an implementation exists.
+    """
+    from lab_suite import builtin_registry, load_manifest
+    from lab_suite.errors import SuiteNotFound
+    from lab_suite.sdk import BaseSuite
+
+    registry = builtin_registry()
+    path = Path(target)
+    if path.exists():
+        manifest = load_manifest(path)
+        try:
+            return manifest, registry.get(str(manifest.get("id", "")))
+        except SuiteNotFound:
+            unimplemented = BaseSuite()
+            unimplemented.id = str(manifest.get("id", ""))
+            unimplemented.manifest = lambda: manifest  # type: ignore[method-assign]
+            return manifest, unimplemented
+    suite = registry.get(target)
+    return suite.manifest(), suite
+
+
+def _cmd_run_suite(args: argparse.Namespace) -> int:
+    from lab_suite import run_suite, validate_manifest
+
+    print("[validating]")
+    manifest, suite = _suite_manifest(args.suite)
+    errors = validate_manifest(manifest) + suite.validate(manifest)  # type: ignore[attr-defined]
+    if errors:
+        for error in errors:
+            print(f"  {error}", file=sys.stderr)
+        return EXIT_VALIDATION
+    execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
+    scenarios = list(manifest.get("scenarios") or []) or list(manifest.get("scenario_refs") or [])
+    conditions = list(execution.get("conditions") or [])
+    repeats = int(execution.get("repeats", 1))  # type: ignore[arg-type]
+    # a suite with NO conditions is single-arm — one trial per (scenario, repeat).
+    # That is the platform's default path, not a degenerate case.
+    trials = len(scenarios) * repeats * max(len(conditions), 1)
+    print(f"valid: {manifest.get('id')}")
+    print(
+        f"  scenarios={len(scenarios)} conditions={len(conditions)} "
+        f"repeats={repeats} -> {trials} trials"
+        + ("  (single-arm: no governance)" if not conditions else "")
+    )
+
+    print("[estimate]")
+    print(f"  {trials} trial(s), local simulated tools, no paid inference")
+    if not _confirmed(args):
+        print(
+            "not confirmed — pass --yes (or answer y) to execute; nothing ran",
+            file=sys.stderr,
+        )
+        return EXIT_UNCONFIRMED
+
+    print("[running_local]")
+    run_id = args.run_id or f"r_{content_hash(manifest)[7:39]}"
+    run = run_suite(manifest, run_id=run_id, suite=suite)  # type: ignore[arg-type]
+    by_status: dict[str, int] = {}
+    for trial in run.trials:
+        by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
+    print(
+        f"  planned {len(run.trials)}: "
+        + ", ".join(f"{n} {status}" for status, n in sorted(by_status.items()))
+    )
+
+    print("[analyzing]")
+    summary = missingness(run.trials)
+    print(f"  {summary.display()}")
+    for aggregate in run.aggregates:
+        _print_aggregate(aggregate)
+    for result in run.invariants:
+        print(f"  invariant {result.regression_id}: {result.status}"
+              + (f" — {result.detail}" if result.detail else ""))
+
+    print("[uploading_artifacts]  (local: writing artifact + bundle)")
+    created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    environment = {
+        "model": {"provider": "scripted", "id": str(manifest.get("id", "")),
+                  "inference_params": {"suite_id": str(manifest.get("id", ""))}},
+    }
+    artifact = run.artifact(
+        artifact_id=f"a_{run_id}", created=created, environment=environment,
+        command=f"axor-lab run-suite {args.suite}",
+    )
+    schema_errors = validate_artifact(artifact, "artifact")
+    if schema_errors:
+        # the artifact IS the deliverable; writing an invalid one and finding out
+        # at publish time is how a run becomes unusable hours later
+        for error in schema_errors:
+            print(f"  [schema] {error}", file=sys.stderr)
+        return EXIT_FAILURE
+    out = Path(args.out)
+    write_bundle_dir(
+        out, artifact["bundle"], run.traces,  # type: ignore[arg-type]
+        overwrite=bool(getattr(args, "overwrite", False)),
+    )
+    (out / "artifact.json").write_text(json.dumps(artifact, indent=2, ensure_ascii=False))
+    # Three outcomes, three exit codes — collapsing them loses the distinction
+    # the whole invariant model rests on. `failed` is a violated invariant.
+    # `error` is one that could NOT be evaluated, which is not a pass either
+    # (an unmeasured latency is not a fast one, lifecycle.md) but is a different
+    # thing to tell a CI than "your change regressed". `skipped` IS fine: the
+    # rule kind executes elsewhere, and failing on it would fail every governed
+    # suite for carrying a verdict_sequence pin.
+    violated = [r for r in run.invariants if r.status == STATUS_FAILED]
+    unevaluable = [r for r in run.invariants if r.status == STATUS_ERROR]
+    print(f"[completed]  artifact: {out}/artifact.json ({len(run.traces)} traces)")
+    print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
+    if violated:
+        print(
+            "  invariants VIOLATED: "
+            + ", ".join(str(r.regression_id) for r in violated),
+            file=sys.stderr,
+        )
+        return EXIT_REGRESSION_DIFFERS
+    if unevaluable:
+        print(
+            "  invariants could not be evaluated: "
+            + ", ".join(f"{r.regression_id} ({r.detail})" for r in unevaluable),
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
+    return EXIT_OK
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -129,7 +390,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     resolved = resolve(document)
 
     print("[estimate]")
-    _print_estimate(resolved, _estimate_model(args, resolved))
+    _print_estimate(resolved)
     if not _confirmed(args):
         print(
             "not confirmed — pass --yes (or answer y) to execute; nothing ran",
@@ -138,13 +399,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return EXIT_UNCONFIRMED
 
     print("[running_local]")
-    # run identity includes the ACTUAL agent — otherwise two runs of the same
-    # experiment with different --agent get the same run_id (and, before, the
-    # same trial/trace ids), so different executions looked like retries of one
-    # trial (review r3). The fingerprint is the agent's CONTENT (cassette bytes /
-    # model id), so identical agents reproduce the same id and different ones don't.
-    agent = _resolve_agent_override(args.agent) if args.agent else resolved.agent
-    fingerprint = _agent_fingerprint(args, resolved)
+    agent = resolved.agent
+    # run identity folds in the agent, so two runs of the same experiment under
+    # different agents are different runs rather than retries of one (review r3).
+    fingerprint = str(resolved.experiment["agent_ref"])
     # 128-bit id (32 hex chars) from the experiment+agent fingerprint — the old
     # 8-char (32-bit) slice was birthday-collision-searchable, so two unrelated
     # runs could share a run_id and look like retries of one trial (review r7).
@@ -154,32 +412,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         args.run_id, resolved.experiment, fingerprint,
         deterministic=bool(getattr(agent, "is_deterministic", True)),
     )
-    model = _estimate_model(args, resolved)
-    # a HARD run-wide cost ceiling: checked against ACTUAL usage between trials,
-    # so the run stops before the next provider call (review r11). Unset → no bind.
-    from lab_agent.cost import CostBudget
-
-    try:
-        budget = CostBudget(
-            max_usd=getattr(args, "max_usd", None),
-            max_input_tokens=getattr(args, "max_input_tokens", None),
-            max_output_tokens=getattr(args, "max_output_tokens", None),
-        )
-    except ValueError as exc:
-        raise RunnerError(str(exc)) from exc
-
-    # thread the ceiling INTO the agent so its multi-turn loop is guarded before
-    # every provider call — the between-trials check below only bounds overshoot
-    # to whole trials, not to a single trial's fan-out of calls (review r12)
-    if budget.is_set() and hasattr(agent, "budget"):
-        agent.budget = budget  # type: ignore[attr-defined]
-        agent.model = model  # type: ignore[attr-defined]
-
-    def _budget_check() -> str | None:
-        if not budget.is_set() or not hasattr(agent, "usage"):
-            return None
-        return budget.exceeded(agent.usage(), model)  # type: ignore[attr-defined]
-
     result = run_experiment_suite(
         list(resolved.scenarios),
         resolved.manifests,
@@ -188,7 +420,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         repeats=resolved.repeats,
         run_id=run_id,
         agent=agent,
-        budget_check=_budget_check,
     )
     # report the plan outcome by status separately — "N trials completed" over
     # result.trials was misleading, since result.trials also holds failed and
@@ -203,9 +434,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         f"  planned {len(result.trials)}: {n_completed} completed, "
         f"{n_failed} failed, {n_excluded} excluded"
     )
-    if result.stopped_reason:
-        print(f"  [cost_ceiling] run stopped early: {result.stopped_reason}", file=sys.stderr)
-
     print("[analyzing]")
     # missingness FIRST (denominator honesty) — it must be reported even if a
     # whole condition has no completed trials, so it never depends on aggregates
@@ -217,24 +445,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     print("[uploading_artifacts]  (local: writing bundle directory)")
     created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    # record ACTUAL usage + spend when the agent tracks it (BYOK); scripted/
-    # cassette report zero, which is correct (no paid inference)
+    # no paid inference: the agent is scripted, so there is no spend to record.
     usage = None
-    if hasattr(agent, "usage"):
-        from lab_agent.cost import actual_usd
-        u = agent.usage()  # type: ignore[attr-defined]
-        in_tok, out_tok = int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
-        usage = {"input_tokens": in_tok, "output_tokens": out_tok,
-                 "usd": actual_usd(in_tok, out_tok, model)}
-        if result.stopped_reason:
-            usage["stopped_reason"] = result.stopped_reason
     bundle = build_bundle(
         bundle_id=f"b_{run_id}",
         created=created,
         scenarios=list(resolved.scenarios),
         conditions=list(resolved.conditions),
         tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved, model, usage, agent=agent),
+        environment=_environment(resolved, usage=usage, agent=agent),
         trials=result.trials,
         aggregates=aggregates,
         traces=result.traces,
@@ -249,11 +468,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     attempt_log = write_superseded_attempts(out, result.superseded)
     if attempt_log is not None:
         print(f"  superseded attempts: {attempt_log} ({len(result.superseded)})")
-    # an honest terminal label: a cost-stopped run is NOT "[completed]" — it
-    # either produced a usable partial (some completed trials) or nothing
-    # (review r14). The bundle is still written for the partial evidence.
-    label = _terminal_label(result.stopped_reason, n_completed)
-    print(f"{label}  bundle: {out}/bundle.json ({len(result.traces)} traces)")
+    print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
     print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")
     return EXIT_OK
@@ -493,9 +708,17 @@ def _cmd_regress(args: argparse.Namespace) -> int:
     manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
     kernel_for = None
     if args.disable_taint_floor:
-        # explicit variant demonstration: force the reference kernel with the
-        # gate off (the fingerprint marks it a different kernel, review r4)
-        kernel: object = Kernel(version=version, taint_floor_enabled=False)
+        # An explicit real-kernel VARIANT demonstration: the same installed
+        # build, but with its egress-sink declarations dropped so the taint /
+        # confidentiality floor is never armed — the exfiltration the pinned run
+        # DENIED is now ALLOWED, which is exactly the regression a pin exists to
+        # catch. The fingerprint marks it a different kernel (behavior_version
+        # gains `+taint_floor=off`), so the report names the variant, not the
+        # pinned build (review r4).
+        cfg = governor_config(manifests, condition.get("policy"), None)  # type: ignore[arg-type]
+        cfg.pop("egress_sinks", None)
+        cfg.pop("value_policies", None)
+        kernel: object = AxorKernel(version=version, config=cfg, taint_floor_enabled=False)
     else:
         # regress under the CANDIDATE kernel — the one named by --kernel or the
         # chosen regression condition — NOT the kernel the trace was recorded
@@ -723,7 +946,7 @@ def _publish_to_server(
 
 
 def _cmd_export_cp(args: argparse.Namespace) -> int:
-    from .cp_export import CPExportError, export_cp
+    from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
     bundle, traces = read_bundle_dir(Path(args.bundle))
     regressions: list[dict[str, object]] = []
@@ -941,7 +1164,7 @@ def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
       - DERIVABILITY: the deploy config recomputes byte-identical from
         source-bundle/ (graph + design-aware bridge + recorded runtime provenance).
     """
-    from .cp_export import CPExportError, export_cp
+    from lab_capabilities.governance.cp_export import CPExportError, export_cp
 
     directory = Path(args.dir)
     deploy_path = directory / "cp-deploy.json"
@@ -1089,7 +1312,7 @@ def _cmd_import_incident(args: argparse.Namespace) -> int:
         validate_scenario,
     )
 
-    from .replay import REPLAY_MATCH, replay_trace_status
+    from lab_capabilities.governance.replay import REPLAY_MATCH, replay_trace_status
 
     trace: dict[str, object] = json.loads(Path(args.trace).read_text())
     scenario: dict[str, object] = json.loads(Path(args.scenario).read_text())
@@ -1247,12 +1470,14 @@ def _repin_to_real_kernel(document: dict[str, object]) -> None:
     `kernel_version` that `verify_bundle` rejects — meaning the command ran every
     trial (paid model calls included) and only THEN failed at save (review r13).
 
-    The real backend handles `enforcement == "off"` as observe-only (an ALLOW
-    with observation still on, no gates applied), so a baseline on the real
-    kernel behaves identically to one on the reference kernel — but now both
-    arms share one kernel, and the bundle has a single kernel_version."""
+    Repinning the baseline is load-bearing, not cosmetic. `enforcement: off` is
+    observe-only, not gate-free: the kernel evaluates every call and records the
+    verdict it would have enforced. So the baseline's verdicts are the REAL
+    kernel's verdicts, and a baseline left on the reference kernel would report
+    a different kernel's opinion of the same calls. Both arms share one kernel,
+    and the bundle has a single kernel_version."""
     from lab_contracts import condition_config_hash
-    from lab_runner import axor_available, real_kernel_version
+    from lab_capabilities.governance import axor_available, real_kernel_version
 
     if not axor_available():
         raise RunnerError("--real-kernel requested but axor-core is not installed")
@@ -1262,18 +1487,6 @@ def _repin_to_real_kernel(document: dict[str, object]) -> None:
         condition["kernel"] = version
         condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
     print(f"  repinned ALL conditions (baseline + governed) to the real kernel: {version}")
-
-
-def _resolve_agent_override(spec: str) -> object:
-    """Build a BYOK agent from --agent (cassette:<file> | anthropic:<model>)."""
-    from lab_agent import AnthropicBackend, FileCassetteAgent, WrappedModelAgent
-
-    kind, _, param = spec.partition(":")
-    if kind == "cassette":
-        return FileCassetteAgent(path=Path(param))
-    if kind == "anthropic":
-        return WrappedModelAgent(backend=AnthropicBackend(model=param or "claude-opus-4-8"))
-    raise RunnerError(f"unknown --agent {spec!r}; use cassette:<file> or anthropic:<model>")
 
 
 def _derive_run_id(
@@ -1299,38 +1512,16 @@ def _derive_run_id(
     return "r_" + content_hash(body).removeprefix("sha256:")[:32]
 
 
-def _agent_fingerprint(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
-    """A content fingerprint of the agent that will actually run — folded into
-    run identity so different agents are different runs (review r3)."""
-    if not args.agent:
-        return str(resolved.experiment["agent_ref"])
-    kind, _, param = args.agent.partition(":")
-    if kind == "cassette":
-        try:
-            return "cassette:" + content_hash({"cassette": Path(param).read_text()})
-        except OSError:
-            return f"cassette:{param}"
-    return args.agent  # e.g. anthropic:<model>
-
-
-def _estimate_model(args: argparse.Namespace, resolved: ResolvedExperiment) -> str:
-    if args.agent:
-        kind, _, param = args.agent.partition(":")
-        if kind == "cassette":
-            return "cassette (recorded transcript)"
-        return param or kind
-    return str(resolved.experiment["agent_ref"])
-
-
-def _print_estimate(resolved: ResolvedExperiment, model: str) -> None:
-    from lab_agent import estimate_cost
-
+def _print_estimate(resolved: ResolvedExperiment) -> None:
+    """The plan's size. There is no cost line: the agent is scripted, so a run
+    makes no provider calls and spends nothing. A confirmation prompt that
+    always said "$0.00" was asking the operator to approve a number that could
+    not be anything else."""
     print(
         f"  {len(resolved.scenarios)} scenario(s) x {len(resolved.conditions)} condition(s) "
         f"x {resolved.repeats} repeat(s) = {resolved.trial_count} trials"
     )
-    estimate = estimate_cost(resolved.trial_count, model)
-    print(f"  agent: {model} -> {estimate.line()}")
+    print(f"  agent: {resolved.experiment['agent_ref']}")
 
 
 def _confirmed(args: argparse.Namespace) -> bool:
@@ -1442,22 +1633,21 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
 
 
 def _environment(
-    resolved: ResolvedExperiment, model: str, usage: dict[str, object] | None = None,
+    resolved: ResolvedExperiment, model: str | None = None,
+    usage: dict[str, object] | None = None,
     agent: object | None = None,
 ) -> dict[str, object]:
-    """Record the ACTUAL agent that ran — not always 'scripted' (review §6.1).
-    The bundle stays self-describing: kernel, the real model provider/id, the
-    experiment id, the ACTUAL token usage + spend (review r11), and (when
-    imported) the dataset version."""
+    """Record the ACTUAL agent that ran (review §6.1). The bundle stays
+    self-describing: kernel, the agent id, and (when imported) the dataset
+    version."""
     kernels = sorted({str(c["kernel"]) for c in resolved.conditions})
+    model = model or str(resolved.experiment["agent_ref"])
     provider = model.split(":", 1)[0] if ":" in model else (
-        "scripted" if model.startswith("scripted") else
-        "anthropic" if model.startswith("claude") else
-        "cassette" if model.startswith("cassette") else "unknown"
+        "scripted" if model.startswith("scripted") else "unknown"
     )
     inference_params: dict[str, object] = {"experiment_id": str(resolved.experiment["id"])}
     if usage is not None:
-        inference_params["usage"] = usage  # actual tokens + spend, recorded in the bundle
+        inference_params["usage"] = usage
     env: dict[str, object] = {
         "model": {"provider": provider, "id": model, "inference_params": inference_params},
     }
@@ -1517,9 +1707,16 @@ def _scenario_for(bundle: dict[str, object], trace: dict[str, object]) -> dict[s
 
 
 def _first_denied_trace(traces: dict[str, dict[str, object]]) -> dict[str, object] | None:
+    """The first trace where a denial was actually ENFORCED.
+
+    Not merely "verdict == DENY". An observe-only arm records real denials and
+    executes the call anyway, so a bare verdict match would happily pin a
+    regression on a trace where nothing was contained — asserting the kernel
+    must keep denying, on the evidence of a run that denied nothing.
+    """
     for trace in sorted(traces.values(), key=lambda t: str(t["trace_id"])):
         for event in trace["events"]:  # type: ignore[union-attr]
-            if event.get("type") == "gate_decision" and event["decision"]["verdict"] == "DENY":  # type: ignore[index]
+            if event.get("type") == "gate_decision" and contained(event["decision"]):  # type: ignore[index,arg-type]
                 return trace
     return None
 
@@ -1534,6 +1731,82 @@ def _build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument("file")
     p_validate.set_defaults(func=_cmd_validate)
 
+    p_suites = sub.add_parser("suites", help="list the suite catalog")
+    p_suites.set_defaults(func=_cmd_suites)
+
+    p_serve = sub.add_parser(
+        "serve", help="run the screen API + the built web app",
+    )
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8871)
+    p_serve.add_argument(
+        "--control-token", default=None,
+        help="require this bearer token on every screen endpoint "
+             "(or AXOR_LAB_CONTROL_TOKEN)",
+    )
+    p_serve.add_argument(
+        "--data-dir", default=None,
+        help="persist the workspace (suites, evidence, regressions, artifacts) "
+             "in this directory and reload it on restart (or AXOR_LAB_DATA_DIR); "
+             "omitted, storage is in-memory",
+    )
+    p_serve.add_argument(
+        "--billing-webhook-secret", default=None,
+        help="shared secret the payment provider sends on /billing/webhook "
+             "(or AXOR_LAB_BILLING_WEBHOOK_SECRET); omitted, the webhook is off",
+    )
+    p_serve.add_argument(
+        "--plans-file", default=None,
+        help="a JSON plan catalog {plan_id: {name, price_usd, max_suites, "
+             "max_artifacts, max_hosted_runtimes, capabilities}} — YOUR pricing "
+             "(or AXOR_LAB_PLANS_FILE). Omitted, a placeholder example catalog is "
+             "used with no pricing authority",
+    )
+    p_serve.add_argument(
+        "--identity-jwks-url", default=None,
+        help="URL of the axor-identity JWKS (or AXOR_LAB_IDENTITY_JWKS_URL); "
+             "enables login with identity access tokens, verified against it",
+    )
+    p_serve.add_argument(
+        "--identity-jwks-file", default=None,
+        help="path to a JWKS document (or AXOR_LAB_IDENTITY_JWKS_FILE), an "
+             "alternative to --identity-jwks-url for an air-gapped deployment",
+    )
+    p_serve.add_argument(
+        "--identity-issuer", default=None,
+        help="expected token issuer (or AXOR_LAB_IDENTITY_ISSUER); "
+             "default 'axor-identity'",
+    )
+    p_serve.add_argument(
+        "--guest-sessions", action="store_true",
+        help="allow anonymous, ephemeral hosted trial sessions via "
+             "POST /guest-session (or AXOR_LAB_GUEST_SESSIONS=1); off by default",
+    )
+    p_serve.set_defaults(func=_cmd_serve)
+
+    p_suite_yaml = sub.add_parser(
+        "suite-yaml", help="print a suite manifest as YAML (the Builder's third mode)",
+    )
+    p_suite_yaml.add_argument("suite", help="a registered suite id, or a manifest path")
+    p_suite_yaml.set_defaults(func=_cmd_suite_yaml)
+
+    p_run_suite = sub.add_parser(
+        "run-suite",
+        help="run a suite by id or manifest path -> artifact (no governance required)",
+    )
+    p_run_suite.add_argument("suite", help="a registered suite id, or a suite/v1 manifest path")
+    p_run_suite.add_argument("--out", required=True, help="artifact + bundle output directory")
+    p_run_suite.add_argument(
+        "--yes", action="store_true", help="confirm the estimate non-interactively",
+    )
+    p_run_suite.add_argument("--run-id", default=None)
+    p_run_suite.add_argument("--created", default=None, help="override timestamp (RFC3339)")
+    p_run_suite.add_argument(
+        "--overwrite", action="store_true",
+        help="replace a non-empty --out directory (clears stale traces first)",
+    )
+    p_run_suite.set_defaults(func=_cmd_run_suite)
+
     p_run = sub.add_parser("run", help="resolve -> estimate -> execute -> analyze -> bundle")
     p_run.add_argument("file")
     p_run.add_argument("--out", required=True, help="bundle output directory")
@@ -1541,24 +1814,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--run-id", default=None)
     p_run.add_argument("--created", default=None, help="override bundle timestamp (RFC3339)")
     p_run.add_argument(
-        "--agent", default=None,
-        help="BYOK agent override: cassette:<file> (offline) or anthropic:<model>",
-    )
-    p_run.add_argument(
         "--real-kernel", action="store_true",
         help="govern with the installed axor-core kernel (not the reference)",
     )
-    # run-wide cost ceilings (review r11): checked against ACTUAL usage between
-    # trials, so the run stops before the next provider call. Token ceilings are
-    # HARD; the USD ceiling is BEST-EFFORT (illustrative prices, projected input),
-    # not a provider-guaranteed dollar cap (review r16 P2)
-    p_run.add_argument("--max-usd", type=float, default=None,
-                       help="stop near this USD figure (BEST-EFFORT: illustrative prices, "
-                            "not a provider-guaranteed cap — pair with --max-*-tokens for a hard bound)")
-    p_run.add_argument("--max-input-tokens", type=int, default=None,
-                       help="hard ceiling: stop once actual input tokens reach this")
-    p_run.add_argument("--max-output-tokens", type=int, default=None,
-                       help="hard ceiling: stop once actual output tokens reach this")
     p_run.add_argument(
         "--overwrite", action="store_true",
         help="replace a non-empty --out directory (clears stale traces first)",

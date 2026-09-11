@@ -1,5 +1,15 @@
 # Axor Lab — Specification (v0.3)
 
+> **Superseded as the product narrative** by
+> [`docs/spec-suite-platform/`](../spec-suite-platform/) (Experiment Suite
+> Platform RFC). That pack governs: Axor Lab is a reproducible experiment
+> platform and governance is an *optional capability*, not the spine. This
+> document remains accurate as the description of what the code does today and
+> as the source of the governance capability's semantics — see
+> [`INTEGRATION_PLAN.md`](../spec-suite-platform/INTEGRATION_PLAN.md) for the
+> migration. The contract docs in `contracts/` stay authoritative until that
+> plan's Phase 1 replaces them.
+
 **Standalone** research product at `lab.useaxor.net`. Not a tab on the Control Plane — its own front door. A researcher arrives with their own agent and a question, no Axor deployment required. Same engine underneath (kernel, gates, replay), different surface and audience.
 
 **Positioning (fixed):** two economies (see `lab-economics.md`) — **Public Lab** is free-for-research (trust, distribution, CAC reduction) and **Private Lab** is a standalone paid product for teams (private incidents, EvidenceCases, regression CI), the first paid rung of the same Axor license that Control Plane sits atop. Not "lead-gen, not revenue" — Private Lab is revenue; Public Lab is the funnel into it. Launches *with* the paper as its reproducibility companion. And it is the **top of the funnel into the Control Plane product**.

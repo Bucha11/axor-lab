@@ -64,7 +64,7 @@ class TestFixtureResultValidation(unittest.TestCase):
         from pathlib import Path
 
         from lab_runner.errors import ExperimentFileError
-        from lab_runner.experiment_file import resolve
+        from lab_capabilities.governance.experiment_file import resolve
 
         example = Path(__file__).resolve().parent.parent / "examples" / "banking-exfil-01.axl"
         doc = json.loads(example.read_text())

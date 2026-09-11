@@ -20,7 +20,7 @@ from pathlib import Path
 
 from tests import support
 from lab_contracts import build_bundle
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 from lab_server import make_server
 
 CREATED = "2026-07-19T12:00:00+00:00"

@@ -15,7 +15,7 @@ import unittest
 
 from tests import support
 from lab_contracts import BundleIntegrityError, build_bundle, content_hash, verify_bundle
-from lab_runner import run_experiment_suite
+from lab_capabilities.governance import run_experiment_suite
 
 CREATED = "2026-07-19T12:00:00+00:00"
 

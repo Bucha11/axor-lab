@@ -11,12 +11,8 @@ from __future__ import annotations
 import unittest
 
 from tests import support
-from lab_runner import (
-    RealExecutionBlocked,
-    ScriptedAgent,
-    SimulatedToolHost,
-    run_trial,
-)
+from lab_runner import RealExecutionBlocked, ScriptedAgent, SimulatedToolHost
+from lab_capabilities.governance import run_trial
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
 

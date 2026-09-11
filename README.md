@@ -1,11 +1,14 @@
 # axor-lab
 
-Axor Lab — standalone research surface for the Axor governance stack: bring an agent, run attack scenarios ungoverned/governed on simulated tools, investigate single trials (EvidenceCase), replay governance verdicts exactly, and publish reproducible bundles.
+Axor Lab — a reproducible experiment platform for AI agents: bring an agent, bring or author an experiment suite, run it, inspect any trial, curate EvidenceCases, pin executable regressions, and export reproducible artifacts. **Governance is an optional capability** that suites may use, not the spine.
 
+**Today the code is narrower than that.** What is implemented is the governance capability end-to-end (paired ungoverned/governed runs on simulated tools, exact verdict replay, injection EvidenceCases, verdict-pin regressions, publishable bundles). The path from here to the platform above is written down:
+
+- **[docs/spec-suite-platform/](docs/spec-suite-platform/)** — the **governing** product spec (Experiment Suite Platform RFC + Web UX RFC + design boards) and **[INTEGRATION_PLAN.md](docs/spec-suite-platform/INTEGRATION_PLAN.md)** — the gap analysis and phased plan for getting there. Read this first; it supersedes the v0.3 narrative.
 - **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — the production-ready implementation plan (phases, reuse map, milestones, definition of done). The MVP spine is implemented; see its status block.
 - **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the post-MVP plan: BYOK model adapter, Control Plane export, full web app, production hardening, then the Later tier (instrumented endpoints, sandbox + cloud code, multi-agent games, population scale) and the commercial track.
 - **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
-- **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3), packaging/economics, bench format guide, UI mocks.
+- **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3 — superseded as narrative by `docs/spec-suite-platform/`), packaging/economics, bench format guide, UI mocks.
 
 ## Maturity — subsystems are NOT equally production-ready
 
@@ -32,11 +35,10 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
   subset JSON-Schema validator (cwd-independent), semantic checks (author-time
   scenario validation, trace referential integrity), canonical JCS hashing,
   bundle assembly/verification, typed publication claims.
-- **`lab_runner/`** — the execution engine + CLI: value ledger with
-  conservative-join provenance, the single pure `decide` shared by live runs and
-  replay, simulated tools with `$injection` fixtures, predicate evaluation,
-  trial/suite runner (scripted agent behind a pluggable `AgentAdapter`), exact
-  replay, EvidenceCase, regression pinning.
+- **`lab_runner/`** — the platform execution engine + CLI: value ledger with
+  conservative-join provenance, untrusted-field minting, the general agent loop,
+  simulated tools with `$injection` fixtures, predicate evaluation, executable
+  invariants, trial identity, bundle I/O.
 - **`lab_analysis/`** — the statistics engine (`contracts/statistics.md` as
   code): Wilson, exact McNemar over stored pairs, paired bootstrap, missingness
   honesty, unit-of-analysis enforcement.
@@ -49,20 +51,26 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
   takedown that preserves attestations, and escaped HTML catalog / publication
   / EvidenceCase pages with three-axis provenance. Stdlib `http.server`; runs
   no live agents.
-- **`lab_agent/`** (B1) — BYOK model-backed agent: `ModelBackend` protocol,
-  `CassetteBackend` (offline) + `AnthropicBackend`, a `WrappedModelAgent`
-  driving the loop through the ledger; cost estimate.
-- **`lab_entitlement/`** (B9) — the Private Lab license (modules as flags) and
-  the two lines as code: safety free forever, org use paid; optional Ed25519.
-- **`lab_endpoint/`** (B5) — instrumented-endpoint trace assembly + black-box
-  eval-only labeling + SSRF guard.
-- **`lab_sandbox/`** (B6) — the sandbox policy decision layer (egress
-  allowlist, resource caps, no host mounts, non-persistent secrets, audit).
-- **`lab_games/`** (B7) — iterated-game runtime with honest per-run statistics.
+- **`lab_suite/`** — the Suite SDK: the `Suite` protocol and `BaseSuite`, a
+  registry with three built-in suites (Blank, AgentDojo, Budget), manifest
+  load/validate/resolve, suite execution, and dispatch to a connected runtime.
+- **`lab_capabilities/governance/`** — governance as an opt-in capability
+  (Suite Platform RFC §10): the reference kernel and the real axor-core backend,
+  the gate a condition resolves to, exact verdict replay, EvidenceCase
+  rendering, verdict pinning, the Control Plane bridge, and the paired `.axl`
+  experiment runner. `lab_runner` imports none of it — the dependency direction
+  and the short list of composition roots are enforced by
+  `tests/test_capability_boundary.py`.
+
+`lab_agent/`, `lab_entitlement/`, `lab_endpoint/`, `lab_sandbox/` and
+`lab_games/` were documented here long after they were deleted. They are gone;
+`docs/POST_MVP_PLAN.md` records what each did and why it was cut.
 
 ## CLI quickstart (`axor-lab`, or `python -m lab_runner`)
 
 ```
+axor-lab suites                                    # the suite catalog
+axor-lab run-suite budget --out ./artifact --yes    # a suite -> artifact/v1
 axor-lab import-agentdojo banking --out suite.axl   # curated benchmark -> .axl
 axor-lab validate examples/banking-exfil-01.axl
 axor-lab run examples/banking-exfil-01.axl --out ./bundle --yes

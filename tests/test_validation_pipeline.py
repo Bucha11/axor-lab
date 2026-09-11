@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 
 from lab_runner.errors import ExperimentFileError
-from lab_runner.experiment_file import resolve
+from lab_capabilities.governance.experiment_file import resolve
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "banking-exfil-01.axl"
 
@@ -29,13 +29,27 @@ class TestValidationPipeline(unittest.TestCase):
     def test_example_resolves(self) -> None:
         resolve(_document())  # sanity: the shipped example is valid
 
-    def test_scenario_missing_violation_is_a_clean_error_not_keyerror(self) -> None:
+    def test_scenario_without_violation_resolves(self) -> None:
+        """`violation` is optional (Suite Platform RFC §6).
+
+        A scenario may carry an injection and simply OBSERVE what happens,
+        leaving the judgement to the suite's evaluators — it does not have to
+        declare a breach predicate. This used to raise; the invariant that
+        survives is the one below: never a raw KeyError.
+        """
         doc = _document()
         del doc["scenarios"][0]["violation"]  # type: ignore[index]
-        # must be an ExperimentFileError (stage: validating), NOT a raw KeyError
+        resolve(doc)
+
+    def test_violation_without_injection_is_a_clean_error_not_keyerror(self) -> None:
+        """The genuinely incoherent shape: a breach criterion with no attack
+        vector can never fire, so it is an authoring error — reported as an
+        ExperimentFileError (stage: validating), never a raw KeyError."""
+        doc = _document()
+        del doc["scenarios"][0]["injection"]  # type: ignore[index]
         with self.assertRaises(ExperimentFileError) as ctx:
             resolve(doc)
-        self.assertTrue(any("violation" in e for e in ctx.exception.errors))
+        self.assertTrue(any("injection" in e for e in ctx.exception.errors), ctx.exception.errors)
 
     def test_duplicate_manifest_id_is_rejected(self) -> None:
         doc = _document()

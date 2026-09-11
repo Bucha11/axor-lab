@@ -17,7 +17,8 @@ import unittest
 from pathlib import Path
 
 from tests import support
-from lab_runner import ScriptedAgent, run_trial
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import run_trial
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

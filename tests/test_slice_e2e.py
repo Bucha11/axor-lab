@@ -20,15 +20,9 @@ from lab_contracts import (
     make_claim,
     validate_scenario,
 )
-from lab_runner import (
-    build_evidence_case,
-    check_pins,
-    pin,
-    replay_bundle,
-    run_experiment,
-    trial_id_for,
-)
-from lab_runner.regression import STATUS_MATCHES
+from lab_runner import trial_id_for
+from lab_capabilities.governance import build_evidence_case, check_pins, pin, replay_bundle, run_experiment
+from lab_capabilities.governance.regression import STATUS_MATCHES
 
 REPEATS = 30
 CREATED = "2026-07-19T00:00:00Z"
@@ -156,7 +150,7 @@ class TestVerticalSliceEndToEnd(unittest.TestCase):
             self.registry.get(support.KERNEL_PINNED), self.manifests,
         )
         self.assertEqual(
-            case["modes"]["counterfactual_policy_replay"]["verdicts"], ["DENY"]  # type: ignore[index]
+            case["modes"]["counterfactual_policy_replay"]["verdicts"], ["ALLOW", "DENY"]  # type: ignore[index]
         )
 
     def test_regression_pin_holds_under_the_pinned_kernel(self) -> None:

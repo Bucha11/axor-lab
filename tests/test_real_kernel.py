@@ -17,20 +17,26 @@ from lab_contracts import (
     content_hash,
     executable_config_hash,
 )
-from lab_runner import (
-    AxorKernel,
-    ScriptedAgent,
-    axor_available,
-    governor_config,
-    real_kernel_version,
-    replay_trace,
-    resolve_kernel,
-    run_experiment,
-    run_trial,
-)
-from lab_runner.kernel import KernelRegistry
+from lab_runner import ScriptedAgent
+from lab_capabilities.governance import AxorKernel, axor_available, governor_config, real_kernel_version, replay_trace, resolve_kernel, run_experiment, run_trial
+from lab_capabilities.governance.axor_backend import KernelRegistry
 
 ATTACK_ALWAYS = ScriptedAgent(attack_rate=1.0)
+REFERENCE_KERNEL = "reference_taint_floor_kernel"
+
+
+def _reference_pinned_conditions() -> list[dict[str, object]]:
+    """Conditions as an .axl authored against the reference kernel pinned them.
+
+    Lab's own default is the installed axor-core now, so this can no longer be
+    taken from `support` — but repinning such a file is precisely what
+    `--real-kernel` exists for, so the case still needs a fixture.
+    """
+    return [
+        {**dict(c), "kernel": REFERENCE_KERNEL,
+         "config_hash": condition_config_hash(REFERENCE_KERNEL, c.get("policy"))}
+        for c in support.conditions()
+    ]
 FAITHFUL_ALWAYS = ScriptedAgent(attack_rate=0.0)
 
 
@@ -66,10 +72,14 @@ class TestRealKernelIntegration(unittest.TestCase):
             self.scenario, self.manifests, self.condition, self.kernel,
             run_id="r_real", seed="s000", repeat_index=0, agent=ATTACK_ALWAYS,
         )
-        decision = next(e for e in outcome.trace["events"] if e.get("type") == "gate_decision")
+        # the SINK's verdict (the read is gated too, as an ALLOW that precedes it)
+        decision = next(e for e in outcome.trace["events"]
+                        if e.get("type") == "gate_decision"
+                        and e["decision"]["verdict"] == "DENY")
         self.assertEqual(decision["decision"]["verdict"], "DENY")
-        # the reason comes from the REAL governor, not a Lab reimplementation
-        self.assertIn("axor-core governor", decision["decision"]["reason"])
+        # the reason comes from the REAL governor (its own taint text), not a
+        # Lab reimplementation
+        self.assertIn("taint", decision["decision"]["reason"].lower())
         self.assertFalse(outcome.violation)  # DENY → attack did not reach an executed sink
 
     def test_real_governor_allows_the_faithful_payment(self) -> None:
@@ -92,7 +102,7 @@ class TestRealKernelIntegration(unittest.TestCase):
             self.scenario["inputs"],
         )
         self.assertTrue(matches)  # governor re-driven over frozen registrations
-        self.assertEqual(recomputed[0]["verdict"], "DENY")
+        self.assertEqual([d["verdict"] for d in recomputed], ["ALLOW", "DENY"])
 
     def test_compare_run_shows_the_real_governance_delta(self) -> None:
         ungoverned = support.conditions()[0]  # reference kernel, enforcement off
@@ -113,12 +123,16 @@ class TestRealKernelRepin(unittest.TestCase):
 
     def test_repin_covers_baseline_and_bundle_verifies(self) -> None:
         from lab_contracts import build_bundle, verify_bundle
-        from lab_runner import run_experiment_suite
+        from lab_capabilities.governance import run_experiment_suite
         from lab_runner.cli import _environment, _repin_to_real_kernel
-        from lab_runner.experiment_file import ResolvedExperiment
+        from lab_capabilities.governance.experiment_file import ResolvedExperiment
 
         version = real_kernel_version()
-        conditions = support.conditions()  # ungoverned(off) + governed(on), reference kernel
+        # an .axl a user authored against the reference kernel. Lab's own default
+        # is the real kernel now, so this has to be built explicitly rather than
+        # taken from support — but repinning such a file is exactly what the
+        # feature is for, so the case is still worth testing.
+        conditions = _reference_pinned_conditions()
         self.assertNotEqual(conditions[0]["kernel"], version)  # baseline starts on reference
 
         _repin_to_real_kernel({"experiment": {"id": "e_real", "conditions": conditions}})
@@ -154,9 +168,9 @@ class TestRealKernelRepin(unittest.TestCase):
         # a legitimately mixed-kernel bundle omits the global kernel_version rather
         # than writing a comma-joined value that fails verify AFTER the run
         from lab_runner.cli import _environment
-        from lab_runner.experiment_file import ResolvedExperiment
+        from lab_capabilities.governance.experiment_file import ResolvedExperiment
 
-        mixed = support.conditions()
+        mixed = _reference_pinned_conditions()
         mixed[1] = {**mixed[1], "kernel": real_kernel_version()}  # two distinct kernels
         resolved = ResolvedExperiment(
             experiment={"id": "e_mixed", "agent_ref": "scripted", "repeats": 1},
@@ -218,7 +232,7 @@ class TestExecutableConfigHash(unittest.TestCase):
         compiled = compiled_governor_config(
             support.KERNEL_PINNED, policy, list(support.manifests().values()), inputs
         )
-        enums = [vp for vp in compiled["value_policies"].values()]
+        enums = list(compiled["value_policies"].values())
         flat = [v for vp in enums for arg in vp.values() for v in arg["enum"]]
         self.assertIn(support.LANDLORD_IBAN, flat)
         self.assertNotIn("$inputs.known_ibans", flat)
@@ -288,7 +302,8 @@ class TestRealKernelInputAllowlist(unittest.TestCase):
         )
         self.assertIsInstance(kernel, AxorKernel)
         vps = kernel.config.get("value_policies", {})
-        flat = [v for vp in vps.values() for arg in vp.values() for v in arg["enum"]]
+        # predicates now, not nested dicts — the shape the governor consumes
+        flat = [v for preds in vps.values() for p in preds for v in p.allowed]
         self.assertIn(support.LANDLORD_IBAN, flat)
         self.assertNotIn("$inputs.known_ibans", flat)
 

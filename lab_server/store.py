@@ -35,7 +35,7 @@ from lab_contracts import (
     verify_bundle,
 )
 from lab_contracts.publication import add_reproduction, rebuild_reproduction_log
-from lab_runner import default_registry, replay_bundle
+from lab_capabilities.governance import default_registry, replay_bundle
 
 from .errors import NotFound, PublishRejected
 from .recompute import check_aggregates
@@ -45,7 +45,7 @@ _ATTESTATION_ID_MAX = 128
 
 # the DENY claim text is rendered by ONE shared function so the CLI local
 # publish and this server path produce identical assertions (review r6)
-from lab_runner.claims import deny_claim_text as _deny_claim_text
+from lab_capabilities.governance.claims import deny_claim_text as _deny_claim_text
 
 
 def _semantic_errors(
@@ -713,12 +713,15 @@ class PublicationStore:
 
     @staticmethod
     def _first_denied(traces: dict[str, dict[str, object]]) -> dict[str, object] | None:
+        """The first trace whose denial was ENFORCED — the one a publication can
+        honestly make a containment claim about. An observe-only arm records
+        real denials and runs the call regardless; publishing one as evidence
+        would claim the kernel stopped something it only watched."""
+        from lab_runner.verdicts import contained
+
         for trace in sorted(traces.values(), key=lambda t: str(t["trace_id"])):
             for event in trace["events"]:  # type: ignore[union-attr]
-                if (
-                    event.get("type") == "gate_decision"
-                    and event["decision"]["verdict"] == "DENY"  # type: ignore[index]
-                ):
+                if event.get("type") == "gate_decision" and contained(event["decision"]):  # type: ignore[index,arg-type]
                     return trace
         return None
 

@@ -9,9 +9,34 @@ description = "Axor Lab — reproducible governance experiments for AI agents: l
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
-# deliberately dependency-free: the contract validator, runner, replay and
-# statistics engine are stdlib-only (see contracts/ and the acceptance suite)
-dependencies = []
+# axor-core is REQUIRED, not an extra. Lab exists to measure what the Axor
+# kernel does; a Lab that installs without it can still run, but every number it
+# produces describes the one-gate reference reimplementation rather than the
+# product — and which of the two you got depended on whether an optional extra
+# happened to be installed. Bounded to one minor line, matching axor-wrap, so an
+# environment cannot resolve a kernel Lab's integration job never ran against.
+#
+# Everything else stays stdlib: the contract validator, replay and the
+# statistics engine pull in nothing.
+# axor-wrap is the single wrapping engine both Lab and the Control Plane run on:
+# CP already drives it via axor_wrap.plane, and Lab's runner is being moved onto
+# axor_wrap.WrappedToolset/build_trace so the two produce identical trace/v1
+# through ONE builder instead of Lab's own (retiring the reference kernel and
+# Lab's duplicate trace construction). It is not yet on PyPI with this API
+# (0.1.0 predates it), so pin the integration branch from git for now — axor-wrap
+# is public, so this clones tokenless. Swap to a version pin once wrap releases.
+dependencies = [
+    "axor-core>=0.10.2,<0.11",
+    "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m",
+    # axor-eval is the shared fault-injection evaluator (silent_fail deprivation,
+    # the ToolAuditLayer that emits FABRICATED_TOOL_RESULT). Lab reuses it for the
+    # tool-fabrication experiment (silent_fail + ToolAuditLayer + the shared
+    # reconstruct_claim in axor_eval.claims) rather than re-implementing the
+    # deviation machinery — the same "one engine, no duplicate" rule the wrap
+    # migration followed. Public repo, pinned to the integration branch (which
+    # carries axor_eval.claims); its axor-core>=0.8,<0.11 is met by Lab's 0.10.2.
+    "axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m",
+]
 
 [project.scripts]
 axor-lab = "lab_runner.cli:main"
@@ -23,7 +48,10 @@ packages = [
     "lab_runner",
     "lab_adapters",
     "lab_server",
-    "lab_agent",
+    "lab_suite",
+    "lab_suite.builtin",
+    "lab_capabilities",
+    "lab_capabilities.governance",
 ]
 
 # ship the contract schemas as package data so an installed wheel is
@@ -34,13 +62,25 @@ packages = [
 lab_contracts = ["schemas/*.schema.json"]
 
 [project.optional-dependencies]
-# the BYOK Anthropic backend; the cassette path and everything else is stdlib
-byok = ["anthropic>=0.40"]
+# The Builder's YAML editing mode (Suite Platform RFC §13). Basic and Advanced
+# edit the same manifest as JSON and need nothing extra, so the platform core
+# stays stdlib-only; only the third editor needs a parser.
+yaml = ["pyyaml>=6.0"]
+# `byok` is retired. It drove a model against SIMULATED tools, so the numbers
+# described neither the caller's agent nor their tools — a run that closed no
+# user story. Kept as an empty alias so an existing
+# `pip install axor-lab[byok]` keeps resolving.
+byok = []
 # Ed25519 license + bundle signing (same crypto as the Control Plane license)
 crypto = ["pynacl>=1.5"]
-# the REAL production kernel: govern with axor_core.ToolCallGovernor instead of
-# the reference taint_floor. Without it, Lab falls back to the reference kernel.
-kernel = ["axor-core>=0.9"]
+# Accepting axor-identity login tokens (hosted workspace SSO substrate). The
+# open-core runner never needs it; only a hosted lab_server that authenticates
+# humans against the shared identity service verifies its EdDSA access tokens.
+identity = ["pyjwt[crypto]>=2.8", "cryptography>=42.0"]
+# `kernel` is retired: axor-core moved to [project.dependencies]. Kept as an
+# empty alias so `pip install axor-lab[kernel]` in an existing script keeps
+# working instead of erroring on an unknown extra.
+kernel = []
 
 [tool.ruff]
 target-version = "py311"
