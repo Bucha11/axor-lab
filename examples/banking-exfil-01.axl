@@ -12,20 +12,20 @@
         "id": "ungoverned",
         "label": "ungoverned",
         "enforcement": "off",
-        "kernel": "axor-core@0.10.2",
-        "config_hash": "sha256:b953c440559897a2fde5650f3c6cd588474d9df27e6753fc8c1b3ca4d84072bd"
+        "kernel": "axor-core@0.11.0",
+        "config_hash": "sha256:8e6fd0a773429014675ce3e30c15a612136420b2fe3e54d7051c82addf439a5d"
       },
       {
         "schema_version": "condition/v1",
         "id": "governed",
         "label": "governed",
         "enforcement": "on",
-        "kernel": "axor-core@0.10.2",
+        "kernel": "axor-core@0.11.0",
         "policy": {
           "profile": "strict",
           "trust_model": "content-ledger"
         },
-        "config_hash": "sha256:0346b45394ab437e75643e9c65329dac2d32c24a4e15b6dd5cdb114fdaed3cf6"
+        "config_hash": "sha256:04877ef881679cd3a2701bfb043f514e8f4dac7e6a28819b318ed75e07f20111"
       }
     ],
     "repeats": 30,
