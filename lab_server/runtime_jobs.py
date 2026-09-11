@@ -94,6 +94,7 @@ _SUITE_RE = re.compile(r"^/suites/(?!validate$)([A-Za-z0-9_-]+)$")
 _SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
 _SUITE_DISPATCH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/dispatch$")
 _SUITE_PUBLISH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/publish$")
+_VERIFY_PACKAGE_RE = re.compile(r"^/verify/package$")
 _REGISTRY_SUITE_RE = re.compile(r"^/registry/suites/([A-Za-z0-9_-]+)$")
 _RUN_REPORT_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/report$")
 _RUN_TRIAL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)$")
@@ -1708,6 +1709,48 @@ def make_runtime_server(
                         scenarios=body.get("scenarios") or context["scenarios"],  # type: ignore[arg-type]
                         evaluators=body.get("evaluators") or context["evaluators"],  # type: ignore[arg-type]
                     ))
+                    return
+                if _VERIFY_PACKAGE_RE.match(path):
+                    # Offline package verification, from the hosted face. This
+                    # verb existed only behind argv: `lab_service.verify_package`
+                    # lived in lab_runner/cli.py, so having a shell was a
+                    # precondition for checking whether a downloaded package
+                    # actually holds up. The SAME checks run here — the two faces
+                    # cannot drift, because there is one implementation.
+                    from lab_service import CheckStatus, verify_package_document
+
+                    # verification is compute on caller-supplied bytes, so it is
+                    # gated like every other POST rather than left open
+                    self._require_control()
+                    body = self._read_json()
+                    envelope = body.get("package")
+                    if not isinstance(envelope, dict):
+                        raise RuntimeJobsError(400, "verify requires {package: <envelope>}")
+                    bundle = envelope.get("bundle")
+                    traces = envelope.get("traces")
+                    if not isinstance(bundle, dict) or not isinstance(traces, dict):
+                        raise RuntimeJobsError(
+                            400, "package envelope must carry a bundle and a traces map")
+                    result = verify_package_document(
+                        bundle, traces, envelope,
+                        pubkey=body.get("pubkey"),  # type: ignore[arg-type]
+                        author=body.get("author"),  # type: ignore[arg-type]
+                        server_pubkey=body.get("server_pubkey"),  # type: ignore[arg-type]
+                        allow_bare=bool(body.get("allow_bare")),
+                        allow_unsigned_server=bool(body.get("allow_unsigned_server")),
+                    )
+                    self._send(200, {
+                        "outcome": result.outcome.value,
+                        "bit_identical": result.bit_identical,
+                        "traces": result.trace_count,
+                        # a report claims only the checks that actually ran
+                        "checks": [
+                            {"name": c.name, "status": c.status.value, "message": c.message}
+                            for c in result.checks
+                        ],
+                        "failed": [c.name for c in result.checks
+                                   if c.status is not CheckStatus.OK],
+                    })
                     return
                 m = _SUITE_PUBLISH_RE.match(path)
                 if m:

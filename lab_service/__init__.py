@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from .checks import Check, CheckStatus
 from .errors import OutputRefused, ServiceError
+from .packages import PackageVerifyResult, verify_package, verify_package_document
+from .incidents import IncidentImportResult, import_incident
 from .handoff import CPExportResult, CPVerifyResult, export_cp_package, verify_cp_package
 from .outcomes import Outcome
 
@@ -26,10 +28,15 @@ __all__ = [
     "CPExportResult",
     "CPVerifyResult",
     "Check",
+    "IncidentImportResult",
     "CheckStatus",
     "Outcome",
+    "PackageVerifyResult",
     "OutputRefused",
     "ServiceError",
     "export_cp_package",
+    "import_incident",
     "verify_cp_package",
+    "verify_package",
+    "verify_package_document",
 ]

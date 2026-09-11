@@ -498,169 +498,30 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-_REPRODUCTION_PACKAGE_SCHEMA = "axor-reproduction-package/v1"
-
-
-def _package_data(path: Path) -> dict[str, object] | None:
-    """The raw JSON of a downloaded `.json` package, or None for a bundle
-    DIRECTORY (which ships no receipt/publication/acceptance)."""
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def _cmd_verify(args: argparse.Namespace) -> int:
     """Standalone, offline verification of a downloaded reproduction package —
-    NO server trusted. Confirms content hashes, bit-identical replay, and — for a
-    server-issued package — that EVERY proof object is present and binds: the
-    author receipt (signed_ref/signature), the publication (id + bundle_ref +
-    claims), and the server acceptance (semantic report + signature). Stripping
-    any proof from a server package is a failure, not a silent pass (review r16)."""
-    path = Path(args.package)
-    bundle, traces = read_bundle_source(path)
-    print(f"content hashes: OK ({len(traces)} trace(s), {len(bundle['conditions'])} conditions)")  # type: ignore[arg-type]
-    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
-    kernels = {k.version: k for k in default_registry(versions).kernels}
-    report = replay_bundle(bundle, traces, kernels)
-    if not report.bit_identical:
-        print("replay MISMATCH: recomputed verdicts differ from recorded", file=sys.stderr)
-        return EXIT_FAILURE
-    print(f"replay: bit-identical over {len(report.decisions)} trace(s)")
+    NO server trusted. The checks live in `lab_service.packages`; this prints
+    them and maps the outcome to an exit code."""
+    from lab_service import CheckStatus, Outcome, verify_package
 
-    # A bundle DIRECTORY is a local artifact that never carried server proofs — it
-    # verifies as bundle-integrity + replay only, and cannot be "downgraded".
-    if path.is_dir():
-        print("receipt: none (a bundle directory carries no portable receipt)")
-        return EXIT_OK
-
-    data = _package_data(path)
-    # A downloaded `.json` MUST be a VERSIONED reproduction envelope. Detection can
-    # no longer key on the PRESENCE of a publication/acceptance/receipt: an
-    # attacker downgrades a server package to a bare {bundle,traces} by stripping
-    # the envelope AND every proof at once, and autodetection then reads it as an
-    # honest bare package and exits 0. The envelope schema_version is the one
-    # marker whose ABSENCE is meaningful — a bare file without --allow-bare is
-    # refused, so a stripped server package cannot masquerade as bare (review r17).
-    has_envelope = bool(data) and str(data.get("schema_version")) == _REPRODUCTION_PACKAGE_SCHEMA
-    if not has_envelope:
-        if not getattr(args, "allow_bare", False):
-            print(
-                f"package: NOT a versioned reproduction envelope (missing schema_version "
-                f"{_REPRODUCTION_PACKAGE_SCHEMA!r}). A server package cannot be silently "
-                "downgraded to a bare bundle — pass --allow-bare to verify a local "
-                "bundle+traces file as bare (integrity + replay only, no server proofs).",
-                file=sys.stderr,
-            )
-            return EXIT_VALIDATION
-        print("package: bare (bundle+traces only, --allow-bare) — no server proofs to check")
-        return EXIT_OK
-
-    assert data is not None
-    receipt = data.get("receipt")
-    if not isinstance(receipt, dict):
-        print("receipt: MISSING from a server package (stripped?) — refusing to pass",
-              file=sys.stderr)
-        return EXIT_FAILURE
-
-    from lab_contracts.publication import verify_publication_binding
-    from lab_contracts.signing import (
-        SignatureInvalid,
-        SignatureUnavailable,
-        verify_acceptance,
-        verify_receipt,
+    result = verify_package(
+        Path(args.package),
+        pubkey=getattr(args, "pubkey", None),
+        author=getattr(args, "author", None),
+        server_pubkey=getattr(args, "server_pubkey", None),
+        server=getattr(args, "server", None),
+        server_key_id=getattr(args, "server_key_id", None),
+        allow_bare=bool(getattr(args, "allow_bare", False)),
+        allow_unsigned_server=bool(getattr(args, "allow_unsigned_server", False)),
     )
-
-    unverified = False  # a signature we could not check (distinct from invalid)
-    # 1) author receipt
-    try:
-        verify_receipt(bundle, receipt, getattr(args, "pubkey", None),
-                       expected_author=getattr(args, "author", None))
-    except SignatureInvalid as exc:
-        print(f"receipt: INVALID — {exc}", file=sys.stderr)
-        return EXIT_FAILURE
-    except SignatureUnavailable as exc:
-        print(f"receipt: UNVERIFIED — {exc}", file=sys.stderr)
-        unverified = True
-    else:
-        kind = "signature VERIFIED" if str(receipt.get("integrity")) == "signed" else "signed_ref OK (hash-only)"
-        print(f"receipt: {kind}")
-
-    publication = data.get("publication")
-    acceptance = data.get("acceptance")
-    if not isinstance(publication, dict) or not isinstance(acceptance, dict):
-        print("package: MISSING publication or acceptance (server package) — refusing to pass",
-              file=sys.stderr)
-        return EXIT_FAILURE
-    # 2) publication binds to the bundle and its own id
-    problems = verify_publication_binding(publication, bundle)
-    if problems:
-        print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
-        return EXIT_FAILURE
-    print("publication: bound (id + bundle_ref + claims)")
-    # 2b) the AUTHOR receipt's integrity must match the publication's — otherwise a
-    # `signed` publication can be downgraded by swapping in a valid hash-only
-    # receipt (the author signature stripped) while the server acceptance stays
-    # signed, and verify would still exit 0. The portable author receipt exists
-    # precisely to prove author authenticity WITHOUT trusting the server, so a
-    # signed publication must carry a signed, VERIFIED author receipt (review r18).
-    pub_integrity = str(publication.get("integrity", "hash_verified"))
-    receipt_integrity = str(receipt.get("integrity", "hash_verified"))
-    if receipt_integrity != pub_integrity:
-        print(
-            f"receipt: INTEGRITY MISMATCH — receipt is {receipt_integrity!r} but the "
-            f"publication is {pub_integrity!r} (author-signature downgrade?) — refusing to pass",
-            file=sys.stderr,
-        )
-        return EXIT_FAILURE
-    if pub_integrity == "signed" and not getattr(args, "pubkey", None):
-        # a signed publication whose author signature we hold no key to check is
-        # UNVERIFIED, never a pass (the server acceptance is a separate attestation)
-        print(
-            "receipt: UNVERIFIED — signed publication but no author public key (--pubkey) "
-            "was supplied to verify its receipt",
-            file=sys.stderr,
-        )
-        unverified = True
-    # 3) server acceptance binds + (optionally) verifies. verify_acceptance also
-    # requires acceptance.integrity == publication.integrity. v0.3 keeps a single
-    # acceptance/v1 form: a server that finds its persisted acceptance damaged
-    # simply re-mints a fresh acceptance/v1 from the current bundle on load, so
-    # there is no reacceptance/history chain to resolve here.
-    try:
-        verify_acceptance(
-            acceptance, publication,
-            server_pubkey_hex=getattr(args, "server_pubkey", None),
-            expected_server=getattr(args, "server", None),
-            expected_key_id=getattr(args, "server_key_id", None),
-        )
-    except SignatureInvalid as exc:
-        print(f"acceptance: INVALID — {exc}", file=sys.stderr)
-        return EXIT_FAILURE
-    except SignatureUnavailable as exc:
-        print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
-        unverified = True
-    else:
-        if str(acceptance.get("algorithm")) == "ed25519":
-            print("acceptance: signature VERIFIED")
-        elif getattr(args, "allow_unsigned_server", False):
-            print("acceptance: unsigned (accepted via --allow-unsigned-server; local dev only)")
-        else:
-            # an UNSIGNED acceptance proves only internal self-consistency, NOT that
-            # a specific Axor Lab server ran the checks — anyone can mint one. It is
-            # not an authenticated server verification, so it is UNVERIFIED (r17).
-            print(
-                "acceptance: UNVERIFIED — unsigned server acceptance is not an authenticated "
-                "verification (pass --server-pubkey to check a signed one, or "
-                "--allow-unsigned-server for local development)",
-                file=sys.stderr,
-            )
-            unverified = True
-
-    return EXIT_UNVERIFIED if unverified else EXIT_OK
+    for check in result.checks:
+        stream = sys.stdout if check.status is CheckStatus.OK else sys.stderr
+        print(f"{check.name}: {check.message}", file=stream)
+    return {
+        Outcome.OK: EXIT_OK,
+        Outcome.VALIDATION: EXIT_VALIDATION,
+        Outcome.UNVERIFIED: EXIT_UNVERIFIED,
+    }.get(result.outcome, EXIT_FAILURE)
 
 
 def _cmd_pin(args: argparse.Namespace) -> int:
@@ -1026,118 +887,23 @@ def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
 def _cmd_import_incident(args: argparse.Namespace) -> int:
     """Second funnel: a production trace -> a trace-replay bundle you can test a
     policy against, pin, and export (control-plane-handoff.md §Second funnel).
+    Validation, replay and materialization live in `lab_service.incidents`, which
+    takes the loaded artifacts — this reads them off disk and reports."""
+    from lab_service import import_incident
 
-    The recorded condition is REQUIRED and used verbatim — reconstructing it
-    (enforcement=on, kernel from the trace) silently loses enforcement mode,
-    policy, allowlist, criticality overrides and the config hash, so replay
-    could then yield a different verdict than the incident actually produced.
-    Everything is validated (schema + semantics + cross-references + config
-    hash) and REPLAYED before anything is written."""
-    from datetime import datetime, timezone
-
-    from lab_contracts import (
-        ScenarioValidationError,
-        build_bundle,
-        condition_config_hash,
-        content_hash,
-        validate_artifact,
-        validate_scenario,
+    result = import_incident(
+        json.loads(Path(args.trace).read_text()),
+        json.loads(Path(args.scenario).read_text()),
+        json.loads(Path(args.manifests).read_text()),
+        json.loads(Path(args.condition).read_text()),
+        out=Path(args.out),
+        created=args.created,
+        overwrite=bool(getattr(args, "overwrite", False)),
     )
-
-    from lab_capabilities.governance.replay import REPLAY_MATCH, replay_trace_status
-
-    trace: dict[str, object] = json.loads(Path(args.trace).read_text())
-    scenario: dict[str, object] = json.loads(Path(args.scenario).read_text())
-    manifests: list[dict[str, object]] = json.loads(Path(args.manifests).read_text())
-    condition: dict[str, object] = json.loads(Path(args.condition).read_text())
-
-    # 1. schema validation of every artifact
-    for obj, name in ((trace, "trace"), (scenario, "scenario"), (condition, "condition")):
-        errors = validate_artifact(obj, name)
-        if errors:
-            raise RunnerError(f"incident {name} is not conformant: {errors}")
-    manifests_by_id: dict[str, dict[str, object]] = {}
-    for manifest in manifests:
-        errors = validate_artifact(manifest, "tool-manifest")
-        if errors:
-            raise RunnerError(f"incident manifest {manifest.get('id')} is not conformant: {errors}")
-        manifests_by_id[str(manifest["id"])] = manifest
-
-    # 2. semantic + cross-reference validation
-    try:
-        validate_scenario(scenario, manifests_by_id)
-    except ScenarioValidationError as exc:
-        raise RunnerError(f"incident scenario failed semantic validation: {exc}") from exc
-    trial: dict[str, object] = trace["trial"]  # type: ignore[assignment]
-    if str(condition["id"]) != str(trial["condition_id"]):
-        raise RunnerError(
-            f"condition.id {condition['id']!r} != trace condition_id {trial['condition_id']!r}"
-        )
-    if str(scenario["name"]) != str(trial["scenario_id"]):
-        raise RunnerError(
-            f"scenario.name {scenario['name']!r} != trace scenario_id {trial['scenario_id']!r}"
-        )
-
-    # 3. config-hash verification (if the recorded condition carries one)
-    if "config_hash" in condition:
-        expected = condition_config_hash(str(condition["kernel"]), condition.get("policy"))  # type: ignore[arg-type]
-        if str(condition["config_hash"]) != expected:
-            raise RunnerError(
-                f"condition config_hash {condition['config_hash']!r} != recomputed {expected!r}"
-            )
-
-    # 4. replay the incident under its OWN recorded condition before writing — a
-    # wrong/reconstructed condition would surface here as a mismatch. Pass the
-    # scenario inputs so a real-kernel `$inputs` allowlist expands to the concrete
-    # values the incident actually ran under, not the symbolic ref (review r17).
-    kernel = resolve_kernel(
-        str(condition["kernel"]), manifests_by_id, condition.get("policy"),  # type: ignore[arg-type]
-        default_registry((str(condition["kernel"]),)), scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    _, status = replay_trace_status(
-        trace, condition, kernel, manifests_by_id, scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    if status != REPLAY_MATCH:
-        raise RunnerError(
-            f"incident trace does not replay under its condition (status={status}) — "
-            "refusing to import a bundle whose verdicts don't reproduce"
-        )
-
-    # a completed trial carries the runtime config it ran under, but this hash is
-    # RECONSTRUCTED at import from the incident's condition + scenario inputs — the
-    # original production trace never carried it, and this process did not observe
-    # the runtime compilation. Mark it reconstructed_incident so config_provenance
-    # reports the honest status and an evidence-backed CP export refuses it as
-    # "the exact runtime config that actually ran in production" (review r21).
-    from lab_contracts import CONFIG_COMPILER_VERSION, runtime_config_hash
-
-    incident_rch = runtime_config_hash(
-        str(condition["kernel"]), condition.get("policy"), manifests,
-        scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    trials = [{
-        "trial_id": content_hash(trace), "scenario_id": str(trial["scenario_id"]),
-        "condition_id": str(trial["condition_id"]), "seed": str(trial["seed"]),
-        "repeat_index": int(trial["repeat_index"]), "status": "completed",
-        "trace_ref": content_hash(trace),
-        "runtime_config_hash": incident_rch,
-        "config_compiler_version": CONFIG_COMPILER_VERSION,
-        "runtime_provenance": "reconstructed_incident",
-    }]
-    bundle = build_bundle(
-        bundle_id="b_incident_" + content_hash(trace).removeprefix("sha256:")[:32],
-        created=args.created or datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        scenarios=[scenario], conditions=[condition], tool_manifests=manifests,
-        environment={"kernel_version": str(trace["producer"]["kernel_version"]),  # type: ignore[index]
-                     "model": {"provider": "imported", "id": "production-incident"}},
-        trials=trials, aggregates=[], traces={str(trace["trace_id"]): trace},
-        packaging=dict(PACKAGING),
-    )
-    write_bundle_dir(Path(args.out), bundle, {str(trace["trace_id"]): trace},
-                     overwrite=bool(getattr(args, "overwrite", False)))
-    print(f"imported incident -> {args.out} (trace-replay bundle)")
-    print(f"  replay it:  axor-lab replay {args.out}")
-    print(f"  pin + export:  axor-lab pin ... && axor-lab export-cp {args.out} --pins pins.json")
+    print(f"imported incident -> {result.directory} (trace-replay bundle)")
+    print(f"  replay it:  axor-lab replay {result.directory}")
+    print(f"  pin + export:  axor-lab pin ... && axor-lab export-cp {result.directory} "
+          "--pins pins.json")
     return EXIT_OK
 
 
