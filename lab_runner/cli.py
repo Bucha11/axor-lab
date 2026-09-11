@@ -135,11 +135,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    resolved = resolve(load_axl(Path(args.file)))
-    print(f"valid: {resolved.experiment['id']}")
+    from lab_service import validate_experiment
+
+    result = validate_experiment(load_axl(Path(args.file)))
+    print(f"valid: {result.experiment_id}")
     print(
-        f"  scenarios={len(resolved.scenarios)} conditions={len(resolved.conditions)} "
-        f"repeats={resolved.repeats} -> {resolved.trial_count} trials"
+        f"  scenarios={result.scenarios} conditions={result.conditions} "
+        f"repeats={result.repeats} -> {result.trial_count} trials"
     )
     return EXIT_OK
 
@@ -388,14 +390,23 @@ def _cmd_run_suite(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    """The lifecycle stages a run passes through, printed as it goes. The work on
+    either side of the confirm gate lives in `lab_service.experiments`; the GATE
+    is the face's — a prompt here, `POST /runs/{id}/confirm` over HTTP."""
+    from lab_service import execute_run, plan_run
+
     print("[validating]")
-    document = load_axl(Path(args.file))
-    if args.real_kernel:
-        _repin_to_real_kernel(document)
-    resolved = resolve(document)
+    plan = plan_run(
+        load_axl(Path(args.file)),
+        real_kernel=bool(args.real_kernel),
+        run_id=args.run_id,
+    )
+    if plan.repinned_kernel:
+        print("  repinned ALL conditions (baseline + governed) to the real kernel: "
+              f"{plan.repinned_kernel}")
 
     print("[estimate]")
-    _print_estimate(resolved)
+    _print_estimate(plan.resolved)
     if not _confirmed(args):
         print(
             "not confirmed — pass --yes (or answer y) to execute; nothing ran",
@@ -404,92 +415,41 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return EXIT_UNCONFIRMED
 
     print("[running_local]")
-    agent = resolved.agent
-    # run identity folds in the agent, so two runs of the same experiment under
-    # different agents are different runs rather than retries of one (review r3).
-    fingerprint = str(resolved.experiment["agent_ref"])
-    # 128-bit id (32 hex chars) from the experiment+agent fingerprint — the old
-    # 8-char (32-bit) slice was birthday-collision-searchable, so two unrelated
-    # runs could share a run_id and look like retries of one trial (review r7).
-    # For a NONDETERMINISTIC agent a fresh random execution nonce is folded in, so
-    # two live runs of the same experiment are distinct executions (review r13).
-    run_id = _derive_run_id(
-        args.run_id, resolved.experiment, fingerprint,
-        deterministic=bool(getattr(agent, "is_deterministic", True)),
-    )
-    result = run_experiment_suite(
-        list(resolved.scenarios),
-        resolved.manifests,
-        list(resolved.conditions),
-        resolved.kernel_registry,
-        repeats=resolved.repeats,
-        run_id=run_id,
-        agent=agent,
+    result = execute_run(
+        plan,
+        out=Path(args.out),
+        created=args.created,
+        overwrite=bool(getattr(args, "overwrite", False)),
     )
     # report the plan outcome by status separately — "N trials completed" over
-    # result.trials was misleading, since result.trials also holds failed and
-    # cost-excluded records (review r14). planned = everything the plan intended.
-    by_status: dict[str, int] = {}
-    for trial in result.trials:
-        by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
-    n_completed = by_status.get("completed", 0)
-    n_failed = by_status.get("failed", 0)
-    n_excluded = by_status.get("excluded", 0)
+    # every trial record was misleading, since the records also hold failed and
+    # cost-excluded trials (review r14). planned = everything the plan intended.
     print(
-        f"  planned {len(result.trials)}: {n_completed} completed, "
-        f"{n_failed} failed, {n_excluded} excluded"
+        f"  planned {result.planned}: {result.completed} completed, "
+        f"{result.failed} failed, {result.excluded} excluded"
     )
     print("[analyzing]")
-    # missingness FIRST (denominator honesty) — it must be reported even if a
-    # whole condition has no completed trials, so it never depends on aggregates
-    summary = missingness(result.trials)
-    print(f"  {summary.display()}")
-    aggregates = _aggregates(resolved, result, agent)
-    for aggregate in aggregates:
+    # missingness FIRST (denominator honesty)
+    print(f"  {result.missingness}")
+    for aggregate in result.aggregates:
         _print_aggregate(aggregate)
 
     print("[uploading_artifacts]  (local: writing bundle directory)")
-    created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    # no paid inference: the agent is scripted, so there is no spend to record.
-    usage = None
-    bundle = build_bundle(
-        bundle_id=f"b_{run_id}",
-        created=created,
-        scenarios=list(resolved.scenarios),
-        conditions=list(resolved.conditions),
-        tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved, usage=usage, agent=agent),
-        trials=result.trials,
-        aggregates=aggregates,
-        traces=result.traces,
-        packaging=dict(PACKAGING),
-    )
-    out = Path(args.out)
-    write_bundle_dir(out, bundle, result.traces, overwrite=bool(getattr(args, "overwrite", False)))
-    # superseded retry attempts are NOT publishable evidence (they would orphan
-    # the bundle graph), but they ARE the audit trail — persist them beside the
-    # bundle so "both attempts are preserved" holds on disk, not only in the
-    # in-memory result (review r9)
-    attempt_log = write_superseded_attempts(out, result.superseded)
-    if attempt_log is not None:
-        print(f"  superseded attempts: {attempt_log} ({len(result.superseded)})")
-    print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
-    print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
+    if result.superseded_log is not None:
+        print(f"  superseded attempts: {result.superseded_log} ({result.superseded_count})")
+    print(f"[completed]  bundle: {result.directory}/bundle.json "
+          f"({result.trace_count} traces)")
+    print(f"  reproduce verdicts (exact):    axor-lab replay {result.directory}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")
     return EXIT_OK
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
-    # accept a bundle DIRECTORY or a downloaded .json reproduction package, so a
-    # reader can replay exactly what a publication page served (review r13)
-    bundle, traces = read_bundle_source(Path(args.bundle))
-    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
-    kernels = {k.version: k for k in default_registry(versions).kernels}
-    report = replay_bundle(bundle, traces, kernels)
-    denies = sum(1 for vs in report.verdicts().values() for v in vs if v == "DENY")
-    allows = sum(1 for vs in report.verdicts().values() for v in vs if v == "ALLOW")
-    print(f"replayed {len(report.decisions)} trace(s): {denies} DENY, {allows} ALLOW")
-    if not report.bit_identical:
+    from lab_service import replay_source
+
+    result = replay_source(Path(args.bundle))
+    print(f"replayed {result.decisions} trace(s): {result.denies} DENY, {result.allows} ALLOW")
+    if not result.bit_identical:
         print("MISMATCH: recomputed verdicts differ from recorded", file=sys.stderr)
         return EXIT_FAILURE
     print("bit-identical: verdict-core (verdict+gate+driving value) matches the "
@@ -525,163 +485,68 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_pin(args: argparse.Namespace) -> int:
+    from lab_service import pin_trace
+
     _, traces = read_bundle_dir(Path(args.bundle))
-    trace = traces.get(args.trace_id)
-    if trace is None:
-        raise RunnerError(f"trace {args.trace_id} not found in bundle")
     out = Path(args.out)
-    pins: list[dict[str, object]] = json.loads(out.read_text()) if out.is_file() else []
-    pins = [p for p in pins if p["trace_id"] != args.trace_id]
-    # use the regression model's pin(), which records the WHOLE ordered verdict
-    # sequence — not just the final verdict. Persisting only expected_verdict made
-    # regress compare a multi-call trace's real sequence (ALLOW, ALLOW, DENY) to a
-    # singleton (DENY) and cry regression on an unchanged trace/kernel (review r12).
-    # pin() also rejects an expected_verdict that contradicts the trace's final
-    # recorded verdict (review r13) — surface that as a clean CLI error.
-    try:
-        p = pin(trace, args.expected)
-    except ValueError as exc:
-        raise RunnerError(str(exc)) from exc
-    pins.append(
-        {
-            "trace_id": p.trace_id,
-            "trace_ref": p.trace_ref,
-            "expected_verdict": p.expected_verdict,
-            "expected_sequence": list(p.expected_sequence),
-        }
-    )
-    out.write_text(json.dumps(pins, indent=2))
-    print(f"pinned {args.trace_id} -> expected {list(p.expected_sequence)} ({out})")
+    existing: list[dict[str, object]] = json.loads(out.read_text()) if out.is_file() else []
+    result = pin_trace(traces, args.trace_id, args.expected, existing=existing)
+    out.write_text(json.dumps(list(result.pins), indent=2))
+    print(f"pinned {result.trace_id} -> expected {list(result.expected_sequence)} ({out})")
     return EXIT_OK
 
 
 def _cmd_regress(args: argparse.Namespace) -> int:
+    from lab_service import Outcome, check_regression
+
     bundle, traces = read_bundle_dir(Path(args.bundle))
-    pins_raw: list[dict[str, object]] = json.loads(Path(args.pins).read_text())
-    pins = tuple(
-        RegressionPin(
-            trace_id=str(p["trace_id"]),
-            trace_ref=str(p["trace_ref"]),
-            expected_verdict=str(p["expected_verdict"]),
-            # restore the pinned ORDERED sequence (default to the singleton for
-            # older pin files) so a multi-call trace is compared correctly (r12)
-            expected_sequence=tuple(str(v) for v in p.get("expected_sequence", ())),
-        )
-        for p in pins_raw
+    result = check_regression(
+        bundle, traces, json.loads(Path(args.pins).read_text()),
+        condition_id=args.condition,
+        kernel_override=args.kernel,
+        disable_taint_floor=bool(args.disable_taint_floor),
     )
-    condition = _enforcing_condition(bundle, args.condition)
-    version = args.kernel or str(condition["kernel"])
-    manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
-    kernel_for = None
-    if args.disable_taint_floor:
-        # An explicit real-kernel VARIANT demonstration: the same installed
-        # build, but with its egress-sink declarations dropped so the taint /
-        # confidentiality floor is never armed — the exfiltration the pinned run
-        # DENIED is now ALLOWED, which is exactly the regression a pin exists to
-        # catch. The fingerprint marks it a different kernel (behavior_version
-        # gains `+taint_floor=off`), so the report names the variant, not the
-        # pinned build (review r4).
-        cfg = governor_config(manifests, condition.get("policy"), None)  # type: ignore[arg-type]
-        cfg.pop("egress_sinks", None)
-        cfg.pop("value_policies", None)
-        kernel: object = AxorKernel(version=version, config=cfg, taint_floor_enabled=False)
-    else:
-        # regress under the CANDIDATE kernel — the one named by --kernel or the
-        # chosen regression condition — NOT the kernel the trace was recorded
-        # under (review r18). Each pin resolves the candidate against its OWN
-        # scenario inputs so a real-kernel allowlist expands per scenario. The
-        # candidate resolver takes policy/enforcement from the selected condition
-        # and the version from the override, so `regress --kernel axor-core@X`
-        # actually runs axor-core@X.
-        registry = default_registry((version,))
-        kernel = resolve_kernel(version, manifests, condition.get("policy"), registry)  # type: ignore[arg-type]
-        kernel_for = lambda trace: resolve_candidate_kernel_for_trace(  # noqa: E731
-            bundle, trace, condition, args.kernel, registry
-        )
-    # each pinned trace replays against ITS OWN scenario's inputs — a single
-    # shared inputs dict would replay every pin under the first scenario's
-    # allowlist / effect-resolution inputs (review r12)
-    results = check_pins(
-        pins, traces, condition, kernel, manifests,
-        inputs_for=lambda trace: _scenario_for(bundle, trace).get("inputs", {}),  # type: ignore[union-attr,arg-type]
-        kernel_for=kernel_for,
-    )
-    for result in results:
+    for entry in result.results:
         print(
-            f"{result['trace_id']}: expected {result['expected']}, got {result['actual']} "
-            f"under {result['kernel']} -> {result['status']}"
+            f"{entry['trace_id']}: expected {entry['expected']}, got {entry['actual']} "
+            f"under {entry['kernel']} -> {entry['status']}"
         )
-    # ANY status other than a clean match is unresolved — a differing verdict, a
-    # missing/tampered/malformed trace, or an unsupported kernel. A malformed
-    # trace whose recomputed sequence coincidentally equals the pin used to fall
-    # through to EXIT_OK; it must NOT (review r13).
-    differs = [r for r in results if r["status"] == STATUS_DIFFERS]
-    unresolved = [r for r in results if r["status"] != STATUS_MATCHES]
-    if unresolved:
-        if differs:
+    if result.outcome is Outcome.REGRESSION_DIFFERS:
+        if result.differs:
             print(
-                f"{len(differs)} pin(s) differ from expected — label each as regression "
+                f"{len(result.differs)} pin(s) differ from expected — label each as regression "
                 "or approved baseline update (not auto-resolved)",
                 file=sys.stderr,
             )
-        other = [r for r in unresolved if r["status"] != STATUS_DIFFERS]
-        if other:
+        if result.other_unresolved:
             print(
-                f"{len(other)} pin(s) could not be cleanly replayed "
+                f"{len(result.other_unresolved)} pin(s) could not be cleanly replayed "
                 "(missing / tampered / malformed / unsupported kernel) — not a pass",
                 file=sys.stderr,
             )
         return EXIT_REGRESSION_DIFFERS
-    print(f"all {len(results)} pin(s) match expected verdicts")
+    print(f"all {len(result.results)} pin(s) match expected verdicts")
     return EXIT_OK
 
 
 def _cmd_evidence(args: argparse.Namespace) -> int:
+    from lab_service import build_evidence
+
     bundle, traces = read_bundle_dir(Path(args.bundle))
-    trace = traces.get(args.trace_id)
-    if trace is None:
-        raise RunnerError(f"trace {args.trace_id} not found in bundle")
-    twin = traces.get(args.twin) if args.twin else None
-    if args.twin and twin is None:
-        raise RunnerError(f"twin trace {args.twin} not found in bundle")
-    if twin is not None:
-        # a governed twin must be the SAME case under an enforcing policy — not
-        # any unrelated trace the caller happened to name (review r13)
-        try:
-            validate_twin(trace, twin, bundle)
-        except ValueError as exc:
-            raise RunnerError(str(exc)) from exc
-    scenario = _scenario_for(bundle, trace)
-    # the SAME condition resolver the HTML EvidenceCase uses: an explicit
-    # --policy wins, else the trace's own enforcing condition, else the first
-    # enforcing one — never just "the first enforcement-on condition", which
-    # rendered a strict counterfactual for an allowlist trace (review r13)
-    try:
-        condition = evidence_condition(bundle, trace, getattr(args, "policy", None))
-    except ValueError as exc:
-        raise RunnerError(str(exc)) from exc
-    manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
-    # resolve the SAME kernel replay/regress use — the REAL axor-core governor
-    # when the condition pins the installed build — and pass THIS trace's scenario
-    # inputs so a real-kernel `$inputs` allowlist expands to the concrete values,
-    # not the symbolic ref (review r12/r17). The condition may be a policy-override
-    # counterfactual, so we keep it and only thread the scenario inputs.
-    version = str(condition["kernel"])
-    kernel = resolve_kernel(
-        version, manifests, condition.get("policy"),  # type: ignore[arg-type]
-        default_registry((version,)), scenario.get("inputs", {}),  # type: ignore[union-attr]
+    result = build_evidence(
+        bundle, traces, args.trace_id,
+        twin_id=args.twin,
+        policy=getattr(args, "policy", None),
     )
-    case = build_evidence_case(trace, scenario, condition, kernel, manifests, governed_twin=twin)
-    print(json.dumps(case, indent=2, ensure_ascii=False))
+    print(json.dumps(result.case, indent=2, ensure_ascii=False))
     return EXIT_OK
 
 
 def _cmd_publish(args: argparse.Namespace) -> int:
+    from lab_service import build_local_publication, check_publishable
+
     bundle, traces = read_bundle_dir(Path(args.bundle))
-    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
-    kernels = {k.version: k for k in default_registry(versions).kernels}
-    report = replay_bundle(bundle, traces, kernels)
-    if not report.bit_identical:
+    if not check_publishable(bundle, traces):
         print("refusing to publish: recomputed verdicts differ from recorded", file=sys.stderr)
         return EXIT_FAILURE
 
@@ -690,60 +555,20 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     if not args.out:
         raise RunnerError("publish needs --out (local publication JSON) or --server (upload)")
 
-    bundle_ref = content_hash(bundle)
-    trace_refs = frozenset(content_hash(t) for t in traces.values())
-    aggregates: list[dict[str, object]] = bundle["aggregates"]  # type: ignore[assignment]
-    aggregate_refs = frozenset(
-        f"agg:{a['metric']}:{a['condition_id']}" for a in aggregates
-    )
-    claims: list[dict[str, object]] = []
-    denied = _first_denied_trace(traces)
-    if denied is not None:
-        claims.append(
-            make_claim(
-                "exactly_replayable",
-                # same decision-derived text the server uses — not a template
-                deny_claim_text(denied),
-                content_hash(denied),
-                trace_refs=trace_refs,
-                aggregate_refs=aggregate_refs,
-            )
-        )
-    # local publish proves REPLAY (it re-ran the verdicts above), NOT statistics:
-    # it does not independently recompute the aggregates, so it must NOT mint a
-    # `statistically_reproducible` claim over self-reported numbers — the schema
-    # forbids self_reported backing that claim, and a hand-edited bundle could
-    # carry a fabricated aggregate. Statistical claims are minted only by the
-    # server, which recomputes from the traces (→ recomputed_from_traces, r12).
-    stat_note = ""
-    if aggregates:
-        stat_note = (
-            f"  ({len(aggregates)} aggregate(s) in the bundle are NOT published as claims — "
-            "host with --server for server-recomputed statistical claims)"
-        )
-    publication = build_publication(
-        publication_id="e_pending",  # placeholder; content-addressed below
-        bundle_ref=bundle_ref,
+    result = build_local_publication(
+        bundle, traces,
         question=args.question,
-        origin="local",
-        integrity="hash_verified",
-        claims=claims,
         license_id=args.license,
         visibility=getattr(args, "visibility", "unlisted"),
-        statistics_integrity=None,  # no statistical claims are asserted locally
     )
-    # content-address the WHOLE body (the shared definition), so the same bundle
-    # published with a different question/visibility/license is a genuinely
-    # different publication with its own id, not an id-colliding overwrite (r12)
-    finalize_publication_id(publication)
-    errors = validate_artifact(publication, "publication")
-    if errors:
-        raise RunnerError(f"publication failed schema validation: {errors}")
-    Path(args.out).write_text(json.dumps(publication, indent=2, ensure_ascii=False))
-    print(f"publication {publication['publication_id']} -> {args.out}")
+    Path(args.out).write_text(json.dumps(result.publication, indent=2, ensure_ascii=False))
+    print(f"publication {result.publication_id} -> {args.out}")
     print("origin=local integrity=hash_verified")
-    if stat_note:
-        print(stat_note)
+    if result.aggregate_count:
+        print(
+            f"  ({result.aggregate_count} aggregate(s) in the bundle are NOT published as "
+            "claims — host with --server for server-recomputed statistical claims)"
+        )
     print(f"host it: axor-lab publish {args.bundle} --question ... --server <url>")
     return EXIT_OK
 
@@ -753,61 +578,48 @@ def _publish_to_server(
     bundle: dict[str, object],
     traces: dict[str, dict[str, object]],
 ) -> int:
-    """Upload via the publish handshake; the server re-verifies before minting."""
-    import urllib.error
-    import urllib.request
+    """The CLI half of a hosted publish: resolve the token from the ENVIRONMENT,
+    hand the upload to `lab_service.publishing`, then save the receipt the server
+    issued. The token is read from the environment, never a CLI arg, so it does
+    not land in the process list or shell history (review r6)."""
+    from lab_service import Outcome, default_acceptance_path, upload_publication
 
     visibility = getattr(args, "visibility", "unlisted")
     if visibility == "public":
         print("NOTE: --visibility public — this artifact will be publicly listed on the server.")
-    body: dict[str, object] = {
-        "bundle": bundle,
-        "traces": traces,
-        "question": args.question,
-        "license": args.license,
-        "visibility": visibility,
-    }
-    # a signed, attributed upload: author + detached signature travel in the body
-    if getattr(args, "author", None):
-        body["author"] = args.author
-    if getattr(args, "signature_file", None):
-        body["signature"] = Path(args.signature_file).read_text().strip()
-    payload = json.dumps(body).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    # the write token is read from the ENVIRONMENT, never a CLI arg, so it does
-    # not land in the process list or shell history (review r6)
+    token = None
     if getattr(args, "token_env", None):
         import os
+
         token = os.environ.get(args.token_env)
         if not token:
             raise RunnerError(f"--token-env {args.token_env} is not set in the environment")
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        args.server.rstrip("/") + "/api/publications",
-        data=payload,
-        headers=headers,
-        method="POST",
+    signature = None
+    if getattr(args, "signature_file", None):
+        signature = Path(args.signature_file).read_text().strip()
+    result = upload_publication(
+        bundle, traces,
+        server=args.server,
+        question=args.question,
+        license_id=args.license,
+        visibility=visibility,
+        author=getattr(args, "author", None),
+        signature=signature,
+        token=token,
     )
-    try:
-        with urllib.request.urlopen(request) as response:  # noqa: S310 (operator-supplied URL)
-            result = json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        print(f"server rejected publish ({exc.code}): {detail}", file=sys.stderr)
+    if result.outcome is not Outcome.OK:
+        print(f"server rejected publish ({result.status}): {result.error}", file=sys.stderr)
         return EXIT_FAILURE
-    except urllib.error.URLError as exc:
-        raise RunnerError(f"cannot reach server {args.server}: {exc.reason}") from exc
-    print(f"published {result['publication_id']} -> {args.server.rstrip('/')}{result['url']}")
+    print(f"published {result.publication_id} -> {args.server.rstrip('/')}{result.url}")
     # SAVE the server acceptance receipt — the signed proof of what the server
     # verified. The old CLI dropped it on the floor (review r15). Default to a
     # sidecar file next to the bundle, or an explicit --acceptance-out.
-    acceptance = result.get("acceptance")
-    if acceptance is not None:
+    if result.acceptance is not None:
         dest = getattr(args, "acceptance_out", None)
-        out_path = Path(dest) if dest else Path(f"{result['publication_id']}.acceptance.json")
-        out_path.write_text(json.dumps(acceptance, indent=2))
-        signed = acceptance.get("algorithm") == "ed25519"
-        print(f"  acceptance receipt: {out_path} ({'signed' if signed else 'unsigned'})")
+        out_path = Path(dest) if dest else default_acceptance_path(result.publication_id)
+        out_path.write_text(json.dumps(result.acceptance, indent=2))
+        print(f"  acceptance receipt: {out_path} "
+              f"({'signed' if result.acceptance_is_signed else 'unsigned'})")
     return EXIT_OK
 
 
@@ -956,60 +768,6 @@ def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
 # -- helpers ------------------------------------------------------------------
 
 
-def _repin_to_real_kernel(document: dict[str, object]) -> None:
-    """Repin EVERY condition — baseline included — to the installed axor-core
-    version, so the run governs with the real kernel.
-
-    Repinning only the enforcement-on conditions left the baseline on the
-    reference kernel, so the compare no longer isolated enforcement: it mixed an
-    enforcement change WITH a kernel change (the condition contract wants one
-    kernel across the compared conditions). It also produced a bundle with two
-    distinct condition kernels, so `_environment` wrote a comma-joined
-    `kernel_version` that `verify_bundle` rejects — meaning the command ran every
-    trial (paid model calls included) and only THEN failed at save (review r13).
-
-    Repinning the baseline is load-bearing, not cosmetic. `enforcement: off` is
-    observe-only, not gate-free: the kernel evaluates every call and records the
-    verdict it would have enforced. So the baseline's verdicts are the REAL
-    kernel's verdicts, and a baseline left on the reference kernel would report
-    a different kernel's opinion of the same calls. Both arms share one kernel,
-    and the bundle has a single kernel_version."""
-    from lab_contracts import condition_config_hash
-    from lab_capabilities.governance import axor_available, real_kernel_version
-
-    if not axor_available():
-        raise RunnerError("--real-kernel requested but axor-core is not installed")
-    version = real_kernel_version()
-    experiment: dict[str, object] = document["experiment"]  # type: ignore[assignment]
-    for condition in experiment.get("conditions", []):  # type: ignore[union-attr]
-        condition["kernel"] = version
-        condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
-    print(f"  repinned ALL conditions (baseline + governed) to the real kernel: {version}")
-
-
-def _derive_run_id(
-    explicit: str | None,
-    experiment: dict[str, object],
-    fingerprint: str,
-    *,
-    deterministic: bool,
-) -> str:
-    """The run id. An explicit --run-id always wins. A DETERMINISTIC agent
-    (scripted / replayed cassette) yields a content-derived id, so re-running the
-    same experiment reproduces the same identity. A NONDETERMINISTIC agent (a live
-    model) draws a fresh sample each execution, so two runs are DIFFERENT
-    executions, not retries of one — a random execution nonce is folded in so
-    their run/trial/trace ids differ (review r13)."""
-    if explicit:
-        return explicit
-    body: dict[str, object] = {"experiment": experiment, "agent": fingerprint}
-    if not deterministic:
-        import secrets
-
-        body["execution_nonce"] = secrets.token_hex(16)  # 128-bit per-execution
-    return "r_" + content_hash(body).removeprefix("sha256:")[:32]
-
-
 def _print_estimate(resolved: ResolvedExperiment) -> None:
     """The plan's size. There is no cost line: the agent is scripted, so a run
     makes no provider calls and spends nothing. A confirmation prompt that
@@ -1031,84 +789,6 @@ def _confirmed(args: argparse.Namespace) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
-def _agent_is_deterministic(agent: object) -> bool:
-    return bool(getattr(agent, "is_deterministic", False))
-
-
-def _effective_design(resolved: ResolvedExperiment, agent: object) -> str:
-    """paired (McNemar) only when the agent's behavior is fixed by scenario+seed.
-
-    A live model draws each condition independently — the 'pairs' are nominal, so
-    McNemar's paired test is invalid and the comparison is independent samples. A
-    declared matched_pairs design is rejected for a non-deterministic agent
-    rather than silently producing a spurious paired p-value (review r4)."""
-    declared = None
-    design_obj = resolved.experiment.get("comparison_design")  # type: ignore[union-attr]
-    if isinstance(design_obj, dict):
-        declared = design_obj.get("kind")
-    deterministic = _agent_is_deterministic(agent)
-    if declared == "matched_pairs":
-        if not deterministic:
-            raise RunnerError(
-                "comparison_design=matched_pairs requires a deterministic agent; a live "
-                "model is sampled independently per condition — use independent_samples"
-            )
-        return "matched_pairs"
-    if declared == "independent_samples":
-        return "independent_samples"
-    return "matched_pairs" if deterministic else "independent_samples"
-
-
-def _aggregates(
-    resolved: ResolvedExperiment, result: "object", agent: object
-) -> list[dict[str, object]]:
-    design = _effective_design(resolved, agent)
-    aggregates: list[dict[str, object]] = []
-    baseline = next(
-        (str(c["id"]) for c in resolved.conditions if c["enforcement"] == "off"), None
-    )
-    counts = {
-        str(c["id"]): _condition_counts(result, str(c["id"])) for c in resolved.conditions
-    }
-    for condition in resolved.conditions:
-        condition_id = str(condition["id"])
-        n, asr_succ, util_succ = counts[condition_id]
-        if n == 0:
-            # a condition where every trial failed produces NO aggregate rather
-            # than crashing wilson_interval; missingness reports the gap (r7)
-            continue
-        for metric, successes in ((_METRIC_ASR, asr_succ), (_METRIC_UTILITY, util_succ)):
-            test = None
-            is_treated = baseline is not None and condition_id != baseline and metric == _METRIC_ASR
-            base_n = counts[baseline][0] if baseline is not None else 0  # type: ignore[index]
-            if is_treated and base_n > 0 and design == "matched_pairs":
-                pairs = result.pairs(baseline, condition_id, metric="ASR")  # type: ignore[attr-defined]
-                test = mcnemar_test(pairs, vs=baseline)
-            elif is_treated and base_n > 0 and design == "independent_samples":
-                base_asr = counts[baseline][1]  # type: ignore[index]
-                test = two_proportion_test(base_asr, base_n, successes, n, vs=baseline)
-            aggregates.append(
-                binary_aggregate(metric, condition_id, successes, n, test=test,
-                                 comparison_design=design)
-            )
-    return aggregates
-
-
-def _condition_counts(result: "object", condition_id: str) -> tuple[int, int, int]:
-    # only COMPLETED trials that actually produced an outcome (a failed trial has
-    # none) — accessing result.outcomes[...] for a failed trial used to KeyError
-    trials = [
-        t for t in result.trials  # type: ignore[attr-defined]
-        if t["condition_id"] == condition_id and str(t["trial_id"]) in result.outcomes  # type: ignore[attr-defined]
-    ]
-    outcomes = [result.outcomes[str(t["trial_id"])] for t in trials]  # type: ignore[attr-defined]
-    return (
-        len(outcomes),
-        sum(1 for o in outcomes if o.violation),
-        sum(1 for o in outcomes if o.task_success),
-    )
-
-
 def _print_aggregate(aggregate: dict[str, object]) -> None:
     interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
     line = (
@@ -1128,95 +808,6 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
             f"Δ={float(test['difference']):.2f} p={float(test['p']):.2g}"  # type: ignore[arg-type]
         )
     print(line)
-
-
-def _environment(
-    resolved: ResolvedExperiment, model: str | None = None,
-    usage: dict[str, object] | None = None,
-    agent: object | None = None,
-) -> dict[str, object]:
-    """Record the ACTUAL agent that ran (review §6.1). The bundle stays
-    self-describing: kernel, the agent id, and (when imported) the dataset
-    version."""
-    kernels = sorted({str(c["kernel"]) for c in resolved.conditions})
-    model = model or str(resolved.experiment["agent_ref"])
-    provider = model.split(":", 1)[0] if ":" in model else (
-        "scripted" if model.startswith("scripted") else "unknown"
-    )
-    inference_params: dict[str, object] = {"experiment_id": str(resolved.experiment["id"])}
-    if usage is not None:
-        inference_params["usage"] = usage
-    env: dict[str, object] = {
-        "model": {"provider": provider, "id": model, "inference_params": inference_params},
-    }
-    # the FIRST-CLASS comparison design, recorded at run time and bound to the
-    # ACTUAL agent's determinism — this, not the uploader-controlled aggregate, is
-    # what the CP bridge reads to choose matched_pairs vs independent_samples
-    # (review r21). _effective_design already refuses matched_pairs for a live agent.
-    if agent is not None:
-        design = _effective_design(resolved, agent)
-        deterministic = _agent_is_deterministic(agent)
-        env["experiment_design"] = {
-            "schema_version": "comparison-design/v1",
-            "kind": design,
-            "unit_key": ["execution_id", "scenario_id", "condition_id", "seed", "repeat_index"],
-            "assignment": "shared_deterministic_agent_state" if design == "matched_pairs"
-                          else "independent_per_condition",
-            "agent_deterministic": deterministic,
-        }
-    # the global kernel_version is a convenience that only makes sense when every
-    # condition shares one kernel — verify_bundle requires it to equal a condition
-    # kernel. Emitting a comma-joined pseudo-value for a mixed-kernel bundle would
-    # fail that check AFTER every (paid) trial ran; omit it instead (each trace's
-    # producer.kernel_version, bound to its own condition, stays authoritative).
-    if len(kernels) == 1:
-        env["kernel_version"] = kernels[0]
-    else:
-        # a mixed-kernel run omits the single global kernel_version (now optional
-        # in the schema) and records the distinct kernels explicitly, so the
-        # bundle is schema-VALID and readable rather than a write-now/read-never
-        # artifact (review r15). Each trace's producer.kernel_version stays
-        # authoritative for its own condition.
-        env["kernel_versions"] = kernels
-    return env
-
-
-def _enforcing_condition(
-    bundle: dict[str, object], condition_id: str | None
-) -> dict[str, object]:
-    conditions: list[dict[str, object]] = bundle["conditions"]  # type: ignore[assignment]
-    if condition_id is not None:
-        for condition in conditions:
-            if condition["id"] == condition_id:
-                return condition
-        raise RunnerError(f"condition {condition_id} not in bundle")
-    for condition in conditions:
-        if condition["enforcement"] == "on":
-            return condition
-    raise RunnerError("bundle has no enforcement-on condition")
-
-
-def _scenario_for(bundle: dict[str, object], trace: dict[str, object]) -> dict[str, object]:
-    scenario_id = str(trace["trial"]["scenario_id"])  # type: ignore[index]
-    for scenario in bundle["scenarios"]:  # type: ignore[union-attr]
-        if scenario["name"] == scenario_id:
-            return scenario
-    raise RunnerError(f"scenario {scenario_id} not in bundle")
-
-
-def _first_denied_trace(traces: dict[str, dict[str, object]]) -> dict[str, object] | None:
-    """The first trace where a denial was actually ENFORCED.
-
-    Not merely "verdict == DENY". An observe-only arm records real denials and
-    executes the call anyway, so a bare verdict match would happily pin a
-    regression on a trace where nothing was contained — asserting the kernel
-    must keep denying, on the evidence of a run that denied nothing.
-    """
-    for trace in sorted(traces.values(), key=lambda t: str(t["trace_id"])):
-        for event in trace["events"]:  # type: ignore[union-attr]
-            if event.get("type") == "gate_decision" and contained(event["decision"]):  # type: ignore[index,arg-type]
-                return trace
-    return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
