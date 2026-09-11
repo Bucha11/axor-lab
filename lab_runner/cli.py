@@ -34,6 +34,11 @@ from lab_contracts import (
     validate_artifact,
 )
 
+from lab_service.handoff import (
+    cp_export_manifest as _cp_export_manifest,
+    safe_export_path as _safe_export_path,
+    verify_manifest_semantic_refs as _verify_manifest_semantic_refs,
+)
 from .bundle_io import (
     PACKAGING,
     read_bundle_dir,
@@ -946,7 +951,8 @@ def _publish_to_server(
 
 
 def _cmd_export_cp(args: argparse.Namespace) -> int:
-    from lab_capabilities.governance.cp_export import CPExportError, export_cp
+    from lab_capabilities.governance.cp_export import CPExportError
+    from lab_service import OutputRefused, export_cp_package
 
     bundle, traces = read_bundle_dir(Path(args.bundle))
     regressions: list[dict[str, object]] = []
@@ -956,339 +962,65 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
         # carries the pin into a production Control Plane config (review r12)
         regressions = list(json.loads(Path(args.pins).read_text()))
     try:
-        export = export_cp(bundle, regressions, condition_id=args.condition, traces=traces)
-    except CPExportError as exc:
-        raise RunnerError(str(exc)) from exc
-    import shutil
-
-    final = Path(args.out)
-    # a re-export must NOT leave stale files behind (review r20): an earlier export
-    # with an earned bridge, or extra regression traces, would linger and the
-    # manifest verifier would flag them — or worse, a reader would trust them. A
-    # non-empty directory requires --overwrite, and --overwrite REPLACES it wholly.
-    if final.exists() and any(final.iterdir()) and not getattr(args, "overwrite", False):
-        raise RunnerError(f"{final} is not empty; pass --overwrite to replace it")
-    # build the WHOLE export in a staging directory, then swap it into place
-    # atomically (review r21): a crash mid-write no longer leaves the previous valid
-    # signed handoff destroyed AND the new one half-written with a missing manifest.
-    staging = final.with_name(final.name + ".staging")
-    if staging.exists():
-        shutil.rmtree(staging)
-    out = staging
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
-    (out / "production-todo.md").write_text(export.production_todo)
-    # make the export SELF-CONTAINED (review r19): write the full source bundle +
-    # ALL its traces (scenarios, predicates, inputs, trials, provenance all travel)
-    # so `axor-lab verify-cp-export` can recompute the graph, the bridge, and the
-    # runtime provenance from the directory ALONE — bridge-traces/ carries only the
-    # bridge's own traces, which is not enough to re-derive the whole handoff.
-    write_bundle_dir(out / "source-bundle", bundle, traces, overwrite=True)
-    # export the FROZEN pinned trace BODIES alongside the config so the
-    # regressions are actually portable — cp-deploy.json carries each pin's
-    # content hash, but a hash is not the bytes to replay on another machine
-    # (review r13). Each is written content-addressed under regression-traces/.
-    carried: list[dict[str, object]] = export.config["regressions"]  # type: ignore[assignment]
-    if carried:
-        by_ref = {content_hash(t): t for t in traces.values()}
-        rt_dir = out / "regression-traces"
-        rt_dir.mkdir(exist_ok=True)
-        for pin in carried:
-            ref = str(pin["trace_ref"])
-            trace = by_ref[ref]  # export_cp already verified the ref resolves
-            (rt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
-                json.dumps(trace, indent=2, ensure_ascii=False)
-            )
-    source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
-    # export the FROZEN bridge trace BODIES so the earned-bridge analysis is
-    # independently recomputable from the export directory alone — the analysis
-    # receipt carries only trace hashes, not the bytes to re-evaluate the
-    # violation predicate over (review r18)
-    analysis: dict[str, object] | None = source.get("bridge_analysis")  # type: ignore[assignment]
-    if analysis is not None:
-        # the analysis receipt as its own file, content-addressed by the ref the
-        # deploy config carries, so a reader can check it independently (review r19)
-        (out / "bridge-analysis.json").write_text(
-            json.dumps(analysis, indent=2, ensure_ascii=False)
+        result = export_cp_package(
+            bundle, traces,
+            out=Path(args.out),
+            regressions=regressions,
+            condition_id=args.condition,
+            overwrite=bool(getattr(args, "overwrite", False)),
+            author=getattr(args, "author", None),
+            sign_key=getattr(args, "sign_key", None),
         )
-        by_ref = {content_hash(t): t for t in traces.values()}
-        bt_dir = out / "bridge-traces"
-        bt_dir.mkdir(exist_ok=True)
-        trial_refs: dict[str, list[str]] = analysis["trial_refs"]  # type: ignore[assignment]
-        for refs in trial_refs.values():
-            for ref in refs:
-                trace = by_ref.get(ref)
-                if trace is not None:
-                    (bt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
-                        json.dumps(trace, indent=2, ensure_ascii=False)
-                    )
-    # a full-file MANIFEST binds EVERY file in the export, so verify-cp-export
-    # checks the whole directory (not just cp-deploy.json + source-bundle) and can
-    # detect a tampered bridge-analysis, a swapped trace, or a stale leftover. When
-    # an author key is supplied it is SIGNED, so a reader can confirm WHO released
-    # this exact handoff — derivability is not authenticity (review r20).
-    manifest = _cp_export_manifest(out, export.config)
-    if getattr(args, "author", None) and getattr(args, "sign_key", None):
-        from lab_contracts.signing import sign_bundle
-
-        manifest["author"] = args.author
-        manifest["signature"] = sign_bundle(manifest, args.sign_key)
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    # ATOMIC SWAP: the staging tree is complete (manifest last), so replace the
-    # previous export in one move — old to a backup, staging to final, then drop the
-    # backup. A crash leaves either the intact old export or the intact new one,
-    # never a half-written directory with a missing/partial manifest (review r21).
-    if final.exists():
-        backup = final.with_name(final.name + ".old")
-        if backup.exists():
-            shutil.rmtree(backup)
-        os.replace(final, backup)
-        os.replace(staging, final)
-        shutil.rmtree(backup)
-    else:
-        final.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staging, final)
-    out = final
-    print(f"exported CP deploy config -> {out}/cp-deploy.json")
-    print(f"  manifest: {len(manifest['files'])} files"
-          + (" (signed)" if manifest.get("signature") else " (unsigned — derivability + integrity only)"))
-    print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
+    except (CPExportError, OutputRefused) as exc:
+        raise RunnerError(str(exc)) from exc
+    print(f"exported CP deploy config -> {result.deploy_config}")
+    print(f"  manifest: {result.manifest_file_count} files"
+          + (" (signed)" if result.signed else " (unsigned — derivability + integrity only)"))
+    print(f"  condition: {result.condition_id} (baseline: {result.baseline_condition_id})")
     # the parametric_config_hash is the carry-over key: kernel + policy + manifests
     # (effect classes, driving args, untrusted-field taint) with allowlist $inputs
     # left SYMBOLIC — the same parametric policy transfers, re-parameterized with
     # production inputs. It is NOT a byte-identical runtime config: that depends on
     # scenario inputs and is recorded per-scenario as runtime_config_hashes (r17).
-    print(f"  parametric_config_hash (carry-over key): {export.config['parametric_config_hash']}")
-    print(f"  config_hash (kernel+policy anchor): {export.config['config_hash']}")
-    runtime_hashes: dict[str, object] = export.config["runtime_config_hashes"]  # type: ignore[assignment]
-    if runtime_hashes:
-        print(f"  runtime_config_hashes (per-scenario concrete config): {len(runtime_hashes)} scenario(s)")
-    print(f"  regressions carried: {len(carried)}"
-          + (f" (frozen trace bodies in {out}/regression-traces/)" if carried else ""))
-    print(f"  production-todo (NOT reused): {out}/production-todo.md")
-    if export.earned_bridge:
-        print(f"  earned bridge: {source['condition_id']} changed the outcome vs "
-              f"{source['baseline_condition_id']} — run THIS governed config in production.")
+    print(f"  parametric_config_hash (carry-over key): {result.parametric_config_hash}")
+    print(f"  config_hash (kernel+policy anchor): {result.config_hash}")
+    if result.runtime_config_hash_count:
+        print("  runtime_config_hashes (per-scenario concrete config): "
+              f"{result.runtime_config_hash_count} scenario(s)")
+    print(f"  regressions carried: {result.regressions_carried}"
+          + (f" (frozen trace bodies in {result.regression_traces}/)"
+             if result.regressions_carried else ""))
+    print(f"  production-todo (NOT reused): {result.production_todo}")
+    if result.earned_bridge:
+        print(f"  earned bridge: {result.condition_id} changed the outcome vs "
+              f"{result.baseline_condition_id} — run THIS governed config in production.")
     else:
         print("  note: no aggregate shows governance changed an outcome yet "
               "(the bridge surfaces once one does).")
     return EXIT_OK
 
 
-def _cp_export_manifest(out: Path, config: dict[str, object]) -> dict[str, object]:
-    """A versioned, full-file manifest of a CP export directory (review r20): the
-    sha256 of EVERY file, plus the semantic refs (deploy config, source bundle,
-    regression set) an author signs over. verify-cp-export uses it to detect a
-    tampered bridge-analysis, a swapped trace, OR a stale leftover file — not just
-    to recompute cp-deploy.json."""
-    import hashlib
-
-    files: dict[str, str] = {}
-    root_manifest = out / "manifest.json"
-    for path in sorted(out.rglob("*")):
-        # exclude ONLY the ROOT manifest.json — a NESTED file that happens to be
-        # named manifest.json (e.g. source-bundle/manifest.json) IS bound, so a
-        # "full-file" manifest is actually full (review r21)
-        if path.is_file() and path != root_manifest and not path.is_symlink():
-            rel = str(path.relative_to(out)).replace("\\", "/")
-            files[rel] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    src: dict[str, object] = config.get("source", {})  # type: ignore[assignment]
-    return {
-        "schema_version": "axor-cp-export-manifest/v1",
-        "condition_id": src.get("condition_id"),
-        "baseline_condition_id": src.get("baseline_condition_id"),
-        "deploy_config_ref": content_hash(config),
-        "source_bundle_ref": files.get("source-bundle/bundle.json"),
-        "regression_set_ref": content_hash(config.get("regressions", [])),
-        "bridge_analysis_ref": src.get("bridge_analysis_ref"),
-        "files": files,
-    }
-
-
-def _safe_export_path(directory: Path, rel: str) -> Path | None:
-    """Resolve a manifest-listed relative path, confined to `directory`. Returns
-    None for an absolute path, a `..` escape, or one that resolves (through a
-    symlink) outside the export tree — the manifest is untrusted until verified,
-    so a listed path must never read outside the directory (review r21)."""
-    if not rel or rel.startswith("/") or "\\" in rel:
-        return None
-    parts = rel.split("/")
-    if any(p in ("", "..", ".") for p in parts):
-        return None
-    candidate = directory / rel
-    if candidate.is_symlink():
-        return None
-    try:
-        resolved = candidate.resolve()
-        resolved.relative_to(directory.resolve())
-    except (ValueError, OSError):
-        return None
-    return candidate
-
-
-def _verify_manifest_semantic_refs(
-    manifest: dict[str, object], shipped: dict[str, object], files: dict[str, str]
-) -> str | None:
-    """Confirm each SEMANTIC ref the manifest names actually matches its artifact
-    (review r21). A signed manifest whose deploy_config_ref / source_bundle_ref /
-    regression_set_ref / bridge_analysis_ref point at the wrong bytes would verify
-    its own signature and recompute a config while MISDESCRIBING what it bundles.
-    Returns a problem string, or None when every ref matches."""
-    if str(manifest.get("deploy_config_ref")) != content_hash(shipped):
-        return "manifest deploy_config_ref does not match cp-deploy.json"
-    src: dict[str, object] = shipped.get("source", {})  # type: ignore[assignment]
-    if str(manifest.get("regression_set_ref")) != content_hash(shipped.get("regressions", [])):
-        return "manifest regression_set_ref does not match the shipped regressions"
-    want_bundle = files.get("source-bundle/bundle.json")
-    if want_bundle is not None and str(manifest.get("source_bundle_ref")) != str(want_bundle):
-        return "manifest source_bundle_ref does not match source-bundle/bundle.json"
-    # the bridge analysis ref must agree BOTH with the deploy config's own ref and,
-    # when a bridge-analysis.json is shipped, with that file's content
-    if str(manifest.get("bridge_analysis_ref") or "") != str(src.get("bridge_analysis_ref") or ""):
-        return "manifest bridge_analysis_ref does not match the deploy config's bridge_analysis_ref"
-    return None
-
-
 def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
-    """Verify a CP export directory: its full-file MANIFEST, its (optional)
-    SIGNATURE, and — recomputing from scratch — that the shipped cp-deploy.json is
-    exactly derivable from the embedded evidence (review r19/r20).
+    """Verify a CP export directory and report its three guarantees separately:
+    INTEGRITY (every file matches the manifest, nothing stale or injected),
+    AUTHENTICITY (a present signature verifies against a supplied key) and
+    DERIVABILITY (the shipped config recomputes from the embedded evidence).
+    The checks live in `lab_service.handoff`; this prints them."""
+    from lab_service import CheckStatus, Outcome, verify_cp_package
 
-    Three distinct guarantees, reported separately and honestly:
-      - INTEGRITY: every file matches the manifest hash and there are no unlisted
-        (stale/injected) files — so a tampered bridge-analysis or a leftover from
-        an earlier export is caught;
-      - AUTHENTICITY: when the manifest is signed, the signature verifies against a
-        supplied key, proving WHO released this exact handoff (derivability alone
-        does not — a different but internally-consistent config also recomputes);
-      - DERIVABILITY: the deploy config recomputes byte-identical from
-        source-bundle/ (graph + design-aware bridge + recorded runtime provenance).
-    """
-    from lab_capabilities.governance.cp_export import CPExportError, export_cp
-
-    directory = Path(args.dir)
-    deploy_path = directory / "cp-deploy.json"
-    if not deploy_path.is_file():
-        raise RunnerError(f"{directory} has no cp-deploy.json — not a CP export directory")
-    manifest_path = directory / "manifest.json"
-    if not manifest_path.is_file():
-        raise RunnerError(
-            f"{directory} has no manifest.json — this export predates full-file verification; "
-            "re-export with a current axor-lab so it carries its own manifest"
-        )
-    # a malformed manifest is an INTEGRITY failure, never a traceback (review r21)
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except ValueError as exc:
-        print(f"cp-export: INVALID — manifest.json is not valid JSON: {exc}", file=sys.stderr)
+    result = verify_cp_package(
+        Path(args.dir),
+        pubkey=getattr(args, "pubkey", None),
+        expect_author=getattr(args, "expect_author", None),
+        allow_unsigned=bool(getattr(args, "allow_unsigned", False)),
+    )
+    for check in result.checks:
+        # an OK step is progress the user asked to see; anything else is a finding
+        stream = sys.stdout if check.status is CheckStatus.OK else sys.stderr
+        print(f"cp-export: {check.message}", file=stream)
+    if result.outcome is Outcome.FAILURE:
         return EXIT_FAILURE
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
-        print("cp-export: INVALID — manifest.json is not an object with a files map",
-              file=sys.stderr)
-        return EXIT_FAILURE
-    unverified = False
-    # 1) INTEGRITY — every listed file's hash matches, and nothing unlisted exists
-    import hashlib
-
-    root_manifest = directory / "manifest.json"
-    files: dict[str, str] = manifest["files"]  # type: ignore[assignment]
-    for rel, want in files.items():
-        # the manifest is UNTRUSTED until verified: a path with `..`, an absolute
-        # path, or a symlink could read/traverse outside the export tree. Confine
-        # every listed path to the directory before touching it (review r21).
-        safe = _safe_export_path(directory, str(rel))
-        if safe is None:
-            print(f"cp-export: INVALID — manifest lists an unsafe path {rel!r}", file=sys.stderr)
-            return EXIT_FAILURE
-        if not safe.is_file():
-            print(f"cp-export: INVALID — manifest names a missing file {rel!r}", file=sys.stderr)
-            return EXIT_FAILURE
-        got = "sha256:" + hashlib.sha256(safe.read_bytes()).hexdigest()
-        if got != str(want):
-            print(f"cp-export: INVALID — {rel} does not match its manifest hash", file=sys.stderr)
-            return EXIT_FAILURE
-    on_disk = {
-        str(p.relative_to(directory)).replace("\\", "/")
-        for p in directory.rglob("*") if p.is_file() and p != root_manifest
-    }
-    extra = sorted(on_disk - set(files))
-    if extra:
-        print(f"cp-export: INVALID — files not in the manifest (stale or injected): {extra}",
-              file=sys.stderr)
-        return EXIT_FAILURE
-    print(f"cp-export: manifest INTEGRITY OK ({len(files)} files, no stale/unlisted)")
-    # 1b) SEMANTIC REFS — the manifest NAMES the deploy config, source bundle,
-    # regression set and bridge analysis by content hash; recompute each and confirm
-    # it matches BEFORE trusting them. A signature over the manifest proves nothing
-    # if a ref inside it points at the wrong artifact (review r21).
-    shipped: dict[str, object] = json.loads(deploy_path.read_text())
-    ref_problem = _verify_manifest_semantic_refs(manifest, shipped, files)
-    if ref_problem is not None:
-        print(f"cp-export: INVALID — {ref_problem}", file=sys.stderr)
-        return EXIT_FAILURE
-    print("cp-export: manifest semantic refs OK (deploy/source/regression/bridge)")
-    # 2) AUTHENTICITY — verify the signature when present; an UNSIGNED export is
-    # UNVERIFIED, not a clean pass (parity with the reproduction package, review r21)
-    if manifest.get("signature"):
-        from lab_contracts.signing import (
-            SignatureInvalid,
-            SignatureUnavailable,
-            verify_bundle_signature,
-        )
-
-        expect_author = getattr(args, "expect_author", None)
-        if expect_author and str(manifest.get("author")) != str(expect_author):
-            print(f"cp-export: INVALID — manifest author {manifest.get('author')!r} is not the "
-                  f"expected {expect_author!r}", file=sys.stderr)
-            return EXIT_FAILURE
-        pubkey = getattr(args, "pubkey", None)
-        if not pubkey:
-            print("cp-export: UNVERIFIED — signed manifest but no --pubkey to check it",
-                  file=sys.stderr)
-            unverified = True
-        else:
-            try:
-                verify_bundle_signature(manifest, str(manifest["signature"]), pubkey)
-            except SignatureInvalid as exc:
-                print(f"cp-export: INVALID — manifest signature does not verify: {exc}",
-                      file=sys.stderr)
-                return EXIT_FAILURE
-            except SignatureUnavailable as exc:
-                print(f"cp-export: UNVERIFIED — {exc}", file=sys.stderr)
-                unverified = True
-            else:
-                print(f"cp-export: signature VERIFIED (author {manifest.get('author')!r})")
-    elif getattr(args, "allow_unsigned", False):
-        print("cp-export: unsigned manifest — integrity + derivability only "
-              "(accepted via --allow-unsigned)")
-    else:
-        print("cp-export: UNVERIFIED — unsigned manifest carries no authenticity; pass a signed "
-              "export, or --allow-unsigned to accept integrity + derivability only", file=sys.stderr)
-        unverified = True
-    # 3) DERIVABILITY — recompute the deploy config from the embedded evidence
-    source_dir = directory / "source-bundle"
-    if not (source_dir / "bundle.json").is_file():
-        raise RunnerError(f"{directory} has no source-bundle/ — cannot recompute the handoff")
-    bundle, traces = read_bundle_dir(source_dir)
-    src: dict[str, object] = shipped.get("source", {})  # type: ignore[assignment]
-    condition_id = str(src.get("condition_id")) if src.get("condition_id") else None
-    regressions: list[dict[str, object]] = list(shipped.get("regressions", []))  # type: ignore[arg-type]
-    try:
-        recomputed = export_cp(bundle, regressions, condition_id=condition_id, traces=traces)
-    except CPExportError as exc:
-        print(f"cp-export: INVALID — recomputation failed: {exc}", file=sys.stderr)
-        return EXIT_FAILURE
-    if recomputed.config != shipped:
-        print(
-            "cp-export: INVALID — the deploy config recomputed from the embedded evidence "
-            "does not match cp-deploy.json (a doctored config, swapped trace, or tampered "
-            "analysis would cause this)",
-            file=sys.stderr,
-        )
-        return EXIT_FAILURE
-    print(f"cp-export: RECOMPUTED OK from {source_dir} ({len(traces)} traces); "
-          f"verified={shipped.get('verified') is True}; earned_bridge={bool(recomputed.earned_bridge)}")
-    return EXIT_UNVERIFIED if unverified else EXIT_OK
+    return EXIT_UNVERIFIED if result.outcome is Outcome.UNVERIFIED else EXIT_OK
 
 
 def _cmd_import_incident(args: argparse.Namespace) -> int:
