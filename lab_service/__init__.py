@@ -65,10 +65,25 @@ from .experiments import (
     replay_source,
     validate_experiment,
 )
-from .handoff import CPExportResult, CPVerifyResult, export_cp_package, verify_cp_package
+from .handoff import (
+    CPExportPackage,
+    CPExportResult,
+    CPVerifyResult,
+    build_cp_export_files,
+    bundle_files,
+    export_cp_package,
+    read_bundle_files,
+    verify_cp_files,
+    verify_cp_package,
+)
 from .outcomes import Outcome
 
 __all__ = [
+    "bundle_files",
+    "verify_cp_files",
+    "read_bundle_files",
+    "build_cp_export_files",
+    "CPExportPackage",
     "resolve_suite_target",
     "plan_suite_run",
     "execute_suite_run",

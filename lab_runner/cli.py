@@ -34,11 +34,6 @@ from lab_contracts import (
     validate_artifact,
 )
 
-from lab_service.handoff import (
-    cp_export_manifest as _cp_export_manifest,
-    safe_export_path as _safe_export_path,
-    verify_manifest_semantic_refs as _verify_manifest_semantic_refs,
-)
 from .bundle_io import (
     PACKAGING,
     read_bundle_dir,

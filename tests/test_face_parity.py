@@ -125,5 +125,91 @@ class TestVerifyOverHttp(RuntimeHttpTestCase):
         self.assertEqual(caught.exception.code, 400)
 
 
+class TestHandoffOverHttp(RuntimeHttpTestCase):
+    """The Control Plane handoff, which the hosted face could not produce at all.
+
+    `grep export_cp lab_server/` came back empty before the service layer: the
+    package was materialized inside an argparse handler, so producing or checking
+    a handoff required a shell.
+    """
+
+    def _post(self, path: str, body: dict[str, object]) -> dict[str, object]:
+        request = urllib.request.Request(
+            self.base + path, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {CONTROL}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            return json.loads(response.read())
+
+    def _exported(self) -> tuple[dict[str, object], dict[str, object]]:
+        from lab_runner.bundle_io import read_bundle_dir
+        from lab_service import build_cp_export_files
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle, traces = read_bundle_dir(_bundle_dir(Path(tmp)))
+        local = build_cp_export_files(bundle, traces)
+        served = self._post("/handoff/export", {
+            "bundle": bundle, "traces": list(traces.values()),
+        })
+        return {"local": local, "bundle": bundle, "traces": traces}, served
+
+    def test_the_served_package_is_byte_identical_to_the_one_the_cli_writes(self) -> None:
+        """Same bytes, same manifest — otherwise the two faces ship different
+        handoffs under one name, and only one of them verifies."""
+        ours, served = self._exported()
+        local = ours["local"]
+        self.assertEqual(served["files"], local.files)  # type: ignore[union-attr]
+        self.assertEqual(served["manifest"], local.manifest)  # type: ignore[union-attr]
+
+    def test_a_served_package_verifies_through_the_hosted_face(self) -> None:
+        """Export and verify over HTTP, end to end, with no filesystem between."""
+        _, served = self._exported()
+        report = self._post("/handoff/verify", {
+            "files": served["files"], "allow_unsigned": True,
+        })
+        self.assertEqual(report["outcome"], "ok", report["checks"])
+        self.assertEqual(report["failed"], [])
+        names = [c["name"] for c in report["checks"]]  # type: ignore[index,union-attr]
+        # the three guarantees stay SEPARATE — an export can be intact without
+        # being authentic, and derivability is neither
+        self.assertEqual(names, ["integrity", "semantic_refs", "authenticity", "derivability"])
+
+    def test_an_unsigned_package_is_unverified_not_a_pass(self) -> None:
+        """Integrity is not authenticity. Without --allow-unsigned, an unsigned
+        manifest carries no proof of WHO released it."""
+        _, served = self._exported()
+        report = self._post("/handoff/verify", {"files": served["files"]})
+        self.assertEqual(report["outcome"], "unverified")
+        self.assertIn("authenticity", report["failed"])  # type: ignore[arg-type]
+
+    def test_a_tampered_file_fails_integrity(self) -> None:
+        files: dict[str, str] = dict(self._exported()[1]["files"])  # type: ignore[arg-type]
+        files["production-todo.md"] = files["production-todo.md"] + "\ntampered\n"
+        report = self._post("/handoff/verify", {"files": files, "allow_unsigned": True})
+        self.assertEqual(report["outcome"], "failure")
+        self.assertIn("integrity", report["failed"])  # type: ignore[arg-type]
+
+    def test_an_unlisted_file_fails_integrity(self) -> None:
+        """A stale leftover is caught, not silently trusted."""
+        files: dict[str, str] = dict(self._exported()[1]["files"])  # type: ignore[arg-type]
+        files["leftover.json"] = "{}"
+        report = self._post("/handoff/verify", {"files": files, "allow_unsigned": True})
+        self.assertEqual(report["outcome"], "failure")
+        self.assertIn("integrity", report["failed"])  # type: ignore[arg-type]
+
+    def test_verify_without_a_files_map_is_a_clean_400(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/handoff/verify", {"files": "not-a-map"})
+        self.assertEqual(caught.exception.code, 400)
+
+    def test_import_incident_needs_every_artifact(self) -> None:
+        """The recorded condition is REQUIRED — reconstructing it would silently
+        lose enforcement mode, policy and allowlist."""
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/incidents/import", {"trace": {}, "scenario": {}})
+        self.assertEqual(caught.exception.code, 400)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

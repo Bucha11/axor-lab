@@ -43,6 +43,7 @@ import pathlib
 import queue
 import re
 import secrets
+import tempfile
 import threading
 import time
 from urllib.parse import unquote
@@ -95,6 +96,31 @@ _SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
 _SUITE_DISPATCH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/dispatch$")
 _SUITE_PUBLISH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/publish$")
 _VERIFY_PACKAGE_RE = re.compile(r"^/verify/package$")
+def _bundle_and_traces(
+    body: dict[str, object]
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """A bundle + traces out of a request body, accepting either shape.
+
+    A reproduction package carries `traces` as a LIST; the in-memory form is a
+    map keyed by trace_id. Callers legitimately hold either, so normalize rather
+    than make the caller guess which one this endpoint wanted.
+    """
+    bundle = body.get("bundle")
+    raw = body.get("traces")
+    if not isinstance(bundle, dict):
+        raise RuntimeJobsError(400, "this endpoint needs a bundle object")
+    if isinstance(raw, list):
+        traces = {str(t["trace_id"]): t for t in raw if isinstance(t, dict)}
+    elif isinstance(raw, dict):
+        traces = {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+    else:
+        raise RuntimeJobsError(400, "this endpoint needs traces (a list or a map)")
+    return bundle, traces
+
+
+_HANDOFF_EXPORT_RE = re.compile(r"^/handoff/export$")
+_HANDOFF_VERIFY_RE = re.compile(r"^/handoff/verify$")
+_INCIDENT_IMPORT_RE = re.compile(r"^/incidents/import$")
 _REGISTRY_SUITE_RE = re.compile(r"^/registry/suites/([A-Za-z0-9_-]+)$")
 _RUN_REPORT_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/report$")
 _RUN_TRIAL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)$")
@@ -1709,6 +1735,130 @@ def make_runtime_server(
                         scenarios=body.get("scenarios") or context["scenarios"],  # type: ignore[arg-type]
                         evaluators=body.get("evaluators") or context["evaluators"],  # type: ignore[arg-type]
                     ))
+                    return
+                if _HANDOFF_EXPORT_RE.match(path):
+                    # The Control Plane handoff, from the hosted face. This verb
+                    # had no HTTP surface at all — `grep export_cp lab_server/`
+                    # came back empty — because materializing the package lived
+                    # in an argparse handler. The DIRECTORY is a CLI
+                    # materialization; over HTTP the deliverable is the file map
+                    # the directory is written from, so both faces ship the same
+                    # bytes and the same manifest binds them.
+                    from lab_capabilities.governance.cp_export import CPExportError
+                    from lab_service import build_cp_export_files
+
+                    self._require_control()
+                    body = self._read_json()
+                    if body.get("run_id"):
+                        # the web face holds a RUN, not a bundle: the stored
+                        # artifact carries the bundle and the job store carries
+                        # the trace bodies. Joining them here keeps the naming
+                        # convention (`a_{run_id}`) server-side instead of making
+                        # every caller reproduce it.
+                        run_id = str(body["run_id"])
+                        artifact: dict[str, object] = shelf.get("artifact", f"a_{run_id}")
+                        bundle = artifact.get("bundle")  # type: ignore[assignment]
+                        if not isinstance(bundle, dict):
+                            raise RuntimeJobsError(
+                                409, f"run {run_id!r} has no collected artifact to export")
+                        traces = {
+                            str(t["trace_id"]): t
+                            for t in jobs.results(run_id)["traces"]  # type: ignore[union-attr]
+                        }
+                    else:
+                        bundle, traces = _bundle_and_traces(body)
+                    try:
+                        package = build_cp_export_files(
+                            bundle, traces,
+                            regressions=body.get("regressions") or [],  # type: ignore[arg-type]
+                            condition_id=body.get("condition"),  # type: ignore[arg-type]
+                            author=body.get("author"),  # type: ignore[arg-type]
+                            sign_key=body.get("sign_key"),  # type: ignore[arg-type]
+                        )
+                    except CPExportError as exc:
+                        # the evidence does not EARN a handoff — the caller's
+                        # answer, not a server fault
+                        raise RuntimeJobsError(409, str(exc)) from None
+                    source = package.source
+                    self._send(200, {
+                        "files": package.files,
+                        "manifest": package.manifest,
+                        "config": package.config,
+                        "signed": package.signed,
+                        "condition_id": source.get("condition_id"),
+                        "baseline_condition_id": source.get("baseline_condition_id"),
+                        "regressions_carried": package.regressions_carried,
+                        "earned_bridge": package.earned_bridge,
+                    })
+                    return
+                if _HANDOFF_VERIFY_RE.match(path):
+                    # Verifying a handoff someone else produced. INTEGRITY,
+                    # AUTHENTICITY and DERIVABILITY come back as separate checks
+                    # because they are separate claims: an export can be intact
+                    # without being authentic, and a signature nobody holds a key
+                    # for is UNVERIFIED, not a pass.
+                    from lab_service import CheckStatus, verify_cp_files
+
+                    self._require_control()
+                    body = self._read_json()
+                    files = body.get("files")
+                    if not isinstance(files, dict) or not all(
+                        isinstance(v, str) for v in files.values()
+                    ):
+                        raise RuntimeJobsError(
+                            400, "verify requires {files: {path: text}}")
+                    result = verify_cp_files(
+                        files,  # type: ignore[arg-type]
+                        pubkey=body.get("pubkey"),  # type: ignore[arg-type]
+                        expect_author=body.get("expect_author"),  # type: ignore[arg-type]
+                        allow_unsigned=bool(body.get("allow_unsigned")),
+                    )
+                    self._send(200, {
+                        "outcome": result.outcome.value,
+                        "traces": result.trace_count,
+                        "earned_bridge": result.earned_bridge,
+                        "checks": [
+                            {"name": c.name, "status": c.status.value, "message": c.message}
+                            for c in result.checks
+                        ],
+                        "failed": [c.name for c in result.checks
+                                   if c.status is not CheckStatus.OK],
+                    })
+                    return
+                if _INCIDENT_IMPORT_RE.match(path):
+                    # The second funnel (control-plane-handoff.md): a production
+                    # trace becomes a bundle a policy can be tested against. The
+                    # recorded condition is REQUIRED and used verbatim, and
+                    # nothing is returned until the incident REPLAYS under it.
+                    from lab_service import import_incident
+
+                    self._require_control()
+                    body = self._read_json()
+                    missing = [k for k in ("trace", "scenario", "manifests", "condition")
+                               if k not in body]
+                    if missing:
+                        raise RuntimeJobsError(
+                            400, f"import needs {{trace, scenario, manifests, condition}}; "
+                                 f"missing {missing}")
+                    with tempfile.TemporaryDirectory() as staging:
+                        result = import_incident(
+                            body["trace"], body["scenario"],  # type: ignore[arg-type]
+                            body["manifests"], body["condition"],  # type: ignore[arg-type]
+                            out=pathlib.Path(staging) / "bundle",
+                        )
+                        from lab_service import bundle_files
+
+                        from lab_runner.bundle_io import read_bundle_dir
+
+                        imported, traces = read_bundle_dir(result.directory)
+                    self._send(201, {
+                        "bundle_id": result.bundle_id,
+                        "trace_id": result.trace_id,
+                        "replay_status": result.replay_status,
+                        "bundle": imported,
+                        "traces": list(traces.values()),
+                        "files": bundle_files(imported, traces),
+                    })
                     return
                 if _VERIFY_PACKAGE_RE.match(path):
                     # Offline package verification, from the hosted face. This

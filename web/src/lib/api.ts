@@ -203,6 +203,31 @@ export interface ValidationResult {
   suite?: Json;
 }
 
+export type CheckRow = {
+  name: string;
+  status: "ok" | "invalid" | "unverified";
+  message: string;
+};
+
+export type CheckReport = {
+  outcome: "ok" | "failure" | "validation" | "unverified" | "regression_differs";
+  checks: CheckRow[];
+  failed: string[];
+  traces?: number;
+  earned_bridge?: boolean;
+};
+
+export type HandoffPackage = {
+  files: Record<string, string>;
+  manifest: Json;
+  config: Json;
+  signed: boolean;
+  condition_id: string;
+  baseline_condition_id: string;
+  regressions_carried: number;
+  earned_bridge: boolean;
+};
+
 // ── endpoints ────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -243,6 +268,25 @@ export const api = {
     if (!response.ok) throw new ApiError(response.status, text || "yaml unavailable");
     return text;
   },
+  /** Build a Control Plane handoff from a completed run. The DIRECTORY the CLI
+   * writes and the file map returned here are the same bytes under the same
+   * manifest — there is one implementation (`lab_service.handoff`). */
+  exportHandoff: (runId: string) =>
+    call<HandoffPackage>("POST", "/handoff/export", { run_id: runId }),
+  /** Verify a handoff's file map. INTEGRITY, AUTHENTICITY and DERIVABILITY come
+   * back as separate checks because they are separate claims. */
+  verifyHandoff: (files: Record<string, string>, allowUnsigned: boolean) =>
+    call<CheckReport>("POST", "/handoff/verify", {
+      files,
+      allow_unsigned: allowUnsigned,
+    }),
+  /** Verify a downloaded reproduction package offline — no server trusted. */
+  verifyPackage: (pkg: Json, allowBare: boolean) =>
+    call<CheckReport>("POST", "/verify/package", {
+      package: pkg,
+      allow_bare: allowBare,
+    }),
+
   validateSuite: (suite: Json) =>
     call<ValidationResult>("POST", "/suites/validate", { suite }),
   validateSuiteYaml: (yaml: string) =>
