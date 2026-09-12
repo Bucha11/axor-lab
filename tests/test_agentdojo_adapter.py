@@ -87,5 +87,44 @@ class TestAgentDojoAdapter(unittest.TestCase):
             self.assertFalse(outcome.violation)
 
 
+class TestTheImportIsRunnable(unittest.TestCase):
+    """A materialized suite must RUN, not merely validate.
+
+    The import pinned a hardcoded `axor-core@0.4.2`. `resolve()` does not check a
+    pin against the installed kernel — only the runner does — so the import
+    reported success and the very next line of the quickstart,
+    `axor-lab run <out>`, died with UnknownKernelError. Every existing test here
+    checked the scenarios were schema-valid and semantically sound, which they
+    were; none checked that the document it wrote could be executed.
+    """
+
+    def test_the_conditions_pin_the_installed_kernel(self) -> None:
+        from lab_capabilities.governance import real_kernel_version
+        from lab_service import build_agentdojo_experiment
+
+        document = build_agentdojo_experiment("banking", repeats=1).document
+        experiment: dict = document["experiment"]  # type: ignore[assignment]
+        pinned = {str(c["kernel"]) for c in experiment["conditions"]}
+        # ONE kernel across the compared arms: a compare that mixes kernels
+        # measures an enforcement change AND a kernel change at once
+        self.assertEqual(pinned, {real_kernel_version()})
+
+    def test_an_imported_suite_actually_executes(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from lab_service import build_agentdojo_experiment, execute_run, plan_run
+
+        document = build_agentdojo_experiment("banking", repeats=1).document
+        with tempfile.TemporaryDirectory() as tmp:
+            result = execute_run(
+                plan_run(document), out=Path(tmp) / "bundle",
+                created="2026-01-01T00:00:00Z",
+            )
+        self.assertEqual(result.failed, 0, result.missingness)
+        self.assertGreater(result.completed, 0)
+
+
+
 if __name__ == "__main__":
     unittest.main()

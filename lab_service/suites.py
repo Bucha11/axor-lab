@@ -17,7 +17,6 @@ from pathlib import Path
 
 from .outcomes import Outcome
 
-DEFAULT_KERNEL = "axor-core@0.4.2"
 STRICT_POLICY: dict[str, object] = {"profile": "strict", "trust_model": "content-ledger"}
 
 
@@ -211,8 +210,21 @@ def build_agentdojo_experiment(
     nobody can run.
     """
     from lab_adapters import build_experiment_document
-    from lab_capabilities.governance import resolve
+    from lab_capabilities.governance import real_kernel_version, resolve
     from lab_contracts import condition_config_hash
+    from lab_runner.errors import RunnerError
+
+    # Pin the INSTALLED build, never a literal. A hardcoded version produces a
+    # document that validates and then refuses to run — `resolve()` does not
+    # check a pin against the installed kernel, only the runner does, so the
+    # import looked healthy and `axor-lab run` (the very next line of the
+    # quickstart) died with UnknownKernelError. A pinned version is also the
+    # point: the compare must isolate enforcement, not mix in a kernel change.
+    kernel = real_kernel_version()
+    if not kernel:
+        raise RunnerError(
+            "axor-core is not installed, so there is no kernel to pin the import to"
+        )
 
     conditions = [
         {
@@ -220,17 +232,17 @@ def build_agentdojo_experiment(
             "id": "ungoverned",
             "label": "ungoverned",
             "enforcement": "off",
-            "kernel": DEFAULT_KERNEL,
-            "config_hash": condition_config_hash(DEFAULT_KERNEL, None),
+            "kernel": kernel,
+            "config_hash": condition_config_hash(kernel, None),
         },
         {
             "schema_version": "condition/v1",
             "id": "governed",
             "label": "governed",
             "enforcement": "on",
-            "kernel": DEFAULT_KERNEL,
+            "kernel": kernel,
             "policy": dict(STRICT_POLICY),
-            "config_hash": condition_config_hash(DEFAULT_KERNEL, dict(STRICT_POLICY)),
+            "config_hash": condition_config_hash(kernel, dict(STRICT_POLICY)),
         },
     ]
     document = build_experiment_document(

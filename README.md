@@ -8,7 +8,7 @@ Axor Lab — a reproducible experiment platform for AI agents: bring an agent, b
 - **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — the production-ready implementation plan (phases, reuse map, milestones, definition of done). The MVP spine is implemented; see its status block.
 - **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the post-MVP plan: BYOK model adapter, Control Plane export, full web app, production hardening, then the Later tier (instrumented endpoints, sandbox + cloud code, multi-agent games, population scale) and the commercial track.
 - **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
-- **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3 — superseded as narrative by `docs/spec-suite-platform/`), packaging/economics, bench format guide, UI mocks.
+- **[docs/spec-v0.3/](docs/spec-v0.3/)** — the v0.3 narrative (superseded as the product narrative by `docs/spec-suite-platform/`, still accurate as a description of the governance capability), packaging/economics, bench format guide, UI mocks.
 
 ## Maturity — subsystems are NOT equally production-ready
 
