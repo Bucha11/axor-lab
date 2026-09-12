@@ -50,4 +50,19 @@ export async function stubScreens(page: Page): Promise<void> {
   await page.route("**/evidence", json(200, { evidence_cases: [] }));
   await page.route("**/regressions", json(200, { regressions: [] }));
   await page.route("**/artifacts", json(200, { artifacts: [] }));
+  // the commercial half: a workspace, its plan catalog and its members. Empty
+  // but VALID, so navigation can reach the screen without a live backend.
+  await page.route("**/workspaces/current", json(200, {
+    id: "ws_test", name: "Test workspace",
+    plan: { name: "free", max_suites: 3, max_artifacts: 10, max_hosted_runtimes: 0,
+            capabilities: [] },
+    is_admin: false, org: null,
+    subscription: { plan_id: "free", status: "active" },
+    created_at: 0, role: "viewer",
+  }));
+  await page.route("**/workspaces", json(403, { error: "listing workspaces requires admin" }));
+  await page.route("**/workspaces/current/members", json(200, { members: [] }));
+  await page.route("**/billing/plans", json(200, { plans: [] }));
+  await page.route("**/hosted-runtimes", json(403, { error: "hosted_execution not in plan" }));
+  await page.route("**/registry/suites", json(403, { error: "private_registry not in plan" }));
 }

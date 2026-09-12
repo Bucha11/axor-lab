@@ -403,6 +403,11 @@ export function Builder({ suiteId }: { suiteId: string }) {
   const [errors, setErrors] = useState<string[] | null>(null);
   const [ok, setOk] = useState<boolean | null>(null);
   const [saved, setSaved] = useState(false);
+  // Whole-suite validation answers "is this manifest valid"; a pile of errors
+  // does not say WHICH scenario broke. Per-scenario validation does, and the
+  // plan preview says what a run would actually execute before one starts.
+  const [scenarioErrors, setScenarioErrors] = useState<[string, string[]][] | null>(null);
+  const [plan, setPlan] = useState<{ trials: string[] } | null>(null);
   const [busy, setBusy] = useState(false);
   const [runtimes, setRuntimes] = useState<RuntimeRow[] | null>(null);
   const [runtimeRef, setRuntimeRef] = useState("");
@@ -585,6 +590,46 @@ export function Builder({ suiteId }: { suiteId: string }) {
     }
   }
 
+  async function checkScenarios() {
+    setBusy(true);
+    setRunError(null);
+    try {
+      const document = await current();
+      if (document === null) return;
+      const scenarios = (document.scenarios ?? []) as Record<string, unknown>[];
+      const found: [string, string[]][] = [];
+      for (const scenario of scenarios) {
+        const result = await api.validateScenario(scenario);
+        if (!result.ok) found.push([String(scenario.name ?? "(unnamed)"), result.errors]);
+      }
+      setScenarioErrors(found);
+    } catch (exc) {
+      setRunError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewPlan() {
+    setBusy(true);
+    setRunError(null);
+    try {
+      const document = await current();
+      if (document === null) return;
+      const execution = (document.execution ?? {}) as Record<string, unknown>;
+      setPlan(await api.planExperiment({
+        scenario_ids: ((document.scenarios ?? []) as Record<string, unknown>[])
+          .map((scenario) => scenario.name),
+        conditions: execution.conditions ?? [],
+        repeats: execution.repeats ?? 1,
+      }));
+    } catch (exc) {
+      setRunError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /** Save, then dispatch to the chosen agent, then land on the live run.
    * Save-first is deliberate: the server dispatches the STORED suite, and a
    * run of anything other than what is on screen is the stale-document bug
@@ -695,10 +740,36 @@ export function Builder({ suiteId }: { suiteId: string }) {
           <Button onClick={save} disabled={busy}>
             Save
           </Button>
+          <Button variant="secondary" onClick={checkScenarios} disabled={busy}>
+            Check scenarios
+          </Button>
+          <Button variant="secondary" onClick={previewPlan} disabled={busy}>
+            Preview plan
+          </Button>
           {ok === true && <Tag tone="success">valid</Tag>}
           {ok === false && <Tag tone="danger">{errors?.length ?? 0} error(s)</Tag>}
           {saved && <Tag tone="success">saved</Tag>}
         </div>
+        {scenarioErrors !== null && (
+          scenarioErrors.length === 0 ? (
+            <p className="muted small">Every scenario validates on its own.</p>
+          ) : (
+            <ul className="errors">
+              {scenarioErrors.map(([name, messages]) => (
+                <li key={name}>
+                  <code>{name}</code>: {messages.join("; ")}
+                </li>
+              ))}
+            </ul>
+          )
+        )}
+        {plan && (
+          <p className="muted small">
+            {plan.trials.length} trial unit(s) — one per (scenario × condition ×
+            repeat). This is a PLAN, not a run: the trial ids are deterministic,
+            so the same manifest always yields the same set.
+          </p>
+        )}
         {errors && errors.length > 0 && (
           <ul className="errors">
             {errors.map((message) => (

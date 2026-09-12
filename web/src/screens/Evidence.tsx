@@ -1,8 +1,26 @@
+import { useState } from "react";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
-import { Card, Empty, Failed, Json, Link, Loading, Tag } from "../components/ui";
+import { Button, Card, Empty, Failed, Field, Json, Link, Loading, Tag } from "../components/ui";
 
 export function EvidenceList() {
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  async function create() {
+    setBusy(true);
+    setCreateError(null);
+    try {
+      await api.createEvidence(JSON.parse(draft));
+      setDraft("");
+      reload();
+    } catch (exc) {
+      setCreateError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
   const { data, error, loading, reload } = useAsync(() => api.evidence());
   if (loading) return <Loading />;
   if (error) return <Failed error={error} onRetry={reload} />;
@@ -33,6 +51,26 @@ export function EvidenceList() {
           ))}
         </div>
       )}
+
+      <Card>
+        <h4>Create from JSON</h4>
+        <p className="muted small">
+          An EvidenceCase is a curated investigation of ONE trial — a latency spike, a budget overrun, an injection that landed. Authored elsewhere and pasted here.
+        </p>
+        <Field label="evidence-case/v1" hint="Validated by the server against its schema; a malformed document is refused, not stored.">
+          <textarea
+            id="evidence-json"
+            rows={4}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder='{\"schema_version\": \"evidence-case/v1\", \"id\": \"ec_1\", …}'
+          />
+        </Field>
+        <Button onClick={create} disabled={busy || !draft}>
+          {busy ? "Creating…" : "Create EvidenceCase"}
+        </Button>
+        {createError && <p className="errors">{createError}</p>}
+      </Card>
     </div>
   );
 }

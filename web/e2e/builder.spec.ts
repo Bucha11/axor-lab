@@ -62,6 +62,8 @@ const YAML_TEXT = "id: suite-alpha\nname: Alpha Suite\ndescription: An example s
 
 interface Opts {
   suites?: unknown[];
+  /** the ORG's shared catalog — a different list from `suites`. */
+  orgSuites?: unknown[];
   manifest?: Record<string, unknown>;
   runtimes?: unknown[];
   validate?: { ok: boolean; errors: string[]; suite?: unknown };
@@ -77,6 +79,7 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
   await stubShell(page, OPEN);
 
   await page.route("**/runtimes", json(200, { runtimes: opts.runtimes ?? [] }));
+
 
   // dispatch is two-segment — no overlap with the generic single-segment handler
   await page.route("**/suites/*/dispatch", json(200, {
@@ -107,6 +110,12 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
     }
     return json(200, { suites: opts.suites ?? [] })(route);
   });
+
+  // LAST, so it wins: `**/suites` matches `/registry/suites` too, and without
+  // this the workspace's own cards render again under the org catalog — every
+  // by-name assertion then hits two elements. Playwright gives precedence to the
+  // most recently registered route.
+  await page.route("**/registry/suites", json(200, { suites: opts.orgSuites ?? [] }));
 }
 
 /** Fail loud on an uncaught render error — a wrong mock shape throws

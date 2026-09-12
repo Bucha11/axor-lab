@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type CheckReport, type HandoffPackage } from "../lib/api";
+import { api, type CheckReport, type HandoffPackage, type Json } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
 import { Button, Card, Empty, Failed, Field, Loading, Stat, Tag } from "../components/ui";
 
@@ -48,6 +48,12 @@ export function Handoff() {
   const [allowUnsigned, setAllowUnsigned] = useState(true);
   const [busy, setBusy] = useState("");
   const [failure, setFailure] = useState("");
+  // the second funnel and the offline package check both take a document the
+  // user already holds, so they are pasted rather than picked from a list.
+  const [incident, setIncident] = useState("");
+  const [imported, setImported] = useState<{ bundle_id: string; replay_status: string } | null>(null);
+  const [pkgText, setPkgText] = useState("");
+  const [pkgReport, setPkgReport] = useState<CheckReport | null>(null);
 
   async function guard(label: string, work: () => Promise<void>) {
     setBusy(label);
@@ -73,6 +79,20 @@ export function Handoff() {
   const verify = () =>
     guard("verify", async () => {
       if (pkg) setReport(await api.verifyHandoff(pkg.files, allowUnsigned));
+    });
+
+  const importIncident = () =>
+    guard("incident", async () => {
+      const parsed = JSON.parse(incident) as {
+        trace: Json; scenario: Json; manifests: Json; condition: Json;
+      };
+      const result = await api.importIncident(parsed);
+      setImported({ bundle_id: result.bundle_id, replay_status: result.replay_status });
+    });
+
+  const verifyPackage = () =>
+    guard("package", async () => {
+      setPkgReport(await api.verifyPackage(JSON.parse(pkgText) as Json, true));
     });
 
   if (loading) return <Loading />;
@@ -157,6 +177,79 @@ export function Handoff() {
           </Button>
         </Card>
       )}
+
+      <Card>
+        <h4>Verify a reproduction package</h4>
+        <p className="muted small">
+          A downloaded package, checked without trusting the server that served
+          it: content hashes, bit-identical replay, and every proof object bound.
+          Paste the package JSON.
+        </p>
+        <Field label="Package JSON" hint="The file a publication page serves under Download.">
+          <textarea
+            id="package-json"
+            rows={4}
+            value={pkgText}
+            onChange={(e) => setPkgText(e.target.value)}
+            placeholder='{"schema_version": "axor-reproduction-package/v1", …}'
+          />
+        </Field>
+        <Button onClick={verifyPackage} disabled={busy !== "" || !pkgText}>
+          {busy === "package" ? "Verifying…" : "Verify package"}
+        </Button>
+        {pkgReport && (
+          <>
+            <p className="muted small">
+              Outcome:{" "}
+              <Tag
+                tone={
+                  pkgReport.outcome === "ok"
+                    ? "success"
+                    : pkgReport.outcome === "unverified"
+                      ? "warning"
+                      : "danger"
+                }
+              >
+                {pkgReport.outcome}
+              </Tag>
+            </p>
+            <Checks report={pkgReport} />
+          </>
+        )}
+      </Card>
+
+      <Card>
+        <h4>Import an incident</h4>
+        <p className="muted small">
+          The second funnel: a production trace becomes a bundle you can test a
+          policy against. The recorded condition is required and used verbatim —
+          reconstructing it would lose enforcement mode, policy and allowlist.
+          Nothing is stored until the incident replays under it.
+        </p>
+        <Field
+          label="Incident JSON"
+          hint="An object with trace, scenario, manifests and condition."
+        >
+          <textarea
+            id="incident-json"
+            rows={4}
+            value={incident}
+            onChange={(e) => setIncident(e.target.value)}
+            placeholder='{"trace": {…}, "scenario": {…}, "manifests": […], "condition": {…}}'
+          />
+        </Field>
+        <Button onClick={importIncident} disabled={busy !== "" || !incident}>
+          {busy === "incident" ? "Importing…" : "Import incident"}
+        </Button>
+        {imported && (
+          <p className="muted small">
+            Imported <code>{imported.bundle_id}</code> — replay status{" "}
+            <Tag tone={imported.replay_status === "match" ? "success" : "warning"}>
+              {imported.replay_status}
+            </Tag>
+          </p>
+        )}
+      </Card>
 
       {report && (
         <Card>

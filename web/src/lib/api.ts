@@ -228,6 +228,67 @@ export type HandoffPackage = {
   earned_bridge: boolean;
 };
 
+export interface Plan {
+  name: string;
+  price_usd?: number;
+  max_suites: number | null;
+  max_artifacts: number | null;
+  max_hosted_runtimes: number | null;
+  capabilities: string[];
+}
+
+export interface Subscription {
+  plan_id: string;
+  status: string;
+}
+
+/** A tenant. `is_admin` is the workspace's own standing on this server; `role`
+ * is the CALLER's standing inside it, and only /workspaces/current carries it. */
+export interface Workspace {
+  id: string;
+  name: string;
+  plan: Plan;
+  is_admin: boolean;
+  org: string | null;
+  subscription: Subscription;
+  created_at: number;
+  role?: string;
+}
+
+export interface MemberCount {
+  role: string;
+  count: number;
+}
+
+/** Who changed what. The compliance surface — admin only. */
+export interface AuditEntry {
+  at: number;
+  actor_role: string;
+  action: string;
+  detail: string;
+}
+
+export interface RuntimeConnection {
+  runtime_ref: string;
+  ingest_key: string;
+}
+
+export interface Checkout {
+  session_id: string;
+  checkout_url: string;
+  plan_id: string;
+}
+
+export interface ValidationOk {
+  ok: boolean;
+  errors: string[];
+}
+
+export interface ExperimentPlan {
+  trials: string[];
+  estimate: Json;
+}
+
 // ── endpoints ────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -286,6 +347,68 @@ export const api = {
       package: pkg,
       allow_bare: allowBare,
     }),
+
+  // ── workspace, plan, compliance (RFC §16 commercial half) ──────────────────
+  /** The caller's own tenant, and the ROLE they hold inside it. */
+  currentWorkspace: () => call<Workspace>("GET", "/workspaces/current"),
+  /** Every tenant on this server. Admin only — a tenant must not enumerate others. */
+  workspaces: () => call<{ workspaces: Workspace[] }>("GET", "/workspaces"),
+  createWorkspace: (name: string, planId?: string) =>
+    call<Workspace>("POST", "/workspaces", { name, plan: planId }),
+  members: () => call<{ members: MemberCount[] }>("GET", "/workspaces/current/members"),
+  /** Mint a member token at a role. The token is shown ONCE. */
+  addMember: (role: string) =>
+    call<{ role: string; token: string }>("POST", "/workspaces/current/members", { role }),
+  audit: () => call<{ audit: AuditEntry[] }>("GET", "/workspaces/current/audit"),
+  /** Grant a plan directly — the admin path, distinct from paying for one. */
+  grantPlan: (planId: string, workspaceId?: string) =>
+    call<{ workspace_id: string; subscription: Subscription }>(
+      "POST", "/workspaces/current/plan", { plan_id: planId, workspace_id: workspaceId }),
+  plans: () => call<{ plans: Plan[] }>("GET", "/billing/plans"),
+  checkout: (planId: string) =>
+    call<Checkout>("POST", "/billing/checkout", { plan_id: planId }),
+
+  // ── hosted execution + org registry ────────────────────────────────────────
+  /** Runtimes the PLATFORM provisions, as opposed to ones a customer connects. */
+  hostedRuntimes: () =>
+    call<{ hosted_runtimes: RuntimeRow[] }>("GET", "/hosted-runtimes"),
+  provisionHostedRuntime: (label: string) =>
+    call<RuntimeConnection>("POST", "/hosted-runtimes", { runtime_label: label }),
+  /** The org's shared catalog — suites every workspace in the org can see. */
+  registrySuites: () => call<{ suites: SuiteCard[] }>("GET", "/registry/suites"),
+  registrySuite: (id: string) =>
+    call<Json>("GET", `/registry/suites/${encodeURIComponent(id)}`),
+  publishSuiteToOrg: (id: string) =>
+    call<{ id: string; org: string }>("POST", `/suites/${encodeURIComponent(id)}/publish`, {}),
+
+  // ── authoring aids ─────────────────────────────────────────────────────────
+  validateScenario: (scenario: Json) =>
+    call<ValidationOk>("POST", "/scenarios/validate", { scenario }),
+  /** Expand an experiment into its planned trial units. A PLAN, not execution. */
+  planExperiment: (experiment: Json) =>
+    call<ExperimentPlan>("POST", "/experiments/plan", { experiment }),
+
+  // Three server endpoints deliberately have no client method:
+  //
+  //   GET  /workspaces/current/subscription — `currentWorkspace()` already
+  //        carries both the subscription and the plan; a second call for the
+  //        same two fields is a second place for them to disagree.
+  //   GET  /runs/{id}/trials/{id}/trace — `trial()` embeds the trace already,
+  //        and the Trial screen renders it from there.
+  //   POST /runs/{id}/aggregates — the runner posts aggregates; Lab RENDERS
+  //        them and does not compute them (ui-backend-contract §3). A button
+  //        that overwrote a published figure would give the UI a second opinion
+  //        about a number someone has already cited.
+
+  /** The second funnel: a production trace becomes a bundle a policy can be
+   * tested against. Nothing comes back until the incident REPLAYS under its own
+   * recorded condition. */
+  importIncident: (body: {
+    trace: Json; scenario: Json; manifests: Json; condition: Json;
+  }) => call<{
+    bundle_id: string; trace_id: string; replay_status: string;
+    bundle: Json; traces: Json[]; files: Record<string, string>;
+  }>("POST", "/incidents/import", body),
 
   validateSuite: (suite: Json) =>
     call<ValidationResult>("POST", "/suites/validate", { suite }),

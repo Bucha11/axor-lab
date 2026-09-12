@@ -229,7 +229,10 @@ export const SECTIONS: SectionSpec[] = [
           { key: "id", label: "Id", widget: "text", placeholder: "governed" },
           { key: "label", label: "Label", widget: "text", placeholder: "governed + allowlist" },
           { key: "enforcement", label: "Enforcement", widget: "select", options: ["off", "on"] },
-          { key: "kernel", label: "Kernel", widget: "text", placeholder: "reference_taint_floor_kernel" },
+          // the reference kernel was REMOVED — a run governs through the real axor-core
+          // build or not at all, so the hint shows the SHAPE rather than a version
+          // that rots the next time the kernel is released.
+          { key: "kernel", label: "Kernel", widget: "text", placeholder: "axor-core@<installed version>" },
         ],
         blank: { schema_version: "condition/v1", id: "", enforcement: "on" },
         help: "omit for a single-arm run; present requires 'governance' in capabilities",
