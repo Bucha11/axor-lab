@@ -106,6 +106,23 @@ class BaseSuite:
         return artifact
 
 
+def drives_its_own_trials(suite: object) -> bool:
+    """Whether this suite decides what its agent DOES.
+
+    A manifest says which tools exist and what they mean; it cannot say the
+    order an agent calls them in. That is `program_for`, and a suite that does
+    not override it gets `_NullProgram` — the loop finishes immediately, the
+    trace is empty, every metric is false, and an artifact is written anyway.
+
+    So a locally-run suite without this is not measuring anything, and the
+    screens that offer to run one locally have to say so BEFORE the click
+    rather than present 108 zeros afterwards. A DISPATCHED suite does not need
+    it: the connected runtime drives the loop with a real model, which is what
+    the manifest was written for.
+    """
+    return type(suite).program_for is not BaseSuite.program_for
+
+
 class SuiteRegistry:
     """Suites by id. Third-party suites register here too (RFC §17)."""
 
@@ -194,21 +211,24 @@ def suite_catalog(registry: "SuiteRegistry | None" = None) -> list[dict[str, obj
 
 
 def builtin_registry() -> SuiteRegistry:
-    """The launch set: Blank, AgentDojo, Budget.
+    """The launch set: Blank, AgentDojo, Budget, Ingest.
 
-    Three, not the six the design's catalog shows. Together they exercise every
-    SDK surface once — Blank proves a suite is authorable from nothing,
-    AgentDojo proves the import path, Budget proves the metrics layer — and the
-    catalog is expected to mark the other three unavailable rather than render a
-    card that runs nothing.
+    Each exercises a different SDK surface once — Blank proves a suite is
+    authorable from nothing, AgentDojo proves the import path, Budget proves the
+    metrics layer, Ingest proves a suite can be derived from a shipped agent's
+    documented tool chain (the case a customer starts from, where nobody has
+    curated anything). The catalog is expected to mark the remaining announced
+    suites unavailable rather than render a card that runs nothing.
     """
     from .builtin.agentdojo import AgentDojoSuite
     from .builtin.blank import BlankSuite
     from .builtin.budget import BudgetSuite
+    from .builtin.ingest import IngestSuite
 
     registry = SuiteRegistry()
     registry.register(BlankSuite())
     registry.register(AgentDojoSuite())
+    registry.register(IngestSuite())
     registry.register(BudgetSuite())
     return registry
 

@@ -88,6 +88,7 @@ interface Opts {
     trials: string[];
     conditions: string[];
     blockers: string[];
+    drives_itself?: boolean;
     estimate?: Record<string, number>;
   };
 }
@@ -165,6 +166,7 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
     trials: ["scn-1:ungoverned:0", "scn-1:ungoverned:1"],
     conditions: ["ungoverned"],
     blockers: [],
+    drives_itself: true,
     estimate: { trials: 2, scenarios: 1, conditions: 1, repeats: 2 },
   }));
 
@@ -421,6 +423,7 @@ test.describe("Suite Builder", () => {
         trials: ["scn-1:ungoverned:0", "scn-1:ungoverned:1"],
         conditions: ["ungoverned"],
         blockers: [],
+        drives_itself: true,
         estimate: { trials: 2 },
       })(route);
     });
@@ -443,6 +446,7 @@ test.describe("Suite Builder", () => {
         trials: ["scn-1:ungoverned:0"],
         conditions: ["ungoverned"],
         blockers: ["topology 'swarm' is accepted and validated but not yet executable"],
+        drives_itself: true,
       },
     });
     await page.goto("/#/suites/suite-alpha");
@@ -630,6 +634,45 @@ test.describe("Suite Builder", () => {
     await page.goto("/#/suites/suite-alpha");
     await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Suite options" })).toHaveCount(0);
+  });
+
+  test("a suite nothing implements says so before the click", async ({ page }) => {
+    // Such a suite RUNS: every trial finishes immediately, every metric comes
+    // back false, and an artifact of zeros is written — at scale it looks
+    // exactly like a result. The screen has to say it beforehand.
+    await routes(page, {
+      plan: {
+        trials: ["scn-1:ungoverned:0"],
+        conditions: ["ungoverned"],
+        blockers: [],
+        drives_itself: false,
+      },
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    // nothing is claimed before the plan is known
+    await expect(page.getByText("no implementation")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    await expect(page.getByText("no implementation")).toBeVisible();
+    await expect(page.getByText(/a LOCAL run of them would measure nothing/)).toBeVisible();
+  });
+
+  test("an inert trial result is labelled, not left to look like a result", async ({ page }) => {
+    await routes(page, {
+      trial: {
+        mode: "simulated",
+        trial: { trial_id: "scn-1:ungoverned:0", status: "completed" },
+        trace: { events: [] },
+        counted_in_a_run: false,
+        evidence_cases: [],
+      },
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await page.getByRole("button", { name: "Try one trial" }).click();
+    await expect(page.getByText("nothing ran")).toBeVisible();
+    await expect(page.getByText(/no tool was called/)).toBeVisible();
   });
 
   test("Run panel lists runtimes and dispatching starts a run", async ({ page }) => {

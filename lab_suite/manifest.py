@@ -177,6 +177,50 @@ def validate_manifest(
         )
     errors.extend(_scripted_agent_errors(agents))
     errors.extend(_suite_config_errors(manifest))
+    errors.extend(_invariant_metric_errors(manifest))
+    return errors
+
+
+#: `check_invariant` reads a threshold metric as a NUMBER and counts a bool as
+#: unmeasured, so a threshold over one of these can only ever come back
+#: "was not measured on N/N". Every other declared kind is numeric.
+_NON_NUMERIC_METRIC_KINDS = frozenset({"boolean"})
+
+
+def _invariant_metric_errors(manifest: dict[str, object]) -> list[str]:
+    """A `metric_threshold` invariant must name a metric a threshold can read.
+
+    The failure this prevents is a green-looking suite that can never be
+    checked: `lte 0.0` over a boolean ASR reads as "the attack never succeeded"
+    and reports `error — metric 'ASR' was not measured on N/N completed
+    trial(s)` on every run, on every execution path. The Builder offers the
+    metric name and the threshold side by side and says nothing about the kind,
+    so this is a trap to author and silent until a run finishes.
+    """
+    evaluation: dict[str, object] = manifest.get("evaluation") or {}  # type: ignore[assignment]
+    kinds = {
+        str(metric.get("name")): str(metric.get("kind", ""))
+        for metric in evaluation.get("metrics") or []  # type: ignore[union-attr]
+        if isinstance(metric, dict)
+    }
+    errors: list[str] = []
+    for regression in manifest.get("regressions") or []:  # type: ignore[union-attr]
+        if not isinstance(regression, dict):
+            continue
+        rule: dict[str, object] = regression.get("rule") or {}  # type: ignore[assignment]
+        if str(rule.get("kind")) != "metric_threshold":
+            continue
+        name = str(rule.get("metric", ""))
+        # a metric the suite does not declare is a raw `trial.metrics` key
+        # (duration_ms, tokens); its type is the runtime's to know, not ours
+        if kinds.get(name) in _NON_NUMERIC_METRIC_KINDS:
+            errors.append(
+                f"[suite] invariant {regression.get('id')!r} thresholds metric "
+                f"{name!r}, which the suite declares as {kinds[name]!r} — a threshold "
+                "reads its metric as a number and treats a boolean as UNMEASURED, so "
+                "this rule can never pass. Use a `predicate` rule over the trace, or "
+                "aggregate the boolean into a rate metric first"
+            )
     return errors
 
 

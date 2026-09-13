@@ -291,6 +291,12 @@ export interface ExperimentPlan {
 
 export interface SuitePlan {
   trials: string[];
+  /** whether a registered implementation decides what this suite's agent DOES.
+   * False means a LOCAL run finishes every trial immediately: empty traces,
+   * every metric false, and an artifact of zeros written anyway. A DISPATCH is
+   * unaffected — the connected runtime drives the loop with a real model, which
+   * is what the manifest was written for. */
+  drives_itself: boolean;
   /** the arm ids actually planned, INCLUDING a synthesized ungoverned one for
    * a suite that declares no conditions. Naming them is the point: a preview
    * that guessed the arm produced trial ids no run would ever use. */

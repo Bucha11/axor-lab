@@ -1096,6 +1096,23 @@ def make_runtime_server(
             except SuiteNotFound:
                 raise
 
+        def _suite_drives_itself(self, manifest: dict[str, object]) -> bool:
+            """Does a registered implementation drive this manifest's trials?
+
+            A manifest with no implementation still RUNS locally — the loop just
+            finishes immediately and every metric comes back false — so the
+            Builder has to be able to say that before someone clicks, instead of
+            presenting an artifact of zeros afterwards.
+            """
+            from lab_suite import builtin_registry, drives_its_own_trials
+            from lab_suite.errors import SuiteNotFound
+
+            try:
+                suite = builtin_registry().get(str(manifest.get("id", "")))
+            except SuiteNotFound:
+                return False
+            return drives_its_own_trials(suite)
+
         def _scenario_registry(self) -> dict[str, dict[str, object]]:
             """The scenarios `scenario_refs` resolves against, by name.
 
@@ -2201,6 +2218,11 @@ def make_runtime_server(
                         ) from None
                     self._send(200, {
                         "trials": list(planned.planned),
+                        # whether this suite decides what its agent DOES. False
+                        # means a LOCAL run produces empty traces and an
+                        # artifact full of zeros; a dispatch is unaffected,
+                        # because the connected runtime drives the loop.
+                        "drives_itself": self._suite_drives_itself(manifest),
                         # the arms actually planned, INCLUDING a synthesized
                         # ungoverned one — the preview has to name the arm the
                         # run will name, or its trial ids are fiction

@@ -921,6 +921,14 @@ export function Builder({ suiteId }: { suiteId: string }) {
                   against it.
                 </p>
               )}
+            {!plan.drives_itself && (
+              <p className="muted small">
+                These trials plan fine and a LOCAL run of them would measure
+                nothing: no registered implementation drives this suite's agent.
+                Dispatch to a connected agent under Run — that is the path this
+                manifest is written for.
+              </p>
+            )}
             {plan.blockers.length > 0 && (
               <ul className="errors">
                 {plan.blockers.map((message) => (
@@ -946,6 +954,15 @@ export function Builder({ suiteId }: { suiteId: string }) {
           simulated tools. Nothing is stored, nothing is aggregated, and it does
           not need a connected agent. This is the debugger, not the run.
         </p>
+        {plan && !plan.drives_itself && (
+          <p className="muted small">
+            <Tag tone="warning">no implementation</Tag> Nothing registered
+            decides what this suite's agent does, so a local trial will call no
+            tools and every metric will come back false. The manifest says which
+            tools exist, not the order an agent calls them in — that comes from
+            a connected agent under Run, or from a suite implementation.
+          </p>
+        )}
         <div className="row">
           <input
             value={trialScenario}

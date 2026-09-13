@@ -13,8 +13,30 @@ import { Timeline } from "./Timeline";
  * whether what you are looking at counted.
  */
 export function TrialResult({ result }: { result: PlaygroundResult }) {
+  // A trial that emitted no events did not act. It still "completes", still
+  // writes a trial record and still reports every metric as false — which is
+  // what a suite with no implementation produces, at scale, looking exactly
+  // like a run. Saying it here costs one line and is the difference between
+  // reading a result and reading a shape.
+  const events = Array.isArray((result.trace as { events?: unknown[] } | null)?.events)
+    ? ((result.trace as { events: unknown[] }).events)
+    : [];
+  const inert = events.length === 0;
+
   return (
     <>
+      {inert && (
+        <Card>
+          <Tag tone="warning">nothing ran</Tag>
+          <p className="muted small">
+            The trial completed but produced no events: no tool was called, so
+            every metric is false and there is nothing to read. That is what a
+            suite with no implementation does — the manifest says which tools
+            exist, not the order an agent calls them in. Dispatch it to a
+            connected agent, or give the suite a <code>program_for</code>.
+          </p>
+        </Card>
+      )}
       <Card>
         <div className="row-between">
           <h3>Trial</h3>
