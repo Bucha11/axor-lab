@@ -80,6 +80,7 @@ interface Opts {
   manifest?: Record<string, unknown>;
   runtimes?: unknown[];
   registryScenarios?: { name: string; task: string }[];
+  trial?: Record<string, unknown>;
   validate?: { ok: boolean; errors: string[]; suite?: unknown };
   yaml?: string;
   createdId?: string;
@@ -134,6 +135,15 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
     }
     return json(200, { suites: opts.suites ?? [] })(route);
   });
+
+  await page.route("**/playground/trial", json(200, opts.trial ?? {
+    mode: "simulated",
+    trial: { trial_id: "scn-1:ungoverned:0", status: "completed",
+             scenario_id: "scn-1", metrics: { task_success: true } },
+    trace: null,
+    counted_in_a_run: false,
+    evidence_cases: [],
+  }));
 
   // authoring aids. `scenarios/validate` echoes back WHICH tool manifests it
   // was given, so a test can assert the client sent them rather than trusting
@@ -278,7 +288,7 @@ test.describe("Suite Builder", () => {
     });
     await scenarios.getByRole("button", { name: "+ Add" }).click();
     await page.getByRole("button", { name: "Save", exact: true }).click();
-    await expect(page.getByText("saved")).toBeVisible();
+    await expect(page.locator(".tag", { hasText: /^saved$/ })).toBeVisible();
 
     const posted = (saved[0].suite as Record<string, unknown>);
     const added = (posted.scenarios as Record<string, unknown>[])[1];
@@ -506,6 +516,59 @@ test.describe("Suite Builder", () => {
     await expect(page.getByText(/trial unit\(s\)/)).toHaveCount(0);
     await expect(page.getByText("Every scenario validates on its own.")).toHaveCount(0);
     await expect(page.locator(".tag", { hasText: /^valid$/ })).toHaveCount(0);
+  });
+
+  test("Try one trial runs the document on screen, unsaved", async ({ page }) => {
+    // RFC §13 asks for a single-trial debugger before full execution. The
+    // Playground already was one, but it ran a SAVED suite by id — so the one
+    // document it could not try was the one being edited.
+    const posted: Record<string, unknown>[] = [];
+    let saves = 0;
+    await routes(page);
+    await page.route("**/suites/suite-alpha", (route: Route) => {
+      if (route.request().method() === "PUT") saves += 1;
+      return json(200, route.request().method() === "PUT"
+        ? { id: "suite-alpha" } : MANIFEST)(route);
+    });
+    await page.route("**/playground/trial", async (route: Route) => {
+      posted.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, {
+        mode: "simulated",
+        trial: { trial_id: "scn-1:ungoverned:0", status: "completed" },
+        trace: null,
+        counted_in_a_run: false,
+        evidence_cases: [],
+      })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    const suiteCard = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Suite", exact: true }),
+    });
+    await suiteCard.getByLabel("Description").fill("An unsaved edit.");
+    await page.getByRole("button", { name: "Try one trial" }).click();
+
+    await expect(page.getByRole("heading", { name: "Trial", exact: true })).toBeVisible();
+    await expect(page.getByText("not counted in a run")).toBeVisible();
+    // the EDITED document went over, and nothing was written
+    expect((posted[0].suite as Record<string, unknown>).description)
+      .toBe("An unsaved edit.");
+    expect(saves).toBe(0);
+  });
+
+  test("a trial result does not outlive the document it describes", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await page.getByRole("button", { name: "Try one trial" }).click();
+    await expect(page.getByRole("heading", { name: "Trial", exact: true })).toBeVisible();
+
+    const execution = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Execution" }),
+    });
+    await execution.getByLabel("Repeats").fill("9");
+    await expect(page.getByRole("heading", { name: "Trial", exact: true })).toHaveCount(0);
   });
 
   test("Run panel lists runtimes and dispatching starts a run", async ({ page }) => {

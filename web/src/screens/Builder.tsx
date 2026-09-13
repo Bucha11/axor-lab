@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, type Json, type RuntimeRow, type SuitePlan } from "../lib/api";
+import {
+  api,
+  type Json,
+  type PlaygroundResult,
+  type RuntimeRow,
+  type SuitePlan,
+} from "../lib/api";
 import { navigate } from "../lib/router";
 import {
   IDENTITY,
@@ -11,6 +17,7 @@ import {
   writePath,
 } from "../lib/sections";
 import { Button, Card, Failed, Link, Loading, Tag } from "../components/ui";
+import { TrialResult } from "../components/TrialResult";
 
 /**
  * The Suite Builder — Basic, Advanced and YAML over ONE manifest (RFC §13).
@@ -431,6 +438,11 @@ export function Builder({ suiteId }: { suiteId: string }) {
   // against a registry nothing filled — so every value typed there made the
   // suite permanently invalid.
   const [registryScenarios, setRegistryScenarios] = useState<string[]>([]);
+  // RFC §13: "Preview should support a single-trial debugger before full
+  // execution." The Playground screen is that debugger, but it ran a SAVED
+  // suite by id, so the one document it could not try was the one on screen.
+  const [trial, setTrial] = useState<PlaygroundResult | null>(null);
+  const [trialScenario, setTrialScenario] = useState("");
   const [runtimeRef, setRuntimeRef] = useState("");
   const [runError, setRunError] = useState<string | null>(null);
   const [jumpTarget, setJumpTarget] = useState<string | null>(null);
@@ -507,6 +519,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
     setScenarioErrors(null);
     setPlan(null);
     setRunError(null);
+    setTrial(null);
   }
 
   function edited(next: Json) {
@@ -653,6 +666,31 @@ export function Builder({ suiteId }: { suiteId: string }) {
         .filter((tool) => typeof tool.id === "string")
         .map((tool) => [String(tool.id), tool]),
     );
+  }
+
+  /** Run ONE trial of the document as it stands — unsaved, unstored, not
+   * counted. `/playground/trial` already took an inline `{suite}`; the Builder
+   * simply never sent the manifest it was holding, so trying a change meant
+   * saving it first and finding the Playground under a different route.
+   *
+   * Deliberately not a Save: a trial is a debugging click, and the payload's
+   * own `counted_in_a_run: false` is rendered beside the result. */
+  async function tryOneTrial() {
+    setBusy(true);
+    setRunError(null);
+    setTrial(null);
+    try {
+      const document = await current();
+      if (document === null) return;
+      setTrial(await api.playground({
+        suite: document,
+        ...(trialScenario ? { scenario: trialScenario } : {}),
+      }));
+    } catch (exc) {
+      setRunError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function checkScenarios() {
@@ -872,6 +910,27 @@ export function Builder({ suiteId }: { suiteId: string }) {
           </ul>
         )}
       </Card>
+
+      <Card>
+        <h3>Try one trial</h3>
+        <p className="muted small">
+          Runs the document as it stands — unsaved, against the suite's own
+          simulated tools. Nothing is stored, nothing is aggregated, and it does
+          not need a connected agent. This is the debugger, not the run.
+        </p>
+        <div className="row">
+          <input
+            value={trialScenario}
+            placeholder="scenario (first declared)"
+            onChange={(event) => setTrialScenario(event.target.value)}
+          />
+          <Button variant="secondary" onClick={tryOneTrial} disabled={busy}>
+            Try one trial
+          </Button>
+        </div>
+      </Card>
+
+      {trial && <TrialResult result={trial} />}
 
       <Card>
         <h3>Run</h3>
