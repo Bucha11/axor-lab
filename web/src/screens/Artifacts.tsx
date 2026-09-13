@@ -106,8 +106,17 @@ function Export({ id }: { id: string }) {
           A local publication re-runs the verdicts, so it asserts REPLAY. It does
           not recompute the aggregates and will not claim them — a hand-edited
           bundle could carry a fabricated figure. Give a server and it verifies
-          the evidence and recomputes the statistics before minting, and returns
-          an acceptance receipt.
+          the evidence before minting, and returns an acceptance receipt.
+        </p>
+        {/* a server does not recompute everything, and saying it does would
+            overstate what a reader receives for a latency or a token count */}
+        <p className="muted small">
+          A server recomputes every metric it can DERIVE from the traces — a rate
+          over the recorded verdicts — and those become claims. A metric present
+          in no trace (latency, tokens, spend) has only its declared estimator
+          re-applied to the reported per-trial values: the arithmetic is checked,
+          the observations are not, so it is published as self-reported and
+          claims nothing.
         </p>
         {failure && <p className="errors">{failure}</p>}
         {minted && (
@@ -117,6 +126,20 @@ function Export({ id }: { id: string }) {
                 {minted.origin}
               </Tag>{" "}
               <code>{minted.publication_id}</code>
+              {minted.statistics_integrity && (
+                <>
+                  {" "}
+                  <Tag
+                    tone={
+                      minted.statistics_integrity === "recomputed_from_traces"
+                        ? "success"
+                        : "warning"
+                    }
+                  >
+                    {minted.statistics_integrity}
+                  </Tag>
+                </>
+              )}
               {minted.url && (
                 <>
                   {" · "}
@@ -170,6 +193,7 @@ function Publications() {
                 {row.origin ?? "local"}
               </Tag>{" "}
               {row.visibility ?? "unlisted"} · {row.claims} claim(s)
+              {row.statistics_integrity ? ` · ${row.statistics_integrity}` : ""}
               {row.created ? ` · ${row.created}` : ""}
             </p>
           </Card>

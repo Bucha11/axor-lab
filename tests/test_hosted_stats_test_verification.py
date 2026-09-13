@@ -115,6 +115,24 @@ class TestTestVerification(unittest.TestCase):
                 f"provider {provider!r} should not auto-enable matched_pairs",
             )
 
+    def test_a_marginal_that_declares_no_design_asserts_no_pairing(self) -> None:
+        """A rate is one arm's own number. Reading the DEFAULT "matched_pairs"
+        off an aggregate that declares nothing and carries no test rejected
+        every run a connected runtime produced: the environment attests
+        independent samples, no aggregate makes a comparison, and the server
+        refused the bundle over a pairing nobody claimed. An explicit
+        declaration (above) and a paired test are still refused."""
+        _, result = _run()
+        pairs = result.pairs("ungoverned", "governed", metric="ASR")
+        plain = [
+            binary_aggregate("ASR", "ungoverned", sum(1 for b, _ in pairs if b), len(pairs)),
+            binary_aggregate("ASR", "governed", sum(1 for _, t in pairs if t), len(pairs)),
+        ]
+        live_env = copy.deepcopy(support.environment())
+        live_env["model"] = {"provider": "connected_runtime", "id": "byo"}
+        bundle, traces = _bundle(plain, environment=live_env)
+        self.assertEqual(check_aggregates(bundle, traces), [])
+
     def test_matched_pairs_claim_is_marked_uploader_declared(self) -> None:
         # even for a declared-deterministic provider the server can't PROVE the
         # pairing — the claim text must say the design is uploader-declared (r14)

@@ -204,6 +204,37 @@ class TestTheArtifactCanBePublished(unittest.TestCase):
         kinds = {c["kind"] for c in minted["publication"]["claims"]}
         self.assertNotIn("statistically_reproducible", kinds)
 
+    def test_a_server_publish_reports_which_tier_the_statistics_landed_in(self) -> None:
+        """The budget suite reports a duration the server can derive from no
+        trace. That used to make the whole artifact unpublishable; now it
+        publishes, and the response says WHICH tier — because a reader told
+        "recomputed" about a self-reported latency has been misled by the face,
+        not by the publish server."""
+        import tempfile
+        import threading
+        from pathlib import Path
+
+        from lab_server import make_server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            publisher = make_server(Path(tmp) / "store", host="127.0.0.1", port=0)
+            threading.Thread(target=publisher.serve_forever, daemon=True).start()
+            try:
+                status, _, body = self.face.call(
+                    "POST", f"/artifacts/{self.artifact_id}/publish",
+                    {"question": "Does it stay inside the ceiling?",
+                     "server": f"http://127.0.0.1:{publisher.server_address[1]}"},
+                )
+            finally:
+                publisher.shutdown()
+        self.assertEqual(status, 201, body)
+        minted = json.loads(body)
+        self.assertEqual(minted["origin"], "server")
+        # task_success IS derivable from the traces, so this artifact earns the
+        # stronger axis — the duration beside it simply carries no claim
+        self.assertEqual(minted["statistics_integrity"], "recomputed_from_traces")
+        self.assertTrue(minted["acceptance"])
+
     def test_a_publication_needs_a_question(self) -> None:
         status, _, body = self.face.call(
             "POST", f"/artifacts/{self.artifact_id}/publish", {"question": "  "})

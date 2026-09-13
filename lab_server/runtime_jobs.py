@@ -1413,6 +1413,7 @@ def make_runtime_server(
                          "created": d.get("created"),
                          "visibility": d.get("visibility"),
                          "origin": d.get("origin"),
+                         "statistics_integrity": d.get("statistics_integrity"),
                          "claims": len(d.get("claims") or [])}  # type: ignore[arg-type]
                         for d in shelf.list("publication")
                     ]})
@@ -2052,6 +2053,16 @@ def make_runtime_server(
                             "publication_id": result.publication_id,
                             "url": result.url,
                             "origin": "server",
+                            # WHICH tier the statistics landed in, taken from the
+                            # receipt rather than guessed here: the remote server
+                            # decides what it could derive, and a reader who is
+                            # told "recomputed" about a self-reported figure has
+                            # been told the wrong thing by us, not by it.
+                            "statistics_integrity": (
+                                (result.acceptance or {})
+                                .get("semantic_report", {})  # type: ignore[union-attr]
+                                .get("statistics")
+                            ),
                             "acceptance": result.acceptance,
                             "acceptance_is_signed": result.acceptance_is_signed,
                         })
@@ -2072,6 +2083,7 @@ def make_runtime_server(
                         # does not assert the aggregates as claims — a
                         # hand-edited bundle could carry a fabricated one
                         "aggregates_not_claimed": local.aggregate_count,
+                        "statistics_integrity": local.publication.get("statistics_integrity"),
                         "publication": local.publication,
                     })
                     return

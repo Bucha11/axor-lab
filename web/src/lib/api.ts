@@ -193,6 +193,11 @@ export interface PublicationRow {
   created?: string;
   visibility?: string;
   origin?: string;
+  /** publication/v1 AXIS 4 — how the statistics were established, not whether
+   * they exist. `recomputed_from_traces` means at least one aggregate was
+   * re-derived from the evidence; `self_reported` means every one of them was
+   * taken from the upload with only its own estimator re-applied. */
+  statistics_integrity?: string | null;
   claims: number;
 }
 
@@ -205,6 +210,7 @@ export interface PublishResult {
   origin: "local" | "server";
   url?: string;
   aggregates_not_claimed?: number;
+  statistics_integrity?: string | null;
   publication?: Json;
   acceptance?: Json;
   acceptance_is_signed?: boolean;

@@ -222,6 +222,27 @@ test.describe("Artifacts", () => {
       "href", "https://lab.example/e/e_srv");
   });
 
+  test("a publication says WHICH tier its statistics landed in", async ({ page }) => {
+    // A server recomputes what it can derive from the traces and re-applies the
+    // estimator to the rest. A latency mean is published and claims nothing —
+    // and a reader who is not told that reads it as recomputed.
+    await page.route("**/artifacts/art_1", json(200, ARTIFACT));
+    await page.route("**/artifacts/art_1/publish", json(201, {
+      publication_id: "e_reported",
+      origin: "server",
+      statistics_integrity: "self_reported",
+      acceptance: { server_id: "lab.example" },
+      acceptance_is_signed: false,
+    }));
+    await page.goto("/#/artifacts/art_1");
+    await page.getByLabel("Question it answers").fill("How slow is it?");
+    await page.getByLabel("Server (optional)").fill("https://lab.example");
+    await page.getByRole("button", { name: "Publish" }).click();
+    await expect(page.locator(".tag", { hasText: /^self_reported$/ })).toBeVisible();
+    // and the screen must SAY what the weaker tier checked, before the click
+    await expect(page.getByText(/the arithmetic is checked/)).toBeVisible();
+  });
+
   test("a refused publish shows the reason", async ({ page }) => {
     await page.route("**/artifacts/art_1", json(200, ARTIFACT));
     await page.route("**/artifacts/art_1/publish", json(422, {
@@ -238,7 +259,8 @@ test.describe("Artifacts", () => {
     await page.route("**/publications", json(200, {
       publications: [
         { publication_id: "e_one", question: "Does it hold?", origin: "server",
-          visibility: "public", claims: 3, created: "2026-03-03" },
+          visibility: "public", claims: 3, created: "2026-03-03",
+          statistics_integrity: "recomputed_from_traces" },
       ],
     }));
     await page.goto("/#/artifacts");
@@ -246,6 +268,7 @@ test.describe("Artifacts", () => {
     await expect(page.getByText("e_one")).toBeVisible();
     await expect(page.getByText("Does it hold?")).toBeVisible();
     await expect(page.getByText(/3 claim\(s\)/)).toBeVisible();
+    await expect(page.getByText(/recomputed_from_traces/)).toBeVisible();
   });
 
   test("no publications, no section", async ({ page }) => {
