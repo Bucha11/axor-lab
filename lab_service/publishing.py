@@ -22,6 +22,12 @@ if TYPE_CHECKING:
 
 PUBLICATIONS_PATH = "/api/publications"
 
+#: `publication/v1` REQUIRES a license string. `license_id=None` therefore built
+#: a publication that failed its own schema — the CLI hid it behind an argparse
+#: default, so the hole only opened when a second face called the verb. The
+#: default belongs to the verb, not to one of its faces.
+DEFAULT_LICENSE = "CC-BY-4.0"
+
 
 @dataclass(frozen=True)
 class LocalPublishResult:
@@ -110,7 +116,7 @@ def build_local_publication(
         origin="local",
         integrity="hash_verified",
         claims=claims,
-        license_id=license_id,
+        license_id=license_id or DEFAULT_LICENSE,
         visibility=visibility,
         statistics_integrity=None,  # no statistical claims are asserted locally
     )
@@ -151,7 +157,7 @@ def upload_publication(
         "bundle": bundle,
         "traces": traces,
         "question": question,
-        "license": license_id,
+        "license": license_id or DEFAULT_LICENSE,
         "visibility": visibility,
     }
     # a signed, attributed upload: author + detached signature travel in the body

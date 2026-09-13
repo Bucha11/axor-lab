@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, type CheckReport, type HandoffPackage, type Json } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
 import { Button, Card, Empty, Failed, Field, Loading, Stat, Tag } from "../components/ui";
+import { saveBlob, saveFile } from "../lib/save";
 
 /** Verification is a SEQUENCE of distinct guarantees, and a screen that merges
  * them teaches the reader to conflate them: an export can be intact without
@@ -29,15 +30,6 @@ function Checks({ report }: { report: CheckReport }) {
       ))}
     </ul>
   );
-}
-
-function download(name: string, body: string) {
-  const url = URL.createObjectURL(new Blob([body], { type: "application/json" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = name;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }
 
 export function Handoff() {
@@ -171,10 +163,24 @@ export function Handoff() {
           </Button>{" "}
           <Button
             variant="secondary"
-            onClick={() => download(`${runId}-handoff.json`, JSON.stringify(pkg.files, null, 2))}
+            onClick={() => guard("zip", async () =>
+              saveBlob(`${runId}-handoff.zip`, await api.exportHandoffZip(runId)))}
+            disabled={busy !== ""}
           >
-            Download files
+            {busy === "zip" ? "Packing…" : "Download handoff (.zip)"}
+          </Button>{" "}
+          <Button
+            variant="secondary"
+            onClick={() => saveFile(`${runId}-handoff.json`, JSON.stringify(pkg.files, null, 2))}
+          >
+            Download file map (JSON)
           </Button>
+          <p className="muted small">
+            The zip is the handoff directory — the same tree the CLI writes, so{" "}
+            <code>axor-lab verify-cp-export &lt;dir&gt;</code> checks what you
+            received. The JSON is the same bytes as one nested file map, for a
+            reader who wants to inspect it without unpacking.
+          </p>
         </Card>
       )}
 

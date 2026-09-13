@@ -72,6 +72,27 @@ async function call<T>(method: string, path: string, body?: unknown, retried = f
   return payload as T;
 }
 
+/** A gated GET whose body is a FILE, returned verbatim. `call` parses JSON and
+ * hands back an object; a download must keep the server's own bytes, because
+ * what the reader verifies is what the server sent. */
+async function fetchText(path: string): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(path, { headers });
+  const text = await response.text();
+  if (!response.ok) {
+    let message = `GET ${path} failed`;
+    try {
+      const payload = JSON.parse(text);
+      if (typeof payload?.error === "string") message = payload.error;
+    } catch {
+      /* a non-JSON error body is not more informative than the default */
+    }
+    throw new ApiError(response.status, message);
+  }
+  return text;
+}
+
 // ── payload shapes ───────────────────────────────────────────────────────────
 // Mirrors of what the endpoints return. Where a field is a Lab-owned schema the
 // type stays deliberately open (`Json`): the SCHEMA is the contract, and
@@ -164,6 +185,29 @@ export interface ArtifactRow {
   artifact_id: string;
   created?: string;
   suite_id?: string;
+}
+
+export interface PublicationRow {
+  publication_id: string;
+  question?: string;
+  created?: string;
+  visibility?: string;
+  origin?: string;
+  claims: number;
+}
+
+/** What a publish minted. A LOCAL mint proves replay and deliberately does not
+ * assert the aggregates — `aggregates_not_claimed` counts what it left alone,
+ * because a hand-edited bundle could carry a fabricated figure and only a
+ * server that recomputes from the traces may claim one. */
+export interface PublishResult {
+  publication_id: string;
+  origin: "local" | "server";
+  url?: string;
+  aggregates_not_claimed?: number;
+  publication?: Json;
+  acceptance?: Json;
+  acceptance_is_signed?: boolean;
 }
 
 export interface InvariantOutcome {
@@ -522,5 +566,54 @@ export const api = {
     }),
 
   artifacts: () => call<{ artifacts: ArtifactRow[] }>("GET", "/artifacts"),
+  /** The artifact document, as text to save. The same `artifact/v1` the screen
+   * renders — what a reader receives is what the screen showed.
+   *
+   * Fetched rather than linked: the control token lives in memory, not in a
+   * cookie, so a plain `<a href>` to a gated route downloads a 401. */
+  artifactDownload: (id: string) =>
+    fetchText(`/artifacts/${encodeURIComponent(id)}/download`),
+  /** `{bundle, traces}` — what `axor-lab verify --allow-bare` reads. Bare on
+   * purpose: `axor-reproduction-package/v1` is the server-issued shape whose
+   * proof objects are mandatory, and an unpublished artifact has none. */
+  artifactPackage: (id: string) =>
+    fetchText(`/artifacts/${encodeURIComponent(id)}/package`),
+  /** The handoff as the DIRECTORY it is, zipped. The CLI writes a tree and
+   * `verify-cp-export` checks a tree; a nested JSON of 160 files is the same
+   * bytes in a shape only one of the two faces can verify. */
+  exportHandoffZip: async (runId: string, condition?: string): Promise<Blob> => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const response = await fetch("/handoff/export", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        run_id: runId, format: "zip", ...(condition ? { condition } : {}),
+      }),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      let message = "handoff export failed";
+      try {
+        const payload = JSON.parse(text);
+        if (typeof payload?.error === "string") message = payload.error;
+      } catch {
+        /* a non-JSON error body is not more informative than the default */
+      }
+      throw new ApiError(response.status, message);
+    }
+    return response.blob();
+  },
+  /** Mint a publication/v1 from this artifact — locally, or through a server's
+   * publish handshake when `server` is given. Only the server path recomputes
+   * the statistics, so only it may assert them. */
+  publishArtifact: (
+    id: string,
+    body: { question: string; license?: string; visibility?: string; server?: string },
+  ) => call<PublishResult>("POST", `/artifacts/${encodeURIComponent(id)}/publish`, body),
+  publications: () =>
+    call<{ publications: PublicationRow[] }>("GET", "/publications"),
+  publication: (id: string) =>
+    call<Json>("GET", `/publications/${encodeURIComponent(id)}`),
   artifact: (id: string) => call<Json>("GET", `/artifacts/${encodeURIComponent(id)}`),
 };

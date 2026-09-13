@@ -21,6 +21,11 @@ Control surface (Lab operator / UI):
   POST /scenarios            save one -> { name }
   DELETE /scenarios/{name}   drop this workspace's copy
   POST /scenarios/{name}/publish   share it with the org (private_registry)
+  GET  /artifacts/{id}/download   the artifact/v1 document, as a file
+  GET  /artifacts/{id}/package    {bundle, traces} — `axor-lab verify --allow-bare`
+  POST /artifacts/{id}/publish    mint a publication/v1 (locally, or via {server})
+  GET  /publications              what this workspace published
+  GET  /publications/{id}         one publication
   POST /experiments/plan     expand an experiment -> { trials, estimate }
   POST /suites/plan          expand a SUITE -> { trials, conditions, blockers, estimate }
                              (the same planner a dispatch runs)
@@ -144,6 +149,10 @@ _EVIDENCE_RE = re.compile(r"^/evidence/([A-Za-z0-9_.:-]+)$")
 _REGRESSION_RE = re.compile(r"^/regressions/([A-Za-z0-9_.:-]+)$")
 _REGRESSION_RUN_RE = re.compile(r"^/regressions/([A-Za-z0-9_.:-]+)/run$")
 _ARTIFACT_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)$")
+_ARTIFACT_DOWNLOAD_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/download$")
+_ARTIFACT_PACKAGE_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/package$")
+_ARTIFACT_PUBLISH_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/publish$")
+_PUBLICATION_RE = re.compile(r"^/publications/([A-Za-z0-9_.:-]+)$")
 
 
 class RuntimeJobsError(Exception):
@@ -924,6 +933,47 @@ def make_runtime_server(
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_download(self, payload: object, filename: str) -> None:
+            """JSON the browser SAVES rather than renders.
+
+            The web app could look at evidence and not hand it to anyone: no
+            artifact download existed at all, so the only way out of the hosted
+            face was a shell. `Content-Disposition` is the whole difference
+            between a screen and a deliverable.
+            """
+            body = json.dumps(payload, indent=1).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_zip(self, files: dict[str, str], filename: str) -> None:
+            """A file MAP as the directory it describes.
+
+            Deterministic on purpose: sorted names and a fixed timestamp, so the
+            same export downloads to the same bytes and a reader can hash what
+            they received.
+            """
+            import io
+            import zipfile
+
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name in sorted(files):
+                    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = 0o644 << 16
+                    archive.writestr(info, files[name])
+            body = buffer.getvalue()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _send_text(self, status: int, text: str, content_type: str) -> None:
             body = text.encode()
             self.send_response(status)
@@ -1109,6 +1159,49 @@ def make_runtime_server(
                 return builtin_registry().get(suite_id).manifest()
             except SuiteNotFound:
                 raise
+
+        def _artifact_evidence(
+            self, artifact_id: str,
+        ) -> tuple[dict[str, object], dict[str, object], dict[str, dict[str, object]]]:
+            """One artifact as (artifact, bundle, traces).
+
+            The artifact document carries the bundle; the trace BODIES live in
+            the job store, keyed by the run the artifact is named after
+            (`a_{run_id}`). Every export needs all three, and joining them here
+            keeps the naming convention server-side instead of making each
+            caller reproduce it — the same thing `/handoff/export` does.
+            """
+            artifact: dict[str, object] = shelf.get("artifact", artifact_id)
+            bundle = artifact.get("bundle")
+            if not isinstance(bundle, dict):
+                raise RuntimeJobsError(
+                    409, f"artifact {artifact_id!r} carries no bundle to export")
+            run_id = artifact_id[2:] if artifact_id.startswith("a_") else artifact_id
+            try:
+                traces = {
+                    str(t["trace_id"]): t
+                    for t in jobs.results(run_id)["traces"]  # type: ignore[union-attr]
+                }
+            except (RuntimeJobsError, KeyError, TypeError):
+                traces = {}
+            expected = {
+                str(t.get("trace_ref")) for t in bundle.get("trials", [])  # type: ignore[union-attr]
+                if t.get("trace_ref")
+            }
+            if expected and not traces:
+                # Refused, not handed over empty: a package with no trace bodies
+                # cannot be replayed, and a reader who receives one learns that
+                # only after downloading it and running the verifier. This
+                # server holds the bodies for runs IT dispatched; an artifact
+                # that arrived some other way brought its metrics and left its
+                # evidence behind.
+                raise RuntimeJobsError(
+                    409,
+                    f"artifact {artifact_id!r} names {len(expected)} trace(s) this server "
+                    "does not hold, so it cannot produce a reproduction package — the "
+                    "run was not dispatched here",
+                )
+            return artifact, bundle, traces
 
         def _suite_drives_itself(self, manifest: dict[str, object]) -> bool:
             """Does a registered implementation drive this manifest's trials?
@@ -1308,6 +1401,27 @@ def make_runtime_server(
                     self._require_control()
                     self._send(200, regression_list(shelf))
                     return
+                if path == "/publications":
+                    # What this workspace HANDED OVER. The publish server has
+                    # had a catalog from the start and the product could not
+                    # reach it — publishing had no hosted surface at all, so
+                    # there was nothing to list.
+                    self._require_control()
+                    self._send(200, {"publications": [
+                        {"publication_id": d.get("publication_id"),
+                         "question": d.get("question"),
+                         "created": d.get("created"),
+                         "visibility": d.get("visibility"),
+                         "origin": d.get("origin"),
+                         "claims": len(d.get("claims") or [])}  # type: ignore[arg-type]
+                        for d in shelf.list("publication")
+                    ]})
+                    return
+                m = _PUBLICATION_RE.match(path)
+                if m:
+                    self._require_control()
+                    self._send(200, shelf.get("publication", m.group(1)))
+                    return
                 if path == "/artifacts":
                     # the artifact registry: newest first, optionally the version
                     # history of one suite via ?suite=<id>
@@ -1326,6 +1440,33 @@ def make_runtime_server(
                 if m:
                     self._require_control()
                     self._send(200, shelf.get("regression", m.group(1)))
+                    return
+                m = _ARTIFACT_DOWNLOAD_RE.match(path)
+                if m:
+                    # the artifact ITSELF, as a file. Not a new document — the
+                    # same `artifact/v1` the screen renders, so what a reader
+                    # receives is what the screen showed.
+                    self._require_control()
+                    self._send_download(
+                        shelf.get("artifact", m.group(1)), f"{m.group(1)}.json")
+                    return
+                m = _ARTIFACT_PACKAGE_RE.match(path)
+                if m:
+                    # What `axor-lab verify` reads: the bundle plus every trace
+                    # BODY, so a reader can reconstruct the bundle directory and
+                    # replay it. Bare `{bundle, traces}` on purpose —
+                    # `axor-reproduction-package/v1` is the SERVER-ISSUED shape
+                    # and the verifier treats every proof object in it as
+                    # mandatory, so labelling an unpublished artifact that way
+                    # would hand out a package that fails verification for
+                    # missing proofs it never had. `verify --allow-bare` is the
+                    # matching door: integrity and replay, claimed as no more.
+                    self._require_control()
+                    _, bundle, traces = self._artifact_evidence(m.group(1))
+                    self._send_download(
+                        {"bundle": bundle, "traces": list(traces.values())},
+                        f"{m.group(1)}-package.json",
+                    )
                     return
                 m = _ARTIFACT_RE.match(path)
                 if m:
@@ -1862,6 +2003,78 @@ def make_runtime_server(
                         evaluators=body.get("evaluators") or context["evaluators"],  # type: ignore[arg-type]
                     ))
                     return
+                m = _ARTIFACT_PUBLISH_RE.match(path)
+                if m:
+                    # Publishing had NO hosted surface at all: `publish` did not
+                    # exist in the web client, so the only way to hand evidence
+                    # to a reader was a shell. The verb is `lab_service.
+                    # publishing`'s either way, so both faces mint the same
+                    # claims — and the local path keeps refusing to assert
+                    # statistics over numbers it did not recompute.
+                    from lab_service import (
+                        Outcome,
+                        build_local_publication,
+                        check_publishable,
+                        upload_publication,
+                    )
+
+                    self._require_control()
+                    body = self._read_json()
+                    question = body.get("question")
+                    if not isinstance(question, str) or not question.strip():
+                        raise RuntimeJobsError(
+                            400, "a publication requires {question} — what it answers")
+                    _, bundle, traces = self._artifact_evidence(m.group(1))
+                    if not check_publishable(bundle, traces):
+                        raise RuntimeJobsError(
+                            422,
+                            "this artifact's recorded verdicts do not recompute, so it "
+                            "cannot be published — replay it to see which trace differs",
+                        )
+                    license_id = body.get("license")
+                    visibility = str(body.get("visibility") or "unlisted")
+                    server_url = body.get("server")
+                    if isinstance(server_url, str) and server_url:
+                        # the HOSTED handshake: the server re-verifies and
+                        # recomputes the statistics before minting, which is the
+                        # only way a statistical claim is ever asserted
+                        result = upload_publication(
+                            bundle, traces, server=server_url, question=question,
+                            license_id=license_id if isinstance(license_id, str) else None,
+                            visibility=visibility,
+                            token=body.get("token") if isinstance(body.get("token"), str) else None,  # type: ignore[arg-type]
+                        )
+                        if result.outcome is not Outcome.OK:
+                            raise RuntimeJobsError(
+                                result.status or 502,
+                                result.error or "the publish handshake was rejected")
+                        self._send(201, {
+                            "publication_id": result.publication_id,
+                            "url": result.url,
+                            "origin": "server",
+                            "acceptance": result.acceptance,
+                            "acceptance_is_signed": result.acceptance_is_signed,
+                        })
+                        return
+                    local = build_local_publication(
+                        bundle, traces, question=question,
+                        license_id=license_id if isinstance(license_id, str) else None,
+                        visibility=visibility,
+                    )
+                    from lab_server.screens import PUBLICATION_ID_FIELD
+
+                    shelf.put("publication", local.publication, PUBLICATION_ID_FIELD)
+                    self._send(201, {
+                        "publication_id": local.publication_id,
+                        "origin": "local",
+                        # said out loud, because it is the difference between the
+                        # two doors: a local mint proves REPLAY and deliberately
+                        # does not assert the aggregates as claims — a
+                        # hand-edited bundle could carry a fabricated one
+                        "aggregates_not_claimed": local.aggregate_count,
+                        "publication": local.publication,
+                    })
+                    return
                 if _HANDOFF_EXPORT_RE.match(path):
                     # The Control Plane handoff, from the hosted face. This verb
                     # had no HTTP surface at all — `grep export_cp lab_server/`
@@ -1906,6 +2119,18 @@ def make_runtime_server(
                         # answer, not a server fault
                         raise RuntimeJobsError(409, str(exc)) from None
                     source = package.source
+                    if str(body.get("format") or "") == "zip":
+                        # The CLI writes a DIRECTORY, and `verify-cp-export`
+                        # checks a directory. Handing the web a nested JSON of
+                        # 160 files meant the hosted deliverable could not be
+                        # run through the verifier without the reader
+                        # reconstructing the tree by hand — the two faces shipped
+                        # the same bytes in a shape only one of them could check.
+                        self._send_zip(
+                            package.files,
+                            f"{source.get('condition_id') or 'cp'}-handoff.zip",
+                        )
+                        return
                     self._send(200, {
                         "files": package.files,
                         "manifest": package.manifest,

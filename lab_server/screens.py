@@ -31,7 +31,12 @@ from lab_contracts import validate_artifact
 # it — so every ref answered "resolves to nothing" and the field could only
 # invalidate a suite. Scenarios are stored and shared exactly like suites:
 # workspace store, org registry, same isolation.
-SCREEN_KINDS = ("suite", "evidence-case", "regression", "artifact", "scenario")
+SCREEN_KINDS = (
+    "suite", "evidence-case", "regression", "artifact", "scenario", "publication",
+)
+
+#: `publication/v1` is keyed by `publication_id`, `scenario/v1` by `name`.
+PUBLICATION_ID_FIELD = "publication_id"
 
 #: `scenario/v1` is keyed by `name`, not `id`, so every store call for this kind
 #: passes it. Named once here rather than spelled at each call site.

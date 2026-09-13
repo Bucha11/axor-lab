@@ -65,6 +65,40 @@ test.describe("Control Plane handoff", () => {
     await expect(page.getByText("unverified").first()).toBeVisible();
   });
 
+  test("the handoff downloads as the directory it is", async ({ page }) => {
+    // The CLI writes a tree and `verify-cp-export` checks a tree. The web used
+    // to hand over the same bytes as one nested JSON of 160 files — a shape
+    // only one of the two faces could verify.
+    await openHandoff(page);
+    let asked: Record<string, unknown> | null = null;
+    await page.route("**/handoff/export", async (route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      if (body.format !== "zip") return json(200, PACKAGE)(route);
+      asked = body;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/zip",
+        headers: { "Content-Disposition": 'attachment; filename="governed-handoff.zip"' },
+        body: Buffer.from("PK\u0005\u0006" + "\u0000".repeat(18), "binary"),
+      });
+    });
+    await page.getByRole("button", { name: "Export handoff" }).click();
+
+    const saved = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download handoff (.zip)" }).click();
+    expect((await saved).suggestedFilename()).toBe("r_demo-handoff.zip");
+    expect(asked).toMatchObject({ run_id: "r_demo", format: "zip" });
+  });
+
+  test("the file map is offered as what it is", async ({ page }) => {
+    await openHandoff(page);
+    await page.route("**/handoff/export", json(200, PACKAGE));
+    await page.getByRole("button", { name: "Export handoff" }).click();
+    const saved = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download file map (JSON)" }).click();
+    expect((await saved).suggestedFilename()).toBe("r_demo-handoff.json");
+  });
+
   test("an export the evidence does not earn says so", async ({ page }) => {
     await openHandoff(page);
     await page.route("**/handoff/export", json(409, { error: "no enforcing condition" }));

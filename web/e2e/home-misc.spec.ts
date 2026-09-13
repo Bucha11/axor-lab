@@ -142,6 +142,119 @@ test.describe("Artifacts", () => {
     // reproduce command
     await expect(page.getByText("axor reproduce art_1")).toBeVisible();
   });
+
+  // ── EXPORT ─────────────────────────────────────────────────────────────
+  //
+  // This screen could render an artifact and not give it to anyone: no
+  // download, and no `publish` anywhere in the client at all, so the only way
+  // out of the hosted face was a shell.
+
+  const ARTIFACT = {
+    created: "2026-01-01",
+    artifact_id: "art_1",
+    suite: { id: "s1", name: "Refund Suite" },
+    bundle: { trials: [{ status: "completed" }], aggregates: [] },
+  };
+
+  test("the artifact and its reproduction package download", async ({ page }) => {
+    await page.route("**/artifacts/art_1", json(200, ARTIFACT));
+    await page.route("**/artifacts/art_1/download", json(200, ARTIFACT));
+    await page.route("**/artifacts/art_1/package",
+      json(200, { bundle: ARTIFACT.bundle, traces: [] }));
+    await page.goto("/#/artifacts/art_1");
+
+    for (const [label, name] of [
+      ["Download artifact", "art_1.json"],
+      ["Download reproduction package", "art_1-package.json"],
+    ]) {
+      const saved = page.waitForEvent("download");
+      await page.getByRole("button", { name: label }).click();
+      expect((await saved).suggestedFilename()).toBe(name);
+    }
+  });
+
+  test("publishing locally says what it did NOT claim", async ({ page }) => {
+    // a local mint proves replay and deliberately does not assert the
+    // aggregates — only a server that recomputes them from the traces may
+    const posted: Record<string, unknown>[] = [];
+    await page.route("**/artifacts/art_1", json(200, ARTIFACT));
+    await page.route("**/artifacts/art_1/publish", async (route) => {
+      posted.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(201, {
+        publication_id: "e_abc123",
+        origin: "local",
+        aggregates_not_claimed: 6,
+        publication: { claims: [{ kind: "exactly_replayable" }] },
+      })(route);
+    });
+    await page.goto("/#/artifacts/art_1");
+
+    await expect(page.getByRole("button", { name: "Publish" })).toBeDisabled();
+    await page.getByLabel("Question it answers").fill("Does governance contain it?");
+    await page.getByLabel("Visibility").selectOption("public");
+    await page.getByRole("button", { name: "Publish" }).click();
+
+    await expect(page.getByText("e_abc123")).toBeVisible();
+    await expect(page.getByText(/6 aggregate\(s\) not published as claims/)).toBeVisible();
+    expect(posted[0]).toMatchObject({
+      question: "Does governance contain it?", visibility: "public",
+    });
+    expect(posted[0]).not.toHaveProperty("server");
+  });
+
+  test("a server publish carries its acceptance receipt", async ({ page }) => {
+    await page.route("**/artifacts/art_1", json(200, ARTIFACT));
+    await page.route("**/artifacts/art_1/publish", json(201, {
+      publication_id: "e_srv",
+      origin: "server",
+      url: "https://lab.example/e/e_srv",
+      acceptance: { server_id: "lab.example", integrity: "hash_verified" },
+      acceptance_is_signed: true,
+    }));
+    await page.goto("/#/artifacts/art_1");
+    await page.getByLabel("Question it answers").fill("q");
+    await page.getByLabel("Server (optional)").fill("https://lab.example");
+    await page.getByRole("button", { name: "Publish" }).click();
+
+    await expect(page.getByText("e_srv")).toBeVisible();
+    await expect(page.getByText("Acceptance receipt (signed)")).toBeVisible();
+    await expect(page.getByRole("link", { name: "open" })).toHaveAttribute(
+      "href", "https://lab.example/e/e_srv");
+  });
+
+  test("a refused publish shows the reason", async ({ page }) => {
+    await page.route("**/artifacts/art_1", json(200, ARTIFACT));
+    await page.route("**/artifacts/art_1/publish", json(422, {
+      error: "this artifact's recorded verdicts do not recompute",
+    }));
+    await page.goto("/#/artifacts/art_1");
+    await page.getByLabel("Question it answers").fill("q");
+    await page.getByRole("button", { name: "Publish" }).click();
+    await expect(page.locator(".errors")).toContainText("do not recompute");
+  });
+
+  test("the list shows what this workspace published", async ({ page }) => {
+    await page.route("**/artifacts", json(200, { artifacts: [] }));
+    await page.route("**/publications", json(200, {
+      publications: [
+        { publication_id: "e_one", question: "Does it hold?", origin: "server",
+          visibility: "public", claims: 3, created: "2026-03-03" },
+      ],
+    }));
+    await page.goto("/#/artifacts");
+    await expect(page.getByRole("heading", { name: "Published" })).toBeVisible();
+    await expect(page.getByText("e_one")).toBeVisible();
+    await expect(page.getByText("Does it hold?")).toBeVisible();
+    await expect(page.getByText(/3 claim\(s\)/)).toBeVisible();
+  });
+
+  test("no publications, no section", async ({ page }) => {
+    await page.route("**/artifacts", json(200, { artifacts: [] }));
+    await page.route("**/publications", json(200, { publications: [] }));
+    await page.goto("/#/artifacts");
+    await expect(page.getByRole("heading", { name: "Artifacts" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Published" })).toHaveCount(0);
+  });
 });
 
 // ── PLAYGROUND ───────────────────────────────────────────────────────────────

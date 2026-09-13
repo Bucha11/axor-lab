@@ -895,7 +895,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument("--question", required=True)
     p_publish.add_argument("--out", help="write publication/v1 JSON locally")
     p_publish.add_argument("--server", help="upload via the publish handshake to this base URL")
-    p_publish.add_argument("--license", default="CC-BY-4.0")
+    # the DEFAULT lives with the verb (`lab_service.publishing`), not here: two
+    # faces with two defaults is how the hosted one ended up minting a
+    # publication that failed its own schema
+    p_publish.add_argument("--license", default=None)
     p_publish.add_argument(
         "--visibility", choices=["public", "unlisted", "private"], default="unlisted",
         help="publication visibility; default unlisted (public must be explicit)",

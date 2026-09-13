@@ -108,6 +108,29 @@ Lifecycle, exit codes, and the estimate-confirm gate follow
 `contracts/runner-protocol.md` and `contracts/lifecycle.md`. The bundle
 directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
 
+### Getting the evidence out
+
+Six doors, and the hosted face reaches all of them (it used to reach one):
+
+| | CLI | UI |
+|---|---|---|
+| artifact + bundle + traces | `run-suite --out DIR` | Artifact → **Download artifact** / **Download reproduction package** |
+| publication, local | `publish --out` | Artifact → **Publish** (mints locally) |
+| publication, hosted + reproduction package | `publish --server`, `verify` | Artifact → **Publish** with a server; the receipt is shown |
+| Control-Plane handoff | `export-cp`, `verify-cp-export` | Handoff → **Download handoff (.zip)**, which `verify-cp-export` checks as-is |
+| incident import | `import-incident` | Handoff → **Import incident** |
+| suite / scenario sharing | `suite-yaml`, publish to org | Suites → **Publish to org** |
+
+A LOCAL publication re-runs the verdicts, so it asserts replay — and refuses to
+claim the aggregates, because it did not recompute them and a hand-edited bundle
+could carry a fabricated one. Only a server that recomputes from the traces
+mints a statistical claim, and it returns an acceptance receipt saying so.
+
+A downloaded reproduction package is bare `{bundle, traces}`:
+`axor-lab verify <file> --allow-bare` checks integrity and replay and claims no
+more. `axor-reproduction-package/v1` is the server-issued shape whose proof
+objects are mandatory, and an unpublished artifact has none of them.
+
 ### Three ways a suite executes
 
 A manifest says which tools exist and what they mean. It cannot say the order an
