@@ -76,11 +76,15 @@ export interface SectionSpec {
  * the list open for third-party ones — the chips row accepts a typed extra). */
 export const KNOWN_CAPABILITIES = ["governance", "provenance", "control_plane_export"];
 
-/** The tool ids this suite declares, in order — the only tools a scenario may
- * reference. `scenario.tools` accepts a full inline manifest per the schema,
- * but `resolve_suite` builds the bundle from `environment.tools` alone, so an
- * inline one resolves to "tool 'x' has no manifest in the bundle". A `$ref`
- * into this list is the form that actually runs. */
+/** The tool ids this suite declares, in order — what a new scenario can `$ref`.
+ *
+ * `scenario.tools` also accepts a full inline manifest, and the resolver
+ * honours it. The blank still prefers a `$ref`: referencing a contract the
+ * suite already states is an assumption the document supports, whereas
+ * inventing a manifest (with a guessed effect class, which decides whether the
+ * kernel treats the tool as a sink) would put a fabricated contract in someone
+ * else's suite. A suite with no tools therefore gets an empty list, and the
+ * validator says so — see `blankScenario`. */
 export function suiteToolIds(manifest: Json): string[] {
   const environment = (manifest.environment ?? {}) as Record<string, unknown>;
   const tools = Array.isArray(environment.tools) ? environment.tools : [];
@@ -100,9 +104,11 @@ export function suiteToolIds(manifest: Json): string[] {
  * item form shows name and task, so anything it does NOT show has to be right
  * from the start or the user cannot fix it without opening YAML.
  *
- * A suite with no tools gets `tools: []`, which is invalid — and correctly so:
- * the suite has nothing for a scenario to reference, and the validator saying
- * `minItems 1` is the true state of the document rather than a blank's fault.
+ * A suite with no tools gets `tools: []`, which is invalid — and correctly so.
+ * A scenario MAY carry its own manifest inline, so the blank could invent one;
+ * but the effect class it would have to guess is what decides whether the
+ * kernel treats the tool as an egress sink, and guessing that into someone
+ * else's suite is worse than the validator saying `minItems 1`.
  *
  * Pinned from both sides: `sections.test.ts` checks the derivation, and
  * `tests/test_suite_platform_contracts.py` checks that a scenario of exactly

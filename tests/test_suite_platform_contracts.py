@@ -349,6 +349,110 @@ class TestTheSuiteSDKsOwnKnobs(unittest.TestCase):
         self.assertEqual(canonical_json(json.loads(once)), once)
 
 
+class TestAScenarioCanCarryItsOwnTools(unittest.TestCase):
+    """`scenario.tools` accepts a full manifest inline, and the resolver honours it.
+
+    scenario.schema.json describes the field as "each is a full manifest (or a
+    $ref to a shared one)", and the `oneOf` admits both. `resolve_suite` built
+    the bundle from `environment.tools` alone, so an inline manifest was
+    schema-valid and then died on "tool 'x' has no manifest in the bundle" —
+    the contract said one thing and the code another.
+
+    It matters most for a REGISTRY scenario, which travels between suites and
+    cannot assume the borrowing suite happens to declare its tools.
+    """
+
+    def _suite(self) -> dict:
+        from lab_suite import builtin_registry
+
+        return copy.deepcopy(builtin_registry().get("blank").manifest())
+
+    def _scenario(self, name: str, tools: list, succeeds: str) -> dict:
+        return {
+            "schema_version": "scenario/v1", "name": name, "task": "t",
+            "inputs": {}, "tools": tools,
+            "fixtures": {succeeds: {"result": {"ok": True}}},
+            "task_success": {"event": "tool_call", "tool": succeeds},
+        }
+
+    INLINE = {
+        "schema_version": "tool-manifest/v1", "id": "scratch",
+        "args_schema": {"type": "object"},
+        "effect": {"default_class": "READ", "driving_args": []},
+        "side_effecting": False,
+    }
+
+    def test_a_suite_sharing_no_tools_at_all_resolves(self) -> None:
+        from lab_suite import resolve_suite
+
+        manifest = self._suite()
+        manifest["environment"]["tools"] = []
+        manifest["scenarios"] = [self._scenario("a", [self.INLINE], "scratch")]
+        self.assertEqual(sorted(resolve_suite(manifest).manifests), ["scratch"])
+
+    def test_an_inline_tool_reaches_the_runtime(self) -> None:
+        """A dispatch ships the resolved bundle; a runtime has no other way to
+        learn an inline tool's contract."""
+        from lab_suite import build_assignment
+
+        manifest = self._suite()
+        manifest["environment"]["tools"] = []
+        manifest["scenarios"] = [self._scenario("a", [self.INLINE], "scratch")]
+        shipped = build_assignment(manifest, "rt_x").assignment["tool_manifests"]
+        self.assertEqual([t["id"] for t in shipped], ["scratch"])  # type: ignore[index,union-attr]
+
+    def test_an_inline_tool_actually_runs(self) -> None:
+        from lab_suite import builtin_registry, run_suite
+        from lab_suite.builtin.blank import _note_manifest
+
+        suite = builtin_registry().get("blank")
+        manifest = self._suite()
+        # the suite's only tool, moved from the suite into the scenario
+        manifest["environment"]["tools"] = []
+        manifest["scenarios"][0]["tools"] = [_note_manifest()]
+        run = run_suite(manifest, run_id="r_inline", suite=suite)
+        self.assertEqual([t["status"] for t in run.trials], ["completed"])
+
+    def test_one_tool_id_cannot_mean_two_contracts(self) -> None:
+        """Not a precedence question: the run governs against one of them and
+        the trace's runtime_config_hash names that one, while the manifest
+        reads as if both applied."""
+        from lab_suite import SuiteValidationError, resolve_suite
+
+        manifest = self._suite()
+        clashing = {**self.INLINE, "id": "note",
+                    "effect": {"default_class": "EXPORT", "driving_args": []},
+                    "side_effecting": True}
+        manifest["scenarios"] = [self._scenario("a", [clashing], "note")]
+        with self.assertRaises(SuiteValidationError) as ctx:
+            resolve_suite(manifest)
+        self.assertIn("cannot mean two contracts", "; ".join(ctx.exception.errors))
+
+    def test_an_identical_redeclaration_is_not_a_conflict(self) -> None:
+        from lab_suite import resolve_suite
+        from lab_suite.builtin.blank import _note_manifest
+
+        manifest = self._suite()
+        manifest["scenarios"] = [self._scenario("a", [_note_manifest()], "note")]
+        self.assertEqual(sorted(resolve_suite(manifest).manifests), ["note"])
+
+    def test_a_scenario_cannot_ref_a_siblings_inline_tool(self) -> None:
+        """It would break the moment that sibling is edited out, so it should
+        not validate today. Each scenario sees the bundle plus its OWN inline
+        manifests, never the union."""
+        from lab_suite import SuiteValidationError, resolve_suite
+
+        manifest = self._suite()
+        manifest["environment"]["tools"] = []
+        manifest["scenarios"] = [
+            self._scenario("a", [self.INLINE], "scratch"),
+            self._scenario("b", [{"$ref": "scratch"}], "scratch"),
+        ]
+        with self.assertRaises(SuiteValidationError) as ctx:
+            resolve_suite(manifest)
+        self.assertIn("has no manifest in the bundle", "; ".join(ctx.exception.errors))
+
+
 class TestRegressionKinds(unittest.TestCase):
     def test_metric_threshold_regression_validates(self) -> None:
         reg = _example("regression_latency_threshold")

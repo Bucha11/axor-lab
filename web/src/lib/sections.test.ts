@@ -313,10 +313,9 @@ describe("a suite contributes its own fields", () => {
   it("its values live under config, so writePath reaches them like any field", () => {
     const next = writePath(WITH_CONFIG, "config.depth", 9);
     expect((next.config as Json).depth).toBe(9);
-    // and clearing one removes it rather than writing null
-    expect("depth" in (writePath(next, "config.depth", undefined).config ?? {})).toBe(
-      false,
-    );
+    // and clearing one removes it rather than writing null. An emptied parent
+    // is removed too, so `config` is gone entirely once its last key is.
+    expect(writePath(next, "config.depth", undefined).config).toBeUndefined();
   });
 });
 

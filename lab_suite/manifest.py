@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from lab_contracts import validate_artifact, validate_scenario
+from lab_contracts.canonical import canonical_json
 from lab_contracts.errors import ScenarioValidationError
 
 from .errors import SuiteValidationError
@@ -283,20 +284,64 @@ def resolve_suite(
     scenarios.extend(dict(registry[str(ref)]) for ref in manifest.get("scenario_refs") or [])
 
     environment: dict[str, object] = manifest.get("environment") or {}  # type: ignore[assignment]
-    manifests: dict[str, dict[str, object]] = dict(tool_manifests or {})
+    bundle: dict[str, dict[str, object]] = dict(tool_manifests or {})
     for tool in environment.get("tools") or []:  # type: ignore[union-attr]
-        manifests[str(tool["id"])] = tool  # type: ignore[index]
+        bundle[str(tool["id"])] = tool  # type: ignore[index]
+
+    # A scenario may carry a tool's FULL manifest inline instead of `$ref`-ing
+    # a shared one — scenario.schema.json says so ("each is a full manifest (or
+    # a $ref to a shared one)") and the Builder's own scenario list writes
+    # either. The resolver used to build the bundle from `environment.tools`
+    # alone, so an inline manifest was schema-valid and then resolved to "tool
+    # 'x' has no manifest in the bundle": the contract said one thing and the
+    # code another. It matters most for a REGISTRY scenario, which travels
+    # between suites and cannot assume the borrowing suite declares its tools.
+    inline: dict[str, dict[str, object]] = {}
+    conflicts: list[str] = []
+    for scenario in scenarios:
+        for tool in scenario.get("tools") or []:  # type: ignore[union-attr]
+            if not isinstance(tool, dict) or "$ref" in tool:
+                continue
+            tool_id = str(tool.get("id", ""))
+            # Two different contracts for one tool id inside one run is not a
+            # precedence question, it is an ambiguity: the run governs against
+            # one of them and the trace's runtime_config_hash names that one,
+            # while the manifest reads as if both applied.
+            prior = bundle.get(tool_id) or inline.get(tool_id)
+            if prior is not None and canonical_json(prior) != canonical_json(tool):
+                conflicts.append(
+                    f"[{scenario.get('name')}] tool {tool_id!r} is declared inline with a "
+                    "different manifest than the one already in the bundle — one tool id "
+                    "cannot mean two contracts in one run"
+                )
+                continue
+            inline[tool_id] = tool
+    if conflicts:
+        raise SuiteValidationError(tuple(conflicts))
 
     # scenario-level semantics need the tool manifests, so they run here rather
-    # than in validate_manifest
+    # than in validate_manifest. Each scenario is checked against the bundle
+    # plus ITS OWN inline manifests, not the union: a scenario that `$ref`s a
+    # tool only some sibling declared inline would break the moment that
+    # sibling is edited out, and it should not validate today.
     scenario_errors: list[str] = []
     for scenario in scenarios:
+        own = {
+            str(t.get("id", "")): t
+            for t in scenario.get("tools") or []  # type: ignore[union-attr]
+            if isinstance(t, dict) and "$ref" not in t
+        }
         try:
-            validate_scenario(scenario, manifests)
+            validate_scenario(scenario, {**bundle, **own})
         except ScenarioValidationError as exc:
             scenario_errors.extend(f"[{scenario.get('name')}] {e}" for e in exc.errors)
     if scenario_errors:
         raise SuiteValidationError(tuple(scenario_errors))
+
+    # ...but the RESOLVED bundle carries every manifest the run will use. It is
+    # what a dispatch ships to a runtime, which has no other way to learn what
+    # an inline tool's contract is.
+    manifests = {**bundle, **inline}
 
     execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
     evaluation: dict[str, object] = manifest.get("evaluation") or {}  # type: ignore[assignment]
