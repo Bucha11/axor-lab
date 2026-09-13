@@ -52,8 +52,14 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
   / EvidenceCase pages with three-axis provenance. Stdlib `http.server`; runs
   no live agents.
 - **`lab_suite/`** — the Suite SDK: the `Suite` protocol and `BaseSuite`, a
-  registry with three built-in suites (Blank, AgentDojo, Budget), manifest
-  load/validate/resolve, suite execution, and dispatch to a connected runtime.
+  registry with four built-in suites, manifest load/validate/resolve, suite
+  execution, and dispatch to a connected runtime. Each built-in covers a
+  different surface once: **Blank** — a suite is authorable from nothing;
+  **AgentDojo** — the external-benchmark import path; **Budget** — the metrics
+  layer; **Ingest** — a suite derived from a shipped agent's documented tool
+  chain (an inbox-to-record ingestion loop whose attachment is attacker-authored
+  and whose mail sink leaves the perimeter), which is the case a customer starts
+  from when nobody has curated anything.
   A suite declares its own options as a JSON Schema in `config_schema`, their
   values in `config`, and where the Builder puts each one in `ui_schema` — the
   Builder renders them as ordinary fields and the values are validated at
@@ -82,6 +88,7 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 ```
 axor-lab suites                                    # the suite catalog
 axor-lab run-suite budget --out ./artifact --yes    # a suite -> artifact/v1
+axor-lab run-suite ingest --out ./artifact --yes    # governed vs ungoverned, paired
 axor-lab run-suite ./suite.json --out ./artifact --yes   # ...or a manifest file;
                                                    #    `scenario_refs` resolve from
                                                    #    ./scenarios beside it (or
@@ -100,6 +107,21 @@ axor-lab publish ./bundle --question "…" --server http://127.0.0.1:8000   # ho
 Lifecycle, exit codes, and the estimate-confirm gate follow
 `contracts/runner-protocol.md` and `contracts/lifecycle.md`. The bundle
 directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
+
+### Three ways a suite executes
+
+A manifest says which tools exist and what they mean. It cannot say the order an
+agent calls them in, and that difference is what separates the three:
+
+| | who decides the actions | tool results | what you get |
+|---|---|---|---|
+| **connected runtime** | a real model, on your machine | real | the only numbers worth publishing. Lab assigns, reads back, and recomputes every claim — a trace for an unplanned trial, an invalid one, one whose `runtime_config_hash` disagrees with the assignment, or one naming no kernel under an arm that does, is refused |
+| **`program_for`** | the suite, in-process | the scenario's fixtures | the same kernel, the same ledger, the same verdicts — enough to prove the scenarios, predicates, arms and invariants measure what you meant, in CI, with no keys |
+| **neither** | nobody | none | every trial completes, every metric is false, an artifact is written. `POST /suites/plan` reports `drives_itself: false` and the Builder says so before the click |
+
+All three run the same `axor_wrap.WrappedToolset` over the real kernel, so an
+`ungoverned` arm is **observed and not enforced** — the verdict is recorded
+either way — rather than ungated.
 
 Run the catalog/publish server (stdlib only, no live agents):
 

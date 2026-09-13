@@ -49,10 +49,21 @@ class _WrappedRuntime:
     and pushes finished traces back. Lab never calls into it.
     """
 
-    def __init__(self, store: RuntimeJobStore, runtime_ref: str, *, skip: set[str] | None = None):
+    def __init__(
+        self,
+        store: RuntimeJobStore,
+        runtime_ref: str,
+        *,
+        skip: set[str] | None = None,
+        program=None,  # noqa: ANN001 — (scenario, seed) -> AgentProgram
+    ):
         self.store = store
         self.runtime_ref = runtime_ref
         self.skip = skip or set()
+        # What a REAL runtime supplies with a model. Default keeps the existing
+        # one-call program these tests were written against; a suite test passes
+        # its own `program_for` so the trials exercise that suite's loop.
+        self.program = program
 
     def work(self) -> int:
         done = 0
@@ -85,10 +96,13 @@ class _WrappedRuntime:
         gate = gate_for_condition(
             condition, manifests, scenario.get("inputs", {}), support.kernel_registry(),
         )
+        seed = f"s{index:03d}"
+        program = (
+            self.program(scenario, seed) if self.program is not None
+            else ScriptedProgram([ToolCall("read_txns", {}), Finish("done")])
+        )
         outcome = run_loop_trial(
-            scenario, manifests, condition, gate,
-            "runtime", f"s{index:03d}", index,
-            ScriptedProgram([ToolCall("read_txns", {}), Finish("done")]),
+            scenario, manifests, condition, gate, "runtime", seed, index, program,
         )
         trace = dict(outcome.trace)
         trace["trial"] = {**trace["trial"], "scenario_id": str(scenario["name"]),
