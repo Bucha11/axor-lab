@@ -289,6 +289,18 @@ export interface ExperimentPlan {
   estimate: Json;
 }
 
+export interface SuitePlan {
+  trials: string[];
+  /** the arm ids actually planned, INCLUDING a synthesized ungoverned one for
+   * a suite that declares no conditions. Naming them is the point: a preview
+   * that guessed the arm produced trial ids no run would ever use. */
+  conditions: string[];
+  /** why a dispatch would be refused. A preview reports them rather than
+   * failing — seeing the plan is how you find out the suite cannot run. */
+  blockers: string[];
+  estimate: Json;
+}
+
 // ── endpoints ────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -397,6 +409,14 @@ export const api = {
   /** Expand an experiment into its planned trial units. A PLAN, not execution. */
   planExperiment: (experiment: Json) =>
     call<ExperimentPlan>("POST", "/experiments/plan", { experiment }),
+  /** Expand a SUITE into the trial units a run would execute — through the
+   * same planner a dispatch runs, so the preview and the run cannot disagree.
+   *
+   * Not `planExperiment`: that one plans an `experiment/v1`, and the Builder
+   * was hand-building one from the manifest. It substituted the literal arm id
+   * `"condition"` for a suite declaring none and ignored `scenario_refs`, so
+   * the trial count was right and every trial id was wrong. */
+  planSuite: (suite: Json) => call<SuitePlan>("POST", "/suites/plan", { suite }),
 
   // Three server endpoints deliberately have no client method:
   //

@@ -82,7 +82,12 @@ interface Opts {
   validate?: { ok: boolean; errors: string[]; suite?: unknown };
   yaml?: string;
   createdId?: string;
-  plan?: { trials: string[]; estimate?: Record<string, number> };
+  plan?: {
+    trials: string[];
+    conditions: string[];
+    blockers: string[];
+    estimate?: Record<string, number>;
+  };
 }
 
 /** Register every endpoint the two screens touch. The generic `**​/suites/*`
@@ -141,8 +146,10 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
           errors: [`[validating] tool 'note' has no manifest in the bundle`],
         })(route);
   });
-  await page.route("**/experiments/plan", json(200, opts.plan ?? {
+  await page.route("**/suites/plan", json(200, opts.plan ?? {
     trials: ["scn-1:ungoverned:0", "scn-1:ungoverned:1"],
+    conditions: ["ungoverned"],
+    blockers: [],
     estimate: { trials: 2, scenarios: 1, conditions: 1, repeats: 2 },
   }));
 
@@ -357,6 +364,50 @@ test.describe("Suite Builder", () => {
     // validation, which cannot say which one broke
     await expect(page.locator(".errors")).toContainText("scn-1");
     await expect(page.locator(".errors")).toContainText("untrusted field");
+  });
+
+  test("Preview plan names the arms the run will name", async ({ page }) => {
+    // It used to hand-build an experiment/v1 from the manifest and plan THAT,
+    // which invented the arm id "condition" for a suite declaring none. The
+    // preview now goes to /suites/plan — the same planner a dispatch runs.
+    const posted: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/suites/plan", async (route: Route) => {
+      posted.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, {
+        trials: ["scn-1:ungoverned:0", "scn-1:ungoverned:1"],
+        conditions: ["ungoverned"],
+        blockers: [],
+        estimate: { trials: 2 },
+      })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    await expect(page.getByText(/2 trial unit\(s\)/)).toBeVisible();
+    await expect(page.getByText(/1 arm\(s\)/)).toBeVisible();
+    await expect(page.locator("code", { hasText: "ungoverned" })).toBeVisible();
+    // the whole manifest goes over, not a hand-assembled experiment
+    expect((posted[0].suite as Record<string, unknown>).id).toBe("suite-alpha");
+  });
+
+  test("Preview plan surfaces why a dispatch would be refused", async ({ page }) => {
+    // seeing the plan is exactly how you find out the run is impossible — the
+    // preview reports the blocker instead of failing
+    await routes(page, {
+      plan: {
+        trials: ["scn-1:ungoverned:0"],
+        conditions: ["ungoverned"],
+        blockers: ["topology 'swarm' is accepted and validated but not yet executable"],
+      },
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    await expect(page.getByText(/1 trial unit\(s\)/)).toBeVisible();
+    await expect(page.locator(".errors")).toContainText("not yet executable");
   });
 
   test("Run panel lists runtimes and dispatching starts a run", async ({ page }) => {

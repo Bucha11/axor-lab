@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Json, type RuntimeRow } from "../lib/api";
+import { api, type Json, type RuntimeRow, type SuitePlan } from "../lib/api";
 import { navigate } from "../lib/router";
 import {
   IDENTITY,
@@ -407,7 +407,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
   // does not say WHICH scenario broke. Per-scenario validation does, and the
   // plan preview says what a run would actually execute before one starts.
   const [scenarioErrors, setScenarioErrors] = useState<[string, string[]][] | null>(null);
-  const [plan, setPlan] = useState<{ trials: string[] } | null>(null);
+  const [plan, setPlan] = useState<SuitePlan | null>(null);
   const [busy, setBusy] = useState(false);
   const [runtimes, setRuntimes] = useState<RuntimeRow[] | null>(null);
   const [runtimeRef, setRuntimeRef] = useState("");
@@ -629,20 +629,24 @@ export function Builder({ suiteId }: { suiteId: string }) {
     }
   }
 
+  /** What a run WOULD execute — planned by the server, through the same
+   * `plan_suite` a dispatch runs.
+   *
+   * This used to hand-build an `experiment/v1` out of the manifest and plan
+   * THAT. Two things went wrong and both were invisible: a suite declaring no
+   * conditions got the literal arm id "condition" where a real dispatch
+   * synthesizes the UNGOVERNED arm, and `scenario_refs` were dropped, so their
+   * trials never appeared. The count looked right, every trial id was wrong,
+   * and the caption promised the ids were deterministic. */
   async function previewPlan() {
     setBusy(true);
     setRunError(null);
     try {
       const document = await current();
       if (document === null) return;
-      const execution = (document.execution ?? {}) as Record<string, unknown>;
-      setPlan(await api.planExperiment({
-        scenario_ids: ((document.scenarios ?? []) as Record<string, unknown>[])
-          .map((scenario) => scenario.name),
-        conditions: execution.conditions ?? [],
-        repeats: execution.repeats ?? 1,
-      }));
+      setPlan(await api.planSuite(document));
     } catch (exc) {
+      setPlan(null);
       setRunError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setBusy(false);
@@ -783,11 +787,31 @@ export function Builder({ suiteId }: { suiteId: string }) {
           )
         )}
         {plan && (
-          <p className="muted small">
-            {plan.trials.length} trial unit(s) — one per (scenario × condition ×
-            repeat). This is a PLAN, not a run: the trial ids are deterministic,
-            so the same manifest always yields the same set.
-          </p>
+          <>
+            <p className="muted small">
+              {plan.trials.length} trial unit(s) — one per (scenario × condition ×
+              repeat), across {plan.conditions.length} arm(s):{" "}
+              <code>{plan.conditions.join(", ")}</code>. This is a PLAN, not a
+              run: the ids come from the same planner a dispatch runs, so what
+              you see here is what the run will name.
+            </p>
+            {plan.conditions.length === 1 && plan.conditions[0] === "ungoverned" &&
+              !readPath(manifest, "execution.conditions") && (
+                <p className="muted small">
+                  This suite declares no conditions, so it gets the single
+                  UNGOVERNED arm — wrapped and observed, gates not enforcing. Not
+                  a kernel-free run: add a second condition to compare governed
+                  against it.
+                </p>
+              )}
+            {plan.blockers.length > 0 && (
+              <ul className="errors">
+                {plan.blockers.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            )}
+          </>
         )}
         {errors && errors.length > 0 && (
           <ul className="errors">

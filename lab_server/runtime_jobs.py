@@ -17,6 +17,8 @@ Control surface (Lab operator / UI):
   GET  /runtimes             list connected runtimes
   POST /scenarios/validate   validate a scenario -> { ok, errors[] }
   POST /experiments/plan     expand an experiment -> { trials, estimate }
+  POST /suites/plan          expand a SUITE -> { trials, conditions, blockers, estimate }
+                             (the same planner a dispatch runs)
   POST /runs                 assign an experiment to a runtime -> { run_id, state }
   POST /runs/{id}/confirm    confirm an awaiting_confirmation run -> { state }
   POST /runs/{id}/aggregates attach bundle.aggregates + finalize -> { state }
@@ -88,10 +90,14 @@ _RUN_CONFIRM_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/confirm$")
 _RUN_CANCEL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/cancel$")
 _RUN_AGG_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/aggregates$")
 _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/trace$")
-# `validate` is a POST sibling, not a suite id — without the lookahead a GET to
+# These are POST siblings, not suite ids. Without the lookahead a GET to
 # /suites/validate answers `no suite 'validate'`, which reads like the endpoint
-# is missing rather than like the method is wrong.
-_SUITE_RE = re.compile(r"^/suites/(?!validate$)([A-Za-z0-9_-]+)$")
+# is missing rather than like the method is wrong — and a PUT to one of them
+# would have UPSERTED a suite under that name, because the save route is an
+# upsert keyed by the path segment. The hyphenated ones matched the id pattern
+# too, so the list is every single-segment POST path under /suites.
+_SUITE_ACTIONS = "validate|validate-yaml|to-yaml|plan"
+_SUITE_RE = re.compile(rf"^/suites/(?!(?:{_SUITE_ACTIONS})$)([A-Za-z0-9_-]+)$")
 _SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
 _SUITE_DISPATCH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/dispatch$")
 _SUITE_PUBLISH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/publish$")
@@ -2055,6 +2061,45 @@ def make_runtime_server(
                         self._send(200, {"ok": False, "errors": [f"malformed scenario: {exc}"]})
                     else:
                         self._send(200, {"ok": True, "errors": []})
+                    return
+                if path == "/suites/plan":
+                    # The Builder's plan preview. NOT `/experiments/plan`:
+                    # that one plans an `experiment/v1`, and the Builder was
+                    # hand-building one out of the manifest — which substituted
+                    # the literal arm id "condition" for a suite declaring none
+                    # (2 of 3 built-ins) and dropped `scenario_refs`. The count
+                    # was right and the trial ids were wrong, under a caption
+                    # promising they were deterministic. This plans the SUITE,
+                    # through the same `plan_suite` a dispatch runs.
+                    from lab_suite import plan_suite
+                    from lab_suite.errors import SuiteValidationError
+
+                    self._require_control()
+                    manifest = self._document("suite")
+                    try:
+                        planned = plan_suite(manifest)
+                    except SuiteValidationError as exc:
+                        raise RuntimeJobsError(
+                            422,
+                            "this suite does not resolve, so there is nothing to "
+                            "plan: " + "; ".join(str(e) for e in exc.errors),
+                        ) from None
+                    self._send(200, {
+                        "trials": list(planned.planned),
+                        # the arms actually planned, INCLUDING a synthesized
+                        # ungoverned one — the preview has to name the arm the
+                        # run will name, or its trial ids are fiction
+                        "conditions": [str(c.get("id")) for c in planned.conditions],
+                        # a dispatch would refuse on these; a preview reports
+                        # them, because seeing the plan is how you find out
+                        "blockers": list(planned.blockers),
+                        "estimate": {
+                            "trials": len(planned.planned),
+                            "scenarios": len(planned.resolved.scenarios),
+                            "conditions": len(planned.conditions),
+                            "repeats": planned.resolved.repeats,
+                        },
+                    })
                     return
                 if path == "/experiments/plan":
                     self._require_control()
