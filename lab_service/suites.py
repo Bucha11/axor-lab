@@ -205,6 +205,7 @@ def execute_suite_run(
     import json
 
     from lab_analysis import missingness
+    from lab_suite import comparison_design
     from lab_contracts import validate_artifact
     from lab_runner.bundle_io import write_bundle_dir
     from lab_runner.invariants import STATUS_ERROR, STATUS_FAILED
@@ -225,6 +226,12 @@ def execute_suite_run(
         environment={
             "model": {"provider": "scripted", "id": plan.suite_id,
                       "inference_params": {"suite_id": plan.suite_id}},
+            # Recorded at run time and bound to the suite's OWN agent, because
+            # this is what the CP bridge reads. Without it `_bridge_design`
+            # returns None and the bridge is never earned — so a suite could be
+            # exported to production and could never say governance changed an
+            # outcome, which is the whole claim the handoff carries.
+            "experiment_design": comparison_design(plan.suite),
         },
         command=command,
     )

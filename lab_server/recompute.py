@@ -28,6 +28,14 @@ from lab_runner import evaluate
 # server-recomputed claim carrying the task-success rate (review r7).
 _METRIC_OUTCOME = {
     "ASR": "violation",
+    # the literal name of the recorded outcome. Three of the four built-in
+    # suites declare their success metric as `task_success` (it IS
+    # `trial.metrics.task_success`), so the whole Suite Platform was
+    # unpublishable: "unknown metric 'task_success'". Adding it is not the
+    # laundering this registry exists to stop — that is an ARBITRARY label
+    # ("zero_production_incidents") resolving to the task-success rate, and this
+    # is the one name that cannot be arbitrary.
+    "task_success": "task_success",
     "task_success_rate": "task_success",
     "utility": "task_success",
 }
@@ -62,9 +70,22 @@ def _rows(
         scenario = scenarios[str(trial["scenario_id"])]
         inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
         outcome = {
-            "violation": bool(evaluate(scenario["violation"], trace, inputs)),  # type: ignore[arg-type]
             "task_success": bool(evaluate(scenario["task_success"], trace, inputs)),  # type: ignore[arg-type]
         }
+        # `violation` is OPTIONAL: a budget / performance / reliability scenario
+        # has no attack model and therefore no breach predicate, and the suite
+        # schema says so. Reading it unconditionally turned any suite carrying
+        # one clean scenario beside an attacked one into a 400 on publish —
+        # and that mix is exactly what proves containment did not break the job.
+        #
+        # ABSENT, not False: the runner's own `_aggregate` leaves ASR off such a
+        # trial, so its denominator counts attacked trials only. Contributing
+        # False here would recompute 17/36 against the bundle's 17/24 and reject
+        # an honest run for a mismatch this code invented.
+        if scenario.get("violation") is not None:
+            outcome["violation"] = bool(
+                evaluate(scenario["violation"], trace, inputs),  # type: ignore[arg-type]
+            )
         key = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
                str(trial.get("execution_id", "")))
         cid = str(trial["condition_id"])
@@ -104,7 +125,11 @@ def recompute_aggregates(
         # intersection made the server reject honest runner bundles at
         # missingness: a single failed baseline trial shrank every condition's
         # recomputed n below the runner's per-condition marginal (review r12).
-        marg = [r[cid] for r in rows.values() if cid in r]
+        # ...and the marginal is over the trials that MEASURED this metric. A
+        # scenario with no breach predicate contributes a row without
+        # `violation`, and counting it in ASR's denominator would report a rate
+        # over trials that could not have violated anything.
+        marg = [r[cid] for r in rows.values() if cid in r and field in r[cid]]
         n = len(marg)
         successes = sum(1 for o in marg if o[field])
         out[(metric, cid)] = binary_aggregate(metric, cid, successes, n)
@@ -226,9 +251,18 @@ def _check_test(
     key = (metric, treated_id)
     if field is None or not baseline_id:
         return [f"{key}: test has no resolvable baseline"]
+    # Every selection below is filtered by `field in …`, not just by condition: a
+    # scenario with no breach predicate contributes a row without `violation`,
+    # and a trial that could not have violated anything belongs in neither the
+    # denominator nor a pair. Reading it unconditionally was a KeyError, which
+    # the publish route surfaced as `400 malformed request: 'violation'` — so a
+    # suite carrying one clean scenario beside its attacked ones could not be
+    # published at all.
     if design == "independent_samples":
-        base = [r[baseline_id] for r in rows.values() if baseline_id in r]
-        treat = [r[treated_id] for r in rows.values() if treated_id in r]
+        base = [r[baseline_id] for r in rows.values()
+                if baseline_id in r and field in r[baseline_id]]
+        treat = [r[treated_id] for r in rows.values()
+                 if treated_id in r and field in r[treated_id]]
         rec = two_proportion_test(
             sum(1 for o in base if o[field]), len(base),
             sum(1 for o in treat if o[field]), len(treat), vs=baseline_id,
@@ -242,7 +276,9 @@ def _check_test(
     # matched pairs → McNemar
     pairs = [
         (r[baseline_id][field], r[treated_id][field])
-        for r in rows.values() if baseline_id in r and treated_id in r
+        for r in rows.values()
+        if baseline_id in r and treated_id in r
+        and field in r[baseline_id] and field in r[treated_id]
     ]
     rec = mcnemar_test(pairs, vs=baseline_id)
     if str(test.get("name")) != "mcnemar":

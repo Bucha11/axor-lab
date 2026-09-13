@@ -178,6 +178,41 @@ def validate_manifest(
     errors.extend(_scripted_agent_errors(agents))
     errors.extend(_suite_config_errors(manifest))
     errors.extend(_invariant_metric_errors(manifest))
+    errors.extend(_condition_config_hash_errors(conditions))
+    return errors
+
+
+def _condition_config_hash_errors(
+    conditions: list[dict[str, object]],
+) -> list[str]:
+    """A declared `config_hash` must be the one its kernel and policy produce.
+
+    The field is the reproducibility anchor a Control-Plane export carries into
+    production. A hand-written one that disagrees with the arm beside it names a
+    config that did not run — and every consumer downstream would trust it,
+    because the whole point of the anchor is that nobody re-derives it.
+    """
+    from lab_contracts import condition_config_hash
+
+    errors: list[str] = []
+    for condition in conditions:
+        declared = condition.get("config_hash")
+        if not declared:
+            continue
+        kernel = condition.get("kernel")
+        if not kernel:
+            errors.append(
+                f"[suite] condition {condition.get('id')!r} declares a config_hash but "
+                "names no kernel — there is no governor config to fingerprint"
+            )
+            continue
+        expected = condition_config_hash(str(kernel), condition.get("policy"))  # type: ignore[arg-type]
+        if str(declared) != expected:
+            errors.append(
+                f"[suite] condition {condition.get('id')!r} declares config_hash "
+                f"{str(declared)!r} but its kernel and policy compile to {expected!r} — "
+                "the anchor would name a config that did not run"
+            )
     return errors
 
 
@@ -393,13 +428,50 @@ def resolve_suite(
         manifest=manifest,
         scenarios=tuple(scenarios),
         manifests=manifests,
-        conditions=tuple(execution.get("conditions") or []),  # type: ignore[arg-type]
+        conditions=stamp_config_hashes(execution.get("conditions") or []),  # type: ignore[arg-type]
         repeats=int(execution.get("repeats", 1)),  # type: ignore[arg-type]
         metrics=tuple(evaluation.get("metrics") or []),  # type: ignore[arg-type]
         aggregations=tuple(evaluation.get("aggregations") or []),  # type: ignore[arg-type]
         evaluators=tuple(evaluation.get("evaluators") or []),  # type: ignore[arg-type]
         regressions=tuple(manifest.get("regressions") or []),  # type: ignore[arg-type]
     )
+
+
+def stamp_config_hashes(
+    conditions: list[dict[str, object]],
+) -> tuple[dict[str, object], ...]:
+    """Each arm with its `config_hash` — the reproducibility anchor for the run.
+
+    `condition/v1` describes it as "sha256 over the normalized (kernel +
+    policy)", and a Control-Plane export REFUSES an arm without one: it would
+    have to synthesize the carry-over key and present it as the measured config.
+    Only the `.axl` path ever set it (`repin_to_real_kernel`), so the entire
+    Suite Platform — every built-in and everything the Builder authors — could
+    run, publish locally and dispatch, and then could not be handed to
+    production at all.
+
+    Derived, never taken on trust: an author who writes one is checked against
+    it by `validate_manifest`, because a declared hash that disagrees with the
+    kernel and policy beside it names a config that did not run.
+
+    An arm with no kernel gets none — there is no governor config to
+    fingerprint, which is the same rule `dispatch._config_fingerprint` applies.
+    """
+    from lab_contracts import condition_config_hash
+
+    stamped: list[dict[str, object]] = []
+    for condition in conditions:
+        kernel = condition.get("kernel")
+        if not kernel:
+            stamped.append(dict(condition))
+            continue
+        # a COPY: these dicts come from the caller's manifest, and resolving a
+        # suite must not edit the document it was handed
+        stamped.append({
+            **condition,
+            "config_hash": condition_config_hash(str(kernel), condition.get("policy")),  # type: ignore[arg-type]
+        })
+    return tuple(stamped)
 
 
 def declared_evaluators(manifest: dict[str, object]) -> dict[str, dict[str, object]]:

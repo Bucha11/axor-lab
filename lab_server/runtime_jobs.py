@@ -273,8 +273,22 @@ def _verify_artifact_integrity(artifact: dict[str, object]) -> None:
 
 
 def _run_environment(manifest: dict[str, object]) -> dict[str, object]:
-    return {"model": {"provider": "connected_runtime",
-                      "id": str(manifest.get("id", "suite"))}}
+    from lab_suite import builtin_registry, comparison_design
+    from lab_suite.errors import SuiteNotFound
+
+    try:
+        suite: object = builtin_registry().get(str(manifest.get("id", "")))
+    except SuiteNotFound:
+        suite = None
+    return {
+        "model": {"provider": "connected_runtime",
+                  "id": str(manifest.get("id", "suite"))},
+        # INDEPENDENT samples, whatever the suite says about its own agent: a
+        # connected runtime ran a model Lab never saw, and a paired design
+        # asserted over independently sampled arms is a spurious p-value with a
+        # signature on it.
+        "experiment_design": comparison_design(suite, executed_by_runtime=True),
+    }
 
 
 def _now_iso() -> str:

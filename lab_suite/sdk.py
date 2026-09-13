@@ -100,10 +100,63 @@ class BaseSuite:
         """Invariants this suite pins from a trial. Default: none."""
         return []
 
+    # --- comparison design ------------------------------------------------
+    def agent_is_deterministic(self) -> bool:
+        """Is this suite's agent behaviour fixed by (scenario, seed)?
+
+        It decides the run's COMPARISON DESIGN. Matched pairs — and therefore
+        McNemar — are only valid when the same seed produces the same behaviour
+        under both arms; a sampled agent draws each condition independently and
+        its "pairs" are nominal, so the paired p-value would be spurious.
+
+        Default FALSE, which yields `independent_samples`. The CP bridge reads
+        the attested design and refuses to assume a paired one — "never a silent
+        default to matched_pairs" — so an author who does not answer gets the
+        weaker claim rather than an unearned one. A suite whose `program_for` is
+        a pure function of the seed says so by overriding this.
+
+        It describes the SUITE's own agent. A run executed by a connected
+        runtime is attested `independent_samples` regardless: a live model is
+        sampled, and this hook cannot speak for someone else's machine.
+        """
+        return False
+
     # --- presentation ----------------------------------------------------
     def render_artifact(self, artifact: dict[str, object]) -> dict[str, object]:
         """A suite-specific artifact view. Default: the artifact unchanged."""
         return artifact
+
+
+def comparison_design(
+    suite: object, *, executed_by_runtime: bool = False
+) -> dict[str, object]:
+    """The run's attested `comparison-design/v1`, for `environment`.
+
+    Bound to the ACTUAL agent's determinism and recorded at run time, because
+    this — not an uploader-controlled aggregate — is what the Control-Plane
+    bridge reads to choose matched_pairs over independent_samples. A suite
+    bundle used to carry no design at all, so `_bridge_design` returned None and
+    the bridge could never be earned: every suite could be exported to
+    production, and none could say governance had changed an outcome.
+
+    `executed_by_runtime` forces independent samples. Lab does not know what a
+    connected runtime ran; a live model draws each condition separately, and a
+    paired design asserted over that is a spurious p-value with a signature on
+    it.
+    """
+    deterministic = (
+        False if executed_by_runtime
+        else bool(getattr(suite, "agent_is_deterministic", lambda: False)())
+    )
+    kind = "matched_pairs" if deterministic else "independent_samples"
+    return {
+        "schema_version": "comparison-design/v1",
+        "kind": kind,
+        "unit_key": ["execution_id", "scenario_id", "condition_id", "seed", "repeat_index"],
+        "assignment": ("shared_deterministic_agent_state" if deterministic
+                       else "independent_per_condition"),
+        "agent_deterministic": deterministic,
+    }
 
 
 def drives_its_own_trials(suite: object) -> bool:

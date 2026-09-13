@@ -31,6 +31,7 @@ from .sdk import (
     Suite,
     SuiteRegistry,
     builtin_registry,
+    comparison_design,
     drives_its_own_trials,
     suite_catalog,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "SuiteRun",
     "SuiteValidationError",
     "builtin_registry",
+    "comparison_design",
     "drives_its_own_trials",
     "load_manifest",
     "plan_suite",

@@ -581,6 +581,17 @@ def _bridge_outcomes(
                 "(pass the FULL completed evidence, not a cherry-picked subset)"
             )
         inputs: dict[str, object] = scenario.get("inputs", {})  # type: ignore[assignment]
+        if scenario.get("violation") is None:
+            # No attack model, so no breach to bridge on. The bridge asks whether
+            # governance changed the ASR outcome; a scenario that cannot violate
+            # anything answers nothing, and folding it in as a non-violation
+            # would dilute both arms equally while inflating the effective n the
+            # composition guard and the interval are computed over.
+            #
+            # This was an unguarded read, so a suite carrying one clean scenario
+            # beside its attacked ones crashed the export with a bare KeyError —
+            # while every other refusal in this function is a typed CPExportError.
+            continue
         violated = bool(evaluate(scenario["violation"], trace, inputs))  # type: ignore[arg-type]
         cid = str(trial["condition_id"])
         coord = (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
@@ -623,17 +634,35 @@ def _status_matrix(bundle: dict[str, object], condition_id: str) -> dict[str, di
 def _arm_coords(
     bundle: dict[str, object], condition_id: str
 ) -> set[tuple[str, str, int, str]]:
-    """EVERY trial coordinate (scenario, seed, repeat, execution) for a condition —
-    regardless of status. The PLANNED set for a matched contrast must include
-    failed/excluded units too, else a pair where BOTH arms failed simply vanishes
-    from the denominator and the receipt overstates coverage (review r20)."""
+    """Every trial coordinate (scenario, seed, repeat, execution) for a condition
+    that COULD have produced an ASR outcome, regardless of status.
+
+    Regardless of status, because the planned set for a matched contrast must
+    include failed and excluded units: a pair where both arms failed would
+    otherwise vanish from the denominator and the receipt would overstate
+    coverage (review r20).
+
+    But only scenarios with a breach predicate. A scenario with no attack model
+    was never a candidate pair — it cannot violate anything — so counting it as
+    a DROPPED one is the same category error as counting it in ASR's
+    denominator. It made the drop fraction read 12/36 on a suite carrying one
+    clean scenario beside two attacked ones, tripping the missingness guard and
+    silently refusing the bridge for a run where governance worked perfectly.
+    """
+    attacked = {
+        str(scenario["name"]) for scenario in bundle.get("scenarios", [])  # type: ignore[union-attr,index]
+        if scenario.get("violation") is not None  # type: ignore[union-attr]
+    }
     coords: set[tuple[str, str, int, str]] = set()
     for trial in bundle.get("trials", []):  # type: ignore[union-attr]
-        if str(trial.get("condition_id")) == condition_id:
-            coords.add(
-                (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
-                 str(trial.get("execution_id", "")))
-            )
+        if str(trial.get("condition_id")) != condition_id:
+            continue
+        if str(trial.get("scenario_id")) not in attacked:
+            continue
+        coords.add(
+            (str(trial["scenario_id"]), str(trial["seed"]), int(trial["repeat_index"]),
+             str(trial.get("execution_id", "")))
+        )
     return coords
 
 

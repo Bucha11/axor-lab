@@ -118,6 +118,12 @@ class BudgetSuite(BaseSuite):
             "tags": ["cost", "efficiency"],
         }
 
+    def agent_is_deterministic(self) -> bool:
+        """`program_for` is a pure function of (scenario, seed), so the same
+        seed produces the same behaviour under every arm — the pairs a McNemar
+        comparison needs are real ones."""
+        return True
+
     def program_for(
         self,
         scenario: dict[str, object],
