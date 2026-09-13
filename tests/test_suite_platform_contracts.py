@@ -175,6 +175,79 @@ class TestSuiteManifestIsOneDocument(unittest.TestCase):
             self.assertIn(field, properties, f"Builder section '{section}' has no manifest field")
 
 
+class TestTheBuilderBlankScenario(unittest.TestCase):
+    """The other half of a cross-language contract.
+
+    `web/src/lib/sections.ts::blankScenario` is what the Builder's "+ Add"
+    writes; this checks a scenario of exactly that shape survives the real
+    validator. `web/src/lib/sections.test.ts` pins the derivation on the
+    TypeScript side — if you change one, change both.
+
+    The old blank was a constant, and it was refused twice over: `tools: []`
+    against `minItems 1`, and `task_success: {event: "final_output"}` against
+    an evaluator that supports only `tool_call`. So the button reliably
+    invalidated the suite, and the item form (name and task) offered no way to
+    fix either without dropping into YAML.
+    """
+
+    #: verbatim `blankScenario(manifest)` for a suite whose first tool is `note`
+    BLANK = {
+        "schema_version": "scenario/v1",
+        "name": "",
+        "task": "",
+        "inputs": {},
+        "tools": [{"$ref": "note"}],
+        "fixtures": {},
+        "task_success": {"event": "tool_call", "tool": "note"},
+    }
+
+    def _blank_suite(self) -> dict:
+        from lab_suite import builtin_registry
+
+        return copy.deepcopy(builtin_registry().get("blank").manifest())
+
+    def test_the_first_tool_of_the_blank_suite_is_the_one_it_refs(self) -> None:
+        """`blankScenario` takes `environment.tools[0].id`; if that stops being
+        `note` this test's fixture is stale, not the code."""
+        manifest = self._blank_suite()
+        self.assertEqual(
+            [t["id"] for t in manifest["environment"]["tools"]][:1], ["note"],
+        )
+
+    def test_adding_one_leaves_the_suite_resolvable(self) -> None:
+        from lab_suite import plan_suite
+
+        manifest = self._blank_suite()
+        manifest["scenarios"].append(copy.deepcopy(self.BLANK))
+        # the real thing a dispatch does — schema, suite semantics AND the
+        # per-scenario semantics the schema alone does not reach
+        self.assertEqual(len(plan_suite(manifest).planned), 2)
+
+    def test_the_two_keys_the_form_never_shows_are_the_two_that_broke(self) -> None:
+        from lab_suite import SuiteValidationError, plan_suite
+
+        for key, bad in (
+            ("tools", []),
+            ("task_success", {"event": "final_output"}),
+        ):
+            with self.subTest(key=key):
+                manifest = self._blank_suite()
+                manifest["scenarios"].append({**copy.deepcopy(self.BLANK), key: bad})
+                with self.assertRaises(SuiteValidationError):
+                    plan_suite(manifest)
+
+    def test_a_toolless_suite_refuses_rather_than_papering_over(self) -> None:
+        """`blankScenario` emits `tools: []` when the suite declares none. That
+        is the true state of the document — there is nothing to reference — and
+        the validator should say so."""
+        from lab_suite import SuiteValidationError, plan_suite
+
+        manifest = self._blank_suite()
+        manifest["environment"]["tools"] = []
+        with self.assertRaises(SuiteValidationError):
+            plan_suite(manifest)
+
+
 class TestRegressionKinds(unittest.TestCase):
     def test_metric_threshold_regression_validates(self) -> None:
         reg = _example("regression_latency_threshold")

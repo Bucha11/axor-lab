@@ -6,6 +6,7 @@ import {
   SECTIONS,
   type FieldSpec,
   type ItemFieldSpec,
+  blankFor,
   readPath,
   writePath,
 } from "../lib/sections";
@@ -47,11 +48,16 @@ function summaryOf(value: unknown): string {
 function Widget({
   spec,
   value,
+  blank,
   onChange,
   onJump,
 }: {
   spec: FieldSpec;
   value: unknown;
+  /** `list` only: what "+ Add" starts a new item as, already resolved against
+   * the document (a new scenario has to reference a tool THIS suite declares,
+   * so the blank cannot be a constant). */
+  blank: Json;
   onChange: (next: unknown) => void;
   onJump: (path: string) => void;
 }) {
@@ -130,7 +136,7 @@ function Widget({
         <ListField
           value={value}
           fields={spec.item ?? []}
-          blank={spec.blank ?? {}}
+          blank={blank}
           onChange={onChange}
           onJump={() => onJump(spec.path)}
         />
@@ -384,6 +390,7 @@ function Fields({
           <Widget
             spec={spec}
             value={readPath(manifest, spec.path)}
+            blank={blankFor(spec, manifest)}
             onChange={(next) => onChange(writePath(manifest, spec.path, next))}
             onJump={onJump}
           />

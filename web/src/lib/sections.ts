@@ -53,8 +53,12 @@ export interface FieldSpec {
   /** `list` only: the fields each item shows. Keys the item carries that no
    * field names are preserved untouched — same rule as the manifest itself. */
   item?: ItemFieldSpec[];
-  /** `list` only: what a newly added item starts as. */
-  blank?: Json;
+  /** `list` only: what a newly added item starts as.
+   *
+   * A FUNCTION when the blank cannot be a constant — a new scenario has to
+   * reference a tool that exists in THIS suite, and no literal can know that.
+   * Resolved by `blankFor` against the manifest being edited. */
+  blank?: Json | ((manifest: Json) => Json);
   advanced?: boolean;
   help?: string;
 }
@@ -71,6 +75,59 @@ export interface SectionSpec {
 /** The capabilities the platform knows how to honour (suite.schema.json keeps
  * the list open for third-party ones — the chips row accepts a typed extra). */
 export const KNOWN_CAPABILITIES = ["governance", "provenance", "control_plane_export"];
+
+/** The tool ids this suite declares, in order — the only tools a scenario may
+ * reference. `scenario.tools` accepts a full inline manifest per the schema,
+ * but `resolve_suite` builds the bundle from `environment.tools` alone, so an
+ * inline one resolves to "tool 'x' has no manifest in the bundle". A `$ref`
+ * into this list is the form that actually runs. */
+export function suiteToolIds(manifest: Json): string[] {
+  const environment = (manifest.environment ?? {}) as Record<string, unknown>;
+  const tools = Array.isArray(environment.tools) ? environment.tools : [];
+  return tools
+    .filter((tool): tool is Json => !!tool && typeof tool === "object")
+    .map((tool) => tool.id)
+    .filter((id): id is string => typeof id === "string");
+}
+
+/**
+ * The smallest scenario that RESOLVES, for this suite.
+ *
+ * Every one of the five keys is load-bearing and none can be a constant:
+ * `tools` must be non-empty and must `$ref` a tool the suite declares, and
+ * `task_success` must name an event the runtime evaluator supports — only
+ * `tool_call` today, so the success predicate is "the tool got called". The
+ * item form shows name and task, so anything it does NOT show has to be right
+ * from the start or the user cannot fix it without opening YAML.
+ *
+ * A suite with no tools gets `tools: []`, which is invalid — and correctly so:
+ * the suite has nothing for a scenario to reference, and the validator saying
+ * `minItems 1` is the true state of the document rather than a blank's fault.
+ *
+ * Pinned from both sides: `sections.test.ts` checks the derivation, and
+ * `tests/test_suite_platform_contracts.py` checks that a scenario of exactly
+ * this shape resolves against the real validator.
+ */
+export function blankScenario(manifest: Json): Json {
+  const [tool] = suiteToolIds(manifest);
+  return {
+    schema_version: "scenario/v1",
+    name: "",
+    task: "",
+    inputs: {},
+    tools: tool ? [{ $ref: tool }] : [],
+    fixtures: {},
+    ...(tool
+      ? { task_success: { event: "tool_call", tool } }
+      : { task_success: { event: "tool_call" } }),
+  };
+}
+
+/** A field's blank item, resolved against the document being edited. */
+export function blankFor(spec: FieldSpec, manifest: Json): Json {
+  if (typeof spec.blank === "function") return spec.blank(manifest);
+  return spec.blank ?? {};
+}
 
 /** Suite identity — not one of the six sections, but the Builder has to show it
  * or a new suite has no id to save under. */
@@ -143,17 +200,23 @@ export const SECTIONS: SectionSpec[] = [
           { key: "name", label: "Name", widget: "text", placeholder: "unique-scenario-01" },
           { key: "task", label: "Task", widget: "textarea" },
         ],
-        // a valid skeleton — tools/fixtures/task_success are schema-required, so
-        // seeding empties lets a new scenario save instead of failing on three
-        // fields the form never shows; refine them per item in Advanced / YAML
-        blank: {
-          schema_version: "scenario/v1", name: "", task: "",
-          inputs: {}, tools: [], fixtures: {},
-          task_success: { event: "final_output" },
-        },
+        // Derived from the suite, because a constant cannot be valid here. The
+        // old literal seeded `tools: []` and `task_success: {event:
+        // "final_output"}`, and BOTH are refused:
+        //
+        //   suite.scenarios[N].tools: minItems 1, got 0
+        //   task_success: event 'final_output' is defined in the schema but not
+        //     supported by the runtime evaluator (supported: ['tool_call'])
+        //
+        // so "+ Add" reliably invalidated the suite, and the item form — name
+        // and task only — offered no way to fix either. It now references the
+        // suite's first tool and asserts success on a call to it: the smallest
+        // scenario that actually resolves.
+        blank: blankScenario,
         help:
-          "tools, inputs, fixtures and success predicates live on each scenario — " +
-          "edit them per item under Details, or in Advanced / YAML",
+          "a new scenario starts on the suite's first tool; inputs, fixtures and " +
+          "the success predicate live on each scenario — edit them per item under " +
+          "Details, or in Advanced / YAML",
       },
       { path: "scenario_refs", label: "Scenario refs", widget: "tags", advanced: true },
     ],

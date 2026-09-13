@@ -253,6 +253,34 @@ test.describe("Suite Builder", () => {
     await expect(desc).toHaveValue("A rewritten description.");
   });
 
+  test("an added scenario references a tool the suite declares", async ({ page }) => {
+    // The old blank seeded `tools: []` and an unevaluable `task_success`, so
+    // "+ Add" reliably invalidated the suite — and the item form (name, task)
+    // gave no way to fix either. What the button writes is asserted through
+    // what Save posts, because that is the document the server sees.
+    const saved: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/suites/suite-alpha", async (route: Route) => {
+      if (route.request().method() !== "PUT") return json(200, MANIFEST)(route);
+      saved.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, { id: "suite-alpha" })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    const scenarios = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Scenarios" }),
+    });
+    await scenarios.getByRole("button", { name: "+ Add" }).click();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByText("saved")).toBeVisible();
+
+    const posted = (saved[0].suite as Record<string, unknown>);
+    const added = (posted.scenarios as Record<string, unknown>[])[1];
+    expect(added.tools).toEqual([{ $ref: "note" }]);
+    expect(added.task_success).toEqual({ event: "tool_call", tool: "note" });
+  });
+
   test("adding and removing a scenario updates the list", async ({ page }) => {
     await routes(page);
     await page.goto("/#/suites/suite-alpha");

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { Json } from "./api";
-import { IDENTITY, SECTIONS, readPath, renderedPaths, writePath } from "./sections";
+import {
+  IDENTITY,
+  SECTIONS,
+  blankFor,
+  blankScenario,
+  readPath,
+  renderedPaths,
+  suiteToolIds,
+  writePath,
+} from "./sections";
 
 /**
  * The Builder's three modes edit ONE manifest (RFC §13), and the plan's risk
@@ -106,6 +115,54 @@ describe("the Builder is a form, not a wall of JSON textareas", () => {
     expect(all.find((field) => field.path === "execution.budgets.max_usd")?.widget).toBe(
       "number",
     );
+  });
+});
+
+describe("a new scenario is one that RESOLVES", () => {
+  /**
+   * The old blank was a constant seeding `tools: []` and
+   * `task_success: {event: "final_output"}`. Both are refused —
+   * `tools: minItems 1`, and the runtime evaluator supports only `tool_call` —
+   * so "+ Add" reliably invalidated the suite, and the item form (name and
+   * task) offered no way to fix either without opening YAML.
+   *
+   * The Python side of this contract is
+   * `tests/test_suite_platform_contracts.py`, which runs a scenario of exactly
+   * this shape through the real validator.
+   */
+  it("references a tool the suite actually declares", () => {
+    const blank = blankScenario(MANIFEST);
+    expect(blank.tools).toEqual([{ $ref: "read" }]);
+    expect(suiteToolIds(MANIFEST)).toEqual(["read"]);
+  });
+
+  it("asserts success on a call to that same tool", () => {
+    // `final_output` is in the schema and NOT in the evaluator, so a blank
+    // using it produced a scenario that validates on paper and refuses to run
+    expect(blankScenario(MANIFEST).task_success).toEqual({
+      event: "tool_call",
+      tool: "read",
+    });
+  });
+
+  it("leaves tools empty when the suite declares none", () => {
+    // not a blank's fault to paper over: the suite has nothing to reference,
+    // and `minItems 1` is the true state of the document
+    const toolless: Json = { ...MANIFEST, environment: { simulation: {} } };
+    expect(blankScenario(toolless).tools).toEqual([]);
+  });
+
+  it("the scenarios field resolves its blank against the document", () => {
+    const spec = SECTIONS.flatMap((s) => s.fields).find((f) => f.path === "scenarios");
+    expect(typeof spec?.blank).toBe("function");
+    expect(blankFor(spec!, MANIFEST)).toEqual(blankScenario(MANIFEST));
+  });
+
+  it("a constant blank still works", () => {
+    const spec = SECTIONS.flatMap((s) => s.fields).find(
+      (f) => f.path === "execution.conditions",
+    );
+    expect(blankFor(spec!, MANIFEST)).toEqual(spec?.blank);
   });
 });
 
