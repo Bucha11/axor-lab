@@ -23,7 +23,20 @@ const MANIFEST = {
   description: "An example suite for tests.",
   tags: ["demo"],
   capabilities: ["governance"],
-  environment: { simulation: { enabled: true } },
+  environment: {
+    simulation: { enabled: true },
+    // a real manifest: per-scenario validation is largely ABOUT the tools, so a
+    // fixture with none cannot show whether the client sends them
+    tools: [
+      {
+        schema_version: "tool-manifest/v1",
+        id: "note",
+        args_schema: { type: "object" },
+        effect: { default_class: "READ", driving_args: [] },
+        side_effecting: false,
+      },
+    ],
+  },
   scenarios: [
     {
       schema_version: "scenario/v1",
@@ -69,6 +82,7 @@ interface Opts {
   validate?: { ok: boolean; errors: string[]; suite?: unknown };
   yaml?: string;
   createdId?: string;
+  plan?: { trials: string[]; estimate?: Record<string, number> };
 }
 
 /** Register every endpoint the two screens touch. The generic `**​/suites/*`
@@ -110,6 +124,27 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
     }
     return json(200, { suites: opts.suites ?? [] })(route);
   });
+
+  // authoring aids. `scenarios/validate` echoes back WHICH tool manifests it
+  // was given, so a test can assert the client sent them rather than trusting
+  // an ok:true that a manifest-less call would also produce.
+  await page.route("**/scenarios/validate", async (route: Route) => {
+    const body = route.request().postDataJSON() as {
+      scenario?: Record<string, unknown>;
+      manifests?: Record<string, unknown>;
+    };
+    const manifests = Object.keys(body.manifests ?? {});
+    return json(200, manifests.length > 0
+      ? { ok: true, errors: [] }
+      : {
+          ok: false,
+          errors: [`[validating] tool 'note' has no manifest in the bundle`],
+        })(route);
+  });
+  await page.route("**/experiments/plan", json(200, opts.plan ?? {
+    trials: ["scn-1:ungoverned:0", "scn-1:ungoverned:1"],
+    estimate: { trials: 2, scenarios: 1, conditions: 1, repeats: 2 },
+  }));
 
   // LAST, so it wins: `**/suites` matches `/registry/suites` too, and without
   // this the workspace's own cards render again under the org catalog — every
@@ -285,6 +320,43 @@ test.describe("Suite Builder", () => {
     await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
     await page.getByRole("button", { name: "YAML", exact: true }).click();
     await expect(page.locator("textarea.yaml")).toHaveValue(YAML_TEXT);
+  });
+
+  test("Check scenarios sends the suite's tool manifests", async ({ page }) => {
+    // Per-scenario validation is largely about the tools. Sending the scenario
+    // alone reported "tool X has no manifest in the bundle" for every tool of
+    // every scenario — the button was pure false positives on suites that
+    // validate perfectly. The stub answers ok only when the manifests arrive.
+    const posted: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/scenarios/validate", async (route: Route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      posted.push(body);
+      return json(200, { ok: true, errors: [] })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Check scenarios" }).click();
+    await expect(page.getByText("Every scenario validates on its own.")).toBeVisible();
+    expect(posted).toHaveLength(1);
+    expect(Object.keys(posted[0].manifests as Record<string, unknown>)).toEqual(["note"]);
+  });
+
+  test("Check scenarios reports a real per-scenario failure", async ({ page }) => {
+    await routes(page);
+    await page.route("**/scenarios/validate", json(200, {
+      ok: false,
+      errors: ["[validating] no fixture places $injection into an untrusted field"],
+    }));
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Check scenarios" }).click();
+    // named by SCENARIO — the whole reason this exists next to whole-suite
+    // validation, which cannot say which one broke
+    await expect(page.locator(".errors")).toContainText("scn-1");
+    await expect(page.locator(".errors")).toContainText("untrusted field");
   });
 
   test("Run panel lists runtimes and dispatching starts a run", async ({ page }) => {

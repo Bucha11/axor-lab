@@ -382,8 +382,18 @@ export const api = {
     call<{ id: string; org: string }>("POST", `/suites/${encodeURIComponent(id)}/publish`, {}),
 
   // ── authoring aids ─────────────────────────────────────────────────────────
-  validateScenario: (scenario: Json) =>
-    call<ValidationOk>("POST", "/scenarios/validate", { scenario }),
+  /** Validate ONE scenario against the tool manifests it will run with.
+   *
+   * `manifests` is not optional in practice even though the endpoint defaults
+   * it to `{}`: scenario semantics are largely ABOUT the tools — a declared
+   * tool with no manifest, an injection with no untrusted field to land in, a
+   * breach predicate with no WRITE/EXPORT/EXEC sink. Calling this without them
+   * reported every one of those against every scenario, so the check was
+   * pure false positives. Required here so a caller cannot omit them by
+   * accident again; pass `{}` deliberately for a scenario that declares no
+   * tools. */
+  validateScenario: (scenario: Json, manifests: Record<string, Json>) =>
+    call<ValidationOk>("POST", "/scenarios/validate", { scenario, manifests }),
   /** Expand an experiment into its planned trial units. A PLAN, not execution. */
   planExperiment: (experiment: Json) =>
     call<ExperimentPlan>("POST", "/experiments/plan", { experiment }),

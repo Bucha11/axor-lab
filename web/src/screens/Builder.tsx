@@ -590,6 +590,24 @@ export function Builder({ suiteId }: { suiteId: string }) {
     }
   }
 
+  /** Per-scenario validation needs the suite's tool manifests, keyed by id —
+   * the same map `resolve_suite` builds from `environment.tools`. Sending the
+   * scenario alone made the checker report "tool X has no manifest in the
+   * bundle" for every tool of every scenario, plus every downstream semantic
+   * that reads a manifest (an injection with no untrusted field to land in, a
+   * breach predicate with no WRITE/EXPORT/EXEC sink). The button was pure
+   * false positives on suites that validate perfectly. */
+  function toolManifests(document: Json): Record<string, Json> {
+    const environment = (document.environment ?? {}) as Record<string, unknown>;
+    const tools = Array.isArray(environment.tools) ? environment.tools : [];
+    return Object.fromEntries(
+      tools
+        .filter((tool): tool is Json => !!tool && typeof tool === "object")
+        .filter((tool) => typeof tool.id === "string")
+        .map((tool) => [String(tool.id), tool]),
+    );
+  }
+
   async function checkScenarios() {
     setBusy(true);
     setRunError(null);
@@ -597,9 +615,10 @@ export function Builder({ suiteId }: { suiteId: string }) {
       const document = await current();
       if (document === null) return;
       const scenarios = (document.scenarios ?? []) as Record<string, unknown>[];
+      const manifests = toolManifests(document);
       const found: [string, string[]][] = [];
       for (const scenario of scenarios) {
-        const result = await api.validateScenario(scenario);
+        const result = await api.validateScenario(scenario, manifests);
         if (!result.ok) found.push([String(scenario.name ?? "(unnamed)"), result.errors]);
       }
       setScenarioErrors(found);
