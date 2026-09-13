@@ -446,6 +446,94 @@ export const SECTIONS: SectionSpec[] = [
   },
 ];
 
+/**
+ * The Suite SDK's own knobs, as fields the Builder renders (RFC §12/§13:
+ * "Every suite contributes declarative schemas").
+ *
+ * `config_schema` is a JSON Schema over the suite's options and `config` holds
+ * their values; `ui_schema` says only WHERE each one appears. Both keys have
+ * been in `suite.schema.json` from the start — its own description of
+ * `config_schema` reads "The Builder renders it" — and nothing did, so the
+ * Suite protocol had no author-time surface at all: a third-party suite could
+ * declare knobs no screen showed.
+ *
+ * Presentation only, as the schema insists: a `ui_schema` cannot introduce a
+ * field, and one naming a property `config_schema` does not define is a
+ * validation error rather than a rendered input.
+ */
+export interface ConfigFields {
+  /** fields a `ui_schema` section claims, in the order it lists them */
+  bySection: Record<string, FieldSpec[]>;
+  /** everything `config_schema` defines that no section claimed. Rendered in
+   * its own card rather than dropped — the same carry-through rule the
+   * manifest itself gets: the Builder never silently loses a declared field. */
+  unplaced: FieldSpec[];
+}
+
+/** One `config_schema` property as a field. The widget follows the JSON
+ * Schema, because the schema IS the contract — offering a control the
+ * validator would refuse is the trap the metric/aggregation enums avoid by
+ * being copied from the schema, and here they can be read from it directly. */
+export function configField(name: string, schema: Json, advanced: boolean): FieldSpec {
+  const type = typeof schema.type === "string" ? schema.type : "";
+  const enumeration = Array.isArray(schema.enum) ? schema.enum.map(String) : undefined;
+  const items = (schema.items ?? {}) as Json;
+  const itemEnum = Array.isArray(items.enum) ? items.enum.map(String) : undefined;
+
+  const spec: FieldSpec = {
+    path: `config.${name}`,
+    label: typeof schema.title === "string" ? schema.title : name,
+    widget: "text",
+    advanced,
+    ...(typeof schema.description === "string" ? { help: schema.description } : {}),
+  };
+  if (enumeration) return { ...spec, widget: "select", options: enumeration };
+  if (type === "boolean") return { ...spec, widget: "checkbox" };
+  if (type === "number" || type === "integer") return { ...spec, widget: "number" };
+  if (type === "array") {
+    // a closed set of strings is clickable; an open one is a tag list. An array
+    // of anything else is not formable and links to the one text editor.
+    if (itemEnum) return { ...spec, widget: "chips", options: itemEnum };
+    return items.type === "string" || items.type === undefined
+      ? { ...spec, widget: "tags" }
+      : { ...spec, widget: "yaml-link" };
+  }
+  if (type === "object") return { ...spec, widget: "yaml-link" };
+  return spec;
+}
+
+export function configFields(manifest: Json): ConfigFields {
+  const configSchema = (manifest.config_schema ?? {}) as Json;
+  // `Record<string, Json>` would still index to `Json | undefined` under
+  // noUncheckedIndexedAccess, and every read below is guarded by an `in` or a
+  // key taken from Object.keys
+  const properties = (configSchema.properties ?? {}) as Record<string, Json | undefined>;
+  const uiSchema = (manifest.ui_schema ?? {}) as Json;
+  const uiSections = Array.isArray(uiSchema.sections) ? uiSchema.sections : [];
+
+  const bySection: Record<string, FieldSpec[]> = {};
+  const placed = new Set<string>();
+  for (const raw of uiSections) {
+    if (!raw || typeof raw !== "object") continue;
+    const section = raw as Json;
+    const id = String(section.id ?? "");
+    const advanced = section.advanced === true;
+    for (const key of Array.isArray(section.fields) ? section.fields : []) {
+      const name = String(key);
+      // a layout cannot introduce a field; the validator refuses one that
+      // tries, and rendering it here would show an input for a value nothing
+      // describes
+      if (!(name in properties)) continue;
+      (bySection[id] ??= []).push(configField(name, properties[name] ?? {}, advanced));
+      placed.add(name);
+    }
+  }
+  const unplaced = Object.keys(properties)
+    .filter((name) => !placed.has(name))
+    .map((name) => configField(name, properties[name] ?? {}, false));
+  return { bySection, unplaced };
+}
+
 /** Every path any form renders — what `sections.test.ts` checks the built-in
  * manifests against, so a field a suite actually uses does not silently become
  * uneditable in the Builder. */

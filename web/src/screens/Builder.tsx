@@ -13,6 +13,7 @@ import {
   type FieldSpec,
   type ItemFieldSpec,
   blankFor,
+  configFields,
   readPath,
   writePath,
 } from "../lib/sections";
@@ -772,6 +773,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
   const dynamicOptions: Record<string, string[]> = {
     scenario_refs: registryScenarios,
   };
+  const suiteConfig = configFields(manifest);
 
   return (
     <div className="screen">
@@ -820,19 +822,45 @@ export function Builder({ suiteId }: { suiteId: string }) {
               onJump={jumpToYaml}
             />
           </Card>
-          {SECTIONS.filter(
-            // a section whose every field is Advanced does not render an
-            // empty card in Basic — a card with nothing to do is not a form
-            (section) =>
-              mode === "advanced" || section.fields.some((field) => !field.advanced),
-          ).map((section) => (
-            <Card key={section.id}>
-              <h3>{section.title}</h3>
-              {section.description && (
-                <p className="muted small">{section.description}</p>
-              )}
+          {SECTIONS.map((section) => ({
+            section,
+            // the suite's OWN knobs, laid out into this section by its
+            // `ui_schema` (RFC §12). They are ordinary fields from here on —
+            // same widgets, same writePath, same carry-through.
+            fields: [...section.fields, ...(suiteConfig.bySection[section.id] ?? [])],
+          }))
+            .filter(
+              // a section whose every field is Advanced does not render an
+              // empty card in Basic — a card with nothing to do is not a form
+              ({ fields }) =>
+                mode === "advanced" || fields.some((field) => !field.advanced),
+            )
+            .map(({ section, fields }) => (
+              <Card key={section.id}>
+                <h3>{section.title}</h3>
+                {section.description && (
+                  <p className="muted small">{section.description}</p>
+                )}
+                <Fields
+                  fields={fields}
+                  manifest={manifest}
+                  advanced={mode === "advanced"}
+                  options={dynamicOptions}
+                  onChange={edited}
+                  onJump={jumpToYaml}
+                />
+              </Card>
+            ))}
+          {suiteConfig.unplaced.length > 0 && (
+            <Card>
+              <h3>Suite options</h3>
+              <p className="muted small">
+                Declared by this suite's <code>config_schema</code>, placed in no
+                section by its <code>ui_schema</code>. Shown here rather than
+                dropped — the Builder never silently loses a declared field.
+              </p>
               <Fields
-                fields={section.fields}
+                fields={suiteConfig.unplaced}
                 manifest={manifest}
                 advanced={mode === "advanced"}
                 options={dynamicOptions}
@@ -840,7 +868,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
                 onJump={jumpToYaml}
               />
             </Card>
-          ))}
+          )}
         </>
       )}
 

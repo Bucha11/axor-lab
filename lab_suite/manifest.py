@@ -175,7 +175,60 @@ def validate_manifest(
             "topology relates them"
         )
     errors.extend(_scripted_agent_errors(agents))
+    errors.extend(_suite_config_errors(manifest))
     return errors
+
+
+def _suite_config_errors(manifest: dict[str, object]) -> list[str]:
+    """The Suite SDK's own knobs: `config` against `config_schema` (RFC §12).
+
+    Both keys existed in the schema and nothing read either — `config_schema`
+    is described there as "the Builder renders it; a value that fails it is
+    rejected at author time, not at run time", and neither half was true. A
+    third-party suite could declare knobs the Builder never showed and the
+    validator never checked, which makes the Suite protocol a protocol with no
+    author-time surface.
+
+    `ui_schema` is presentation only, and the schema says it "can never
+    introduce a field config_schema does not define" — enforced here, because a
+    layout naming a field nothing defines renders an input that writes a value
+    nothing validates.
+    """
+    from lab_contracts.subset_validator import validate_against
+
+    errors: list[str] = []
+    config_schema: dict[str, object] = manifest.get("config_schema") or {}  # type: ignore[assignment]
+    config: dict[str, object] = manifest.get("config") or {}  # type: ignore[assignment]
+    declared = set(_config_properties(config_schema))
+
+    if config and not config_schema:
+        errors.append(
+            "[suite] `config` is set but the suite declares no `config_schema` — "
+            "values nothing describes cannot be validated or rendered"
+        )
+    elif config_schema:
+        # the platform's own subset validator, on a one-entry schema map: a
+        # suite's knobs get exactly the checks every other contract gets, and
+        # `jsonschema` stays out of the dependency list
+        for problem in validate_against(config, "config", {"config": config_schema}):
+            errors.append(f"[suite] {problem}")
+
+    ui_schema: dict[str, object] = manifest.get("ui_schema") or {}  # type: ignore[assignment]
+    for section in ui_schema.get("sections") or []:  # type: ignore[union-attr]
+        for name in section.get("fields") or []:  # type: ignore[union-attr]
+            if str(name) not in declared:
+                errors.append(
+                    f"[suite] ui_schema section {section.get('id')!r} lays out field "
+                    f"{str(name)!r}, which config_schema does not define — a layout "
+                    "cannot introduce a field"
+                )
+    return errors
+
+
+def _config_properties(config_schema: dict[str, object]) -> list[str]:
+    """The knob names a `config_schema` defines, in declaration order."""
+    properties = config_schema.get("properties")
+    return [str(k) for k in properties] if isinstance(properties, dict) else []
 
 
 # The agent identity fields `suite.schema.json` allows. They describe the model

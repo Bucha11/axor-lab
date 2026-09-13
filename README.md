@@ -54,6 +54,11 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 - **`lab_suite/`** — the Suite SDK: the `Suite` protocol and `BaseSuite`, a
   registry with three built-in suites (Blank, AgentDojo, Budget), manifest
   load/validate/resolve, suite execution, and dispatch to a connected runtime.
+  A suite declares its own options as a JSON Schema in `config_schema`, their
+  values in `config`, and where the Builder puts each one in `ui_schema` — the
+  Builder renders them as ordinary fields and the values are validated at
+  author time, so a suite's knobs are refused in the form rather than at run
+  time (RFC §12/§13, "every suite contributes declarative schemas").
 - **`lab_capabilities/governance/`** — governance as an opt-in capability
   (Suite Platform RFC §10): the reference kernel and the real axor-core backend,
   the gate a condition resolves to, exact verdict replay, EvidenceCase

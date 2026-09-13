@@ -6,6 +6,13 @@ helpers. Everything except the manifest itself has a default, so the smallest
 possible suite is a manifest and nothing else — which is exactly what the Blank
 suite is, and what a third-party author starts from.
 
+The config and UI schemas are NOT hooks: they are `config_schema`, `config` and
+`ui_schema` on the manifest itself. One place to declare them, so the document
+a Builder edits and a runtime receives already carries the suite's own options
+— a hook would put the declaration somewhere the manifest cannot reach, and the
+manifest is what travels. `lab_suite.manifest` validates `config` against
+`config_schema` at author time; the Builder renders it.
+
 The hooks are deliberately narrow. A suite decides WHAT its agent does and WHAT
 its own metrics mean; it never touches provenance, gating or the ledger. Those
 belong to the runtime, and a suite that could reach them could launder taint.

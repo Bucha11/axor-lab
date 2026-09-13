@@ -248,6 +248,107 @@ class TestTheBuilderBlankScenario(unittest.TestCase):
             plan_suite(manifest)
 
 
+class TestTheSuiteSDKsOwnKnobs(unittest.TestCase):
+    """`config_schema` / `config` / `ui_schema` — RFC §12, and the half of §13
+    that reads "Every suite contributes declarative schemas".
+
+    `config_schema` and `ui_schema` were in the schema from the start, and
+    nothing read either. The schema's own description of `config_schema` says
+    "The Builder renders it; a value that fails it is rejected at author time,
+    not at run time" — and neither half was true, so a third-party suite could
+    declare knobs no screen showed and no validator checked. `sections.test.ts`
+    even used `ui_schema` as its example of a key NO form renders, which turned
+    the unimplemented feature into a passing test.
+
+    The TypeScript half is `web/src/lib/sections.ts::configFields`.
+    """
+
+    SCHEMA = {
+        "type": "object",
+        "properties": {
+            "depth": {"type": "integer", "title": "Search depth"},
+            "style": {"enum": ["terse", "verbose"]},
+        },
+        "required": ["depth"],
+        "additionalProperties": False,
+    }
+
+    def _suite(self, **over: object) -> dict:
+        from lab_suite import builtin_registry
+
+        return {**copy.deepcopy(builtin_registry().get("blank").manifest()), **over}
+
+    def _errors(self, **over: object) -> list[str]:
+        from lab_suite import validate_manifest
+
+        return validate_manifest(self._suite(**over))
+
+    def test_a_suite_declaring_nothing_is_unaffected(self) -> None:
+        self.assertEqual(self._errors(), [])
+
+    def test_config_is_checked_against_config_schema_at_author_time(self) -> None:
+        self.assertEqual(
+            self._errors(config_schema=self.SCHEMA,
+                         config={"depth": 3, "style": "terse"}),
+            [],
+        )
+        for label, config, fragment in (
+            ("wrong type", {"depth": "three"}, "type integer, got str"),
+            ("missing required", {"style": "terse"}, "missing required 'depth'"),
+            ("unknown key", {"depth": 1, "nope": 2}, "additional property 'nope'"),
+            ("bad enum", {"depth": 1, "style": "loud"}, "not in enum"),
+        ):
+            with self.subTest(case=label):
+                errors = self._errors(config_schema=self.SCHEMA, config=config)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(fragment, errors[0])
+
+    def test_values_with_nothing_describing_them_are_refused(self) -> None:
+        errors = self._errors(config={"depth": 3})
+        self.assertEqual(len(errors), 1)
+        self.assertIn("declares no `config_schema`", errors[0])
+
+    def test_a_layout_cannot_introduce_a_field(self) -> None:
+        """The schema says `ui_schema` "can never introduce a field
+        config_schema does not define". Nothing enforced it, so a layout could
+        render an input writing a value nothing validates."""
+        errors = self._errors(
+            config_schema=self.SCHEMA, config={"depth": 1},
+            ui_schema={"sections": [{"id": "execution", "fields": ["depth", "ghost"]}]},
+        )
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("'ghost'", errors[0])
+        self.assertIn("a layout cannot introduce a field", errors[0])
+
+    def test_a_layout_over_declared_fields_is_fine(self) -> None:
+        self.assertEqual(
+            self._errors(
+                config_schema=self.SCHEMA, config={"depth": 1},
+                ui_schema={"sections": [
+                    {"id": "execution", "fields": ["depth"]},
+                    {"id": "evaluation", "fields": ["style"], "advanced": True},
+                ]},
+            ),
+            [],
+        )
+
+    def test_a_ui_schema_that_only_titles_sections_still_validates(self) -> None:
+        """The shape the shipped slice example uses — no `fields` at all."""
+        self.assertEqual(
+            self._errors(ui_schema={"sections": [{"id": "execution", "title": "Execution"}]}),
+            [],
+        )
+
+    def test_config_survives_a_canonical_round_trip(self) -> None:
+        """The Basic/Advanced/YAML single-document rule reaches these too."""
+        from lab_contracts.canonical import canonical_json
+
+        suite = self._suite(config_schema=self.SCHEMA, config={"depth": 4})
+        once = canonical_json(suite)
+        self.assertEqual(json.loads(once)["config"], {"depth": 4})
+        self.assertEqual(canonical_json(json.loads(once)), once)
+
+
 class TestRegressionKinds(unittest.TestCase):
     def test_metric_threshold_regression_validates(self) -> None:
         reg = _example("regression_latency_threshold")

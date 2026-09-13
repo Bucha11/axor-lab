@@ -571,6 +571,67 @@ test.describe("Suite Builder", () => {
     await expect(page.getByRole("heading", { name: "Trial", exact: true })).toHaveCount(0);
   });
 
+  test("a suite's own config_schema renders into its ui_schema section", async ({ page }) => {
+    // RFC §12/§13: "Every suite contributes declarative schemas."
+    // suite.schema.json said "The Builder renders it" about `config_schema`;
+    // nothing did, so a third-party suite could declare knobs no screen showed.
+    const saved: Record<string, unknown>[] = [];
+    const manifest = {
+      ...MANIFEST,
+      config_schema: {
+        type: "object",
+        properties: {
+          depth: { type: "integer", title: "Search depth" },
+          style: { enum: ["terse", "verbose"] },
+          orphan: { type: "string", title: "Unplaced knob" },
+        },
+      },
+      ui_schema: { sections: [{ id: "execution", fields: ["depth", "style"] }] },
+      config: { depth: 2 },
+    };
+    await routes(page, { manifest });
+    await page.route("**/suites/suite-alpha", (route: Route) => {
+      if (route.request().method() !== "PUT") return json(200, manifest)(route);
+      saved.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, { id: "suite-alpha" })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    const execution = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Execution" }),
+    });
+    const depth = execution.getByLabel("Search depth");
+    await expect(depth).toHaveValue("2");
+    // the enum is a dropdown of exactly what the schema allows
+    const style = execution.getByLabel("style");
+    await expect(style.locator("option")).toHaveText(["—", "terse", "verbose"]);
+
+    // a field the layout placed nowhere is shown, not dropped
+    const options = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Suite options" }),
+    });
+    await expect(options.getByLabel("Unplaced knob")).toBeVisible();
+
+    await depth.fill("7");
+    await style.selectOption("verbose");
+    await options.getByLabel("Unplaced knob").fill("hi");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator(".tag", { hasText: /^saved$/ })).toBeVisible();
+
+    // the values land under `config`, which is what config_schema describes
+    expect((saved[0].suite as Record<string, unknown>).config).toEqual({
+      depth: 7, style: "verbose", orphan: "hi",
+    });
+  });
+
+  test("a suite with no config_schema renders no extra fields", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Suite options" })).toHaveCount(0);
+  });
+
   test("Run panel lists runtimes and dispatching starts a run", async ({ page }) => {
     const errs = watchErrors(page);
     await routes(page, { runtimes: RUNTIMES, validate: { ok: true, errors: [] } });
