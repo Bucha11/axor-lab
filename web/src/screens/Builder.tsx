@@ -365,16 +365,25 @@ function Fields({
   fields,
   manifest,
   advanced,
+  options,
   onChange,
   onJump,
 }: {
   fields: FieldSpec[];
   manifest: Json;
   advanced: boolean;
+  /** Choices a field's options cannot be declared with, because they are SERVER
+   * state rather than a property of the manifest — the scenario registry is
+   * the case that forced this. Keyed by field path. */
+  options: Record<string, string[]>;
   onChange: (next: Json) => void;
   onJump: (path: string) => void;
 }) {
-  const shown = fields.filter((field) => advanced || !field.advanced);
+  const shown = fields
+    .filter((field) => advanced || !field.advanced)
+    .map((field) =>
+      options[field.path] ? { ...field, options: options[field.path] } : field,
+    );
   return (
     <div className="builder-fields">
       {shown.map((spec) => (
@@ -417,6 +426,11 @@ export function Builder({ suiteId }: { suiteId: string }) {
   const [plan, setPlan] = useState<SuitePlan | null>(null);
   const [busy, setBusy] = useState(false);
   const [runtimes, setRuntimes] = useState<RuntimeRow[] | null>(null);
+  // the names a `scenario_refs` entry can actually resolve to. Loaded, not
+  // declared: the registry is server state, and the field used to be free text
+  // against a registry nothing filled — so every value typed there made the
+  // suite permanently invalid.
+  const [registryScenarios, setRegistryScenarios] = useState<string[]>([]);
   const [runtimeRef, setRuntimeRef] = useState("");
   const [runError, setRunError] = useState<string | null>(null);
   const [jumpTarget, setJumpTarget] = useState<string | null>(null);
@@ -449,6 +463,20 @@ export function Builder({ suiteId }: { suiteId: string }) {
         if (only) setRuntimeRef(only.runtime_ref);
       })
       .catch(() => live && setRuntimes([]));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .registryScenarios()
+      .then(({ scenarios }) => live && setRegistryScenarios(scenarios.map((s) => s.name)))
+      // an empty registry is the normal state of a fresh workspace, and the
+      // chips row still accepts a typed name — a failed load must not be a
+      // red screen over a field most suites never use
+      .catch(() => live && setRegistryScenarios([]));
     return () => {
       live = false;
     };
@@ -691,6 +719,10 @@ export function Builder({ suiteId }: { suiteId: string }) {
   if (loadError) return <Failed error={loadError} />;
   if (manifest === null) return <Loading />;
 
+  const dynamicOptions: Record<string, string[]> = {
+    scenario_refs: registryScenarios,
+  };
+
   return (
     <div className="screen">
       <header className="screen-head">
@@ -735,6 +767,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
               fields={IDENTITY}
               manifest={manifest}
               advanced={mode === "advanced"}
+              options={dynamicOptions}
               onChange={edited}
               onJump={jumpToYaml}
             />
@@ -754,6 +787,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
                 fields={section.fields}
                 manifest={manifest}
                 advanced={mode === "advanced"}
+                options={dynamicOptions}
                 onChange={edited}
                 onJump={jumpToYaml}
               />

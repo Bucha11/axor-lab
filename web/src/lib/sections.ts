@@ -218,7 +218,21 @@ export const SECTIONS: SectionSpec[] = [
           "the success predicate live on each scenario — edit them per item under " +
           "Details, or in Advanced / YAML",
       },
-      { path: "scenario_refs", label: "Scenario refs", widget: "tags", advanced: true },
+      {
+        // chips, not free text: the options are the registry's own names
+        // (supplied at render time — the registry is server state, not part of
+        // the manifest). A typed name is still accepted, and still refused by
+        // the validator if nothing answers to it, which is the honest place to
+        // refuse. As free text the field could only ever break a suite: nothing
+        // filled the registry, so every value resolved to nothing.
+        path: "scenario_refs",
+        label: "Scenario refs",
+        widget: "chips",
+        advanced: true,
+        help:
+          "scenarios shared across suites, resolved by name at plan time and " +
+          "frozen into the artifact — a later edit cannot change a finished run",
+      },
     ],
   },
   {

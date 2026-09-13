@@ -16,6 +16,11 @@ Control surface (Lab operator / UI):
   POST /runtimes/connect     register a runtime  -> { runtime_ref, ingest_key }
   GET  /runtimes             list connected runtimes
   POST /scenarios/validate   validate a scenario -> { ok, errors[] }
+  GET  /scenarios            the registry `scenario_refs` resolves against
+  GET  /scenarios/{name}     one registry scenario
+  POST /scenarios            save one -> { name }
+  DELETE /scenarios/{name}   drop this workspace's copy
+  POST /scenarios/{name}/publish   share it with the org (private_registry)
   POST /experiments/plan     expand an experiment -> { trials, estimate }
   POST /suites/plan          expand a SUITE -> { trials, conditions, blockers, estimate }
                              (the same planner a dispatch runs)
@@ -128,6 +133,11 @@ _HANDOFF_EXPORT_RE = re.compile(r"^/handoff/export$")
 _HANDOFF_VERIFY_RE = re.compile(r"^/handoff/verify$")
 _INCIDENT_IMPORT_RE = re.compile(r"^/incidents/import$")
 _REGISTRY_SUITE_RE = re.compile(r"^/registry/suites/([A-Za-z0-9_-]+)$")
+# a scenario is addressed by its `name`, which the schema leaves free-form; the
+# pattern is the same conservative id shape every other path segment uses, so a
+# scenario whose name needs more than this is reachable by listing, not by URL
+_SCENARIO_RE = re.compile(r"^/scenarios/(?!validate$)([A-Za-z0-9_.-]+)$")
+_SCENARIO_PUBLISH_RE = re.compile(r"^/scenarios/([A-Za-z0-9_.-]+)/publish$")
 _RUN_REPORT_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/report$")
 _RUN_TRIAL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)$")
 _EVIDENCE_RE = re.compile(r"^/evidence/([A-Za-z0-9_.:-]+)$")
@@ -1086,6 +1096,27 @@ def make_runtime_server(
             except SuiteNotFound:
                 raise
 
+        def _scenario_registry(self) -> dict[str, dict[str, object]]:
+            """The scenarios `scenario_refs` resolves against, by name.
+
+            This workspace's own, with the ORG's shared ones underneath — the
+            same layering suites get, so a scenario published to the org is
+            reusable across its workspaces and a local one of the same name
+            wins. Frozen into the assignment at plan time, so a later edit here
+            cannot retroactively change what a finished run claims to have
+            executed (suite.schema.json says exactly that about these refs).
+            """
+            org = self._current_workspace().org
+            shared = workspaces.org_registry(org).list("scenario") if org else []
+            registry: dict[str, dict[str, object]] = {
+                str(d.get("name", "")): d for d in shared
+            }
+            registry.update(
+                {str(d.get("name", "")): d for d in shelf.list("scenario")}
+            )
+            registry.pop("", None)
+            return registry
+
         def _catalog(self, builtin: list[dict[str, object]]) -> list[dict[str, object]]:
             """Built-ins and announced placeholders, with saved suites layered
             over them — an edited built-in shows the EDITED name, and a suite the
@@ -1133,7 +1164,7 @@ def make_runtime_server(
             from lab_suite.errors import SuiteNotFound
             from lab_server.workspaces import require_within
 
-            errors = validate_manifest(document)
+            errors = validate_manifest(document, self._scenario_registry())
             if errors:
                 raise RuntimeJobsError(422, "; ".join(errors[:5]))
             suite_id = str(document.get("id", ""))
@@ -1298,6 +1329,28 @@ def make_runtime_server(
 
                     self._require_control()
                     self._send(200, {"suites": self._catalog(suite_catalog())})
+                    return
+                if path == "/scenarios":
+                    # The scenario registry `scenario_refs` resolves against.
+                    # Listed with the org's shared ones layered underneath, so
+                    # the Builder can OFFER the refs that will actually resolve
+                    # instead of asking a user to type a name and find out at
+                    # validation time that nothing answers to it.
+                    self._require_control()
+                    registry = self._scenario_registry()
+                    self._send(200, {"scenarios": [
+                        {"name": name, "task": str(doc.get("task", ""))}
+                        for name, doc in sorted(registry.items())
+                    ]})
+                    return
+                m = _SCENARIO_RE.match(path)
+                if m:
+                    self._require_control()
+                    scenario = self._scenario_registry().get(m.group(1))
+                    if scenario is None:
+                        raise RuntimeJobsError(
+                            404, f"no scenario {m.group(1)!r} in this workspace")
+                    self._send(200, scenario)
                     return
                 if path == "/registry/suites":
                     # the ORG's private registry — suites shared across the
@@ -1497,6 +1550,15 @@ def make_runtime_server(
                     shelf.delete("suite", m.group(1))
                     self._send(200, {"id": m.group(1), "deleted": True})
                     return
+                m = _SCENARIO_RE.match(path)
+                if m:
+                    self._require_control()
+                    # only this workspace's copy; an org-shared scenario of the
+                    # same name stays and becomes visible again, exactly as a
+                    # deleted suite falls back to its built-in
+                    shelf.delete("scenario", m.group(1))
+                    self._send(200, {"name": m.group(1), "deleted": True})
+                    return
                 self._send(404, {"error": "not found"})
             except (RuntimeJobsError, ScreenStoreError, EntitlementError) as exc:
                 self._send(exc.status, {"error": exc.message})
@@ -1695,6 +1757,33 @@ def make_runtime_server(
                 if path == "/suites":
                     self._require_control()
                     self._send(201, {"id": self._save_suite(self._document("suite"))})
+                    return
+                if path == "/scenarios":
+                    # Save a scenario so other suites can `scenario_ref` it.
+                    # Semantically checked here, not only schema-checked: a
+                    # scenario the registry accepts and `resolve_suite` then
+                    # refuses would make every suite that refs it unrunnable,
+                    # and the failure would surface on the SUITE rather than on
+                    # the scenario that caused it.
+                    from lab_contracts import ScenarioValidationError, validate_scenario
+                    from lab_server.screens import SCENARIO_ID_FIELD
+
+                    self._require_control()
+                    body = self._read_json()
+                    scenario = body.get("scenario")
+                    manifests = body.get("manifests") or {}
+                    if not isinstance(scenario, dict) or not isinstance(manifests, dict):
+                        raise RuntimeJobsError(
+                            400, "this endpoint requires {scenario, manifests}")
+                    try:
+                        validate_scenario(scenario, manifests)  # type: ignore[arg-type]
+                    except ScenarioValidationError as exc:
+                        raise RuntimeJobsError(422, "; ".join(exc.errors[:5])) from None
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise RuntimeJobsError(400, f"malformed scenario: {exc}") from None
+                    self._send(201, {
+                        "name": shelf.put("scenario", scenario, SCENARIO_ID_FIELD),
+                    })
                     return
                 if path == "/evidence":
                     self._require_control()
@@ -1933,6 +2022,30 @@ def make_runtime_server(
                     workspaces.org_registry(workspace.org).put("suite", dict(suite))
                     self._send(201, {"id": m.group(1), "org": workspace.org})
                     return
+                m = _SCENARIO_PUBLISH_RE.match(path)
+                if m:
+                    # the same move as publishing a suite, for the scenarios
+                    # other suites `scenario_ref`. Without it `_scenario_registry`
+                    # would read an org store nothing could ever write to, and
+                    # sharing a scenario would mean re-typing it per workspace.
+                    from lab_server.workspaces import require_capability
+
+                    self._require_control()
+                    workspace = self._current_workspace()
+                    require_capability(workspace, "private_registry")
+                    if not workspace.org:
+                        raise RuntimeJobsError(
+                            409, "this workspace belongs to no org — nothing to publish to")
+                    scenario = self._scenario_registry().get(m.group(1))
+                    if scenario is None:
+                        raise RuntimeJobsError(
+                            404, f"no scenario {m.group(1)!r} in this workspace")
+                    from lab_server.screens import SCENARIO_ID_FIELD
+
+                    workspaces.org_registry(workspace.org).put(
+                        "scenario", dict(scenario), SCENARIO_ID_FIELD)
+                    self._send(201, {"name": m.group(1), "org": workspace.org})
+                    return
                 m = _SUITE_DISPATCH_RE.match(path)
                 if m:
                     # The Builder's Run button: bind a CONNECTED agent to this
@@ -1966,7 +2079,9 @@ def make_runtime_server(
 
                         require_capability(self._current_workspace(), "governance")
                     try:
-                        planned = build_assignment(manifest, runtime_ref)
+                        planned = build_assignment(
+                            manifest, runtime_ref, self._scenario_registry(),
+                        )
                     except SuiteError as exc:
                         # a manifest that resolves but cannot be executed on a
                         # remote runtime is the user's to fix, not a crash
@@ -1990,7 +2105,7 @@ def make_runtime_server(
                     manifest = body.get("suite")
                     if not isinstance(manifest, dict):
                         raise RuntimeJobsError(400, "validate requires {suite}")
-                    errors = validate_manifest(manifest)
+                    errors = validate_manifest(manifest, self._scenario_registry())
                     self._send(200, {"ok": not errors, "errors": errors})
                     return
                 if path == "/suites/to-yaml":
@@ -2032,7 +2147,7 @@ def make_runtime_server(
                     except Exception as exc:  # noqa: BLE001 — a parse error is the user's
                         self._send(200, {"ok": False, "errors": [f"invalid YAML: {exc}"]})
                         return
-                    errors = validate_manifest(parsed)
+                    errors = validate_manifest(parsed, self._scenario_registry())
                     # the PARSED manifest comes back whenever the text PARSES —
                     # including when validation then fails. The Builder's modes
                     # edit one document, and a semantically invalid document is
@@ -2077,7 +2192,7 @@ def make_runtime_server(
                     self._require_control()
                     manifest = self._document("suite")
                     try:
-                        planned = plan_suite(manifest)
+                        planned = plan_suite(manifest, self._scenario_registry())
                     except SuiteValidationError as exc:
                         raise RuntimeJobsError(
                             422,

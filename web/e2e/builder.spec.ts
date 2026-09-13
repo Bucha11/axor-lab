@@ -79,6 +79,7 @@ interface Opts {
   orgSuites?: unknown[];
   manifest?: Record<string, unknown>;
   runtimes?: unknown[];
+  registryScenarios?: { name: string; task: string }[];
   validate?: { ok: boolean; errors: string[]; suite?: unknown };
   yaml?: string;
   createdId?: string;
@@ -98,6 +99,10 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
   await stubShell(page, OPEN);
 
   await page.route("**/runtimes", json(200, { runtimes: opts.runtimes ?? [] }));
+  // the registry `scenario_refs` resolve against
+  await page.route("**/scenarios", json(200, {
+    scenarios: opts.registryScenarios ?? [],
+  }));
 
 
   // dispatch is two-segment — no overlap with the generic single-segment handler
@@ -436,6 +441,43 @@ test.describe("Suite Builder", () => {
     await page.getByRole("button", { name: "Preview plan" }).click();
     await expect(page.getByText(/1 trial unit\(s\)/)).toBeVisible();
     await expect(page.locator(".errors")).toContainText("not yet executable");
+  });
+
+  test("Scenario refs offer the registry's names, not a blank text box", async ({ page }) => {
+    // As free text the field could only break a suite: nothing filled the
+    // registry, so any value validated as "scenario_ref 'x' resolves to
+    // nothing". The chips are the names that actually resolve.
+    await routes(page, {
+      registryScenarios: [
+        { name: "shared-note", task: "Record a note." },
+        { name: "shared-transfer", task: "Move money." },
+      ],
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await page.getByRole("button", { name: "Advanced" }).click();
+
+    const scenarios = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Scenarios" }),
+    });
+    await expect(scenarios.locator("button.chip", { hasText: /^shared-note$/ })).toBeVisible();
+    const chip = scenarios.locator("button.chip", { hasText: /^shared-transfer$/ });
+    await expect(chip).not.toHaveClass(/chip-on/);
+    await chip.click();
+    await expect(chip).toHaveClass(/chip-on/);
+  });
+
+  test("an empty registry leaves the field usable rather than blocking", async ({ page }) => {
+    await routes(page, { registryScenarios: [] });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await page.getByRole("button", { name: "Advanced" }).click();
+    // no options, but the typed-extra input is still there — and a name nothing
+    // answers to is refused by the validator, which is the honest place
+    const scenarios = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Scenarios" }),
+    });
+    await expect(scenarios.locator("input.chip-input")).toBeVisible();
   });
 
   test("Run panel lists runtimes and dispatching starts a run", async ({ page }) => {

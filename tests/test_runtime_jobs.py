@@ -307,3 +307,105 @@ class TestStoreDirect(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheScenarioRegistry(_Base):
+    """`scenario_refs` resolves against something.
+
+    The suite schema has always described these ("scenarios resolved from a
+    registry by name") and `resolve_suite` has always taken a registry
+    argument — but nothing ever filled it. So the Builder rendered an editable
+    field where every value answered "resolves to nothing", on Validate, Save
+    and Run alike: a field that could only break a suite.
+
+    Scenarios are stored and shared exactly like suites — workspace store with
+    the org's registry underneath — so there is no new concept here, only the
+    missing store.
+    """
+
+    def _blank(self) -> dict:
+        import copy
+
+        from lab_suite import builtin_registry
+
+        return copy.deepcopy(builtin_registry().get("blank").manifest())
+
+    def _save_shared(self, name: str = "shared-note") -> dict:
+        manifest = self._blank()
+        tools = {t["id"]: t for t in manifest["environment"]["tools"]}
+        scenario = dict(manifest["scenarios"][0], name=name)
+        status, body = self._req(
+            "POST", "/scenarios", {"scenario": scenario, "manifests": tools}, token="ctl")
+        self.assertEqual((status, body), (201, {"name": name}))
+        return manifest
+
+    def test_a_saved_scenario_is_listed_and_readable(self) -> None:
+        self.assertEqual(
+            self._req("GET", "/scenarios", token="ctl")[1], {"scenarios": []})
+        self._save_shared()
+        self.assertEqual(
+            self._req("GET", "/scenarios", token="ctl")[1],
+            {"scenarios": [{"name": "shared-note", "task": "Record a note."}]},
+        )
+        status, body = self._req("GET", "/scenarios/shared-note", token="ctl")
+        self.assertEqual((status, body["name"]), (200, "shared-note"))
+
+    def test_a_scenario_the_resolver_would_refuse_is_not_stored(self) -> None:
+        """Otherwise the failure surfaces on every suite that refs it, rather
+        than on the scenario that caused it."""
+        manifest = self._blank()
+        broken = dict(manifest["scenarios"][0], name="broken",
+                      tools=[{"$ref": "no-such-tool"}])
+        status, body = self._req(
+            "POST", "/scenarios", {"scenario": broken, "manifests": {}}, token="ctl")
+        self.assertEqual(status, 422)
+        self.assertIn("no manifest in the bundle", body["error"])
+        self.assertEqual(self._req("GET", "/scenarios", token="ctl")[1], {"scenarios": []})
+
+    def test_a_ref_now_validates_plans_and_saves(self) -> None:
+        manifest = self._save_shared()
+        suite = dict(manifest, id="refs-one", name="Refs one",
+                     scenario_refs=["shared-note"])
+
+        self.assertEqual(
+            self._req("POST", "/suites/validate", {"suite": suite}, token="ctl")[1],
+            {"ok": True, "errors": []},
+        )
+        status, plan = self._req("POST", "/suites/plan", {"suite": suite}, token="ctl")
+        self.assertEqual(status, 200)
+        # the ref's trials are PLANNED, not merely tolerated
+        self.assertEqual(
+            plan["trials"], ["blank-01:ungoverned:0", "shared-note:ungoverned:0"])
+        self.assertEqual(
+            self._req("POST", "/suites", {"suite": suite}, token="ctl")[0], 201)
+
+    def test_an_unknown_ref_is_still_refused(self) -> None:
+        suite = dict(self._blank(), id="refs-none", scenario_refs=["nothing"])
+        self.assertEqual(
+            self._req("POST", "/suites/validate", {"suite": suite}, token="ctl")[1],
+            {"ok": False,
+             "errors": ["[suite] scenario_ref 'nothing' resolves to nothing"]},
+        )
+        # and a suite naming it cannot be SAVED either, so a stored suite is
+        # never one the Builder would refuse to run
+        self.assertEqual(
+            self._req("POST", "/suites", {"suite": suite}, token="ctl")[0], 422)
+
+    def test_deleting_a_scenario_breaks_the_suites_that_ref_it_loudly(self) -> None:
+        """Not silently: the suite stops validating and says which ref died."""
+        manifest = self._save_shared()
+        suite = dict(manifest, id="refs-one", scenario_refs=["shared-note"])
+        self._req("DELETE", "/scenarios/shared-note", token="ctl")
+        self.assertEqual(
+            self._req("POST", "/suites/validate", {"suite": suite}, token="ctl")[1]["errors"],
+            ["[suite] scenario_ref 'shared-note' resolves to nothing"],
+        )
+
+    def test_the_registry_needs_the_control_token(self) -> None:
+        for method, path in (
+            ("GET", "/scenarios"), ("GET", "/scenarios/x"),
+            ("DELETE", "/scenarios/x"),
+        ):
+            with self.subTest(route=f"{method} {path}"):
+                self.assertEqual(self._req(method, path)[0], 401)
+        self.assertEqual(self._req("POST", "/scenarios", {"scenario": {}})[0], 401)

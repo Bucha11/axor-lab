@@ -317,6 +317,21 @@ export const api = {
   home: () => call<HomePayload>("GET", "/home"),
 
   suites: () => call<{ suites: SuiteCard[] }>("GET", "/suites"),
+  /** The registry a suite's `scenario_refs` resolve against — this workspace's
+   * saved scenarios with the org's shared ones underneath. The Builder offers
+   * these as the ref options: the field used to be free text against a registry
+   * nothing filled, so any value typed there made the suite permanently
+   * invalid ("scenario_ref 'x' resolves to nothing"). */
+  registryScenarios: () =>
+    call<{ scenarios: { name: string; task: string }[] }>("GET", "/scenarios"),
+  registryScenario: (name: string) =>
+    call<Json>("GET", `/scenarios/${encodeURIComponent(name)}`),
+  saveScenario: (scenario: Json, manifests: Record<string, Json>) =>
+    call<{ name: string }>("POST", "/scenarios", { scenario, manifests }),
+  deleteScenario: (name: string) =>
+    call<{ name: string; deleted: boolean }>(
+      "DELETE", `/scenarios/${encodeURIComponent(name)}`,
+    ),
   suite: (id: string) => call<Json>("GET", `/suites/${encodeURIComponent(id)}`),
   suiteYaml: async (id: string): Promise<string> => {
     const headers: Record<string, string> = {};
