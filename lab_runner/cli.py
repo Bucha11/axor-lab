@@ -258,7 +258,10 @@ def _cmd_run_suite(args: argparse.Namespace) -> int:
     from lab_service import Outcome, execute_suite_run, plan_suite_run
 
     print("[validating]")
-    plan = plan_suite_run(args.suite, run_id=args.run_id)
+    plan = plan_suite_run(
+        args.suite, run_id=args.run_id,
+        scenarios_dir=Path(args.scenarios) if getattr(args, "scenarios", None) else None,
+    )
     if plan.outcome is Outcome.VALIDATION:
         for error in plan.errors:
             print(f"  {error}", file=sys.stderr)
@@ -796,6 +799,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_run_suite.add_argument("--run-id", default=None)
     p_run_suite.add_argument("--created", default=None, help="override timestamp (RFC3339)")
+    p_run_suite.add_argument(
+        "--scenarios", default=None, metavar="DIR",
+        help="directory of scenario/v1 files the suite's `scenario_refs` resolve "
+             "against (default: ./scenarios beside the manifest)",
+    )
     p_run_suite.add_argument(
         "--overwrite", action="store_true",
         help="replace a non-empty --out directory (clears stale traces first)",

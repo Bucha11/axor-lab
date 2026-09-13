@@ -26,7 +26,9 @@ from .suites import (
     SuitePlan,
     SuiteRunResult,
     build_agentdojo_experiment,
+    default_scenario_dir,
     execute_suite_run,
+    local_scenario_registry,
     plan_suite_run,
     resolve_suite_target,
 )
@@ -86,6 +88,8 @@ __all__ = [
     "CPExportPackage",
     "resolve_suite_target",
     "plan_suite_run",
+    "default_scenario_dir",
+    "local_scenario_registry",
     "execute_suite_run",
     "build_agentdojo_experiment",
     "SuiteRunResult",

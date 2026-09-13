@@ -33,6 +33,9 @@ class SuitePlan:
     repeats: int = 1
     trials: int = 0
     errors: tuple[str, ...] = field(default_factory=tuple)
+    #: the scenarios `scenario_refs` resolved against, frozen at plan time so
+    #: the execution runs the same bodies the plan was validated over
+    scenario_registry: dict[str, dict[str, object]] = field(default_factory=dict)
 
     @property
     def suite_id(self) -> str:
@@ -98,28 +101,95 @@ def resolve_suite_target(target: str) -> tuple[dict[str, object], object]:
     return suite.manifest(), suite
 
 
-def plan_suite_run(target: str, *, run_id: str | None = None) -> SuitePlan:
+#: Where a locally-run suite finds the scenarios its `scenario_refs` name: a
+#: directory of `*.json` scenario documents beside the manifest file. The hosted
+#: server resolves refs from the workspace store; a file has no workspace, and
+#: the filesystem beside it is the only registry there is.
+LOCAL_SCENARIO_DIR = "scenarios"
+
+
+def local_scenario_registry(
+    directory: Path | None,
+) -> tuple[dict[str, dict[str, object]], tuple[str, ...]]:
+    """Scenario documents in `directory`, keyed by `name`, plus any that failed.
+
+    A file that cannot be read is REPORTED rather than skipped. Skipping it
+    would turn a typo in a scenario file into "scenario_ref 'x' resolves to
+    nothing" on a suite that names it correctly — the error would point at the
+    innocent document.
+    """
+    import json
+
+    registry: dict[str, dict[str, object]] = {}
+    problems: list[str] = []
+    if directory is None or not directory.is_dir():
+        return registry, ()
+    for file in sorted(directory.glob("*.json")):
+        try:
+            document = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            problems.append(f"[scenarios] {file.name}: {exc}")
+            continue
+        if not isinstance(document, dict) or not document.get("name"):
+            problems.append(f"[scenarios] {file.name}: not a scenario document (no `name`)")
+            continue
+        registry[str(document["name"])] = document
+    return registry, tuple(problems)
+
+
+def default_scenario_dir(target: str) -> Path | None:
+    """The conventional registry for `target`: `scenarios/` beside a manifest
+    FILE. A built-in suite id has no directory, and therefore no registry —
+    which is correct, not a gap: nothing shipped names a ref."""
+    path = Path(target)
+    return path.parent / LOCAL_SCENARIO_DIR if path.exists() else None
+
+
+def plan_suite_run(
+    target: str,
+    *,
+    run_id: str | None = None,
+    scenarios_dir: Path | None = None,
+) -> SuitePlan:
     """Resolve and validate a suite; nothing executes. Validation problems come
-    back on the plan rather than as an exception — they are the answer."""
+    back on the plan rather than as an exception — they are the answer.
+
+    `scenarios_dir` overrides the conventional `scenarios/` beside the manifest,
+    for a library shared across suites in other directories.
+    """
     from lab_contracts import content_hash
     from lab_suite import validate_manifest
 
     manifest, suite = resolve_suite_target(target)
-    errors = validate_manifest(manifest) + suite.validate(manifest)  # type: ignore[attr-defined]
+    registry, problems = local_scenario_registry(
+        scenarios_dir if scenarios_dir is not None else default_scenario_dir(target)
+    )
+    errors = [
+        *problems,
+        *validate_manifest(manifest, registry),
+        *suite.validate(manifest),  # type: ignore[attr-defined]
+    ]
     resolved_run_id = run_id or f"r_{content_hash(manifest)[7:39]}"
     if errors:
         return SuitePlan(
             outcome=Outcome.VALIDATION, manifest=manifest, suite=suite,
             run_id=resolved_run_id, errors=tuple(str(e) for e in errors),
+            scenario_registry=registry,
         )
     execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
-    scenarios = list(manifest.get("scenarios") or []) or list(manifest.get("scenario_refs") or [])
+    # inline scenarios AND refs — `resolve_suite` extends one with the other, so
+    # counting them as alternatives under-reported a suite that carries both
+    scenario_count = (
+        len(manifest.get("scenarios") or [])  # type: ignore[arg-type]
+        + len(manifest.get("scenario_refs") or [])  # type: ignore[arg-type]
+    )
     conditions = list(execution.get("conditions") or [])
     repeats = int(execution.get("repeats", 1))  # type: ignore[arg-type]
     return SuitePlan(
         outcome=Outcome.OK, manifest=manifest, suite=suite, run_id=resolved_run_id,
-        scenarios=len(scenarios), conditions=len(conditions), repeats=repeats,
-        trials=len(scenarios) * repeats * max(len(conditions), 1),
+        scenarios=scenario_count, conditions=len(conditions), repeats=repeats,
+        trials=scenario_count * repeats * max(len(conditions), 1),
+        scenario_registry=registry,
     )
 
 
@@ -140,7 +210,12 @@ def execute_suite_run(
     from lab_runner.invariants import STATUS_ERROR, STATUS_FAILED
     from lab_suite import run_suite
 
-    run = run_suite(plan.manifest, run_id=plan.run_id, suite=plan.suite)  # type: ignore[arg-type]
+    # the registry the PLAN validated against, not a fresh read: a scenario file
+    # edited between plan and execute would otherwise run a body nobody approved
+    run = run_suite(
+        plan.manifest, run_id=plan.run_id, suite=plan.suite,  # type: ignore[arg-type]
+        scenario_registry=plan.scenario_registry,
+    )
     by_status: dict[str, int] = {}
     for trial in run.trials:
         by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
