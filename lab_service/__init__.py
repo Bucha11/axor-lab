@@ -20,6 +20,7 @@ from __future__ import annotations
 from .checks import Check, CheckStatus
 from .errors import OutputRefused, ServiceError
 from .packages import PackageVerifyResult, verify_package, verify_package_document
+from .report import REPORT_FORMATS, PaperReport, ReportError, build_paper_report
 from .incidents import IncidentImportResult, import_incident
 from .suites import (
     BenchmarkImportResult,
@@ -81,6 +82,10 @@ from .handoff import (
 from .outcomes import Outcome
 
 __all__ = [
+    "build_paper_report",
+    "PaperReport",
+    "ReportError",
+    "REPORT_FORMATS",
     "bundle_files",
     "verify_cp_files",
     "read_bundle_files",

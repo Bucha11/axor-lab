@@ -173,6 +173,35 @@ test.describe("Artifacts", () => {
     }
   });
 
+  test("the run downloads in the shapes a paper needs", async ({ page }) => {
+    // The door that was missing entirely: every other export here is JSON, and
+    // nobody pastes a bundle into a results section.
+    await page.route("**/artifacts/art_1", json(200, ARTIFACT));
+    const asked: string[] = [];
+    await page.route("**/artifacts/art_1/report*", async (route) => {
+      const format = new URL(route.request().url()).searchParams.get("format") ?? "";
+      asked.push(format);
+      return route.fulfill({
+        status: 200,
+        contentType: "text/plain",
+        body: `rendered ${format}`,
+      });
+    });
+    await page.goto("/#/artifacts/art_1");
+    for (const [label, name, format] of [
+      ["Results + Methods (.md)", "art_1-report.md", "md"],
+      ["Table (.tex)", "art_1-report.tex", "tex"],
+      ["Citation (.bib)", "art_1-report.bib", "bib"],
+    ]) {
+      const saved = page.waitForEvent("download");
+      await page.getByRole("button", { name: label }).click();
+      expect((await saved).suggestedFilename()).toBe(name);
+      expect(asked).toContain(format);
+    }
+    // and the screen says the thing no author would think to check
+    await expect(page.getByText(/DERIVED from the traces or merely/)).toBeVisible();
+  });
+
   test("publishing locally says what it did NOT claim", async ({ page }) => {
     // a local mint proves replay and deliberately does not assert the
     // aggregates — only a server that recomputes them from the traces may

@@ -41,6 +41,7 @@ from .bundle_io import (
     write_bundle_dir,
     write_superseded_attempts,
 )
+from lab_service import REPORT_FORMATS, ReportError
 from lab_suite.errors import SuiteError
 
 from .errors import ExperimentFileError, RunnerError
@@ -122,6 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     except SuiteError as exc:
         # an unknown suite id / invalid manifest from the suite commands is the
         # user's to fix — a clean message + exit code, not a raw traceback
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    except ReportError as exc:
+        # "this run measured nothing, so there is no table" is an ANSWER, not a
+        # crash — the user asked a reasonable question of an artifact that
+        # cannot answer it
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
 
@@ -477,6 +484,43 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
         policy=getattr(args, "policy", None),
     )
     print(json.dumps(result.case, indent=2, ensure_ascii=False))
+    return EXIT_OK
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Render a run as something a manuscript can hold.
+
+    Takes what the user already has — a bundle directory, a downloaded
+    reproduction package, or an artifact JSON — because "which of the three do I
+    have" is not a question worth making someone answer to get a table.
+    """
+    from lab_service import build_paper_report
+
+    source = Path(args.source)
+    if source.is_dir():
+        bundle, _ = read_bundle_dir(source)
+        document: dict[str, object] = bundle
+    else:
+        document = json.loads(source.read_text())
+    publication = json.loads(Path(args.publication).read_text()) if args.publication else None
+    report = build_paper_report(
+        document, publication=publication, url=args.url, title=args.title,
+    )
+    if not args.out:
+        print(report.render(args.format), end="")
+        return EXIT_OK
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    written = []
+    for fmt in (REPORT_FORMATS if args.format == "all" else (args.format,)):
+        path = out / f"report.{fmt}"
+        path.write_text(report.render(fmt))
+        written.append(str(path))
+    print("wrote " + ", ".join(written))
+    for caveat in report.caveats:
+        # the table cannot be read correctly without these, so they are not
+        # buried in the file the user might paste only one section of
+        print(f"  note: {caveat}")
     return EXIT_OK
 
 
@@ -889,6 +933,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="condition id to replay the counterfactual under (must be enforcement-on)",
     )
     p_evidence.set_defaults(func=_cmd_evidence)
+
+    p_report = sub.add_parser(
+        "report",
+        help="render a run as a paste-ready results table, Methods paragraph and BibTeX",
+    )
+    p_report.add_argument(
+        "source",
+        help="a bundle directory, a reproduction package .json, or an artifact .json",
+    )
+    p_report.add_argument(
+        "--format", choices=[*REPORT_FORMATS, "all"], default="md",
+        help="md (default, to stdout), tex (booktabs table), bib, or all (needs --out)",
+    )
+    p_report.add_argument("--out", default=None, help="write report.<fmt> into this directory")
+    p_report.add_argument(
+        "--publication", default=None,
+        help="a publication/v1 JSON — makes the BibTeX entry cite a resolvable, "
+             "immutable record instead of a bare content hash",
+    )
+    p_report.add_argument("--url", default=None, help="the publication URL for the BibTeX entry")
+    p_report.add_argument("--title", default=None,
+                          help="override the title (default: the question, else the suite name)")
+    p_report.set_defaults(func=_cmd_report)
 
     p_publish = sub.add_parser("publish", help="mint a publication/v1 from a verified bundle")
     p_publish.add_argument("bundle")

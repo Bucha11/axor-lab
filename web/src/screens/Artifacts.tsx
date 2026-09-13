@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type PublishResult } from "../lib/api";
+import { api, type PublishResult, type ReportFormat } from "../lib/api";
 import { saveFile } from "../lib/save";
 import { useAsync } from "../lib/useAsync";
 import {
@@ -61,6 +61,39 @@ function Export({ id }: { id: string }) {
           to reconstruct the run and re-derive its verdicts:{" "}
           <code>axor-lab verify {id}-package.json --allow-bare</code>. Bare
           means integrity and replay, claimed as no more.
+        </p>
+      </Card>
+
+      <Card>
+        <h3>For a paper</h3>
+        {/* every other door here hands over JSON, and nobody pastes a bundle
+            into a results section — so the numbers were retyped by hand out of
+            a viewer, which is where a figure stops matching its evidence */}
+        <div className="row">
+          {([
+            ["md", "Results + Methods (.md)"],
+            ["tex", "Table (.tex)"],
+            ["bib", "Citation (.bib)"],
+          ] as [ReportFormat, string][]).map(([format, label]) => (
+            <Button
+              key={format}
+              variant="secondary"
+              disabled={busy !== ""}
+              onClick={() => run(`report-${format}`, async () =>
+                saveFile(`${id}-report.${format}`, await api.artifactReport(id, format)))}
+            >
+              {busy === `report-${format}` ? "Rendering…" : label}
+            </Button>
+          ))}
+        </div>
+        <p className="muted small">
+          A results table (arm × metric, estimate, interval, n), the comparison
+          sentences with their test statistics, a Methods paragraph carrying the
+          pinned kernel and each arm&apos;s config hash, and a BibTeX entry. Every
+          row says whether its number was DERIVED from the traces or merely
+          REPORTED by the runner — a latency mean and an attack-success rate look
+          alike in a table and are not the same kind of claim. The LaTeX table
+          needs <code>\usepackage&#123;booktabs&#125;</code>.
         </p>
       </Card>
 

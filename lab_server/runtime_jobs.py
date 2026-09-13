@@ -24,6 +24,7 @@ Control surface (Lab operator / UI):
   GET  /artifacts/{id}/download   the artifact/v1 document, as a file
   GET  /artifacts/{id}/package    {bundle, traces} — `axor-lab verify --allow-bare`
   POST /artifacts/{id}/publish    mint a publication/v1 (locally, or via {server})
+  GET  /artifacts/{id}/report     the run as a paste-ready md/tex/bib report
   GET  /publications              what this workspace published
   GET  /publications/{id}         one publication
   POST /experiments/plan     expand an experiment -> { trials, estimate }
@@ -152,6 +153,7 @@ _ARTIFACT_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)$")
 _ARTIFACT_DOWNLOAD_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/download$")
 _ARTIFACT_PACKAGE_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/package$")
 _ARTIFACT_PUBLISH_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/publish$")
+_ARTIFACT_REPORT_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/report$")
 _PUBLICATION_RE = re.compile(r"^/publications/([A-Za-z0-9_.:-]+)$")
 
 
@@ -949,6 +951,18 @@ def make_runtime_server(
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_text_file(self, text: str, filename: str, content_type: str) -> None:
+            """Text the browser SAVES — distinct from `_send_text`, which serves
+            a body inline. A LaTeX table is not JSON and must not be wrapped in
+            it: the point is a file that pastes into a manuscript."""
+            body = text.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _send_zip(self, files: dict[str, str], filename: str) -> None:
             """A file MAP as the directory it describes.
 
@@ -1450,6 +1464,36 @@ def make_runtime_server(
                     self._require_control()
                     self._send_download(
                         shelf.get("artifact", m.group(1)), f"{m.group(1)}.json")
+                    return
+                m = _ARTIFACT_REPORT_RE.match(path)
+                if m:
+                    # The run as a manuscript holds it: a results table, the
+                    # comparison sentences, a Methods paragraph and a citation.
+                    # Every other door here hands over JSON, and nobody pastes a
+                    # bundle into a results section — so the numbers were being
+                    # retyped by hand out of a viewer, which is where a figure
+                    # quietly stops matching its evidence.
+                    from urllib.parse import parse_qs, urlparse
+
+                    from lab_service import REPORT_FORMATS, ReportError, build_paper_report
+
+                    self._require_control()
+                    query = parse_qs(urlparse(self.path).query)
+                    fmt = (query.get("format") or ["md"])[0]
+                    if fmt not in REPORT_FORMATS:
+                        raise RuntimeJobsError(
+                            400, f"format must be one of {list(REPORT_FORMATS)}, got {fmt!r}")
+                    artifact = shelf.get("artifact", m.group(1))
+                    try:
+                        report = build_paper_report(artifact)
+                    except ReportError as exc:
+                        # a run that measured nothing has no table — an answer,
+                        # not a 500
+                        raise RuntimeJobsError(422, str(exc)) from exc
+                    self._send_text_file(
+                        report.render(fmt), f"{m.group(1)}-report.{fmt}",
+                        "text/plain" if fmt != "md" else "text/markdown",
+                    )
                     return
                 m = _ARTIFACT_PACKAGE_RE.match(path)
                 if m:

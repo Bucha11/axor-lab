@@ -187,6 +187,9 @@ export interface ArtifactRow {
   suite_id?: string;
 }
 
+/** Markdown to read, LaTeX to compile, BibTeX to cite. */
+export type ReportFormat = "md" | "tex" | "bib";
+
 export interface PublicationRow {
   publication_id: string;
   question?: string;
@@ -584,6 +587,12 @@ export const api = {
    * proof objects are mandatory, and an unpublished artifact has none. */
   artifactPackage: (id: string) =>
     fetchText(`/artifacts/${encodeURIComponent(id)}/package`),
+  /** The run as a manuscript holds it: a results table, the comparison
+   * sentences, a Methods paragraph and a citation. Every other door here hands
+   * over JSON, and nobody pastes a bundle into a results section — so the
+   * numbers were being retyped by hand out of a viewer. */
+  artifactReport: (id: string, format: ReportFormat) =>
+    fetchText(`/artifacts/${encodeURIComponent(id)}/report?format=${format}`),
   /** The handoff as the DIRECTORY it is, zipped. The CLI writes a tree and
    * `verify-cp-export` checks a tree; a nested JSON of 160 files is the same
    * bytes in a shape only one of the two faces can verify. */

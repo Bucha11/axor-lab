@@ -102,6 +102,7 @@ axor-lab regress ./bundle --pins pins.json     # surfaces changes, exit 4 if any
 axor-lab evidence ./bundle <trace_id>          # the three-mode EvidenceCase
 axor-lab publish ./bundle --question "…" --out publication.json   # local
 axor-lab publish ./bundle --question "…" --server http://127.0.0.1:8000   # hosted
+axor-lab report ./bundle --format all --out ./paper   # results table + Methods + BibTeX
 ```
 
 Lifecycle, exit codes, and the estimate-confirm gate follow
@@ -110,16 +111,27 @@ directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
 
 ### Getting the evidence out
 
-Six doors, and the hosted face reaches all of them (it used to reach one):
+Seven doors, and the hosted face reaches all of them (it used to reach one):
 
 | | CLI | UI |
 |---|---|---|
 | artifact + bundle + traces | `run-suite --out DIR` | Artifact → **Download artifact** / **Download reproduction package** |
+| a results table for a paper | `report --format md\|tex\|bib` | Artifact → **Results + Methods (.md)** / **Table (.tex)** / **Citation (.bib)** |
 | publication, local | `publish --out` | Artifact → **Publish** (mints locally) |
 | publication, hosted + reproduction package | `publish --server`, `verify` | Artifact → **Publish** with a server; the receipt is shown |
 | Control-Plane handoff | `export-cp`, `verify-cp-export` | Handoff → **Download handoff (.zip)**, which `verify-cp-export` checks as-is |
 | incident import | `import-incident` | Handoff → **Import incident** |
 | suite / scenario sharing | `suite-yaml`, publish to org | Suites → **Publish to org** |
+
+`report` is the one door that is not JSON, because nobody pastes a bundle into a
+results section: it renders the run as a table (arm × metric, estimate,
+interval, n), the comparison sentences with their test statistics, a Methods
+paragraph carrying the pinned kernel and each arm's config hash, and a BibTeX
+entry keyed on the content-addressed publication (or, unpublished, on the bundle
+hash — and it says which). Every row states whether its number was DERIVED from
+the traces or merely REPORTED by the runner: a latency mean and an
+attack-success rate look identical in a results table and are not the same kind
+of claim.
 
 A LOCAL publication re-runs the verdicts, so it asserts replay — and refuses to
 claim the aggregates, because it did not recompute them and a hand-edited bundle

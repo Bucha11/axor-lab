@@ -149,6 +149,31 @@ class TestTheArtifactCanBeObtained(unittest.TestCase):
         self.assertEqual(names["content hashes"].status.value, "ok")
         self.assertEqual(names["replay"].status.value, "ok")
 
+    def test_the_run_downloads_as_a_paper_ready_report(self) -> None:
+        """The door that was missing entirely. Every other export here is JSON,
+        and nobody pastes a bundle into a results section — so a table came out
+        of this product by being retyped out of a viewer."""
+        for fmt, marker in (
+            ("md", "## Results"),
+            ("tex", "\\toprule"),
+            ("bib", "@misc{axorlab:"),
+        ):
+            with self.subTest(format=fmt):
+                status, headers, body = self.face.call(
+                    "GET", f"/artifacts/{self.artifact_id}/report?format={fmt}")
+                self.assertEqual(status, 200, body)
+                self.assertIn("attachment", headers.get("Content-Disposition", ""))
+                self.assertIn(f"-report.{fmt}", headers["Content-Disposition"])
+                # a LaTeX table must arrive as text, not wrapped in JSON
+                self.assertNotIn("application/json", headers.get("Content-Type", ""))
+                self.assertIn(marker, body.decode())
+
+    def test_an_unknown_report_format_is_a_clean_400(self) -> None:
+        status, _, body = self.face.call(
+            "GET", f"/artifacts/{self.artifact_id}/report?format=pdf")
+        self.assertEqual(status, 400)
+        self.assertIn("format", json.loads(body)["error"])
+
     def test_an_artifact_whose_traces_this_server_lacks_is_refused(self) -> None:
         """Refused, not handed over empty: a package with no bodies cannot be
         replayed, and a reader would learn that only after downloading it."""
