@@ -480,6 +480,34 @@ test.describe("Suite Builder", () => {
     await expect(scenarios.locator("input.chip-input")).toBeVisible();
   });
 
+  test("editing clears results that describe the old document", async ({ page }) => {
+    // Every result on screen describes the document that produced it. Only the
+    // validation verdict was cleared on an edit, so a plan preview and a
+    // per-scenario report outlived the document they were about — change
+    // `repeats` and the old trial count kept its place.
+    await routes(page, { validate: { ok: true, errors: [] } });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Validate" }).click();
+    // the tag, not the word wherever it appears (the Scenarios help text says
+    // "validates" too)
+    await expect(page.locator(".tag", { hasText: /^valid$/ })).toBeVisible();
+    await page.getByRole("button", { name: "Check scenarios" }).click();
+    await expect(page.getByText("Every scenario validates on its own.")).toBeVisible();
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    await expect(page.getByText(/2 trial unit\(s\)/)).toBeVisible();
+
+    const execution = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Execution" }),
+    });
+    await execution.getByLabel("Repeats").fill("7");
+
+    await expect(page.getByText(/trial unit\(s\)/)).toHaveCount(0);
+    await expect(page.getByText("Every scenario validates on its own.")).toHaveCount(0);
+    await expect(page.locator(".tag", { hasText: /^valid$/ })).toHaveCount(0);
+  });
+
   test("Run panel lists runtimes and dispatching starts a run", async ({ page }) => {
     const errs = watchErrors(page);
     await routes(page, { runtimes: RUNTIMES, validate: { ok: true, errors: [] } });

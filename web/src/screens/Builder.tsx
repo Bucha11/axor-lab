@@ -495,11 +495,23 @@ export function Builder({ suiteId }: { suiteId: string }) {
     };
   }, [suiteId]);
 
-  function edited(next: Json) {
-    setManifest(next);
+  /** Every result on screen describes the document that produced it, so a new
+   * document invalidates all of them at once. Clearing only the validation
+   * verdict left the plan preview and the per-scenario report standing after an
+   * edit — change `repeats` and the old trial count kept its place, reading as
+   * the plan for what you were now looking at. */
+  function clearResults() {
     setOk(null);
     setErrors(null);
     setSaved(false);
+    setScenarioErrors(null);
+    setPlan(null);
+    setRunError(null);
+  }
+
+  function edited(next: Json) {
+    setManifest(next);
+    clearResults();
   }
 
   /** Switching INTO yaml serializes the current document; switching OUT parses
@@ -753,9 +765,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
             spellCheck={false}
             onChange={(event) => {
               setYaml(event.target.value);
-              setOk(null);
-              setErrors(null);
-              setSaved(false);
+              clearResults();
             }}
           />
         </Card>
