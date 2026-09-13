@@ -130,11 +130,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    resolved = resolve(load_axl(Path(args.file)))
-    print(f"valid: {resolved.experiment['id']}")
+    from lab_service import validate_experiment
+
+    result = validate_experiment(load_axl(Path(args.file)))
+    print(f"valid: {result.experiment_id}")
     print(
-        f"  scenarios={len(resolved.scenarios)} conditions={len(resolved.conditions)} "
-        f"repeats={resolved.repeats} -> {resolved.trial_count} trials"
+        f"  scenarios={result.scenarios} conditions={result.conditions} "
+        f"repeats={result.repeats} -> {result.trial_count} trials"
     )
     return EXIT_OK
 
@@ -237,10 +239,11 @@ def _cmd_suite_yaml(args: argparse.Namespace) -> int:
     acceptance criterion 8.5 and it is pinned in
     `tests/test_yaml_mode_round_trip.py`.
     """
+    from lab_service import resolve_suite_target
     from lab_suite import to_yaml
     from lab_suite.yaml_mode import YamlUnavailable
 
-    manifest, _ = _suite_manifest(args.suite)
+    manifest, _ = resolve_suite_target(args.suite)
     try:
         print(to_yaml(manifest), end="")
     except YamlUnavailable as exc:
@@ -249,61 +252,29 @@ def _cmd_suite_yaml(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _suite_manifest(target: str) -> tuple[dict[str, object], object]:
-    """Resolve `target` — a registered suite id or a manifest path — to
-    (manifest, suite implementation).
-
-    A manifest file may name a suite the registry knows; then that suite's hooks
-    run over the file's manifest, which is exactly the Builder's edit-and-run
-    loop. A manifest whose `id` is unregistered runs on `BaseSuite` defaults —
-    no program, no metrics, no extractors — rather than being refused, because a
-    manifest is authorable long before an implementation exists.
-    """
-    from lab_suite import builtin_registry, load_manifest
-    from lab_suite.errors import SuiteNotFound
-    from lab_suite.sdk import BaseSuite
-
-    registry = builtin_registry()
-    path = Path(target)
-    if path.exists():
-        manifest = load_manifest(path)
-        try:
-            return manifest, registry.get(str(manifest.get("id", "")))
-        except SuiteNotFound:
-            unimplemented = BaseSuite()
-            unimplemented.id = str(manifest.get("id", ""))
-            unimplemented.manifest = lambda: manifest  # type: ignore[method-assign]
-            return manifest, unimplemented
-    suite = registry.get(target)
-    return suite.manifest(), suite
-
-
 def _cmd_run_suite(args: argparse.Namespace) -> int:
-    from lab_suite import run_suite, validate_manifest
+    """The suite lifecycle, printed as it goes. Plan and execution live in
+    `lab_service.suites`; the confirm gate is the face's."""
+    from lab_service import Outcome, execute_suite_run, plan_suite_run
 
     print("[validating]")
-    manifest, suite = _suite_manifest(args.suite)
-    errors = validate_manifest(manifest) + suite.validate(manifest)  # type: ignore[attr-defined]
-    if errors:
-        for error in errors:
+    plan = plan_suite_run(
+        args.suite, run_id=args.run_id,
+        scenarios_dir=Path(args.scenarios) if getattr(args, "scenarios", None) else None,
+    )
+    if plan.outcome is Outcome.VALIDATION:
+        for error in plan.errors:
             print(f"  {error}", file=sys.stderr)
         return EXIT_VALIDATION
-    execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
-    scenarios = list(manifest.get("scenarios") or []) or list(manifest.get("scenario_refs") or [])
-    conditions = list(execution.get("conditions") or [])
-    repeats = int(execution.get("repeats", 1))  # type: ignore[arg-type]
-    # a suite with NO conditions is single-arm — one trial per (scenario, repeat).
-    # That is the platform's default path, not a degenerate case.
-    trials = len(scenarios) * repeats * max(len(conditions), 1)
-    print(f"valid: {manifest.get('id')}")
+    print(f"valid: {plan.suite_id}")
     print(
-        f"  scenarios={len(scenarios)} conditions={len(conditions)} "
-        f"repeats={repeats} -> {trials} trials"
-        + ("  (single-arm: no governance)" if not conditions else "")
+        f"  scenarios={plan.scenarios} conditions={plan.conditions} "
+        f"repeats={plan.repeats} -> {plan.trials} trials"
+        + ("  (single-arm: no governance)" if plan.single_arm else "")
     )
 
     print("[estimate]")
-    print(f"  {trials} trial(s), local simulated tools, no paid inference")
+    print(f"  {plan.trials} trial(s), local simulated tools, no paid inference")
     if not _confirmed(args):
         print(
             "not confirmed — pass --yes (or answer y) to execute; nothing ran",
@@ -312,85 +283,68 @@ def _cmd_run_suite(args: argparse.Namespace) -> int:
         return EXIT_UNCONFIRMED
 
     print("[running_local]")
-    run_id = args.run_id or f"r_{content_hash(manifest)[7:39]}"
-    run = run_suite(manifest, run_id=run_id, suite=suite)  # type: ignore[arg-type]
-    by_status: dict[str, int] = {}
-    for trial in run.trials:
-        by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
+    result = execute_suite_run(
+        plan,
+        out=Path(args.out),
+        created=args.created,
+        overwrite=bool(getattr(args, "overwrite", False)),
+        command=f"axor-lab run-suite {args.suite}",
+    )
+    if result.schema_errors:
+        for error in result.schema_errors:
+            print(f"  [schema] {error}", file=sys.stderr)
+        return EXIT_FAILURE
     print(
-        f"  planned {len(run.trials)}: "
-        + ", ".join(f"{n} {status}" for status, n in sorted(by_status.items()))
+        f"  planned {result.planned}: "
+        + ", ".join(f"{n} {status}" for status, n in sorted(result.by_status.items()))
     )
 
     print("[analyzing]")
-    summary = missingness(run.trials)
-    print(f"  {summary.display()}")
-    for aggregate in run.aggregates:
+    print(f"  {result.missingness}")
+    for aggregate in result.aggregates:
         _print_aggregate(aggregate)
-    for result in run.invariants:
-        print(f"  invariant {result.regression_id}: {result.status}"
-              + (f" — {result.detail}" if result.detail else ""))
+    for entry in result.invariants:
+        print(f"  invariant {entry.regression_id}: {entry.status}"
+              + (f" — {entry.detail}" if entry.detail else ""))
 
     print("[uploading_artifacts]  (local: writing artifact + bundle)")
-    created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    environment = {
-        "model": {"provider": "scripted", "id": str(manifest.get("id", "")),
-                  "inference_params": {"suite_id": str(manifest.get("id", ""))}},
-    }
-    artifact = run.artifact(
-        artifact_id=f"a_{run_id}", created=created, environment=environment,
-        command=f"axor-lab run-suite {args.suite}",
-    )
-    schema_errors = validate_artifact(artifact, "artifact")
-    if schema_errors:
-        # the artifact IS the deliverable; writing an invalid one and finding out
-        # at publish time is how a run becomes unusable hours later
-        for error in schema_errors:
-            print(f"  [schema] {error}", file=sys.stderr)
-        return EXIT_FAILURE
-    out = Path(args.out)
-    write_bundle_dir(
-        out, artifact["bundle"], run.traces,  # type: ignore[arg-type]
-        overwrite=bool(getattr(args, "overwrite", False)),
-    )
-    (out / "artifact.json").write_text(json.dumps(artifact, indent=2, ensure_ascii=False))
-    # Three outcomes, three exit codes — collapsing them loses the distinction
-    # the whole invariant model rests on. `failed` is a violated invariant.
-    # `error` is one that could NOT be evaluated, which is not a pass either
-    # (an unmeasured latency is not a fast one, lifecycle.md) but is a different
-    # thing to tell a CI than "your change regressed". `skipped` IS fine: the
-    # rule kind executes elsewhere, and failing on it would fail every governed
-    # suite for carrying a verdict_sequence pin.
-    violated = [r for r in run.invariants if r.status == STATUS_FAILED]
-    unevaluable = [r for r in run.invariants if r.status == STATUS_ERROR]
-    print(f"[completed]  artifact: {out}/artifact.json ({len(run.traces)} traces)")
-    print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
-    if violated:
-        print(
-            "  invariants VIOLATED: "
-            + ", ".join(str(r.regression_id) for r in violated),
-            file=sys.stderr,
-        )
+    print(f"[completed]  artifact: {result.directory}/artifact.json "
+          f"({result.trace_count} traces)")
+    print(f"  reproduce verdicts (exact):    axor-lab replay {result.directory}")
+    # Three outcomes, three exit codes — collapsing them loses the distinction the
+    # whole invariant model rests on. `failed` is a violated invariant; `error` is
+    # one that could NOT be evaluated, which is not a pass either but is a
+    # different thing to tell a CI than "your change regressed".
+    if result.violated:
+        print("  invariants VIOLATED: "
+              + ", ".join(str(r.regression_id) for r in result.violated), file=sys.stderr)
         return EXIT_REGRESSION_DIFFERS
-    if unevaluable:
-        print(
-            "  invariants could not be evaluated: "
-            + ", ".join(f"{r.regression_id} ({r.detail})" for r in unevaluable),
-            file=sys.stderr,
-        )
+    if result.unevaluable:
+        print("  invariants could not be evaluated: "
+              + ", ".join(f"{r.regression_id} ({r.detail})" for r in result.unevaluable),
+              file=sys.stderr)
         return EXIT_FAILURE
     return EXIT_OK
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    """The lifecycle stages a run passes through, printed as it goes. The work on
+    either side of the confirm gate lives in `lab_service.experiments`; the GATE
+    is the face's — a prompt here, `POST /runs/{id}/confirm` over HTTP."""
+    from lab_service import execute_run, plan_run
+
     print("[validating]")
-    document = load_axl(Path(args.file))
-    if args.real_kernel:
-        _repin_to_real_kernel(document)
-    resolved = resolve(document)
+    plan = plan_run(
+        load_axl(Path(args.file)),
+        real_kernel=bool(args.real_kernel),
+        run_id=args.run_id,
+    )
+    if plan.repinned_kernel:
+        print("  repinned ALL conditions (baseline + governed) to the real kernel: "
+              f"{plan.repinned_kernel}")
 
     print("[estimate]")
-    _print_estimate(resolved)
+    _print_estimate(plan.resolved)
     if not _confirmed(args):
         print(
             "not confirmed — pass --yes (or answer y) to execute; nothing ran",
@@ -399,92 +353,41 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return EXIT_UNCONFIRMED
 
     print("[running_local]")
-    agent = resolved.agent
-    # run identity folds in the agent, so two runs of the same experiment under
-    # different agents are different runs rather than retries of one (review r3).
-    fingerprint = str(resolved.experiment["agent_ref"])
-    # 128-bit id (32 hex chars) from the experiment+agent fingerprint — the old
-    # 8-char (32-bit) slice was birthday-collision-searchable, so two unrelated
-    # runs could share a run_id and look like retries of one trial (review r7).
-    # For a NONDETERMINISTIC agent a fresh random execution nonce is folded in, so
-    # two live runs of the same experiment are distinct executions (review r13).
-    run_id = _derive_run_id(
-        args.run_id, resolved.experiment, fingerprint,
-        deterministic=bool(getattr(agent, "is_deterministic", True)),
-    )
-    result = run_experiment_suite(
-        list(resolved.scenarios),
-        resolved.manifests,
-        list(resolved.conditions),
-        resolved.kernel_registry,
-        repeats=resolved.repeats,
-        run_id=run_id,
-        agent=agent,
+    result = execute_run(
+        plan,
+        out=Path(args.out),
+        created=args.created,
+        overwrite=bool(getattr(args, "overwrite", False)),
     )
     # report the plan outcome by status separately — "N trials completed" over
-    # result.trials was misleading, since result.trials also holds failed and
-    # cost-excluded records (review r14). planned = everything the plan intended.
-    by_status: dict[str, int] = {}
-    for trial in result.trials:
-        by_status[str(trial["status"])] = by_status.get(str(trial["status"]), 0) + 1
-    n_completed = by_status.get("completed", 0)
-    n_failed = by_status.get("failed", 0)
-    n_excluded = by_status.get("excluded", 0)
+    # every trial record was misleading, since the records also hold failed and
+    # cost-excluded trials (review r14). planned = everything the plan intended.
     print(
-        f"  planned {len(result.trials)}: {n_completed} completed, "
-        f"{n_failed} failed, {n_excluded} excluded"
+        f"  planned {result.planned}: {result.completed} completed, "
+        f"{result.failed} failed, {result.excluded} excluded"
     )
     print("[analyzing]")
-    # missingness FIRST (denominator honesty) — it must be reported even if a
-    # whole condition has no completed trials, so it never depends on aggregates
-    summary = missingness(result.trials)
-    print(f"  {summary.display()}")
-    aggregates = _aggregates(resolved, result, agent)
-    for aggregate in aggregates:
+    # missingness FIRST (denominator honesty)
+    print(f"  {result.missingness}")
+    for aggregate in result.aggregates:
         _print_aggregate(aggregate)
 
     print("[uploading_artifacts]  (local: writing bundle directory)")
-    created = args.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    # no paid inference: the agent is scripted, so there is no spend to record.
-    usage = None
-    bundle = build_bundle(
-        bundle_id=f"b_{run_id}",
-        created=created,
-        scenarios=list(resolved.scenarios),
-        conditions=list(resolved.conditions),
-        tool_manifests=list(resolved.manifests.values()),
-        environment=_environment(resolved, usage=usage, agent=agent),
-        trials=result.trials,
-        aggregates=aggregates,
-        traces=result.traces,
-        packaging=dict(PACKAGING),
-    )
-    out = Path(args.out)
-    write_bundle_dir(out, bundle, result.traces, overwrite=bool(getattr(args, "overwrite", False)))
-    # superseded retry attempts are NOT publishable evidence (they would orphan
-    # the bundle graph), but they ARE the audit trail — persist them beside the
-    # bundle so "both attempts are preserved" holds on disk, not only in the
-    # in-memory result (review r9)
-    attempt_log = write_superseded_attempts(out, result.superseded)
-    if attempt_log is not None:
-        print(f"  superseded attempts: {attempt_log} ({len(result.superseded)})")
-    print(f"[completed]  bundle: {out}/bundle.json ({len(result.traces)} traces)")
-    print(f"  reproduce verdicts (exact):    axor-lab replay {out}")
+    if result.superseded_log is not None:
+        print(f"  superseded attempts: {result.superseded_log} ({result.superseded_count})")
+    print(f"[completed]  bundle: {result.directory}/bundle.json "
+          f"({result.trace_count} traces)")
+    print(f"  reproduce verdicts (exact):    axor-lab replay {result.directory}")
     print(f"  reproduce behavior (fresh):    axor-lab run {args.file} --out <new-dir>")
     return EXIT_OK
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
-    # accept a bundle DIRECTORY or a downloaded .json reproduction package, so a
-    # reader can replay exactly what a publication page served (review r13)
-    bundle, traces = read_bundle_source(Path(args.bundle))
-    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
-    kernels = {k.version: k for k in default_registry(versions).kernels}
-    report = replay_bundle(bundle, traces, kernels)
-    denies = sum(1 for vs in report.verdicts().values() for v in vs if v == "DENY")
-    allows = sum(1 for vs in report.verdicts().values() for v in vs if v == "ALLOW")
-    print(f"replayed {len(report.decisions)} trace(s): {denies} DENY, {allows} ALLOW")
-    if not report.bit_identical:
+    from lab_service import replay_source
+
+    result = replay_source(Path(args.bundle))
+    print(f"replayed {result.decisions} trace(s): {result.denies} DENY, {result.allows} ALLOW")
+    if not result.bit_identical:
         print("MISMATCH: recomputed verdicts differ from recorded", file=sys.stderr)
         return EXIT_FAILURE
     print("bit-identical: verdict-core (verdict+gate+driving value) matches the "
@@ -493,329 +396,95 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-_REPRODUCTION_PACKAGE_SCHEMA = "axor-reproduction-package/v1"
-
-
-def _package_data(path: Path) -> dict[str, object] | None:
-    """The raw JSON of a downloaded `.json` package, or None for a bundle
-    DIRECTORY (which ships no receipt/publication/acceptance)."""
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def _cmd_verify(args: argparse.Namespace) -> int:
     """Standalone, offline verification of a downloaded reproduction package —
-    NO server trusted. Confirms content hashes, bit-identical replay, and — for a
-    server-issued package — that EVERY proof object is present and binds: the
-    author receipt (signed_ref/signature), the publication (id + bundle_ref +
-    claims), and the server acceptance (semantic report + signature). Stripping
-    any proof from a server package is a failure, not a silent pass (review r16)."""
-    path = Path(args.package)
-    bundle, traces = read_bundle_source(path)
-    print(f"content hashes: OK ({len(traces)} trace(s), {len(bundle['conditions'])} conditions)")  # type: ignore[arg-type]
-    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
-    kernels = {k.version: k for k in default_registry(versions).kernels}
-    report = replay_bundle(bundle, traces, kernels)
-    if not report.bit_identical:
-        print("replay MISMATCH: recomputed verdicts differ from recorded", file=sys.stderr)
-        return EXIT_FAILURE
-    print(f"replay: bit-identical over {len(report.decisions)} trace(s)")
+    NO server trusted. The checks live in `lab_service.packages`; this prints
+    them and maps the outcome to an exit code."""
+    from lab_service import CheckStatus, Outcome, verify_package
 
-    # A bundle DIRECTORY is a local artifact that never carried server proofs — it
-    # verifies as bundle-integrity + replay only, and cannot be "downgraded".
-    if path.is_dir():
-        print("receipt: none (a bundle directory carries no portable receipt)")
-        return EXIT_OK
-
-    data = _package_data(path)
-    # A downloaded `.json` MUST be a VERSIONED reproduction envelope. Detection can
-    # no longer key on the PRESENCE of a publication/acceptance/receipt: an
-    # attacker downgrades a server package to a bare {bundle,traces} by stripping
-    # the envelope AND every proof at once, and autodetection then reads it as an
-    # honest bare package and exits 0. The envelope schema_version is the one
-    # marker whose ABSENCE is meaningful — a bare file without --allow-bare is
-    # refused, so a stripped server package cannot masquerade as bare (review r17).
-    has_envelope = bool(data) and str(data.get("schema_version")) == _REPRODUCTION_PACKAGE_SCHEMA
-    if not has_envelope:
-        if not getattr(args, "allow_bare", False):
-            print(
-                f"package: NOT a versioned reproduction envelope (missing schema_version "
-                f"{_REPRODUCTION_PACKAGE_SCHEMA!r}). A server package cannot be silently "
-                "downgraded to a bare bundle — pass --allow-bare to verify a local "
-                "bundle+traces file as bare (integrity + replay only, no server proofs).",
-                file=sys.stderr,
-            )
-            return EXIT_VALIDATION
-        print("package: bare (bundle+traces only, --allow-bare) — no server proofs to check")
-        return EXIT_OK
-
-    assert data is not None
-    receipt = data.get("receipt")
-    if not isinstance(receipt, dict):
-        print("receipt: MISSING from a server package (stripped?) — refusing to pass",
-              file=sys.stderr)
-        return EXIT_FAILURE
-
-    from lab_contracts.publication import verify_publication_binding
-    from lab_contracts.signing import (
-        SignatureInvalid,
-        SignatureUnavailable,
-        verify_acceptance,
-        verify_receipt,
+    result = verify_package(
+        Path(args.package),
+        pubkey=getattr(args, "pubkey", None),
+        author=getattr(args, "author", None),
+        server_pubkey=getattr(args, "server_pubkey", None),
+        server=getattr(args, "server", None),
+        server_key_id=getattr(args, "server_key_id", None),
+        allow_bare=bool(getattr(args, "allow_bare", False)),
+        allow_unsigned_server=bool(getattr(args, "allow_unsigned_server", False)),
     )
-
-    unverified = False  # a signature we could not check (distinct from invalid)
-    # 1) author receipt
-    try:
-        verify_receipt(bundle, receipt, getattr(args, "pubkey", None),
-                       expected_author=getattr(args, "author", None))
-    except SignatureInvalid as exc:
-        print(f"receipt: INVALID — {exc}", file=sys.stderr)
-        return EXIT_FAILURE
-    except SignatureUnavailable as exc:
-        print(f"receipt: UNVERIFIED — {exc}", file=sys.stderr)
-        unverified = True
-    else:
-        kind = "signature VERIFIED" if str(receipt.get("integrity")) == "signed" else "signed_ref OK (hash-only)"
-        print(f"receipt: {kind}")
-
-    publication = data.get("publication")
-    acceptance = data.get("acceptance")
-    if not isinstance(publication, dict) or not isinstance(acceptance, dict):
-        print("package: MISSING publication or acceptance (server package) — refusing to pass",
-              file=sys.stderr)
-        return EXIT_FAILURE
-    # 2) publication binds to the bundle and its own id
-    problems = verify_publication_binding(publication, bundle)
-    if problems:
-        print("publication: INVALID — " + "; ".join(problems[:5]), file=sys.stderr)
-        return EXIT_FAILURE
-    print("publication: bound (id + bundle_ref + claims)")
-    # 2b) the AUTHOR receipt's integrity must match the publication's — otherwise a
-    # `signed` publication can be downgraded by swapping in a valid hash-only
-    # receipt (the author signature stripped) while the server acceptance stays
-    # signed, and verify would still exit 0. The portable author receipt exists
-    # precisely to prove author authenticity WITHOUT trusting the server, so a
-    # signed publication must carry a signed, VERIFIED author receipt (review r18).
-    pub_integrity = str(publication.get("integrity", "hash_verified"))
-    receipt_integrity = str(receipt.get("integrity", "hash_verified"))
-    if receipt_integrity != pub_integrity:
-        print(
-            f"receipt: INTEGRITY MISMATCH — receipt is {receipt_integrity!r} but the "
-            f"publication is {pub_integrity!r} (author-signature downgrade?) — refusing to pass",
-            file=sys.stderr,
-        )
-        return EXIT_FAILURE
-    if pub_integrity == "signed" and not getattr(args, "pubkey", None):
-        # a signed publication whose author signature we hold no key to check is
-        # UNVERIFIED, never a pass (the server acceptance is a separate attestation)
-        print(
-            "receipt: UNVERIFIED — signed publication but no author public key (--pubkey) "
-            "was supplied to verify its receipt",
-            file=sys.stderr,
-        )
-        unverified = True
-    # 3) server acceptance binds + (optionally) verifies. verify_acceptance also
-    # requires acceptance.integrity == publication.integrity. v0.3 keeps a single
-    # acceptance/v1 form: a server that finds its persisted acceptance damaged
-    # simply re-mints a fresh acceptance/v1 from the current bundle on load, so
-    # there is no reacceptance/history chain to resolve here.
-    try:
-        verify_acceptance(
-            acceptance, publication,
-            server_pubkey_hex=getattr(args, "server_pubkey", None),
-            expected_server=getattr(args, "server", None),
-            expected_key_id=getattr(args, "server_key_id", None),
-        )
-    except SignatureInvalid as exc:
-        print(f"acceptance: INVALID — {exc}", file=sys.stderr)
-        return EXIT_FAILURE
-    except SignatureUnavailable as exc:
-        print(f"acceptance: UNVERIFIED — {exc}", file=sys.stderr)
-        unverified = True
-    else:
-        if str(acceptance.get("algorithm")) == "ed25519":
-            print("acceptance: signature VERIFIED")
-        elif getattr(args, "allow_unsigned_server", False):
-            print("acceptance: unsigned (accepted via --allow-unsigned-server; local dev only)")
-        else:
-            # an UNSIGNED acceptance proves only internal self-consistency, NOT that
-            # a specific Axor Lab server ran the checks — anyone can mint one. It is
-            # not an authenticated server verification, so it is UNVERIFIED (r17).
-            print(
-                "acceptance: UNVERIFIED — unsigned server acceptance is not an authenticated "
-                "verification (pass --server-pubkey to check a signed one, or "
-                "--allow-unsigned-server for local development)",
-                file=sys.stderr,
-            )
-            unverified = True
-
-    return EXIT_UNVERIFIED if unverified else EXIT_OK
+    for check in result.checks:
+        stream = sys.stdout if check.status is CheckStatus.OK else sys.stderr
+        print(f"{check.name}: {check.message}", file=stream)
+    return {
+        Outcome.OK: EXIT_OK,
+        Outcome.VALIDATION: EXIT_VALIDATION,
+        Outcome.UNVERIFIED: EXIT_UNVERIFIED,
+    }.get(result.outcome, EXIT_FAILURE)
 
 
 def _cmd_pin(args: argparse.Namespace) -> int:
+    from lab_service import pin_trace
+
     _, traces = read_bundle_dir(Path(args.bundle))
-    trace = traces.get(args.trace_id)
-    if trace is None:
-        raise RunnerError(f"trace {args.trace_id} not found in bundle")
     out = Path(args.out)
-    pins: list[dict[str, object]] = json.loads(out.read_text()) if out.is_file() else []
-    pins = [p for p in pins if p["trace_id"] != args.trace_id]
-    # use the regression model's pin(), which records the WHOLE ordered verdict
-    # sequence — not just the final verdict. Persisting only expected_verdict made
-    # regress compare a multi-call trace's real sequence (ALLOW, ALLOW, DENY) to a
-    # singleton (DENY) and cry regression on an unchanged trace/kernel (review r12).
-    # pin() also rejects an expected_verdict that contradicts the trace's final
-    # recorded verdict (review r13) — surface that as a clean CLI error.
-    try:
-        p = pin(trace, args.expected)
-    except ValueError as exc:
-        raise RunnerError(str(exc)) from exc
-    pins.append(
-        {
-            "trace_id": p.trace_id,
-            "trace_ref": p.trace_ref,
-            "expected_verdict": p.expected_verdict,
-            "expected_sequence": list(p.expected_sequence),
-        }
-    )
-    out.write_text(json.dumps(pins, indent=2))
-    print(f"pinned {args.trace_id} -> expected {list(p.expected_sequence)} ({out})")
+    existing: list[dict[str, object]] = json.loads(out.read_text()) if out.is_file() else []
+    result = pin_trace(traces, args.trace_id, args.expected, existing=existing)
+    out.write_text(json.dumps(list(result.pins), indent=2))
+    print(f"pinned {result.trace_id} -> expected {list(result.expected_sequence)} ({out})")
     return EXIT_OK
 
 
 def _cmd_regress(args: argparse.Namespace) -> int:
+    from lab_service import Outcome, check_regression
+
     bundle, traces = read_bundle_dir(Path(args.bundle))
-    pins_raw: list[dict[str, object]] = json.loads(Path(args.pins).read_text())
-    pins = tuple(
-        RegressionPin(
-            trace_id=str(p["trace_id"]),
-            trace_ref=str(p["trace_ref"]),
-            expected_verdict=str(p["expected_verdict"]),
-            # restore the pinned ORDERED sequence (default to the singleton for
-            # older pin files) so a multi-call trace is compared correctly (r12)
-            expected_sequence=tuple(str(v) for v in p.get("expected_sequence", ())),
-        )
-        for p in pins_raw
+    result = check_regression(
+        bundle, traces, json.loads(Path(args.pins).read_text()),
+        condition_id=args.condition,
+        kernel_override=args.kernel,
+        disable_taint_floor=bool(args.disable_taint_floor),
     )
-    condition = _enforcing_condition(bundle, args.condition)
-    version = args.kernel or str(condition["kernel"])
-    manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
-    kernel_for = None
-    if args.disable_taint_floor:
-        # An explicit real-kernel VARIANT demonstration: the same installed
-        # build, but with its egress-sink declarations dropped so the taint /
-        # confidentiality floor is never armed — the exfiltration the pinned run
-        # DENIED is now ALLOWED, which is exactly the regression a pin exists to
-        # catch. The fingerprint marks it a different kernel (behavior_version
-        # gains `+taint_floor=off`), so the report names the variant, not the
-        # pinned build (review r4).
-        cfg = governor_config(manifests, condition.get("policy"), None)  # type: ignore[arg-type]
-        cfg.pop("egress_sinks", None)
-        cfg.pop("value_policies", None)
-        kernel: object = AxorKernel(version=version, config=cfg, taint_floor_enabled=False)
-    else:
-        # regress under the CANDIDATE kernel — the one named by --kernel or the
-        # chosen regression condition — NOT the kernel the trace was recorded
-        # under (review r18). Each pin resolves the candidate against its OWN
-        # scenario inputs so a real-kernel allowlist expands per scenario. The
-        # candidate resolver takes policy/enforcement from the selected condition
-        # and the version from the override, so `regress --kernel axor-core@X`
-        # actually runs axor-core@X.
-        registry = default_registry((version,))
-        kernel = resolve_kernel(version, manifests, condition.get("policy"), registry)  # type: ignore[arg-type]
-        kernel_for = lambda trace: resolve_candidate_kernel_for_trace(  # noqa: E731
-            bundle, trace, condition, args.kernel, registry
-        )
-    # each pinned trace replays against ITS OWN scenario's inputs — a single
-    # shared inputs dict would replay every pin under the first scenario's
-    # allowlist / effect-resolution inputs (review r12)
-    results = check_pins(
-        pins, traces, condition, kernel, manifests,
-        inputs_for=lambda trace: _scenario_for(bundle, trace).get("inputs", {}),  # type: ignore[union-attr,arg-type]
-        kernel_for=kernel_for,
-    )
-    for result in results:
+    for entry in result.results:
         print(
-            f"{result['trace_id']}: expected {result['expected']}, got {result['actual']} "
-            f"under {result['kernel']} -> {result['status']}"
+            f"{entry['trace_id']}: expected {entry['expected']}, got {entry['actual']} "
+            f"under {entry['kernel']} -> {entry['status']}"
         )
-    # ANY status other than a clean match is unresolved — a differing verdict, a
-    # missing/tampered/malformed trace, or an unsupported kernel. A malformed
-    # trace whose recomputed sequence coincidentally equals the pin used to fall
-    # through to EXIT_OK; it must NOT (review r13).
-    differs = [r for r in results if r["status"] == STATUS_DIFFERS]
-    unresolved = [r for r in results if r["status"] != STATUS_MATCHES]
-    if unresolved:
-        if differs:
+    if result.outcome is Outcome.REGRESSION_DIFFERS:
+        if result.differs:
             print(
-                f"{len(differs)} pin(s) differ from expected — label each as regression "
+                f"{len(result.differs)} pin(s) differ from expected — label each as regression "
                 "or approved baseline update (not auto-resolved)",
                 file=sys.stderr,
             )
-        other = [r for r in unresolved if r["status"] != STATUS_DIFFERS]
-        if other:
+        if result.other_unresolved:
             print(
-                f"{len(other)} pin(s) could not be cleanly replayed "
+                f"{len(result.other_unresolved)} pin(s) could not be cleanly replayed "
                 "(missing / tampered / malformed / unsupported kernel) — not a pass",
                 file=sys.stderr,
             )
         return EXIT_REGRESSION_DIFFERS
-    print(f"all {len(results)} pin(s) match expected verdicts")
+    print(f"all {len(result.results)} pin(s) match expected verdicts")
     return EXIT_OK
 
 
 def _cmd_evidence(args: argparse.Namespace) -> int:
+    from lab_service import build_evidence
+
     bundle, traces = read_bundle_dir(Path(args.bundle))
-    trace = traces.get(args.trace_id)
-    if trace is None:
-        raise RunnerError(f"trace {args.trace_id} not found in bundle")
-    twin = traces.get(args.twin) if args.twin else None
-    if args.twin and twin is None:
-        raise RunnerError(f"twin trace {args.twin} not found in bundle")
-    if twin is not None:
-        # a governed twin must be the SAME case under an enforcing policy — not
-        # any unrelated trace the caller happened to name (review r13)
-        try:
-            validate_twin(trace, twin, bundle)
-        except ValueError as exc:
-            raise RunnerError(str(exc)) from exc
-    scenario = _scenario_for(bundle, trace)
-    # the SAME condition resolver the HTML EvidenceCase uses: an explicit
-    # --policy wins, else the trace's own enforcing condition, else the first
-    # enforcing one — never just "the first enforcement-on condition", which
-    # rendered a strict counterfactual for an allowlist trace (review r13)
-    try:
-        condition = evidence_condition(bundle, trace, getattr(args, "policy", None))
-    except ValueError as exc:
-        raise RunnerError(str(exc)) from exc
-    manifests = {str(m["id"]): m for m in bundle["tool_manifests"]}  # type: ignore[union-attr]
-    # resolve the SAME kernel replay/regress use — the REAL axor-core governor
-    # when the condition pins the installed build — and pass THIS trace's scenario
-    # inputs so a real-kernel `$inputs` allowlist expands to the concrete values,
-    # not the symbolic ref (review r12/r17). The condition may be a policy-override
-    # counterfactual, so we keep it and only thread the scenario inputs.
-    version = str(condition["kernel"])
-    kernel = resolve_kernel(
-        version, manifests, condition.get("policy"),  # type: ignore[arg-type]
-        default_registry((version,)), scenario.get("inputs", {}),  # type: ignore[union-attr]
+    result = build_evidence(
+        bundle, traces, args.trace_id,
+        twin_id=args.twin,
+        policy=getattr(args, "policy", None),
     )
-    case = build_evidence_case(trace, scenario, condition, kernel, manifests, governed_twin=twin)
-    print(json.dumps(case, indent=2, ensure_ascii=False))
+    print(json.dumps(result.case, indent=2, ensure_ascii=False))
     return EXIT_OK
 
 
 def _cmd_publish(args: argparse.Namespace) -> int:
+    from lab_service import build_local_publication, check_publishable
+
     bundle, traces = read_bundle_dir(Path(args.bundle))
-    versions = tuple(str(c["kernel"]) for c in bundle["conditions"])  # type: ignore[union-attr]
-    kernels = {k.version: k for k in default_registry(versions).kernels}
-    report = replay_bundle(bundle, traces, kernels)
-    if not report.bit_identical:
+    if not check_publishable(bundle, traces):
         print("refusing to publish: recomputed verdicts differ from recorded", file=sys.stderr)
         return EXIT_FAILURE
 
@@ -824,60 +493,20 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     if not args.out:
         raise RunnerError("publish needs --out (local publication JSON) or --server (upload)")
 
-    bundle_ref = content_hash(bundle)
-    trace_refs = frozenset(content_hash(t) for t in traces.values())
-    aggregates: list[dict[str, object]] = bundle["aggregates"]  # type: ignore[assignment]
-    aggregate_refs = frozenset(
-        f"agg:{a['metric']}:{a['condition_id']}" for a in aggregates
-    )
-    claims: list[dict[str, object]] = []
-    denied = _first_denied_trace(traces)
-    if denied is not None:
-        claims.append(
-            make_claim(
-                "exactly_replayable",
-                # same decision-derived text the server uses — not a template
-                deny_claim_text(denied),
-                content_hash(denied),
-                trace_refs=trace_refs,
-                aggregate_refs=aggregate_refs,
-            )
-        )
-    # local publish proves REPLAY (it re-ran the verdicts above), NOT statistics:
-    # it does not independently recompute the aggregates, so it must NOT mint a
-    # `statistically_reproducible` claim over self-reported numbers — the schema
-    # forbids self_reported backing that claim, and a hand-edited bundle could
-    # carry a fabricated aggregate. Statistical claims are minted only by the
-    # server, which recomputes from the traces (→ recomputed_from_traces, r12).
-    stat_note = ""
-    if aggregates:
-        stat_note = (
-            f"  ({len(aggregates)} aggregate(s) in the bundle are NOT published as claims — "
-            "host with --server for server-recomputed statistical claims)"
-        )
-    publication = build_publication(
-        publication_id="e_pending",  # placeholder; content-addressed below
-        bundle_ref=bundle_ref,
+    result = build_local_publication(
+        bundle, traces,
         question=args.question,
-        origin="local",
-        integrity="hash_verified",
-        claims=claims,
         license_id=args.license,
         visibility=getattr(args, "visibility", "unlisted"),
-        statistics_integrity=None,  # no statistical claims are asserted locally
     )
-    # content-address the WHOLE body (the shared definition), so the same bundle
-    # published with a different question/visibility/license is a genuinely
-    # different publication with its own id, not an id-colliding overwrite (r12)
-    finalize_publication_id(publication)
-    errors = validate_artifact(publication, "publication")
-    if errors:
-        raise RunnerError(f"publication failed schema validation: {errors}")
-    Path(args.out).write_text(json.dumps(publication, indent=2, ensure_ascii=False))
-    print(f"publication {publication['publication_id']} -> {args.out}")
+    Path(args.out).write_text(json.dumps(result.publication, indent=2, ensure_ascii=False))
+    print(f"publication {result.publication_id} -> {args.out}")
     print("origin=local integrity=hash_verified")
-    if stat_note:
-        print(stat_note)
+    if result.aggregate_count:
+        print(
+            f"  ({result.aggregate_count} aggregate(s) in the bundle are NOT published as "
+            "claims — host with --server for server-recomputed statistical claims)"
+        )
     print(f"host it: axor-lab publish {args.bundle} --question ... --server <url>")
     return EXIT_OK
 
@@ -887,66 +516,54 @@ def _publish_to_server(
     bundle: dict[str, object],
     traces: dict[str, dict[str, object]],
 ) -> int:
-    """Upload via the publish handshake; the server re-verifies before minting."""
-    import urllib.error
-    import urllib.request
+    """The CLI half of a hosted publish: resolve the token from the ENVIRONMENT,
+    hand the upload to `lab_service.publishing`, then save the receipt the server
+    issued. The token is read from the environment, never a CLI arg, so it does
+    not land in the process list or shell history (review r6)."""
+    from lab_service import Outcome, default_acceptance_path, upload_publication
 
     visibility = getattr(args, "visibility", "unlisted")
     if visibility == "public":
         print("NOTE: --visibility public — this artifact will be publicly listed on the server.")
-    body: dict[str, object] = {
-        "bundle": bundle,
-        "traces": traces,
-        "question": args.question,
-        "license": args.license,
-        "visibility": visibility,
-    }
-    # a signed, attributed upload: author + detached signature travel in the body
-    if getattr(args, "author", None):
-        body["author"] = args.author
-    if getattr(args, "signature_file", None):
-        body["signature"] = Path(args.signature_file).read_text().strip()
-    payload = json.dumps(body).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    # the write token is read from the ENVIRONMENT, never a CLI arg, so it does
-    # not land in the process list or shell history (review r6)
+    token = None
     if getattr(args, "token_env", None):
         import os
+
         token = os.environ.get(args.token_env)
         if not token:
             raise RunnerError(f"--token-env {args.token_env} is not set in the environment")
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        args.server.rstrip("/") + "/api/publications",
-        data=payload,
-        headers=headers,
-        method="POST",
+    signature = None
+    if getattr(args, "signature_file", None):
+        signature = Path(args.signature_file).read_text().strip()
+    result = upload_publication(
+        bundle, traces,
+        server=args.server,
+        question=args.question,
+        license_id=args.license,
+        visibility=visibility,
+        author=getattr(args, "author", None),
+        signature=signature,
+        token=token,
     )
-    try:
-        with urllib.request.urlopen(request) as response:  # noqa: S310 (operator-supplied URL)
-            result = json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        print(f"server rejected publish ({exc.code}): {detail}", file=sys.stderr)
+    if result.outcome is not Outcome.OK:
+        print(f"server rejected publish ({result.status}): {result.error}", file=sys.stderr)
         return EXIT_FAILURE
-    except urllib.error.URLError as exc:
-        raise RunnerError(f"cannot reach server {args.server}: {exc.reason}") from exc
-    print(f"published {result['publication_id']} -> {args.server.rstrip('/')}{result['url']}")
+    print(f"published {result.publication_id} -> {args.server.rstrip('/')}{result.url}")
     # SAVE the server acceptance receipt — the signed proof of what the server
     # verified. The old CLI dropped it on the floor (review r15). Default to a
     # sidecar file next to the bundle, or an explicit --acceptance-out.
-    acceptance = result.get("acceptance")
-    if acceptance is not None:
+    if result.acceptance is not None:
         dest = getattr(args, "acceptance_out", None)
-        out_path = Path(dest) if dest else Path(f"{result['publication_id']}.acceptance.json")
-        out_path.write_text(json.dumps(acceptance, indent=2))
-        signed = acceptance.get("algorithm") == "ed25519"
-        print(f"  acceptance receipt: {out_path} ({'signed' if signed else 'unsigned'})")
+        out_path = Path(dest) if dest else default_acceptance_path(result.publication_id)
+        out_path.write_text(json.dumps(result.acceptance, indent=2))
+        print(f"  acceptance receipt: {out_path} "
+              f"({'signed' if result.acceptance_is_signed else 'unsigned'})")
     return EXIT_OK
 
 
 def _cmd_export_cp(args: argparse.Namespace) -> int:
-    from lab_capabilities.governance.cp_export import CPExportError, export_cp
+    from lab_capabilities.governance.cp_export import CPExportError
+    from lab_service import OutputRefused, export_cp_package
 
     bundle, traces = read_bundle_dir(Path(args.bundle))
     regressions: list[dict[str, object]] = []
@@ -956,560 +573,108 @@ def _cmd_export_cp(args: argparse.Namespace) -> int:
         # carries the pin into a production Control Plane config (review r12)
         regressions = list(json.loads(Path(args.pins).read_text()))
     try:
-        export = export_cp(bundle, regressions, condition_id=args.condition, traces=traces)
-    except CPExportError as exc:
-        raise RunnerError(str(exc)) from exc
-    import shutil
-
-    final = Path(args.out)
-    # a re-export must NOT leave stale files behind (review r20): an earlier export
-    # with an earned bridge, or extra regression traces, would linger and the
-    # manifest verifier would flag them — or worse, a reader would trust them. A
-    # non-empty directory requires --overwrite, and --overwrite REPLACES it wholly.
-    if final.exists() and any(final.iterdir()) and not getattr(args, "overwrite", False):
-        raise RunnerError(f"{final} is not empty; pass --overwrite to replace it")
-    # build the WHOLE export in a staging directory, then swap it into place
-    # atomically (review r21): a crash mid-write no longer leaves the previous valid
-    # signed handoff destroyed AND the new one half-written with a missing manifest.
-    staging = final.with_name(final.name + ".staging")
-    if staging.exists():
-        shutil.rmtree(staging)
-    out = staging
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "cp-deploy.json").write_text(json.dumps(export.config, indent=2, ensure_ascii=False))
-    (out / "production-todo.md").write_text(export.production_todo)
-    # make the export SELF-CONTAINED (review r19): write the full source bundle +
-    # ALL its traces (scenarios, predicates, inputs, trials, provenance all travel)
-    # so `axor-lab verify-cp-export` can recompute the graph, the bridge, and the
-    # runtime provenance from the directory ALONE — bridge-traces/ carries only the
-    # bridge's own traces, which is not enough to re-derive the whole handoff.
-    write_bundle_dir(out / "source-bundle", bundle, traces, overwrite=True)
-    # export the FROZEN pinned trace BODIES alongside the config so the
-    # regressions are actually portable — cp-deploy.json carries each pin's
-    # content hash, but a hash is not the bytes to replay on another machine
-    # (review r13). Each is written content-addressed under regression-traces/.
-    carried: list[dict[str, object]] = export.config["regressions"]  # type: ignore[assignment]
-    if carried:
-        by_ref = {content_hash(t): t for t in traces.values()}
-        rt_dir = out / "regression-traces"
-        rt_dir.mkdir(exist_ok=True)
-        for pin in carried:
-            ref = str(pin["trace_ref"])
-            trace = by_ref[ref]  # export_cp already verified the ref resolves
-            (rt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
-                json.dumps(trace, indent=2, ensure_ascii=False)
-            )
-    source: dict[str, object] = export.config["source"]  # type: ignore[assignment]
-    # export the FROZEN bridge trace BODIES so the earned-bridge analysis is
-    # independently recomputable from the export directory alone — the analysis
-    # receipt carries only trace hashes, not the bytes to re-evaluate the
-    # violation predicate over (review r18)
-    analysis: dict[str, object] | None = source.get("bridge_analysis")  # type: ignore[assignment]
-    if analysis is not None:
-        # the analysis receipt as its own file, content-addressed by the ref the
-        # deploy config carries, so a reader can check it independently (review r19)
-        (out / "bridge-analysis.json").write_text(
-            json.dumps(analysis, indent=2, ensure_ascii=False)
+        result = export_cp_package(
+            bundle, traces,
+            out=Path(args.out),
+            regressions=regressions,
+            condition_id=args.condition,
+            overwrite=bool(getattr(args, "overwrite", False)),
+            author=getattr(args, "author", None),
+            sign_key=getattr(args, "sign_key", None),
         )
-        by_ref = {content_hash(t): t for t in traces.values()}
-        bt_dir = out / "bridge-traces"
-        bt_dir.mkdir(exist_ok=True)
-        trial_refs: dict[str, list[str]] = analysis["trial_refs"]  # type: ignore[assignment]
-        for refs in trial_refs.values():
-            for ref in refs:
-                trace = by_ref.get(ref)
-                if trace is not None:
-                    (bt_dir / (ref.removeprefix("sha256:") + ".json")).write_text(
-                        json.dumps(trace, indent=2, ensure_ascii=False)
-                    )
-    # a full-file MANIFEST binds EVERY file in the export, so verify-cp-export
-    # checks the whole directory (not just cp-deploy.json + source-bundle) and can
-    # detect a tampered bridge-analysis, a swapped trace, or a stale leftover. When
-    # an author key is supplied it is SIGNED, so a reader can confirm WHO released
-    # this exact handoff — derivability is not authenticity (review r20).
-    manifest = _cp_export_manifest(out, export.config)
-    if getattr(args, "author", None) and getattr(args, "sign_key", None):
-        from lab_contracts.signing import sign_bundle
-
-        manifest["author"] = args.author
-        manifest["signature"] = sign_bundle(manifest, args.sign_key)
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    # ATOMIC SWAP: the staging tree is complete (manifest last), so replace the
-    # previous export in one move — old to a backup, staging to final, then drop the
-    # backup. A crash leaves either the intact old export or the intact new one,
-    # never a half-written directory with a missing/partial manifest (review r21).
-    if final.exists():
-        backup = final.with_name(final.name + ".old")
-        if backup.exists():
-            shutil.rmtree(backup)
-        os.replace(final, backup)
-        os.replace(staging, final)
-        shutil.rmtree(backup)
-    else:
-        final.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staging, final)
-    out = final
-    print(f"exported CP deploy config -> {out}/cp-deploy.json")
-    print(f"  manifest: {len(manifest['files'])} files"
-          + (" (signed)" if manifest.get("signature") else " (unsigned — derivability + integrity only)"))
-    print(f"  condition: {source['condition_id']} (baseline: {source['baseline_condition_id']})")
+    except (CPExportError, OutputRefused) as exc:
+        raise RunnerError(str(exc)) from exc
+    print(f"exported CP deploy config -> {result.deploy_config}")
+    print(f"  manifest: {result.manifest_file_count} files"
+          + (" (signed)" if result.signed else " (unsigned — derivability + integrity only)"))
+    print(f"  condition: {result.condition_id} (baseline: {result.baseline_condition_id})")
     # the parametric_config_hash is the carry-over key: kernel + policy + manifests
     # (effect classes, driving args, untrusted-field taint) with allowlist $inputs
     # left SYMBOLIC — the same parametric policy transfers, re-parameterized with
     # production inputs. It is NOT a byte-identical runtime config: that depends on
     # scenario inputs and is recorded per-scenario as runtime_config_hashes (r17).
-    print(f"  parametric_config_hash (carry-over key): {export.config['parametric_config_hash']}")
-    print(f"  config_hash (kernel+policy anchor): {export.config['config_hash']}")
-    runtime_hashes: dict[str, object] = export.config["runtime_config_hashes"]  # type: ignore[assignment]
-    if runtime_hashes:
-        print(f"  runtime_config_hashes (per-scenario concrete config): {len(runtime_hashes)} scenario(s)")
-    print(f"  regressions carried: {len(carried)}"
-          + (f" (frozen trace bodies in {out}/regression-traces/)" if carried else ""))
-    print(f"  production-todo (NOT reused): {out}/production-todo.md")
-    if export.earned_bridge:
-        print(f"  earned bridge: {source['condition_id']} changed the outcome vs "
-              f"{source['baseline_condition_id']} — run THIS governed config in production.")
+    print(f"  parametric_config_hash (carry-over key): {result.parametric_config_hash}")
+    print(f"  config_hash (kernel+policy anchor): {result.config_hash}")
+    if result.runtime_config_hash_count:
+        print("  runtime_config_hashes (per-scenario concrete config): "
+              f"{result.runtime_config_hash_count} scenario(s)")
+    print(f"  regressions carried: {result.regressions_carried}"
+          + (f" (frozen trace bodies in {result.regression_traces}/)"
+             if result.regressions_carried else ""))
+    print(f"  production-todo (NOT reused): {result.production_todo}")
+    if result.earned_bridge:
+        print(f"  earned bridge: {result.condition_id} changed the outcome vs "
+              f"{result.baseline_condition_id} — run THIS governed config in production.")
     else:
         print("  note: no aggregate shows governance changed an outcome yet "
               "(the bridge surfaces once one does).")
     return EXIT_OK
 
 
-def _cp_export_manifest(out: Path, config: dict[str, object]) -> dict[str, object]:
-    """A versioned, full-file manifest of a CP export directory (review r20): the
-    sha256 of EVERY file, plus the semantic refs (deploy config, source bundle,
-    regression set) an author signs over. verify-cp-export uses it to detect a
-    tampered bridge-analysis, a swapped trace, OR a stale leftover file — not just
-    to recompute cp-deploy.json."""
-    import hashlib
-
-    files: dict[str, str] = {}
-    root_manifest = out / "manifest.json"
-    for path in sorted(out.rglob("*")):
-        # exclude ONLY the ROOT manifest.json — a NESTED file that happens to be
-        # named manifest.json (e.g. source-bundle/manifest.json) IS bound, so a
-        # "full-file" manifest is actually full (review r21)
-        if path.is_file() and path != root_manifest and not path.is_symlink():
-            rel = str(path.relative_to(out)).replace("\\", "/")
-            files[rel] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    src: dict[str, object] = config.get("source", {})  # type: ignore[assignment]
-    return {
-        "schema_version": "axor-cp-export-manifest/v1",
-        "condition_id": src.get("condition_id"),
-        "baseline_condition_id": src.get("baseline_condition_id"),
-        "deploy_config_ref": content_hash(config),
-        "source_bundle_ref": files.get("source-bundle/bundle.json"),
-        "regression_set_ref": content_hash(config.get("regressions", [])),
-        "bridge_analysis_ref": src.get("bridge_analysis_ref"),
-        "files": files,
-    }
-
-
-def _safe_export_path(directory: Path, rel: str) -> Path | None:
-    """Resolve a manifest-listed relative path, confined to `directory`. Returns
-    None for an absolute path, a `..` escape, or one that resolves (through a
-    symlink) outside the export tree — the manifest is untrusted until verified,
-    so a listed path must never read outside the directory (review r21)."""
-    if not rel or rel.startswith("/") or "\\" in rel:
-        return None
-    parts = rel.split("/")
-    if any(p in ("", "..", ".") for p in parts):
-        return None
-    candidate = directory / rel
-    if candidate.is_symlink():
-        return None
-    try:
-        resolved = candidate.resolve()
-        resolved.relative_to(directory.resolve())
-    except (ValueError, OSError):
-        return None
-    return candidate
-
-
-def _verify_manifest_semantic_refs(
-    manifest: dict[str, object], shipped: dict[str, object], files: dict[str, str]
-) -> str | None:
-    """Confirm each SEMANTIC ref the manifest names actually matches its artifact
-    (review r21). A signed manifest whose deploy_config_ref / source_bundle_ref /
-    regression_set_ref / bridge_analysis_ref point at the wrong bytes would verify
-    its own signature and recompute a config while MISDESCRIBING what it bundles.
-    Returns a problem string, or None when every ref matches."""
-    if str(manifest.get("deploy_config_ref")) != content_hash(shipped):
-        return "manifest deploy_config_ref does not match cp-deploy.json"
-    src: dict[str, object] = shipped.get("source", {})  # type: ignore[assignment]
-    if str(manifest.get("regression_set_ref")) != content_hash(shipped.get("regressions", [])):
-        return "manifest regression_set_ref does not match the shipped regressions"
-    want_bundle = files.get("source-bundle/bundle.json")
-    if want_bundle is not None and str(manifest.get("source_bundle_ref")) != str(want_bundle):
-        return "manifest source_bundle_ref does not match source-bundle/bundle.json"
-    # the bridge analysis ref must agree BOTH with the deploy config's own ref and,
-    # when a bridge-analysis.json is shipped, with that file's content
-    if str(manifest.get("bridge_analysis_ref") or "") != str(src.get("bridge_analysis_ref") or ""):
-        return "manifest bridge_analysis_ref does not match the deploy config's bridge_analysis_ref"
-    return None
-
-
 def _cmd_verify_cp_export(args: argparse.Namespace) -> int:
-    """Verify a CP export directory: its full-file MANIFEST, its (optional)
-    SIGNATURE, and — recomputing from scratch — that the shipped cp-deploy.json is
-    exactly derivable from the embedded evidence (review r19/r20).
+    """Verify a CP export directory and report its three guarantees separately:
+    INTEGRITY (every file matches the manifest, nothing stale or injected),
+    AUTHENTICITY (a present signature verifies against a supplied key) and
+    DERIVABILITY (the shipped config recomputes from the embedded evidence).
+    The checks live in `lab_service.handoff`; this prints them."""
+    from lab_service import CheckStatus, Outcome, verify_cp_package
 
-    Three distinct guarantees, reported separately and honestly:
-      - INTEGRITY: every file matches the manifest hash and there are no unlisted
-        (stale/injected) files — so a tampered bridge-analysis or a leftover from
-        an earlier export is caught;
-      - AUTHENTICITY: when the manifest is signed, the signature verifies against a
-        supplied key, proving WHO released this exact handoff (derivability alone
-        does not — a different but internally-consistent config also recomputes);
-      - DERIVABILITY: the deploy config recomputes byte-identical from
-        source-bundle/ (graph + design-aware bridge + recorded runtime provenance).
-    """
-    from lab_capabilities.governance.cp_export import CPExportError, export_cp
-
-    directory = Path(args.dir)
-    deploy_path = directory / "cp-deploy.json"
-    if not deploy_path.is_file():
-        raise RunnerError(f"{directory} has no cp-deploy.json — not a CP export directory")
-    manifest_path = directory / "manifest.json"
-    if not manifest_path.is_file():
-        raise RunnerError(
-            f"{directory} has no manifest.json — this export predates full-file verification; "
-            "re-export with a current axor-lab so it carries its own manifest"
-        )
-    # a malformed manifest is an INTEGRITY failure, never a traceback (review r21)
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except ValueError as exc:
-        print(f"cp-export: INVALID — manifest.json is not valid JSON: {exc}", file=sys.stderr)
+    result = verify_cp_package(
+        Path(args.dir),
+        pubkey=getattr(args, "pubkey", None),
+        expect_author=getattr(args, "expect_author", None),
+        allow_unsigned=bool(getattr(args, "allow_unsigned", False)),
+    )
+    for check in result.checks:
+        # an OK step is progress the user asked to see; anything else is a finding
+        stream = sys.stdout if check.status is CheckStatus.OK else sys.stderr
+        print(f"cp-export: {check.message}", file=stream)
+    if result.outcome is Outcome.FAILURE:
         return EXIT_FAILURE
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
-        print("cp-export: INVALID — manifest.json is not an object with a files map",
-              file=sys.stderr)
-        return EXIT_FAILURE
-    unverified = False
-    # 1) INTEGRITY — every listed file's hash matches, and nothing unlisted exists
-    import hashlib
-
-    root_manifest = directory / "manifest.json"
-    files: dict[str, str] = manifest["files"]  # type: ignore[assignment]
-    for rel, want in files.items():
-        # the manifest is UNTRUSTED until verified: a path with `..`, an absolute
-        # path, or a symlink could read/traverse outside the export tree. Confine
-        # every listed path to the directory before touching it (review r21).
-        safe = _safe_export_path(directory, str(rel))
-        if safe is None:
-            print(f"cp-export: INVALID — manifest lists an unsafe path {rel!r}", file=sys.stderr)
-            return EXIT_FAILURE
-        if not safe.is_file():
-            print(f"cp-export: INVALID — manifest names a missing file {rel!r}", file=sys.stderr)
-            return EXIT_FAILURE
-        got = "sha256:" + hashlib.sha256(safe.read_bytes()).hexdigest()
-        if got != str(want):
-            print(f"cp-export: INVALID — {rel} does not match its manifest hash", file=sys.stderr)
-            return EXIT_FAILURE
-    on_disk = {
-        str(p.relative_to(directory)).replace("\\", "/")
-        for p in directory.rglob("*") if p.is_file() and p != root_manifest
-    }
-    extra = sorted(on_disk - set(files))
-    if extra:
-        print(f"cp-export: INVALID — files not in the manifest (stale or injected): {extra}",
-              file=sys.stderr)
-        return EXIT_FAILURE
-    print(f"cp-export: manifest INTEGRITY OK ({len(files)} files, no stale/unlisted)")
-    # 1b) SEMANTIC REFS — the manifest NAMES the deploy config, source bundle,
-    # regression set and bridge analysis by content hash; recompute each and confirm
-    # it matches BEFORE trusting them. A signature over the manifest proves nothing
-    # if a ref inside it points at the wrong artifact (review r21).
-    shipped: dict[str, object] = json.loads(deploy_path.read_text())
-    ref_problem = _verify_manifest_semantic_refs(manifest, shipped, files)
-    if ref_problem is not None:
-        print(f"cp-export: INVALID — {ref_problem}", file=sys.stderr)
-        return EXIT_FAILURE
-    print("cp-export: manifest semantic refs OK (deploy/source/regression/bridge)")
-    # 2) AUTHENTICITY — verify the signature when present; an UNSIGNED export is
-    # UNVERIFIED, not a clean pass (parity with the reproduction package, review r21)
-    if manifest.get("signature"):
-        from lab_contracts.signing import (
-            SignatureInvalid,
-            SignatureUnavailable,
-            verify_bundle_signature,
-        )
-
-        expect_author = getattr(args, "expect_author", None)
-        if expect_author and str(manifest.get("author")) != str(expect_author):
-            print(f"cp-export: INVALID — manifest author {manifest.get('author')!r} is not the "
-                  f"expected {expect_author!r}", file=sys.stderr)
-            return EXIT_FAILURE
-        pubkey = getattr(args, "pubkey", None)
-        if not pubkey:
-            print("cp-export: UNVERIFIED — signed manifest but no --pubkey to check it",
-                  file=sys.stderr)
-            unverified = True
-        else:
-            try:
-                verify_bundle_signature(manifest, str(manifest["signature"]), pubkey)
-            except SignatureInvalid as exc:
-                print(f"cp-export: INVALID — manifest signature does not verify: {exc}",
-                      file=sys.stderr)
-                return EXIT_FAILURE
-            except SignatureUnavailable as exc:
-                print(f"cp-export: UNVERIFIED — {exc}", file=sys.stderr)
-                unverified = True
-            else:
-                print(f"cp-export: signature VERIFIED (author {manifest.get('author')!r})")
-    elif getattr(args, "allow_unsigned", False):
-        print("cp-export: unsigned manifest — integrity + derivability only "
-              "(accepted via --allow-unsigned)")
-    else:
-        print("cp-export: UNVERIFIED — unsigned manifest carries no authenticity; pass a signed "
-              "export, or --allow-unsigned to accept integrity + derivability only", file=sys.stderr)
-        unverified = True
-    # 3) DERIVABILITY — recompute the deploy config from the embedded evidence
-    source_dir = directory / "source-bundle"
-    if not (source_dir / "bundle.json").is_file():
-        raise RunnerError(f"{directory} has no source-bundle/ — cannot recompute the handoff")
-    bundle, traces = read_bundle_dir(source_dir)
-    src: dict[str, object] = shipped.get("source", {})  # type: ignore[assignment]
-    condition_id = str(src.get("condition_id")) if src.get("condition_id") else None
-    regressions: list[dict[str, object]] = list(shipped.get("regressions", []))  # type: ignore[arg-type]
-    try:
-        recomputed = export_cp(bundle, regressions, condition_id=condition_id, traces=traces)
-    except CPExportError as exc:
-        print(f"cp-export: INVALID — recomputation failed: {exc}", file=sys.stderr)
-        return EXIT_FAILURE
-    if recomputed.config != shipped:
-        print(
-            "cp-export: INVALID — the deploy config recomputed from the embedded evidence "
-            "does not match cp-deploy.json (a doctored config, swapped trace, or tampered "
-            "analysis would cause this)",
-            file=sys.stderr,
-        )
-        return EXIT_FAILURE
-    print(f"cp-export: RECOMPUTED OK from {source_dir} ({len(traces)} traces); "
-          f"verified={shipped.get('verified') is True}; earned_bridge={bool(recomputed.earned_bridge)}")
-    return EXIT_UNVERIFIED if unverified else EXIT_OK
+    return EXIT_UNVERIFIED if result.outcome is Outcome.UNVERIFIED else EXIT_OK
 
 
 def _cmd_import_incident(args: argparse.Namespace) -> int:
     """Second funnel: a production trace -> a trace-replay bundle you can test a
     policy against, pin, and export (control-plane-handoff.md §Second funnel).
+    Validation, replay and materialization live in `lab_service.incidents`, which
+    takes the loaded artifacts — this reads them off disk and reports."""
+    from lab_service import import_incident
 
-    The recorded condition is REQUIRED and used verbatim — reconstructing it
-    (enforcement=on, kernel from the trace) silently loses enforcement mode,
-    policy, allowlist, criticality overrides and the config hash, so replay
-    could then yield a different verdict than the incident actually produced.
-    Everything is validated (schema + semantics + cross-references + config
-    hash) and REPLAYED before anything is written."""
-    from datetime import datetime, timezone
-
-    from lab_contracts import (
-        ScenarioValidationError,
-        build_bundle,
-        condition_config_hash,
-        content_hash,
-        validate_artifact,
-        validate_scenario,
+    result = import_incident(
+        json.loads(Path(args.trace).read_text()),
+        json.loads(Path(args.scenario).read_text()),
+        json.loads(Path(args.manifests).read_text()),
+        json.loads(Path(args.condition).read_text()),
+        out=Path(args.out),
+        created=args.created,
+        overwrite=bool(getattr(args, "overwrite", False)),
     )
-
-    from lab_capabilities.governance.replay import REPLAY_MATCH, replay_trace_status
-
-    trace: dict[str, object] = json.loads(Path(args.trace).read_text())
-    scenario: dict[str, object] = json.loads(Path(args.scenario).read_text())
-    manifests: list[dict[str, object]] = json.loads(Path(args.manifests).read_text())
-    condition: dict[str, object] = json.loads(Path(args.condition).read_text())
-
-    # 1. schema validation of every artifact
-    for obj, name in ((trace, "trace"), (scenario, "scenario"), (condition, "condition")):
-        errors = validate_artifact(obj, name)
-        if errors:
-            raise RunnerError(f"incident {name} is not conformant: {errors}")
-    manifests_by_id: dict[str, dict[str, object]] = {}
-    for manifest in manifests:
-        errors = validate_artifact(manifest, "tool-manifest")
-        if errors:
-            raise RunnerError(f"incident manifest {manifest.get('id')} is not conformant: {errors}")
-        manifests_by_id[str(manifest["id"])] = manifest
-
-    # 2. semantic + cross-reference validation
-    try:
-        validate_scenario(scenario, manifests_by_id)
-    except ScenarioValidationError as exc:
-        raise RunnerError(f"incident scenario failed semantic validation: {exc}") from exc
-    trial: dict[str, object] = trace["trial"]  # type: ignore[assignment]
-    if str(condition["id"]) != str(trial["condition_id"]):
-        raise RunnerError(
-            f"condition.id {condition['id']!r} != trace condition_id {trial['condition_id']!r}"
-        )
-    if str(scenario["name"]) != str(trial["scenario_id"]):
-        raise RunnerError(
-            f"scenario.name {scenario['name']!r} != trace scenario_id {trial['scenario_id']!r}"
-        )
-
-    # 3. config-hash verification (if the recorded condition carries one)
-    if "config_hash" in condition:
-        expected = condition_config_hash(str(condition["kernel"]), condition.get("policy"))  # type: ignore[arg-type]
-        if str(condition["config_hash"]) != expected:
-            raise RunnerError(
-                f"condition config_hash {condition['config_hash']!r} != recomputed {expected!r}"
-            )
-
-    # 4. replay the incident under its OWN recorded condition before writing — a
-    # wrong/reconstructed condition would surface here as a mismatch. Pass the
-    # scenario inputs so a real-kernel `$inputs` allowlist expands to the concrete
-    # values the incident actually ran under, not the symbolic ref (review r17).
-    kernel = resolve_kernel(
-        str(condition["kernel"]), manifests_by_id, condition.get("policy"),  # type: ignore[arg-type]
-        default_registry((str(condition["kernel"]),)), scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    _, status = replay_trace_status(
-        trace, condition, kernel, manifests_by_id, scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    if status != REPLAY_MATCH:
-        raise RunnerError(
-            f"incident trace does not replay under its condition (status={status}) — "
-            "refusing to import a bundle whose verdicts don't reproduce"
-        )
-
-    # a completed trial carries the runtime config it ran under, but this hash is
-    # RECONSTRUCTED at import from the incident's condition + scenario inputs — the
-    # original production trace never carried it, and this process did not observe
-    # the runtime compilation. Mark it reconstructed_incident so config_provenance
-    # reports the honest status and an evidence-backed CP export refuses it as
-    # "the exact runtime config that actually ran in production" (review r21).
-    from lab_contracts import CONFIG_COMPILER_VERSION, runtime_config_hash
-
-    incident_rch = runtime_config_hash(
-        str(condition["kernel"]), condition.get("policy"), manifests,
-        scenario.get("inputs", {}),  # type: ignore[arg-type]
-    )
-    trials = [{
-        "trial_id": content_hash(trace), "scenario_id": str(trial["scenario_id"]),
-        "condition_id": str(trial["condition_id"]), "seed": str(trial["seed"]),
-        "repeat_index": int(trial["repeat_index"]), "status": "completed",
-        "trace_ref": content_hash(trace),
-        "runtime_config_hash": incident_rch,
-        "config_compiler_version": CONFIG_COMPILER_VERSION,
-        "runtime_provenance": "reconstructed_incident",
-    }]
-    bundle = build_bundle(
-        bundle_id="b_incident_" + content_hash(trace).removeprefix("sha256:")[:32],
-        created=args.created or datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        scenarios=[scenario], conditions=[condition], tool_manifests=manifests,
-        environment={"kernel_version": str(trace["producer"]["kernel_version"]),  # type: ignore[index]
-                     "model": {"provider": "imported", "id": "production-incident"}},
-        trials=trials, aggregates=[], traces={str(trace["trace_id"]): trace},
-        packaging=dict(PACKAGING),
-    )
-    write_bundle_dir(Path(args.out), bundle, {str(trace["trace_id"]): trace},
-                     overwrite=bool(getattr(args, "overwrite", False)))
-    print(f"imported incident -> {args.out} (trace-replay bundle)")
-    print(f"  replay it:  axor-lab replay {args.out}")
-    print(f"  pin + export:  axor-lab pin ... && axor-lab export-cp {args.out} --pins pins.json")
+    print(f"imported incident -> {result.directory} (trace-replay bundle)")
+    print(f"  replay it:  axor-lab replay {result.directory}")
+    print(f"  pin + export:  axor-lab pin ... && axor-lab export-cp {result.directory} "
+          "--pins pins.json")
     return EXIT_OK
 
 
 def _cmd_import_agentdojo(args: argparse.Namespace) -> int:
-    from lab_adapters import (
-        UnknownSuiteError,
-        available_suites,
-        build_experiment_document,
-    )
-    from lab_contracts import condition_config_hash
+    from lab_adapters import UnknownSuiteError, available_suites
+    from lab_service import build_agentdojo_experiment
 
-    kernel = "axor-core@0.4.2"
-    conditions = [
-        {
-            "schema_version": "condition/v1",
-            "id": "ungoverned",
-            "label": "ungoverned",
-            "enforcement": "off",
-            "kernel": kernel,
-            "config_hash": condition_config_hash(kernel, None),
-        },
-        {
-            "schema_version": "condition/v1",
-            "id": "governed",
-            "label": "governed",
-            "enforcement": "on",
-            "kernel": kernel,
-            "policy": {"profile": "strict", "trust_model": "content-ledger"},
-            "config_hash": condition_config_hash(
-                kernel, {"profile": "strict", "trust_model": "content-ledger"}
-            ),
-        },
-    ]
     try:
-        document = build_experiment_document(
-            args.suite, conditions, repeats=args.repeats, agent_ref=args.agent_ref
+        result = build_agentdojo_experiment(
+            args.suite, repeats=args.repeats, agent_ref=args.agent_ref
         )
     except UnknownSuiteError as exc:
         print(f"error: {exc}; available: {list(available_suites())}", file=sys.stderr)
         return EXIT_VALIDATION
-    # a materialized suite that cannot resolve is a bug — fail loudly, not silently
-    resolve(document)
-    Path(args.out).write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
-    scenarios = document["scenarios"]  # type: ignore[index]
-    print(f"imported AgentDojo '{args.suite}': {len(scenarios)} scenario(s) -> {args.out}")
+    Path(args.out).write_text(json.dumps(result.document, indent=2, ensure_ascii=False) + "\n")
+    print(f"imported AgentDojo '{args.suite}': {result.scenarios} scenario(s) -> {args.out}")
     print(f"  run: axor-lab run {args.out} --out ./bundle --yes")
     return EXIT_OK
 
 
 # -- helpers ------------------------------------------------------------------
-
-
-def _repin_to_real_kernel(document: dict[str, object]) -> None:
-    """Repin EVERY condition — baseline included — to the installed axor-core
-    version, so the run governs with the real kernel.
-
-    Repinning only the enforcement-on conditions left the baseline on the
-    reference kernel, so the compare no longer isolated enforcement: it mixed an
-    enforcement change WITH a kernel change (the condition contract wants one
-    kernel across the compared conditions). It also produced a bundle with two
-    distinct condition kernels, so `_environment` wrote a comma-joined
-    `kernel_version` that `verify_bundle` rejects — meaning the command ran every
-    trial (paid model calls included) and only THEN failed at save (review r13).
-
-    Repinning the baseline is load-bearing, not cosmetic. `enforcement: off` is
-    observe-only, not gate-free: the kernel evaluates every call and records the
-    verdict it would have enforced. So the baseline's verdicts are the REAL
-    kernel's verdicts, and a baseline left on the reference kernel would report
-    a different kernel's opinion of the same calls. Both arms share one kernel,
-    and the bundle has a single kernel_version."""
-    from lab_contracts import condition_config_hash
-    from lab_capabilities.governance import axor_available, real_kernel_version
-
-    if not axor_available():
-        raise RunnerError("--real-kernel requested but axor-core is not installed")
-    version = real_kernel_version()
-    experiment: dict[str, object] = document["experiment"]  # type: ignore[assignment]
-    for condition in experiment.get("conditions", []):  # type: ignore[union-attr]
-        condition["kernel"] = version
-        condition["config_hash"] = condition_config_hash(version, condition.get("policy"))
-    print(f"  repinned ALL conditions (baseline + governed) to the real kernel: {version}")
-
-
-def _derive_run_id(
-    explicit: str | None,
-    experiment: dict[str, object],
-    fingerprint: str,
-    *,
-    deterministic: bool,
-) -> str:
-    """The run id. An explicit --run-id always wins. A DETERMINISTIC agent
-    (scripted / replayed cassette) yields a content-derived id, so re-running the
-    same experiment reproduces the same identity. A NONDETERMINISTIC agent (a live
-    model) draws a fresh sample each execution, so two runs are DIFFERENT
-    executions, not retries of one — a random execution nonce is folded in so
-    their run/trial/trace ids differ (review r13)."""
-    if explicit:
-        return explicit
-    body: dict[str, object] = {"experiment": experiment, "agent": fingerprint}
-    if not deterministic:
-        import secrets
-
-        body["execution_nonce"] = secrets.token_hex(16)  # 128-bit per-execution
-    return "r_" + content_hash(body).removeprefix("sha256:")[:32]
 
 
 def _print_estimate(resolved: ResolvedExperiment) -> None:
@@ -1533,84 +698,6 @@ def _confirmed(args: argparse.Namespace) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
-def _agent_is_deterministic(agent: object) -> bool:
-    return bool(getattr(agent, "is_deterministic", False))
-
-
-def _effective_design(resolved: ResolvedExperiment, agent: object) -> str:
-    """paired (McNemar) only when the agent's behavior is fixed by scenario+seed.
-
-    A live model draws each condition independently — the 'pairs' are nominal, so
-    McNemar's paired test is invalid and the comparison is independent samples. A
-    declared matched_pairs design is rejected for a non-deterministic agent
-    rather than silently producing a spurious paired p-value (review r4)."""
-    declared = None
-    design_obj = resolved.experiment.get("comparison_design")  # type: ignore[union-attr]
-    if isinstance(design_obj, dict):
-        declared = design_obj.get("kind")
-    deterministic = _agent_is_deterministic(agent)
-    if declared == "matched_pairs":
-        if not deterministic:
-            raise RunnerError(
-                "comparison_design=matched_pairs requires a deterministic agent; a live "
-                "model is sampled independently per condition — use independent_samples"
-            )
-        return "matched_pairs"
-    if declared == "independent_samples":
-        return "independent_samples"
-    return "matched_pairs" if deterministic else "independent_samples"
-
-
-def _aggregates(
-    resolved: ResolvedExperiment, result: "object", agent: object
-) -> list[dict[str, object]]:
-    design = _effective_design(resolved, agent)
-    aggregates: list[dict[str, object]] = []
-    baseline = next(
-        (str(c["id"]) for c in resolved.conditions if c["enforcement"] == "off"), None
-    )
-    counts = {
-        str(c["id"]): _condition_counts(result, str(c["id"])) for c in resolved.conditions
-    }
-    for condition in resolved.conditions:
-        condition_id = str(condition["id"])
-        n, asr_succ, util_succ = counts[condition_id]
-        if n == 0:
-            # a condition where every trial failed produces NO aggregate rather
-            # than crashing wilson_interval; missingness reports the gap (r7)
-            continue
-        for metric, successes in ((_METRIC_ASR, asr_succ), (_METRIC_UTILITY, util_succ)):
-            test = None
-            is_treated = baseline is not None and condition_id != baseline and metric == _METRIC_ASR
-            base_n = counts[baseline][0] if baseline is not None else 0  # type: ignore[index]
-            if is_treated and base_n > 0 and design == "matched_pairs":
-                pairs = result.pairs(baseline, condition_id, metric="ASR")  # type: ignore[attr-defined]
-                test = mcnemar_test(pairs, vs=baseline)
-            elif is_treated and base_n > 0 and design == "independent_samples":
-                base_asr = counts[baseline][1]  # type: ignore[index]
-                test = two_proportion_test(base_asr, base_n, successes, n, vs=baseline)
-            aggregates.append(
-                binary_aggregate(metric, condition_id, successes, n, test=test,
-                                 comparison_design=design)
-            )
-    return aggregates
-
-
-def _condition_counts(result: "object", condition_id: str) -> tuple[int, int, int]:
-    # only COMPLETED trials that actually produced an outcome (a failed trial has
-    # none) — accessing result.outcomes[...] for a failed trial used to KeyError
-    trials = [
-        t for t in result.trials  # type: ignore[attr-defined]
-        if t["condition_id"] == condition_id and str(t["trial_id"]) in result.outcomes  # type: ignore[attr-defined]
-    ]
-    outcomes = [result.outcomes[str(t["trial_id"])] for t in trials]  # type: ignore[attr-defined]
-    return (
-        len(outcomes),
-        sum(1 for o in outcomes if o.violation),
-        sum(1 for o in outcomes if o.task_success),
-    )
-
-
 def _print_aggregate(aggregate: dict[str, object]) -> None:
     interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
     line = (
@@ -1630,95 +717,6 @@ def _print_aggregate(aggregate: dict[str, object]) -> None:
             f"Δ={float(test['difference']):.2f} p={float(test['p']):.2g}"  # type: ignore[arg-type]
         )
     print(line)
-
-
-def _environment(
-    resolved: ResolvedExperiment, model: str | None = None,
-    usage: dict[str, object] | None = None,
-    agent: object | None = None,
-) -> dict[str, object]:
-    """Record the ACTUAL agent that ran (review §6.1). The bundle stays
-    self-describing: kernel, the agent id, and (when imported) the dataset
-    version."""
-    kernels = sorted({str(c["kernel"]) for c in resolved.conditions})
-    model = model or str(resolved.experiment["agent_ref"])
-    provider = model.split(":", 1)[0] if ":" in model else (
-        "scripted" if model.startswith("scripted") else "unknown"
-    )
-    inference_params: dict[str, object] = {"experiment_id": str(resolved.experiment["id"])}
-    if usage is not None:
-        inference_params["usage"] = usage
-    env: dict[str, object] = {
-        "model": {"provider": provider, "id": model, "inference_params": inference_params},
-    }
-    # the FIRST-CLASS comparison design, recorded at run time and bound to the
-    # ACTUAL agent's determinism — this, not the uploader-controlled aggregate, is
-    # what the CP bridge reads to choose matched_pairs vs independent_samples
-    # (review r21). _effective_design already refuses matched_pairs for a live agent.
-    if agent is not None:
-        design = _effective_design(resolved, agent)
-        deterministic = _agent_is_deterministic(agent)
-        env["experiment_design"] = {
-            "schema_version": "comparison-design/v1",
-            "kind": design,
-            "unit_key": ["execution_id", "scenario_id", "condition_id", "seed", "repeat_index"],
-            "assignment": "shared_deterministic_agent_state" if design == "matched_pairs"
-                          else "independent_per_condition",
-            "agent_deterministic": deterministic,
-        }
-    # the global kernel_version is a convenience that only makes sense when every
-    # condition shares one kernel — verify_bundle requires it to equal a condition
-    # kernel. Emitting a comma-joined pseudo-value for a mixed-kernel bundle would
-    # fail that check AFTER every (paid) trial ran; omit it instead (each trace's
-    # producer.kernel_version, bound to its own condition, stays authoritative).
-    if len(kernels) == 1:
-        env["kernel_version"] = kernels[0]
-    else:
-        # a mixed-kernel run omits the single global kernel_version (now optional
-        # in the schema) and records the distinct kernels explicitly, so the
-        # bundle is schema-VALID and readable rather than a write-now/read-never
-        # artifact (review r15). Each trace's producer.kernel_version stays
-        # authoritative for its own condition.
-        env["kernel_versions"] = kernels
-    return env
-
-
-def _enforcing_condition(
-    bundle: dict[str, object], condition_id: str | None
-) -> dict[str, object]:
-    conditions: list[dict[str, object]] = bundle["conditions"]  # type: ignore[assignment]
-    if condition_id is not None:
-        for condition in conditions:
-            if condition["id"] == condition_id:
-                return condition
-        raise RunnerError(f"condition {condition_id} not in bundle")
-    for condition in conditions:
-        if condition["enforcement"] == "on":
-            return condition
-    raise RunnerError("bundle has no enforcement-on condition")
-
-
-def _scenario_for(bundle: dict[str, object], trace: dict[str, object]) -> dict[str, object]:
-    scenario_id = str(trace["trial"]["scenario_id"])  # type: ignore[index]
-    for scenario in bundle["scenarios"]:  # type: ignore[union-attr]
-        if scenario["name"] == scenario_id:
-            return scenario
-    raise RunnerError(f"scenario {scenario_id} not in bundle")
-
-
-def _first_denied_trace(traces: dict[str, dict[str, object]]) -> dict[str, object] | None:
-    """The first trace where a denial was actually ENFORCED.
-
-    Not merely "verdict == DENY". An observe-only arm records real denials and
-    executes the call anyway, so a bare verdict match would happily pin a
-    regression on a trace where nothing was contained — asserting the kernel
-    must keep denying, on the evidence of a run that denied nothing.
-    """
-    for trace in sorted(traces.values(), key=lambda t: str(t["trace_id"])):
-        for event in trace["events"]:  # type: ignore[union-attr]
-            if event.get("type") == "gate_decision" and contained(event["decision"]):  # type: ignore[index,arg-type]
-                return trace
-    return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1801,6 +799,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_run_suite.add_argument("--run-id", default=None)
     p_run_suite.add_argument("--created", default=None, help="override timestamp (RFC3339)")
+    p_run_suite.add_argument(
+        "--scenarios", default=None, metavar="DIR",
+        help="directory of scenario/v1 files the suite's `scenario_refs` resolve "
+             "against (default: ./scenarios beside the manifest)",
+    )
     p_run_suite.add_argument(
         "--overwrite", action="store_true",
         help="replace a non-empty --out directory (clears stale traces first)",

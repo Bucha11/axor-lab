@@ -490,6 +490,10 @@
       "type": "object",
       "description": "Suite SDK: JSON Schema for the suite's own configuration knobs (RFC §12). The Builder renders it; a value that fails it is rejected at author time, not at run time."
     },
+    "config": {
+      "type": "object",
+      "description": "Suite SDK: the VALUES of the knobs config_schema describes (RFC §12). Validated against config_schema at author time, so a suite's own options are refused in the Builder rather than at run time. Absent when a suite declares no config_schema."
+    },
     "ui_schema": {
       "type": "object",
       "description": "Suite SDK: how the Builder should lay out config_schema — field order, grouping, widget hints, which section each field belongs to. Presentation only; it can never introduce a field config_schema does not define.",

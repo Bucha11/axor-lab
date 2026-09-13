@@ -124,7 +124,7 @@ class TestRealKernelRepin(unittest.TestCase):
     def test_repin_covers_baseline_and_bundle_verifies(self) -> None:
         from lab_contracts import build_bundle, verify_bundle
         from lab_capabilities.governance import run_experiment_suite
-        from lab_runner.cli import _environment, _repin_to_real_kernel
+        from lab_service import build_environment, repin_to_real_kernel
         from lab_capabilities.governance.experiment_file import ResolvedExperiment
 
         version = real_kernel_version()
@@ -135,7 +135,7 @@ class TestRealKernelRepin(unittest.TestCase):
         conditions = _reference_pinned_conditions()
         self.assertNotEqual(conditions[0]["kernel"], version)  # baseline starts on reference
 
-        _repin_to_real_kernel({"experiment": {"id": "e_real", "conditions": conditions}})
+        repin_to_real_kernel({"experiment": {"id": "e_real", "conditions": conditions}})
         # ALL conditions — the enforcement-off baseline included — now on the real
         # kernel, so the compare isolates enforcement and the bundle has ONE kernel
         self.assertTrue(all(c["kernel"] == version for c in conditions))
@@ -152,7 +152,7 @@ class TestRealKernelRepin(unittest.TestCase):
             scenarios=(support.banking_scenario(),), manifests=support.manifests(),
             conditions=tuple(conditions), agent=None, kernel_registry=support.kernel_registry(),
         )
-        env = _environment(resolved, "scripted")
+        env = build_environment(resolved, "scripted")
         # a SINGLE kernel_version, never a comma-joined pseudo-value verify rejects
         self.assertEqual(env["kernel_version"], version)
 
@@ -167,7 +167,7 @@ class TestRealKernelRepin(unittest.TestCase):
     def test_environment_omits_kernel_version_for_a_mixed_kernel_bundle(self) -> None:
         # a legitimately mixed-kernel bundle omits the global kernel_version rather
         # than writing a comma-joined value that fails verify AFTER the run
-        from lab_runner.cli import _environment
+        from lab_service import build_environment
         from lab_capabilities.governance.experiment_file import ResolvedExperiment
 
         mixed = _reference_pinned_conditions()
@@ -177,7 +177,7 @@ class TestRealKernelRepin(unittest.TestCase):
             scenarios=(support.banking_scenario(),), manifests=support.manifests(),
             conditions=tuple(mixed), agent=None, kernel_registry=support.kernel_registry(),
         )
-        env = _environment(resolved, "scripted")
+        env = build_environment(resolved, "scripted")
         self.assertNotIn("kernel_version", env)
 
 

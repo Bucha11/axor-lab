@@ -25,7 +25,17 @@ from urllib.parse import quote, unquote
 
 from lab_contracts import validate_artifact
 
-SCREEN_KINDS = ("suite", "evidence-case", "regression", "artifact")
+# `scenario` is here so `scenario_refs` resolves to something. The suite schema
+# has always described them ("scenarios resolved from a registry by name") and
+# `resolve_suite` has always taken a registry argument, but nothing ever filled
+# it — so every ref answered "resolves to nothing" and the field could only
+# invalidate a suite. Scenarios are stored and shared exactly like suites:
+# workspace store, org registry, same isolation.
+SCREEN_KINDS = ("suite", "evidence-case", "regression", "artifact", "scenario")
+
+#: `scenario/v1` is keyed by `name`, not `id`, so every store call for this kind
+#: passes it. Named once here rather than spelled at each call site.
+SCENARIO_ID_FIELD = "name"
 
 
 class ScreenStoreError(Exception):

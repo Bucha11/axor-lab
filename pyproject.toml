@@ -26,7 +26,7 @@ requires-python = ">=3.11"
 # (0.1.0 predates it), so pin the integration branch from git for now — axor-wrap
 # is public, so this clones tokenless. Swap to a version pin once wrap releases.
 dependencies = [
-    "axor-core>=0.10.2,<0.11",
+    "axor-core>=0.11,<0.12",
     "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m",
     # axor-eval is the shared fault-injection evaluator (silent_fail deprivation,
     # the ToolAuditLayer that emits FABRICATED_TOOL_RESULT). Lab reuses it for the
@@ -34,7 +34,7 @@ dependencies = [
     # reconstruct_claim in axor_eval.claims) rather than re-implementing the
     # deviation machinery — the same "one engine, no duplicate" rule the wrap
     # migration followed. Public repo, pinned to the integration branch (which
-    # carries axor_eval.claims); its axor-core>=0.8,<0.11 is met by Lab's 0.10.2.
+    # carries axor_eval.claims); its axor-core>=0.8,<0.11 is met by Lab's 0.11.
     "axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m",
 ]
 
@@ -58,6 +58,10 @@ packages = [
 # self-contained (no AXOR_LAB_CONTRACTS needed outside a checkout). The source
 # of truth is contracts/schemas/; lab_contracts/schemas/ is a build-time copy
 # kept byte-identical by tests/test_packaging.py.
+# Only the Lab's OWN ten schemas ship as package data. `trace`,
+# `tool-manifest` and `predicate` come from axor-core, which ships them as its
+# own package data — a wheel that carried a fourth copy would reintroduce the
+# thing this split removed.
 [tool.setuptools.package-data]
 lab_contracts = ["schemas/*.schema.json"]
 

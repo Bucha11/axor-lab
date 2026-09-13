@@ -23,11 +23,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # `validate_slice.py` used to run with no install at all, against a
+      # standalone `validate.py` next door. That script was a third copy of an
+      # engine `lab_contracts` already had — and the weaker one: it implemented
+      # no `if`/`then`, so it passed a slice bundle missing the very fields a
+      # completed trial is required to record. It is gone, and this job installs
+      # the package and validates through the same code path everything else
+      # uses. Three of the thirteen schemas come from axor-core, which a
+      # directory glob could never have found.
       - name: Validate slice examples against schemas
-        working-directory: contracts
         run: |
-          python validate.py
-          python validate_slice.py
+          pip install -e .
+          cd contracts && python validate_slice.py
 
   acceptance:
     name: Acceptance suite (${{ matrix.python }})

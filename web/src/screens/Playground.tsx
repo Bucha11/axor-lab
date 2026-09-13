@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { api, type PlaygroundResult } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
-import { Button, Card, Failed, Field, Json, Loading, Tag } from "../components/ui";
-import { Timeline } from "../components/Timeline";
+import { Button, Card, Failed, Field, Loading } from "../components/ui";
+import { TrialResult } from "../components/TrialResult";
 
 /**
  * One trial, for inspection. NOT a run — no repeats, no aggregation, nothing
@@ -83,31 +83,7 @@ export function Playground() {
 
       {error && <Failed error={error} />}
 
-      {result && (
-        <>
-          <Card>
-            <div className="row-between">
-              <h3>Trial</h3>
-              <Tag tone={result.counted_in_a_run ? "warning" : "info"}>
-                {result.counted_in_a_run ? "counted in a run" : "not counted in a run"}
-              </Tag>
-            </div>
-            <Json value={result.trial} />
-          </Card>
-          {result.trace && (
-            <Card>
-              <h3>Trace</h3>
-              <Timeline trace={result.trace} />
-            </Card>
-          )}
-          {result.evidence_cases.length > 0 && (
-            <Card>
-              <h3>What the suite would curate</h3>
-              <Json value={result.evidence_cases} />
-            </Card>
-          )}
-        </>
-      )}
+      {result && <TrialResult result={result} />}
     </div>
   );
 }

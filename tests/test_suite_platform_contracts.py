@@ -175,6 +175,284 @@ class TestSuiteManifestIsOneDocument(unittest.TestCase):
             self.assertIn(field, properties, f"Builder section '{section}' has no manifest field")
 
 
+class TestTheBuilderBlankScenario(unittest.TestCase):
+    """The other half of a cross-language contract.
+
+    `web/src/lib/sections.ts::blankScenario` is what the Builder's "+ Add"
+    writes; this checks a scenario of exactly that shape survives the real
+    validator. `web/src/lib/sections.test.ts` pins the derivation on the
+    TypeScript side — if you change one, change both.
+
+    The old blank was a constant, and it was refused twice over: `tools: []`
+    against `minItems 1`, and `task_success: {event: "final_output"}` against
+    an evaluator that supports only `tool_call`. So the button reliably
+    invalidated the suite, and the item form (name and task) offered no way to
+    fix either without dropping into YAML.
+    """
+
+    #: verbatim `blankScenario(manifest)` for a suite whose first tool is `note`
+    BLANK = {
+        "schema_version": "scenario/v1",
+        "name": "",
+        "task": "",
+        "inputs": {},
+        "tools": [{"$ref": "note"}],
+        "fixtures": {},
+        "task_success": {"event": "tool_call", "tool": "note"},
+    }
+
+    def _blank_suite(self) -> dict:
+        from lab_suite import builtin_registry
+
+        return copy.deepcopy(builtin_registry().get("blank").manifest())
+
+    def test_the_first_tool_of_the_blank_suite_is_the_one_it_refs(self) -> None:
+        """`blankScenario` takes `environment.tools[0].id`; if that stops being
+        `note` this test's fixture is stale, not the code."""
+        manifest = self._blank_suite()
+        self.assertEqual(
+            [t["id"] for t in manifest["environment"]["tools"]][:1], ["note"],
+        )
+
+    def test_adding_one_leaves_the_suite_resolvable(self) -> None:
+        from lab_suite import plan_suite
+
+        manifest = self._blank_suite()
+        manifest["scenarios"].append(copy.deepcopy(self.BLANK))
+        # the real thing a dispatch does — schema, suite semantics AND the
+        # per-scenario semantics the schema alone does not reach
+        self.assertEqual(len(plan_suite(manifest).planned), 2)
+
+    def test_the_two_keys_the_form_never_shows_are_the_two_that_broke(self) -> None:
+        from lab_suite import SuiteValidationError, plan_suite
+
+        for key, bad in (
+            ("tools", []),
+            ("task_success", {"event": "final_output"}),
+        ):
+            with self.subTest(key=key):
+                manifest = self._blank_suite()
+                manifest["scenarios"].append({**copy.deepcopy(self.BLANK), key: bad})
+                with self.assertRaises(SuiteValidationError):
+                    plan_suite(manifest)
+
+    def test_a_toolless_suite_refuses_rather_than_papering_over(self) -> None:
+        """`blankScenario` emits `tools: []` when the suite declares none. That
+        is the true state of the document — there is nothing to reference — and
+        the validator should say so."""
+        from lab_suite import SuiteValidationError, plan_suite
+
+        manifest = self._blank_suite()
+        manifest["environment"]["tools"] = []
+        with self.assertRaises(SuiteValidationError):
+            plan_suite(manifest)
+
+
+class TestTheSuiteSDKsOwnKnobs(unittest.TestCase):
+    """`config_schema` / `config` / `ui_schema` — RFC §12, and the half of §13
+    that reads "Every suite contributes declarative schemas".
+
+    `config_schema` and `ui_schema` were in the schema from the start, and
+    nothing read either. The schema's own description of `config_schema` says
+    "The Builder renders it; a value that fails it is rejected at author time,
+    not at run time" — and neither half was true, so a third-party suite could
+    declare knobs no screen showed and no validator checked. `sections.test.ts`
+    even used `ui_schema` as its example of a key NO form renders, which turned
+    the unimplemented feature into a passing test.
+
+    The TypeScript half is `web/src/lib/sections.ts::configFields`.
+    """
+
+    SCHEMA = {
+        "type": "object",
+        "properties": {
+            "depth": {"type": "integer", "title": "Search depth"},
+            "style": {"enum": ["terse", "verbose"]},
+        },
+        "required": ["depth"],
+        "additionalProperties": False,
+    }
+
+    def _suite(self, **over: object) -> dict:
+        from lab_suite import builtin_registry
+
+        return {**copy.deepcopy(builtin_registry().get("blank").manifest()), **over}
+
+    def _errors(self, **over: object) -> list[str]:
+        from lab_suite import validate_manifest
+
+        return validate_manifest(self._suite(**over))
+
+    def test_a_suite_declaring_nothing_is_unaffected(self) -> None:
+        self.assertEqual(self._errors(), [])
+
+    def test_config_is_checked_against_config_schema_at_author_time(self) -> None:
+        self.assertEqual(
+            self._errors(config_schema=self.SCHEMA,
+                         config={"depth": 3, "style": "terse"}),
+            [],
+        )
+        for label, config, fragment in (
+            ("wrong type", {"depth": "three"}, "type integer, got str"),
+            ("missing required", {"style": "terse"}, "missing required 'depth'"),
+            ("unknown key", {"depth": 1, "nope": 2}, "additional property 'nope'"),
+            ("bad enum", {"depth": 1, "style": "loud"}, "not in enum"),
+        ):
+            with self.subTest(case=label):
+                errors = self._errors(config_schema=self.SCHEMA, config=config)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(fragment, errors[0])
+
+    def test_values_with_nothing_describing_them_are_refused(self) -> None:
+        errors = self._errors(config={"depth": 3})
+        self.assertEqual(len(errors), 1)
+        self.assertIn("declares no `config_schema`", errors[0])
+
+    def test_a_layout_cannot_introduce_a_field(self) -> None:
+        """The schema says `ui_schema` "can never introduce a field
+        config_schema does not define". Nothing enforced it, so a layout could
+        render an input writing a value nothing validates."""
+        errors = self._errors(
+            config_schema=self.SCHEMA, config={"depth": 1},
+            ui_schema={"sections": [{"id": "execution", "fields": ["depth", "ghost"]}]},
+        )
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("'ghost'", errors[0])
+        self.assertIn("a layout cannot introduce a field", errors[0])
+
+    def test_a_layout_over_declared_fields_is_fine(self) -> None:
+        self.assertEqual(
+            self._errors(
+                config_schema=self.SCHEMA, config={"depth": 1},
+                ui_schema={"sections": [
+                    {"id": "execution", "fields": ["depth"]},
+                    {"id": "evaluation", "fields": ["style"], "advanced": True},
+                ]},
+            ),
+            [],
+        )
+
+    def test_a_ui_schema_that_only_titles_sections_still_validates(self) -> None:
+        """The shape the shipped slice example uses — no `fields` at all."""
+        self.assertEqual(
+            self._errors(ui_schema={"sections": [{"id": "execution", "title": "Execution"}]}),
+            [],
+        )
+
+    def test_config_survives_a_canonical_round_trip(self) -> None:
+        """The Basic/Advanced/YAML single-document rule reaches these too."""
+        from lab_contracts.canonical import canonical_json
+
+        suite = self._suite(config_schema=self.SCHEMA, config={"depth": 4})
+        once = canonical_json(suite)
+        self.assertEqual(json.loads(once)["config"], {"depth": 4})
+        self.assertEqual(canonical_json(json.loads(once)), once)
+
+
+class TestAScenarioCanCarryItsOwnTools(unittest.TestCase):
+    """`scenario.tools` accepts a full manifest inline, and the resolver honours it.
+
+    scenario.schema.json describes the field as "each is a full manifest (or a
+    $ref to a shared one)", and the `oneOf` admits both. `resolve_suite` built
+    the bundle from `environment.tools` alone, so an inline manifest was
+    schema-valid and then died on "tool 'x' has no manifest in the bundle" —
+    the contract said one thing and the code another.
+
+    It matters most for a REGISTRY scenario, which travels between suites and
+    cannot assume the borrowing suite happens to declare its tools.
+    """
+
+    def _suite(self) -> dict:
+        from lab_suite import builtin_registry
+
+        return copy.deepcopy(builtin_registry().get("blank").manifest())
+
+    def _scenario(self, name: str, tools: list, succeeds: str) -> dict:
+        return {
+            "schema_version": "scenario/v1", "name": name, "task": "t",
+            "inputs": {}, "tools": tools,
+            "fixtures": {succeeds: {"result": {"ok": True}}},
+            "task_success": {"event": "tool_call", "tool": succeeds},
+        }
+
+    INLINE = {
+        "schema_version": "tool-manifest/v1", "id": "scratch",
+        "args_schema": {"type": "object"},
+        "effect": {"default_class": "READ", "driving_args": []},
+        "side_effecting": False,
+    }
+
+    def test_a_suite_sharing_no_tools_at_all_resolves(self) -> None:
+        from lab_suite import resolve_suite
+
+        manifest = self._suite()
+        manifest["environment"]["tools"] = []
+        manifest["scenarios"] = [self._scenario("a", [self.INLINE], "scratch")]
+        self.assertEqual(sorted(resolve_suite(manifest).manifests), ["scratch"])
+
+    def test_an_inline_tool_reaches_the_runtime(self) -> None:
+        """A dispatch ships the resolved bundle; a runtime has no other way to
+        learn an inline tool's contract."""
+        from lab_suite import build_assignment
+
+        manifest = self._suite()
+        manifest["environment"]["tools"] = []
+        manifest["scenarios"] = [self._scenario("a", [self.INLINE], "scratch")]
+        shipped = build_assignment(manifest, "rt_x").assignment["tool_manifests"]
+        self.assertEqual([t["id"] for t in shipped], ["scratch"])  # type: ignore[index,union-attr]
+
+    def test_an_inline_tool_actually_runs(self) -> None:
+        from lab_suite import builtin_registry, run_suite
+        from lab_suite.builtin.blank import _note_manifest
+
+        suite = builtin_registry().get("blank")
+        manifest = self._suite()
+        # the suite's only tool, moved from the suite into the scenario
+        manifest["environment"]["tools"] = []
+        manifest["scenarios"][0]["tools"] = [_note_manifest()]
+        run = run_suite(manifest, run_id="r_inline", suite=suite)
+        self.assertEqual([t["status"] for t in run.trials], ["completed"])
+
+    def test_one_tool_id_cannot_mean_two_contracts(self) -> None:
+        """Not a precedence question: the run governs against one of them and
+        the trace's runtime_config_hash names that one, while the manifest
+        reads as if both applied."""
+        from lab_suite import SuiteValidationError, resolve_suite
+
+        manifest = self._suite()
+        clashing = {**self.INLINE, "id": "note",
+                    "effect": {"default_class": "EXPORT", "driving_args": []},
+                    "side_effecting": True}
+        manifest["scenarios"] = [self._scenario("a", [clashing], "note")]
+        with self.assertRaises(SuiteValidationError) as ctx:
+            resolve_suite(manifest)
+        self.assertIn("cannot mean two contracts", "; ".join(ctx.exception.errors))
+
+    def test_an_identical_redeclaration_is_not_a_conflict(self) -> None:
+        from lab_suite import resolve_suite
+        from lab_suite.builtin.blank import _note_manifest
+
+        manifest = self._suite()
+        manifest["scenarios"] = [self._scenario("a", [_note_manifest()], "note")]
+        self.assertEqual(sorted(resolve_suite(manifest).manifests), ["note"])
+
+    def test_a_scenario_cannot_ref_a_siblings_inline_tool(self) -> None:
+        """It would break the moment that sibling is edited out, so it should
+        not validate today. Each scenario sees the bundle plus its OWN inline
+        manifests, never the union."""
+        from lab_suite import SuiteValidationError, resolve_suite
+
+        manifest = self._suite()
+        manifest["environment"]["tools"] = []
+        manifest["scenarios"] = [
+            self._scenario("a", [self.INLINE], "scratch"),
+            self._scenario("b", [{"$ref": "scratch"}], "scratch"),
+        ]
+        with self.assertRaises(SuiteValidationError) as ctx:
+            resolve_suite(manifest)
+        self.assertIn("has no manifest in the bundle", "; ".join(ctx.exception.errors))
+
+
 class TestRegressionKinds(unittest.TestCase):
     def test_metric_threshold_regression_validates(self) -> None:
         reg = _example("regression_latency_threshold")

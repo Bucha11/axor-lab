@@ -28,6 +28,7 @@ from lab_suite import (
     build_assignment,
     builtin_registry,
     collect_suite_run,
+    plan_suite,
     run_suite,
 )
 
@@ -502,6 +503,61 @@ class TestUngovernedStillGoesThroughTheCore(unittest.TestCase):
         with self.assertRaises(DispatchError) as ctx:
             collect_suite_run(assignment, store)
         self.assertIn("ran unwrapped", str(ctx.exception))
+
+
+class TheePreviewPlansWhatTheRunWillExecute(unittest.TestCase):
+    """A preview and a dispatch must not disagree about the trial units.
+
+    They did. The Builder hand-built an `experiment/v1` out of the manifest and
+    planned that: a suite declaring no conditions got the literal arm id
+    "condition" where a dispatch synthesizes the UNGOVERNED arm, and
+    `scenario_refs` were dropped so their trials never appeared. The trial
+    COUNT was right and every trial ID was wrong — under a caption promising
+    the ids were deterministic.
+    """
+
+    def test_every_builtin_previews_exactly_what_it_dispatches(self) -> None:
+        for suite_id in builtin_registry().ids():
+            with self.subTest(suite=suite_id):
+                manifest = builtin_registry().get(suite_id).manifest()
+                self.assertEqual(
+                    list(plan_suite(manifest).planned),
+                    list(build_assignment(manifest, "rt_x").planned),
+                )
+
+    def test_a_suite_with_no_conditions_previews_the_ungoverned_arm(self) -> None:
+        """Not the literal string "condition" — that arm exists nowhere."""
+        manifest = builtin_registry().get("blank").manifest()
+        planned = plan_suite(manifest)
+        self.assertEqual([c["id"] for c in planned.conditions], ["ungoverned"])
+        self.assertEqual(list(planned.planned), ["blank-01:ungoverned:0"])
+
+    def test_a_blocker_is_reported_by_the_preview_and_raised_by_the_dispatch(self) -> None:
+        """Seeing the plan is exactly how you find out the run is impossible, so
+        a preview reports what a dispatch refuses instead of refusing too."""
+        manifest = dict(builtin_registry().get("blank").manifest(),
+                        topology={"kind": "swarm"})
+        planned = plan_suite(manifest)
+        self.assertTrue(planned.planned)  # still says what it WOULD run
+        self.assertEqual(len(planned.blockers), 1)
+        self.assertIn("not yet executable", planned.blockers[0])
+        with self.assertRaises(DispatchError) as ctx:
+            build_assignment(manifest, "rt_x")
+        # the dispatch raises the preview's own words, not a second wording
+        self.assertEqual(str(ctx.exception), planned.blockers[0])
+
+    def test_scenario_refs_are_planned_too(self) -> None:
+        """`resolve_suite` extends scenarios with the refs; the old preview read
+        only the inline list, so a ref's trials were simply absent."""
+        base = copy.deepcopy(builtin_registry().get("blank").manifest())
+        extra = copy.deepcopy(base["scenarios"][0])
+        extra["name"] = "from-the-registry"
+        manifest = dict(base, scenario_refs=["from-the-registry"])
+        planned = plan_suite(manifest, {"from-the-registry": extra})
+        self.assertEqual(
+            list(planned.planned),
+            ["blank-01:ungoverned:0", "from-the-registry:ungoverned:0"],
+        )
 
 
 def _evaluated_task_success(scenario, trace):

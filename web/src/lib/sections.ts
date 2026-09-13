@@ -53,8 +53,12 @@ export interface FieldSpec {
   /** `list` only: the fields each item shows. Keys the item carries that no
    * field names are preserved untouched — same rule as the manifest itself. */
   item?: ItemFieldSpec[];
-  /** `list` only: what a newly added item starts as. */
-  blank?: Json;
+  /** `list` only: what a newly added item starts as.
+   *
+   * A FUNCTION when the blank cannot be a constant — a new scenario has to
+   * reference a tool that exists in THIS suite, and no literal can know that.
+   * Resolved by `blankFor` against the manifest being edited. */
+  blank?: Json | ((manifest: Json) => Json);
   advanced?: boolean;
   help?: string;
 }
@@ -71,6 +75,65 @@ export interface SectionSpec {
 /** The capabilities the platform knows how to honour (suite.schema.json keeps
  * the list open for third-party ones — the chips row accepts a typed extra). */
 export const KNOWN_CAPABILITIES = ["governance", "provenance", "control_plane_export"];
+
+/** The tool ids this suite declares, in order — what a new scenario can `$ref`.
+ *
+ * `scenario.tools` also accepts a full inline manifest, and the resolver
+ * honours it. The blank still prefers a `$ref`: referencing a contract the
+ * suite already states is an assumption the document supports, whereas
+ * inventing a manifest (with a guessed effect class, which decides whether the
+ * kernel treats the tool as a sink) would put a fabricated contract in someone
+ * else's suite. A suite with no tools therefore gets an empty list, and the
+ * validator says so — see `blankScenario`. */
+export function suiteToolIds(manifest: Json): string[] {
+  const environment = (manifest.environment ?? {}) as Record<string, unknown>;
+  const tools = Array.isArray(environment.tools) ? environment.tools : [];
+  return tools
+    .filter((tool): tool is Json => !!tool && typeof tool === "object")
+    .map((tool) => tool.id)
+    .filter((id): id is string => typeof id === "string");
+}
+
+/**
+ * The smallest scenario that RESOLVES, for this suite.
+ *
+ * Every one of the five keys is load-bearing and none can be a constant:
+ * `tools` must be non-empty and must `$ref` a tool the suite declares, and
+ * `task_success` must name an event the runtime evaluator supports — only
+ * `tool_call` today, so the success predicate is "the tool got called". The
+ * item form shows name and task, so anything it does NOT show has to be right
+ * from the start or the user cannot fix it without opening YAML.
+ *
+ * A suite with no tools gets `tools: []`, which is invalid — and correctly so.
+ * A scenario MAY carry its own manifest inline, so the blank could invent one;
+ * but the effect class it would have to guess is what decides whether the
+ * kernel treats the tool as an egress sink, and guessing that into someone
+ * else's suite is worse than the validator saying `minItems 1`.
+ *
+ * Pinned from both sides: `sections.test.ts` checks the derivation, and
+ * `tests/test_suite_platform_contracts.py` checks that a scenario of exactly
+ * this shape resolves against the real validator.
+ */
+export function blankScenario(manifest: Json): Json {
+  const [tool] = suiteToolIds(manifest);
+  return {
+    schema_version: "scenario/v1",
+    name: "",
+    task: "",
+    inputs: {},
+    tools: tool ? [{ $ref: tool }] : [],
+    fixtures: {},
+    ...(tool
+      ? { task_success: { event: "tool_call", tool } }
+      : { task_success: { event: "tool_call" } }),
+  };
+}
+
+/** A field's blank item, resolved against the document being edited. */
+export function blankFor(spec: FieldSpec, manifest: Json): Json {
+  if (typeof spec.blank === "function") return spec.blank(manifest);
+  return spec.blank ?? {};
+}
 
 /** Suite identity — not one of the six sections, but the Builder has to show it
  * or a new suite has no id to save under. */
@@ -143,19 +206,39 @@ export const SECTIONS: SectionSpec[] = [
           { key: "name", label: "Name", widget: "text", placeholder: "unique-scenario-01" },
           { key: "task", label: "Task", widget: "textarea" },
         ],
-        // a valid skeleton — tools/fixtures/task_success are schema-required, so
-        // seeding empties lets a new scenario save instead of failing on three
-        // fields the form never shows; refine them per item in Advanced / YAML
-        blank: {
-          schema_version: "scenario/v1", name: "", task: "",
-          inputs: {}, tools: [], fixtures: {},
-          task_success: { event: "final_output" },
-        },
+        // Derived from the suite, because a constant cannot be valid here. The
+        // old literal seeded `tools: []` and `task_success: {event:
+        // "final_output"}`, and BOTH are refused:
+        //
+        //   suite.scenarios[N].tools: minItems 1, got 0
+        //   task_success: event 'final_output' is defined in the schema but not
+        //     supported by the runtime evaluator (supported: ['tool_call'])
+        //
+        // so "+ Add" reliably invalidated the suite, and the item form — name
+        // and task only — offered no way to fix either. It now references the
+        // suite's first tool and asserts success on a call to it: the smallest
+        // scenario that actually resolves.
+        blank: blankScenario,
         help:
-          "tools, inputs, fixtures and success predicates live on each scenario — " +
-          "edit them per item under Details, or in Advanced / YAML",
+          "a new scenario starts on the suite's first tool; inputs, fixtures and " +
+          "the success predicate live on each scenario — edit them per item under " +
+          "Details, or in Advanced / YAML",
       },
-      { path: "scenario_refs", label: "Scenario refs", widget: "tags", advanced: true },
+      {
+        // chips, not free text: the options are the registry's own names
+        // (supplied at render time — the registry is server state, not part of
+        // the manifest). A typed name is still accepted, and still refused by
+        // the validator if nothing answers to it, which is the honest place to
+        // refuse. As free text the field could only ever break a suite: nothing
+        // filled the registry, so every value resolved to nothing.
+        path: "scenario_refs",
+        label: "Scenario refs",
+        widget: "chips",
+        advanced: true,
+        help:
+          "scenarios shared across suites, resolved by name at plan time and " +
+          "frozen into the artifact — a later edit cannot change a finished run",
+      },
     ],
   },
   {
@@ -229,7 +312,10 @@ export const SECTIONS: SectionSpec[] = [
           { key: "id", label: "Id", widget: "text", placeholder: "governed" },
           { key: "label", label: "Label", widget: "text", placeholder: "governed + allowlist" },
           { key: "enforcement", label: "Enforcement", widget: "select", options: ["off", "on"] },
-          { key: "kernel", label: "Kernel", widget: "text", placeholder: "reference_taint_floor_kernel" },
+          // the reference kernel was REMOVED — a run governs through the real axor-core
+          // build or not at all, so the hint shows the SHAPE rather than a version
+          // that rots the next time the kernel is released.
+          { key: "kernel", label: "Kernel", widget: "text", placeholder: "axor-core@<installed version>" },
         ],
         blank: { schema_version: "condition/v1", id: "", enforcement: "on" },
         help: "omit for a single-arm run; present requires 'governance' in capabilities",
@@ -365,6 +451,94 @@ export const SECTIONS: SectionSpec[] = [
     ],
   },
 ];
+
+/**
+ * The Suite SDK's own knobs, as fields the Builder renders (RFC §12/§13:
+ * "Every suite contributes declarative schemas").
+ *
+ * `config_schema` is a JSON Schema over the suite's options and `config` holds
+ * their values; `ui_schema` says only WHERE each one appears. Both keys have
+ * been in `suite.schema.json` from the start — its own description of
+ * `config_schema` reads "The Builder renders it" — and nothing did, so the
+ * Suite protocol had no author-time surface at all: a third-party suite could
+ * declare knobs no screen showed.
+ *
+ * Presentation only, as the schema insists: a `ui_schema` cannot introduce a
+ * field, and one naming a property `config_schema` does not define is a
+ * validation error rather than a rendered input.
+ */
+export interface ConfigFields {
+  /** fields a `ui_schema` section claims, in the order it lists them */
+  bySection: Record<string, FieldSpec[]>;
+  /** everything `config_schema` defines that no section claimed. Rendered in
+   * its own card rather than dropped — the same carry-through rule the
+   * manifest itself gets: the Builder never silently loses a declared field. */
+  unplaced: FieldSpec[];
+}
+
+/** One `config_schema` property as a field. The widget follows the JSON
+ * Schema, because the schema IS the contract — offering a control the
+ * validator would refuse is the trap the metric/aggregation enums avoid by
+ * being copied from the schema, and here they can be read from it directly. */
+export function configField(name: string, schema: Json, advanced: boolean): FieldSpec {
+  const type = typeof schema.type === "string" ? schema.type : "";
+  const enumeration = Array.isArray(schema.enum) ? schema.enum.map(String) : undefined;
+  const items = (schema.items ?? {}) as Json;
+  const itemEnum = Array.isArray(items.enum) ? items.enum.map(String) : undefined;
+
+  const spec: FieldSpec = {
+    path: `config.${name}`,
+    label: typeof schema.title === "string" ? schema.title : name,
+    widget: "text",
+    advanced,
+    ...(typeof schema.description === "string" ? { help: schema.description } : {}),
+  };
+  if (enumeration) return { ...spec, widget: "select", options: enumeration };
+  if (type === "boolean") return { ...spec, widget: "checkbox" };
+  if (type === "number" || type === "integer") return { ...spec, widget: "number" };
+  if (type === "array") {
+    // a closed set of strings is clickable; an open one is a tag list. An array
+    // of anything else is not formable and links to the one text editor.
+    if (itemEnum) return { ...spec, widget: "chips", options: itemEnum };
+    return items.type === "string" || items.type === undefined
+      ? { ...spec, widget: "tags" }
+      : { ...spec, widget: "yaml-link" };
+  }
+  if (type === "object") return { ...spec, widget: "yaml-link" };
+  return spec;
+}
+
+export function configFields(manifest: Json): ConfigFields {
+  const configSchema = (manifest.config_schema ?? {}) as Json;
+  // `Record<string, Json>` would still index to `Json | undefined` under
+  // noUncheckedIndexedAccess, and every read below is guarded by an `in` or a
+  // key taken from Object.keys
+  const properties = (configSchema.properties ?? {}) as Record<string, Json | undefined>;
+  const uiSchema = (manifest.ui_schema ?? {}) as Json;
+  const uiSections = Array.isArray(uiSchema.sections) ? uiSchema.sections : [];
+
+  const bySection: Record<string, FieldSpec[]> = {};
+  const placed = new Set<string>();
+  for (const raw of uiSections) {
+    if (!raw || typeof raw !== "object") continue;
+    const section = raw as Json;
+    const id = String(section.id ?? "");
+    const advanced = section.advanced === true;
+    for (const key of Array.isArray(section.fields) ? section.fields : []) {
+      const name = String(key);
+      // a layout cannot introduce a field; the validator refuses one that
+      // tries, and rendering it here would show an input for a value nothing
+      // describes
+      if (!(name in properties)) continue;
+      (bySection[id] ??= []).push(configField(name, properties[name] ?? {}, advanced));
+      placed.add(name);
+    }
+  }
+  const unplaced = Object.keys(properties)
+    .filter((name) => !placed.has(name))
+    .map((name) => configField(name, properties[name] ?? {}, false));
+  return { bySection, unplaced };
+}
 
 /** Every path any form renders — what `sections.test.ts` checks the built-in
  * manifests against, so a field a suite actually uses does not silently become

@@ -15,10 +15,12 @@ from __future__ import annotations
 
 from .dispatch import (
     DispatchError,
+    PlannedSuite,
     SuiteAssignment,
     assign_suite,
     build_assignment,
     collect_suite_run,
+    plan_suite,
 )
 from .errors import SuiteError, SuiteValidationError
 from .execute import SuiteRun, run_suite
@@ -35,6 +37,7 @@ from .sdk import (
 __all__ = [
     "UNAVAILABLE_SUITES",
     "DispatchError",
+    "PlannedSuite",
     "ResolvedSuite",
     "SuiteAssignment",
     "assign_suite",
@@ -47,6 +50,7 @@ __all__ = [
     "SuiteValidationError",
     "builtin_registry",
     "load_manifest",
+    "plan_suite",
     "resolve_suite",
     "YamlUnavailable",
     "from_yaml",

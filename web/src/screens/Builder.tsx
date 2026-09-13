@@ -1,15 +1,24 @@
 import { useEffect, useState } from "react";
-import { api, type Json, type RuntimeRow } from "../lib/api";
+import {
+  api,
+  type Json,
+  type PlaygroundResult,
+  type RuntimeRow,
+  type SuitePlan,
+} from "../lib/api";
 import { navigate } from "../lib/router";
 import {
   IDENTITY,
   SECTIONS,
   type FieldSpec,
   type ItemFieldSpec,
+  blankFor,
+  configFields,
   readPath,
   writePath,
 } from "../lib/sections";
 import { Button, Card, Failed, Link, Loading, Tag } from "../components/ui";
+import { TrialResult } from "../components/TrialResult";
 
 /**
  * The Suite Builder — Basic, Advanced and YAML over ONE manifest (RFC §13).
@@ -47,11 +56,16 @@ function summaryOf(value: unknown): string {
 function Widget({
   spec,
   value,
+  blank,
   onChange,
   onJump,
 }: {
   spec: FieldSpec;
   value: unknown;
+  /** `list` only: what "+ Add" starts a new item as, already resolved against
+   * the document (a new scenario has to reference a tool THIS suite declares,
+   * so the blank cannot be a constant). */
+  blank: Json;
   onChange: (next: unknown) => void;
   onJump: (path: string) => void;
 }) {
@@ -130,7 +144,7 @@ function Widget({
         <ListField
           value={value}
           fields={spec.item ?? []}
-          blank={spec.blank ?? {}}
+          blank={blank}
           onChange={onChange}
           onJump={() => onJump(spec.path)}
         />
@@ -359,16 +373,25 @@ function Fields({
   fields,
   manifest,
   advanced,
+  options,
   onChange,
   onJump,
 }: {
   fields: FieldSpec[];
   manifest: Json;
   advanced: boolean;
+  /** Choices a field's options cannot be declared with, because they are SERVER
+   * state rather than a property of the manifest — the scenario registry is
+   * the case that forced this. Keyed by field path. */
+  options: Record<string, string[]>;
   onChange: (next: Json) => void;
   onJump: (path: string) => void;
 }) {
-  const shown = fields.filter((field) => advanced || !field.advanced);
+  const shown = fields
+    .filter((field) => advanced || !field.advanced)
+    .map((field) =>
+      options[field.path] ? { ...field, options: options[field.path] } : field,
+    );
   return (
     <div className="builder-fields">
       {shown.map((spec) => (
@@ -384,6 +407,7 @@ function Fields({
           <Widget
             spec={spec}
             value={readPath(manifest, spec.path)}
+            blank={blankFor(spec, manifest)}
             onChange={(next) => onChange(writePath(manifest, spec.path, next))}
             onJump={onJump}
           />
@@ -403,8 +427,23 @@ export function Builder({ suiteId }: { suiteId: string }) {
   const [errors, setErrors] = useState<string[] | null>(null);
   const [ok, setOk] = useState<boolean | null>(null);
   const [saved, setSaved] = useState(false);
+  // Whole-suite validation answers "is this manifest valid"; a pile of errors
+  // does not say WHICH scenario broke. Per-scenario validation does, and the
+  // plan preview says what a run would actually execute before one starts.
+  const [scenarioErrors, setScenarioErrors] = useState<[string, string[]][] | null>(null);
+  const [plan, setPlan] = useState<SuitePlan | null>(null);
   const [busy, setBusy] = useState(false);
   const [runtimes, setRuntimes] = useState<RuntimeRow[] | null>(null);
+  // the names a `scenario_refs` entry can actually resolve to. Loaded, not
+  // declared: the registry is server state, and the field used to be free text
+  // against a registry nothing filled — so every value typed there made the
+  // suite permanently invalid.
+  const [registryScenarios, setRegistryScenarios] = useState<string[]>([]);
+  // RFC §13: "Preview should support a single-trial debugger before full
+  // execution." The Playground screen is that debugger, but it ran a SAVED
+  // suite by id, so the one document it could not try was the one on screen.
+  const [trial, setTrial] = useState<PlaygroundResult | null>(null);
+  const [trialScenario, setTrialScenario] = useState("");
   const [runtimeRef, setRuntimeRef] = useState("");
   const [runError, setRunError] = useState<string | null>(null);
   const [jumpTarget, setJumpTarget] = useState<string | null>(null);
@@ -445,6 +484,20 @@ export function Builder({ suiteId }: { suiteId: string }) {
   useEffect(() => {
     let live = true;
     api
+      .registryScenarios()
+      .then(({ scenarios }) => live && setRegistryScenarios(scenarios.map((s) => s.name)))
+      // an empty registry is the normal state of a fresh workspace, and the
+      // chips row still accepts a typed name — a failed load must not be a
+      // red screen over a field most suites never use
+      .catch(() => live && setRegistryScenarios([]));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    api
       .suite(suiteId)
       .then((document) => live && setManifest(document))
       .catch((exc: unknown) =>
@@ -455,11 +508,24 @@ export function Builder({ suiteId }: { suiteId: string }) {
     };
   }, [suiteId]);
 
-  function edited(next: Json) {
-    setManifest(next);
+  /** Every result on screen describes the document that produced it, so a new
+   * document invalidates all of them at once. Clearing only the validation
+   * verdict left the plan preview and the per-scenario report standing after an
+   * edit — change `repeats` and the old trial count kept its place, reading as
+   * the plan for what you were now looking at. */
+  function clearResults() {
     setOk(null);
     setErrors(null);
     setSaved(false);
+    setScenarioErrors(null);
+    setPlan(null);
+    setRunError(null);
+    setTrial(null);
+  }
+
+  function edited(next: Json) {
+    setManifest(next);
+    clearResults();
   }
 
   /** Switching INTO yaml serializes the current document; switching OUT parses
@@ -585,6 +651,94 @@ export function Builder({ suiteId }: { suiteId: string }) {
     }
   }
 
+  /** Per-scenario validation needs the suite's tool manifests, keyed by id —
+   * the same map `resolve_suite` builds from `environment.tools`. Sending the
+   * scenario alone made the checker report "tool X has no manifest in the
+   * bundle" for every tool of every scenario, plus every downstream semantic
+   * that reads a manifest (an injection with no untrusted field to land in, a
+   * breach predicate with no WRITE/EXPORT/EXEC sink). The button was pure
+   * false positives on suites that validate perfectly. */
+  function toolManifests(document: Json): Record<string, Json> {
+    const environment = (document.environment ?? {}) as Record<string, unknown>;
+    const tools = Array.isArray(environment.tools) ? environment.tools : [];
+    return Object.fromEntries(
+      tools
+        .filter((tool): tool is Json => !!tool && typeof tool === "object")
+        .filter((tool) => typeof tool.id === "string")
+        .map((tool) => [String(tool.id), tool]),
+    );
+  }
+
+  /** Run ONE trial of the document as it stands — unsaved, unstored, not
+   * counted. `/playground/trial` already took an inline `{suite}`; the Builder
+   * simply never sent the manifest it was holding, so trying a change meant
+   * saving it first and finding the Playground under a different route.
+   *
+   * Deliberately not a Save: a trial is a debugging click, and the payload's
+   * own `counted_in_a_run: false` is rendered beside the result. */
+  async function tryOneTrial() {
+    setBusy(true);
+    setRunError(null);
+    setTrial(null);
+    try {
+      const document = await current();
+      if (document === null) return;
+      setTrial(await api.playground({
+        suite: document,
+        ...(trialScenario ? { scenario: trialScenario } : {}),
+      }));
+    } catch (exc) {
+      setRunError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkScenarios() {
+    setBusy(true);
+    setRunError(null);
+    try {
+      const document = await current();
+      if (document === null) return;
+      const scenarios = (document.scenarios ?? []) as Record<string, unknown>[];
+      const manifests = toolManifests(document);
+      const found: [string, string[]][] = [];
+      for (const scenario of scenarios) {
+        const result = await api.validateScenario(scenario, manifests);
+        if (!result.ok) found.push([String(scenario.name ?? "(unnamed)"), result.errors]);
+      }
+      setScenarioErrors(found);
+    } catch (exc) {
+      setRunError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** What a run WOULD execute — planned by the server, through the same
+   * `plan_suite` a dispatch runs.
+   *
+   * This used to hand-build an `experiment/v1` out of the manifest and plan
+   * THAT. Two things went wrong and both were invisible: a suite declaring no
+   * conditions got the literal arm id "condition" where a real dispatch
+   * synthesizes the UNGOVERNED arm, and `scenario_refs` were dropped, so their
+   * trials never appeared. The count looked right, every trial id was wrong,
+   * and the caption promised the ids were deterministic. */
+  async function previewPlan() {
+    setBusy(true);
+    setRunError(null);
+    try {
+      const document = await current();
+      if (document === null) return;
+      setPlan(await api.planSuite(document));
+    } catch (exc) {
+      setPlan(null);
+      setRunError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /** Save, then dispatch to the chosen agent, then land on the live run.
    * Save-first is deliberate: the server dispatches the STORED suite, and a
    * run of anything other than what is on screen is the stale-document bug
@@ -616,6 +770,11 @@ export function Builder({ suiteId }: { suiteId: string }) {
   if (loadError) return <Failed error={loadError} />;
   if (manifest === null) return <Loading />;
 
+  const dynamicOptions: Record<string, string[]> = {
+    scenario_refs: registryScenarios,
+  };
+  const suiteConfig = configFields(manifest);
+
   return (
     <div className="screen">
       <header className="screen-head">
@@ -646,9 +805,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
             spellCheck={false}
             onChange={(event) => {
               setYaml(event.target.value);
-              setOk(null);
-              setErrors(null);
-              setSaved(false);
+              clearResults();
             }}
           />
         </Card>
@@ -660,30 +817,58 @@ export function Builder({ suiteId }: { suiteId: string }) {
               fields={IDENTITY}
               manifest={manifest}
               advanced={mode === "advanced"}
+              options={dynamicOptions}
               onChange={edited}
               onJump={jumpToYaml}
             />
           </Card>
-          {SECTIONS.filter(
-            // a section whose every field is Advanced does not render an
-            // empty card in Basic — a card with nothing to do is not a form
-            (section) =>
-              mode === "advanced" || section.fields.some((field) => !field.advanced),
-          ).map((section) => (
-            <Card key={section.id}>
-              <h3>{section.title}</h3>
-              {section.description && (
-                <p className="muted small">{section.description}</p>
-              )}
+          {SECTIONS.map((section) => ({
+            section,
+            // the suite's OWN knobs, laid out into this section by its
+            // `ui_schema` (RFC §12). They are ordinary fields from here on —
+            // same widgets, same writePath, same carry-through.
+            fields: [...section.fields, ...(suiteConfig.bySection[section.id] ?? [])],
+          }))
+            .filter(
+              // a section whose every field is Advanced does not render an
+              // empty card in Basic — a card with nothing to do is not a form
+              ({ fields }) =>
+                mode === "advanced" || fields.some((field) => !field.advanced),
+            )
+            .map(({ section, fields }) => (
+              <Card key={section.id}>
+                <h3>{section.title}</h3>
+                {section.description && (
+                  <p className="muted small">{section.description}</p>
+                )}
+                <Fields
+                  fields={fields}
+                  manifest={manifest}
+                  advanced={mode === "advanced"}
+                  options={dynamicOptions}
+                  onChange={edited}
+                  onJump={jumpToYaml}
+                />
+              </Card>
+            ))}
+          {suiteConfig.unplaced.length > 0 && (
+            <Card>
+              <h3>Suite options</h3>
+              <p className="muted small">
+                Declared by this suite's <code>config_schema</code>, placed in no
+                section by its <code>ui_schema</code>. Shown here rather than
+                dropped — the Builder never silently loses a declared field.
+              </p>
               <Fields
-                fields={section.fields}
+                fields={suiteConfig.unplaced}
                 manifest={manifest}
                 advanced={mode === "advanced"}
+                options={dynamicOptions}
                 onChange={edited}
                 onJump={jumpToYaml}
               />
             </Card>
-          ))}
+          )}
         </>
       )}
 
@@ -695,10 +880,56 @@ export function Builder({ suiteId }: { suiteId: string }) {
           <Button onClick={save} disabled={busy}>
             Save
           </Button>
+          <Button variant="secondary" onClick={checkScenarios} disabled={busy}>
+            Check scenarios
+          </Button>
+          <Button variant="secondary" onClick={previewPlan} disabled={busy}>
+            Preview plan
+          </Button>
           {ok === true && <Tag tone="success">valid</Tag>}
           {ok === false && <Tag tone="danger">{errors?.length ?? 0} error(s)</Tag>}
           {saved && <Tag tone="success">saved</Tag>}
         </div>
+        {scenarioErrors !== null && (
+          scenarioErrors.length === 0 ? (
+            <p className="muted small">Every scenario validates on its own.</p>
+          ) : (
+            <ul className="errors">
+              {scenarioErrors.map(([name, messages]) => (
+                <li key={name}>
+                  <code>{name}</code>: {messages.join("; ")}
+                </li>
+              ))}
+            </ul>
+          )
+        )}
+        {plan && (
+          <>
+            <p className="muted small">
+              {plan.trials.length} trial unit(s) — one per (scenario × condition ×
+              repeat), across {plan.conditions.length} arm(s):{" "}
+              <code>{plan.conditions.join(", ")}</code>. This is a PLAN, not a
+              run: the ids come from the same planner a dispatch runs, so what
+              you see here is what the run will name.
+            </p>
+            {plan.conditions.length === 1 && plan.conditions[0] === "ungoverned" &&
+              !readPath(manifest, "execution.conditions") && (
+                <p className="muted small">
+                  This suite declares no conditions, so it gets the single
+                  UNGOVERNED arm — wrapped and observed, gates not enforcing. Not
+                  a kernel-free run: add a second condition to compare governed
+                  against it.
+                </p>
+              )}
+            {plan.blockers.length > 0 && (
+              <ul className="errors">
+                {plan.blockers.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
         {errors && errors.length > 0 && (
           <ul className="errors">
             {errors.map((message) => (
@@ -707,6 +938,27 @@ export function Builder({ suiteId }: { suiteId: string }) {
           </ul>
         )}
       </Card>
+
+      <Card>
+        <h3>Try one trial</h3>
+        <p className="muted small">
+          Runs the document as it stands — unsaved, against the suite's own
+          simulated tools. Nothing is stored, nothing is aggregated, and it does
+          not need a connected agent. This is the debugger, not the run.
+        </p>
+        <div className="row">
+          <input
+            value={trialScenario}
+            placeholder="scenario (first declared)"
+            onChange={(event) => setTrialScenario(event.target.value)}
+          />
+          <Button variant="secondary" onClick={tryOneTrial} disabled={busy}>
+            Try one trial
+          </Button>
+        </div>
+      </Card>
+
+      {trial && <TrialResult result={trial} />}
 
       <Card>
         <h3>Run</h3>

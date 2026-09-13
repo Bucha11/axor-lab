@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { Json } from "./api";
-import { IDENTITY, SECTIONS, readPath, renderedPaths, writePath } from "./sections";
+import {
+  IDENTITY,
+  SECTIONS,
+  blankFor,
+  blankScenario,
+  configFields,
+  readPath,
+  renderedPaths,
+  suiteToolIds,
+  writePath,
+} from "./sections";
 
 /**
  * The Builder's three modes edit ONE manifest (RFC §13), and the plan's risk
@@ -109,6 +119,54 @@ describe("the Builder is a form, not a wall of JSON textareas", () => {
   });
 });
 
+describe("a new scenario is one that RESOLVES", () => {
+  /**
+   * The old blank was a constant seeding `tools: []` and
+   * `task_success: {event: "final_output"}`. Both are refused —
+   * `tools: minItems 1`, and the runtime evaluator supports only `tool_call` —
+   * so "+ Add" reliably invalidated the suite, and the item form (name and
+   * task) offered no way to fix either without opening YAML.
+   *
+   * The Python side of this contract is
+   * `tests/test_suite_platform_contracts.py`, which runs a scenario of exactly
+   * this shape through the real validator.
+   */
+  it("references a tool the suite actually declares", () => {
+    const blank = blankScenario(MANIFEST);
+    expect(blank.tools).toEqual([{ $ref: "read" }]);
+    expect(suiteToolIds(MANIFEST)).toEqual(["read"]);
+  });
+
+  it("asserts success on a call to that same tool", () => {
+    // `final_output` is in the schema and NOT in the evaluator, so a blank
+    // using it produced a scenario that validates on paper and refuses to run
+    expect(blankScenario(MANIFEST).task_success).toEqual({
+      event: "tool_call",
+      tool: "read",
+    });
+  });
+
+  it("leaves tools empty when the suite declares none", () => {
+    // not a blank's fault to paper over: the suite has nothing to reference,
+    // and `minItems 1` is the true state of the document
+    const toolless: Json = { ...MANIFEST, environment: { simulation: {} } };
+    expect(blankScenario(toolless).tools).toEqual([]);
+  });
+
+  it("the scenarios field resolves its blank against the document", () => {
+    const spec = SECTIONS.flatMap((s) => s.fields).find((f) => f.path === "scenarios");
+    expect(typeof spec?.blank).toBe("function");
+    expect(blankFor(spec!, MANIFEST)).toEqual(blankScenario(MANIFEST));
+  });
+
+  it("a constant blank still works", () => {
+    const spec = SECTIONS.flatMap((s) => s.fields).find(
+      (f) => f.path === "execution.conditions",
+    );
+    expect(blankFor(spec!, MANIFEST)).toEqual(spec?.blank);
+  });
+});
+
 describe("editing one field touches nothing else", () => {
   it("writes the value at the path", () => {
     const next = writePath(MANIFEST, "execution.repeats", 12);
@@ -153,6 +211,111 @@ describe("editing one field touches nothing else", () => {
       if (value !== undefined) edited = writePath(edited, path, value);
     }
     expect(JSON.stringify(edited)).toBe(JSON.stringify(MANIFEST));
+  });
+});
+
+describe("a suite contributes its own fields", () => {
+  /**
+   * RFC §12/§13: "Every suite contributes declarative schemas."
+   * `suite.schema.json` describes `config_schema` as "the Builder renders it;
+   * a value that fails it is rejected at author time" — and nothing rendered
+   * it and nothing validated it, so the Suite protocol had no author-time
+   * surface: a third-party suite could declare knobs no screen ever showed.
+   */
+  const WITH_CONFIG: Json = {
+    ...MANIFEST,
+    config_schema: {
+      type: "object",
+      properties: {
+        depth: { type: "integer", title: "Search depth", description: "how far" },
+        style: { enum: ["terse", "verbose"] },
+        strict: { type: "boolean" },
+        corpora: { type: "array", items: { type: "string" } },
+        families: { type: "array", items: { enum: ["a", "b"] } },
+        tuning: { type: "object" },
+        note: { type: "string" },
+      },
+    },
+    ui_schema: {
+      sections: [
+        { id: "execution", fields: ["depth", "style"] },
+        { id: "evaluation", fields: ["strict"], advanced: true },
+      ],
+    },
+    config: { depth: 2 },
+  };
+
+  it("places a field where the ui_schema puts it, in that order", () => {
+    const { bySection } = configFields(WITH_CONFIG);
+    expect(bySection.execution?.map((f) => f.path)).toEqual([
+      "config.depth",
+      "config.style",
+    ]);
+    expect(bySection.evaluation?.map((f) => f.path)).toEqual(["config.strict"]);
+  });
+
+  it("a section's advanced flag hides its fields in Basic, never drops them", () => {
+    const { bySection } = configFields(WITH_CONFIG);
+    expect(bySection.execution?.every((f) => f.advanced)).toBe(false);
+    expect(bySection.evaluation?.every((f) => f.advanced)).toBe(true);
+  });
+
+  it("a field no section claims is still rendered", () => {
+    // the same carry-through rule the manifest gets: never silently lost
+    expect(configFields(WITH_CONFIG).unplaced.map((f) => f.path)).toEqual([
+      "config.corpora",
+      "config.families",
+      "config.tuning",
+      "config.note",
+    ]);
+  });
+
+  it("the widget follows the JSON Schema, so no control offers what the validator refuses", () => {
+    const all = [
+      ...Object.values(configFields(WITH_CONFIG).bySection).flat(),
+      ...configFields(WITH_CONFIG).unplaced,
+    ];
+    const widget = (path: string) => all.find((f) => f.path === path)?.widget;
+    expect(widget("config.depth")).toBe("number");
+    expect(widget("config.style")).toBe("select");
+    expect(widget("config.strict")).toBe("checkbox");
+    expect(widget("config.corpora")).toBe("tags");
+    expect(widget("config.families")).toBe("chips");
+    expect(widget("config.note")).toBe("text");
+    // not formable — links to the one text editor, like every other deep value
+    expect(widget("config.tuning")).toBe("yaml-link");
+  });
+
+  it("title and description become the label and the help", () => {
+    const depth = configFields(WITH_CONFIG).bySection.execution?.[0];
+    expect(depth?.label).toBe("Search depth");
+    expect(depth?.help).toBe("how far");
+    // no title -> the property name, never a blank label
+    expect(configFields(WITH_CONFIG).bySection.execution?.[1]?.label).toBe("style");
+  });
+
+  it("a layout cannot introduce a field", () => {
+    // the schema says so outright; the validator refuses it, and rendering it
+    // would show an input writing a value nothing describes
+    const ghost: Json = {
+      ...WITH_CONFIG,
+      ui_schema: { sections: [{ id: "execution", fields: ["depth", "ghost"] }] },
+    };
+    expect(configFields(ghost).bySection.execution?.map((f) => f.path)).toEqual([
+      "config.depth",
+    ]);
+  });
+
+  it("a suite with no config_schema contributes nothing", () => {
+    expect(configFields(MANIFEST)).toEqual({ bySection: {}, unplaced: [] });
+  });
+
+  it("its values live under config, so writePath reaches them like any field", () => {
+    const next = writePath(WITH_CONFIG, "config.depth", 9);
+    expect((next.config as Json).depth).toBe(9);
+    // and clearing one removes it rather than writing null. An emptied parent
+    // is removed too, so `config` is gone entirely once its last key is.
+    expect(writePath(next, "config.depth", undefined).config).toBeUndefined();
   });
 });
 

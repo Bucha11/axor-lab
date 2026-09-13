@@ -8,7 +8,7 @@ Axor Lab — a reproducible experiment platform for AI agents: bring an agent, b
 - **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — the production-ready implementation plan (phases, reuse map, milestones, definition of done). The MVP spine is implemented; see its status block.
 - **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the post-MVP plan: BYOK model adapter, Control Plane export, full web app, production hardening, then the Later tier (instrumented endpoints, sandbox + cloud code, multi-agent games, population scale) and the commercial track.
 - **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
-- **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3 — superseded as narrative by `docs/spec-suite-platform/`), packaging/economics, bench format guide, UI mocks.
+- **[docs/spec-v0.3/](docs/spec-v0.3/)** — the v0.3 narrative (superseded as the product narrative by `docs/spec-suite-platform/`, still accurate as a description of the governance capability), packaging/economics, bench format guide, UI mocks.
 
 ## Maturity — subsystems are NOT equally production-ready
 
@@ -54,6 +54,17 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 - **`lab_suite/`** — the Suite SDK: the `Suite` protocol and `BaseSuite`, a
   registry with three built-in suites (Blank, AgentDojo, Budget), manifest
   load/validate/resolve, suite execution, and dispatch to a connected runtime.
+  A suite declares its own options as a JSON Schema in `config_schema`, their
+  values in `config`, and where the Builder puts each one in `ui_schema` — the
+  Builder renders them as ordinary fields and the values are validated at
+  author time, so a suite's knobs are refused in the form rather than at run
+  time (RFC §12/§13, "every suite contributes declarative schemas").
+  A scenario may `$ref` a tool the suite shares in `environment.tools` or carry
+  the manifest inline; either way it lands in the bundle a run governs against,
+  and one tool id declared twice with different contracts is refused. Scenarios
+  themselves are shareable: `scenario_refs` resolve from the workspace (and its
+  org registry) on the server, and from a `scenarios/` directory beside the
+  manifest on the CLI.
 - **`lab_capabilities/governance/`** — governance as an opt-in capability
   (Suite Platform RFC §10): the reference kernel and the real axor-core backend,
   the gate a condition resolves to, exact verdict replay, EvidenceCase
@@ -71,6 +82,10 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 ```
 axor-lab suites                                    # the suite catalog
 axor-lab run-suite budget --out ./artifact --yes    # a suite -> artifact/v1
+axor-lab run-suite ./suite.json --out ./artifact --yes   # ...or a manifest file;
+                                                   #    `scenario_refs` resolve from
+                                                   #    ./scenarios beside it (or
+                                                   #    --scenarios DIR)
 axor-lab import-agentdojo banking --out suite.axl   # curated benchmark -> .axl
 axor-lab validate examples/banking-exfil-01.axl
 axor-lab run examples/banking-exfil-01.axl --out ./bundle --yes
