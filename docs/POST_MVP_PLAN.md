@@ -352,19 +352,48 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 
 ## Parallel track — Commercial (demand-gated, not code-gated)
 
-### B9 — Private Lab workspaces (the paid rung) — ✅ entitlement implemented
-*Turn the spine into revenue the moment there's a buyer; reuse the CP license.*
+### B9 — Private Lab workspaces (the paid rung) — ✅ the rung is built
+*Turn the spine into revenue the moment there's a buyer.*
 
-> **Status:** `lab_entitlement` ships the license (modules as flags, one file
-> both modules — mirrors CP `cp-monetization.md` §4) and the two lines as code:
-> `SAFETY_FEATURES` are free forever (the `FeatureGate` never consults a license
-> for them), `ORG_FEATURES` require a non-expired license flagging `private_lab`,
-> tier-bundled (team vs security). Expiry degrades org features to read-only and
-> never touches safety. Optional Ed25519 sign/verify (PyNaCl) over a JCS-subset
-> payload, same crypto as CP. Covered by `test_entitlement.py` (safety-free,
-> org-paid, expiry read-only, module-flag, signed round-trip when PyNaCl is
-> present). The hosted workspace UI/billing surface is the remaining
-> infra-level work (rides on B3/B4).
+> **Status.** This block used to describe a `lab_entitlement` package with a
+> `FeatureGate`, `SAFETY_FEATURES`/`ORG_FEATURES` and an Ed25519 license file,
+> covered by `test_entitlement.py`. None of that exists: the package was deleted
+> (`spec-suite-platform/INTEGRATION_PLAN.md` §4 records the deletion) and
+> entitlement was rebuilt as workspace PLANS. `python -c "import
+> lab_entitlement"` and `grep -rn FeatureGate` both come back empty. What ships
+> instead, in `lab_server/workspaces.py` and the screen API:
+>
+> - **Tenancy** — durable workspaces, each with its own token, job store,
+>   screen store and org-shared registry.
+> - **RBAC** — owner/admin/member/viewer; a viewer cannot mutate, and every
+>   mutation is written to a per-workspace audit log with the role, never the
+>   token.
+> - **The gate** — `require_capability` / `require_within` over a plan's
+>   capabilities and numeric limits, answering **402 Payment Required**:
+>   authorised and well-formed, just not in the plan. `max_artifacts` is a
+>   RETENTION window (oldest evicted), not a refusal — the honest behaviour for
+>   a store the customer keeps writing to.
+> - **The catalog** — operator-supplied (`serve --plans-file`); the code ships
+>   only a placeholder with no pricing authority, and the owner's ladder lives
+>   in `docs/pricing/axor-plans.json`.
+> - **Identity → tier → plan** — an access token's org `tier` selects the
+>   catalog plan on first login and fails CLOSED to free on an unknown tier.
+> - **Purchase** — checkout plus a secret-gated provider webhook: a purchase
+>   requires an unspent checkout (a replay is 409), a lapse is addressed to the
+>   workspace (a renewal fails months after the sale, with no checkout in
+>   sight), and a non-active subscription drops to free, so a lapsed payment
+>   loses paid features rather than keeping them.
+> - **Anonymous trials** — `/guest-session` mints an ephemeral trial workspace
+>   with no account, capped and swept on expiry.
+> - **The screens** — Workspace renders plans, members, the audit log and (for
+>   an admin) the tenant list; a 402 anywhere in the app says it is the plan and
+>   points here.
+>
+> Line 1 holds: none of this gates a safety feature. A local run, replay, local
+> regressions and EvidenceCase capture need no plan at all.
+>
+> **What is NOT built is listed in §B10 below**, each with the check that proves
+> its absence — work items 2 and 3 of this block are almost entirely there.
 
 - **Contract anchor:** `axor-packaging.md` (single source of truth: tiers,
   prices, the one-ladder/two-modules frame), `lab-economics.md` (bill the
@@ -397,6 +426,58 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   *capture*. Paid — hosted private org workspace, scheduled CI, approvals,
   retention, SSO, compliance exports. Trigger is organizational use, never a
   safety feature, never hobby-scale privacy.
+
+---
+
+## B10 — Paid features declared but not built (future scope)
+
+Every row below is sold by `axor-packaging.md` or granted by
+`docs/pricing/axor-plans.json`, and does not exist in the code. Each carries the
+check that proves it, so this list stays falsifiable: if a check starts coming
+back non-empty, the row is stale and should move up into B9's status.
+
+This is the honest inventory, not a commitment to build all of it. The tiers can
+be sold today on what B9 ships — a hosted private workspace, the org registry
+and the governance execution gate are real — but a Security or Enterprise
+contract that promises the rows below promises something absent.
+
+Each row's check runs over the Python packages (`lab_analysis lab_capabilities
+lab_contracts lab_runner lab_server lab_service lab_suite lab_adapters`, written
+`$PKGS` below) and comes back **empty** today. The patterns are deliberately
+narrow — an earlier draft of this table searched for the plain words and matched
+prose in comments ("scheduled transactions", `coverage` under `overage`), which
+is a check that proves nothing.
+
+| # | Feature | Sold as | Check that must stay empty |
+|---|---|---|---|
+| B10.1 | Scheduled regression CI + history | Security | `grep -rnE 'crontab\|APScheduler\|schedule\(\|_schedule\|SCHEDULE' $PKGS --include=*.py` — `regress` runs on demand; nothing schedules it and no history is kept beyond the artifacts. |
+| B10.2 | Approvals / multi-operator attestation | Security | `grep -rniE 'require_approval\|approvals?_\|n_confirmations\|quorum' $PKGS --include=*.py` — RBAC exists; "require N confirmations before X" does not. |
+| B10.3 | Compliance / audit report generation | Security | `grep -rniE 'compliance_report\|def .*compliance\|audit_export\|export_audit' $PKGS --include=*.py` — `GET /workspaces/current/audit` returns raw entries; there is no period report over interventions, attestations-with-reasons and denial stats, which is the artifact an auditor is handed. |
+| B10.4 | Fleet view | Enterprise | `grep -rni 'fleet' $PKGS --include=*.py` — runs and runtimes list per workspace; nothing aggregates across the org. |
+| B10.5 | Hosted-trial allowance, metering, overage | Team / Security | `grep -rnE '\boverage\b\|trials_used\|trial_allowance\|\bquota\b' $PKGS --include=*.py` — `max_hosted_runtimes` caps CONCURRENT runtimes, not trials executed. "including 50,000 hosted trials" has no counter behind it. |
+| B10.6 | SSO beyond a bearer JWT | Enterprise | `grep -rniE '\bsaml\b\|\bscim\b' $PKGS web/src` — `lab_server/identity_client.py` verifies an Ed25519 JWT against a JWKS and reads `org`/`role`/`tier`; SAML and SCIM provisioning are not implemented. |
+| B10.7 | Managed retention policies, legal hold, audit-log export | Enterprise | `grep -rniE 'legal_hold\|retention_policy\|retention_policies' $PKGS --include=*.py` — only `max_artifacts` exists, a newest-N window per workspace: no policy language, no hold that survives it, no export. |
+| B10.8 | A2A inter-federation (L0/L1 observation; L2 governed-peer attestation) | Team / Enterprise | `grep -rniE 'inter_federation\|interfederation\|peer_keyset' $PKGS --include=*.py` — not present. Intra-federation is free by Line 1 (`cp-monetization.md` §2) and is a Control-Plane concern either way. |
+
+`tests/test_future_scope_is_honest.py` runs all eight and fails if one starts
+matching, so a row cannot quietly go stale after the feature lands.
+
+### The one open decision
+
+`control_plane` is granted by the Enterprise tier and **no Lab route reads it**
+(`ALL_CAPABILITIES` now says so). Governed-node operation belongs to the Control
+Plane, and `architecture-boundary.md` puts entitlement at platform level, so
+Lab may legitimately have nothing to gate. The candidate is the HOSTED handoff:
+
+- `POST /handoff/export` is the organizational surface — "what carries over to
+  production" — and would be a consistent thing to put behind the add-on.
+- The CLI `export-cp` runs locally and must stay free: Line 1 protects local
+  use, and the free line names "local BYOK runs, local private projects".
+
+Gating the hosted route and leaving the CLI free is the shape that matches both
+lines. It is a pricing decision, not a bug, so it is written here rather than
+made in the code. Until it is decided, a plan granting `control_plane` changes
+nothing a user can observe.
 
 ---
 

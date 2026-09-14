@@ -80,7 +80,7 @@ Enforcement, tool dispatch, provenance construction all happen in the runtime (p
 
 ## Deferred (in vision, not in v1)
 
-Multi-agent games · population scale · arbitrary topology · full catalog with ranking/leaderboards/reputation · PDF/MD export (after Results/EvidenceCase UI) · independent-reproduction attestations (after simple publications).
+Multi-agent games · population scale · arbitrary topology · full catalog with ranking/leaderboards/reputation · a rendered PDF (`axor-lab report` ships the Markdown, LaTeX and BibTeX a manuscript actually pastes; a PDF container is what is still deferred) · independent-reproduction attestations (after simple publications).
 
 ## The product sentence
 

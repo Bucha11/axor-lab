@@ -37,11 +37,25 @@ if TYPE_CHECKING:
 # capabilities, so tenancy alone changes nothing until a restricted plan is set.
 # A restricted plan sets a numeric limit (e.g. max_suites: 2) or drops a
 # capability.
+#: Every capability a plan may grant, and — stated, because it was not — which
+#: ones LAB ITSELF enforces. A capability a plan advertises and no route reads is
+#: a chip on the Workspace screen that means nothing, and there is no way to tell
+#: the two apart by looking at the list.
 ALL_CAPABILITIES = (
-    "hosted_execution",   # the platform provisions/runs managed runtimes (feature 4)
-    "private_registry",   # an org-private shared suite registry (feature 6)
-    "governance",         # may RUN suites that declare a governance capability
-    "control_plane",      # the Control Plane add-on: governed-node operation
+    # ENFORCED here (`require_capability`, answering 402):
+    "hosted_execution",   # POST /hosted-runtimes — the platform runs managed runtimes
+    "private_registry",   # POST /scenarios|suites/{id}/publish — the org's shared catalog
+    "governance",         # dispatching a suite that DECLARES governance (the open
+                          # format still validates and stores anywhere: the gate is
+                          # on execution, not on authorship)
+    # CARRIED, NOT GATED by Lab: the Production Governance add-on is governed-NODE
+    # operation, which happens in the Control Plane, and `architecture-boundary.md`
+    # puts entitlement at platform level. Lab grants it so an identity tier and the
+    # plan catalog can express it end to end; no Lab route consults it today.
+    # Whether the HOSTED Control-Plane handoff belongs behind it is an open
+    # pricing question, recorded in `docs/POST_MVP_PLAN.md` §B10 rather than
+    # decided here.
+    "control_plane",
 )
 
 # RBAC roles, most-privileged first. A member's token carries a role within its
