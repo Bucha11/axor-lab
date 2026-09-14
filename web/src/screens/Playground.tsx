@@ -42,7 +42,7 @@ export function Playground() {
   }
 
   if (catalog.loading) return <Loading />;
-  if (catalog.error) return <Failed error={catalog.error} onRetry={catalog.reload} />;
+  if (catalog.error) return <Failed error={catalog.error} status={catalog.status} onRetry={catalog.reload} />;
 
   return (
     <div className="screen">

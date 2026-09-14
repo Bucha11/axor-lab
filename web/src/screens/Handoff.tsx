@@ -33,7 +33,7 @@ function Checks({ report }: { report: CheckReport }) {
 }
 
 export function Handoff() {
-  const { data, error, loading, reload } = useAsync(() => api.home());
+  const { data, error, status, loading, reload } = useAsync(() => api.home());
   const [pkg, setPkg] = useState<HandoffPackage | null>(null);
   const [runId, setRunId] = useState("");
   const [report, setReport] = useState<CheckReport | null>(null);
@@ -88,7 +88,7 @@ export function Handoff() {
     });
 
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   const runs = data?.recent_runs ?? [];
 
   return (

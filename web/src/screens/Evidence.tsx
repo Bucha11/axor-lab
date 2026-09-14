@@ -21,9 +21,9 @@ export function EvidenceList() {
       setBusy(false);
     }
   }
-  const { data, error, loading, reload } = useAsync(() => api.evidence());
+  const { data, error, status, loading, reload } = useAsync(() => api.evidence());
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   const cases = data?.evidence_cases ?? [];
   return (
     <div className="screen">
@@ -84,9 +84,9 @@ interface TimelineEntry {
 }
 
 export function EvidenceScreen({ id }: { id: string }) {
-  const { data, error, loading, reload } = useAsync(() => api.evidenceCase(id), [id]);
+  const { data, error, status, loading, reload } = useAsync(() => api.evidenceCase(id), [id]);
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   if (!data) return null;
 
   const timeline = (data.timeline as TimelineEntry[] | undefined) ?? [];

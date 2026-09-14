@@ -21,9 +21,9 @@ export function RegressionList() {
       setBusy(false);
     }
   }
-  const { data, error, loading, reload } = useAsync(() => api.regressions());
+  const { data, error, status, loading, reload } = useAsync(() => api.regressions());
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   const rows = data?.regressions ?? [];
   return (
     <div className="screen">
@@ -71,7 +71,7 @@ export function RegressionList() {
 }
 
 export function RegressionScreen({ id }: { id: string }) {
-  const { data, error, loading, reload } = useAsync(() => api.regression(id), [id]);
+  const { data, error, status, loading, reload } = useAsync(() => api.regression(id), [id]);
   const [runId, setRunId] = useState("");
   const [outcome, setOutcome] = useState<InvariantOutcome | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -87,7 +87,7 @@ export function RegressionScreen({ id }: { id: string }) {
   }
 
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   if (!data) return null;
 
   return (

@@ -24,7 +24,14 @@ function limit(value: number | null): string {
 }
 
 function when(at: number): string {
-  return new Date(at * 1000).toISOString().replace("T", " ").slice(0, 19);
+  // `toISOString` THROWS on a non-finite date, and this renders inside the
+  // component body — so one absent or malformed timestamp took the whole
+  // Workspace screen down to a blank page with a RangeError in the console.
+  // A missing time is a missing time; it is not worth a screen.
+  const at_ms = new Date(at * 1000);
+  return Number.isNaN(at_ms.getTime())
+    ? "—"
+    : at_ms.toISOString().replace("T", " ").slice(0, 19);
 }
 
 function PlanCard({
@@ -60,11 +67,11 @@ function PlanCard({
       </p>
       {!current && (
         <>
-          <Button onClick={() => onBuy(plan.name)} disabled={busy}>
+          <Button onClick={() => onBuy(plan.plan_id)} disabled={busy}>
             Subscribe
           </Button>{" "}
           {canAdmin && (
-            <Button variant="secondary" onClick={() => onGrant(plan.name)} disabled={busy}>
+            <Button variant="secondary" onClick={() => onGrant(plan.plan_id)} disabled={busy}>
               Grant without paying
             </Button>
           )}
@@ -123,7 +130,7 @@ export function Workspace() {
     });
 
   if (workspace.loading) return <Loading />;
-  if (workspace.error) return <Failed error={workspace.error} onRetry={workspace.reload} />;
+  if (workspace.error) return <Failed error={workspace.error} status={workspace.status} onRetry={workspace.reload} />;
   if (!current) return null;
 
   return (
@@ -161,7 +168,7 @@ export function Workspace() {
           A member token carries a role. Roles bound what a caller may do, and the
           token is shown once — nothing here can read it back.
         </p>
-        {members.error && <Failed error={members.error} onRetry={members.reload} />}
+        {members.error && <Failed error={members.error} status={members.status} onRetry={members.reload} />}
         {(members.data?.members ?? []).length === 0 ? (
           <Empty>No members recorded.</Empty>
         ) : (
@@ -198,13 +205,13 @@ export function Workspace() {
 
       <section>
         <h3>Plans</h3>
-        {plans.error && <Failed error={plans.error} onRetry={plans.reload} />}
+        {plans.error && <Failed error={plans.error} status={plans.status} onRetry={plans.reload} />}
         <div className="grid">
           {(plans.data?.plans ?? []).map((plan) => (
             <PlanCard
-              key={plan.name}
+              key={plan.plan_id}
               plan={plan}
-              current={plan.name === current.subscription.plan_id}
+              current={plan.plan_id === current.subscription.plan_id}
               onBuy={buy}
               onGrant={grant}
               busy={busy}

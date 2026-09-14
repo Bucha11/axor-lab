@@ -286,6 +286,11 @@ export type HandoffPackage = {
 };
 
 export interface Plan {
+  /** what /billing/checkout and /workspaces/current/plan take, and what
+   * `subscription.plan_id` is compared against. DISTINCT from `name`, which is
+   * the operator's display label — sending the label instead answered
+   * "unknown plan 'Team'" against every catalog that has real names. */
+  plan_id: string;
   name: string;
   price_usd?: number;
   max_suites: number | null;

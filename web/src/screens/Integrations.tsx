@@ -4,7 +4,7 @@ import { useAsync } from "../lib/useAsync";
 import { Button, Card, Empty, Failed, Field, Loading, Tag } from "../components/ui";
 
 export function Integrations() {
-  const { data, error, loading, reload } = useAsync(() => api.runtimes());
+  const { data, error, status, loading, reload } = useAsync(() => api.runtimes());
   // runtimes the PLATFORM provisions, as opposed to ones the customer connects.
   // Gated by the plan's `hosted_execution` capability, so a failure here is a
   // plan boundary rather than a fault — the section stays hidden.
@@ -33,7 +33,7 @@ export function Integrations() {
   }
 
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
 
   return (
     <div className="screen">

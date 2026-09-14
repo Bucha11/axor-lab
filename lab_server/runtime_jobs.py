@@ -55,6 +55,10 @@ import json
 import pathlib
 import queue
 import re
+# module-level, and it must STAY that way: `do_POST` carried three redundant
+# `import secrets` lines inside route branches, which makes the name local to
+# the WHOLE function — so any use in a branch that does not reach one of them
+# raises UnboundLocalError, as a 500 with no message.
 import secrets
 import tempfile
 import threading
@@ -1648,8 +1652,19 @@ def make_runtime_server(
                 if path == "/billing/plans":
                     # the plan CATALOG — what a customer can buy, with prices and
                     # limits. This is what a "choose a plan" screen renders.
+                    #
+                    # Each entry carries its ID. The catalog is a map of id ->
+                    # plan and this used to send the VALUES, so the id a client
+                    # must quote back to /billing/checkout never left the server:
+                    # the screen fell back to the display name, and every catalog
+                    # whose name differs from its id — which is every real one —
+                    # answered "unknown plan 'Team'". The example catalog names
+                    # each plan after its own id, so the fixture hid it.
                     self._require_control()
-                    self._send(200, {"plans": list(workspaces.plan_catalog.values())})
+                    self._send(200, {"plans": [
+                        {"plan_id": plan_id, **plan}
+                        for plan_id, plan in workspaces.plan_catalog.items()
+                    ]})
                     return
                 if path == "/workspaces/current/subscription":
                     self._require_control()
@@ -1803,14 +1818,20 @@ def make_runtime_server(
                     # route does not exist so no one can spin up free compute.
                     if not guest_sessions:
                         raise RuntimeJobsError(404, "guest sessions are not enabled")
-                    self._send(201, workspaces.create_guest())
+                    from lab_server.workspaces import GuestCapacityError
+
+                    try:
+                        self._send(201, workspaces.create_guest())
+                    except GuestCapacityError as exc:
+                        # the one route with no credential at all: full is a
+                        # temporary 429, never unbounded allocation
+                        raise RuntimeJobsError(exc.status, exc.message) from None
                     return
                 if path == "/workspaces":
                     # provision a new tenant (ADMIN only) → returns its token,
                     # shown once. Its stores are created lazily on first use.
-                    import secrets
 
-                    from lab_server.workspaces import DEFAULT_PLAN, Workspace, new_id
+                    from lab_server.workspaces import FREE_PLAN, Workspace, new_id
 
                     self._require_control()
                     if not self._current_workspace().is_admin:
@@ -1818,10 +1839,19 @@ def make_runtime_server(
                     body = self._read_json()
                     ws_id = new_id("ws", {w.id for w in workspaces.list()})
                     plan = body.get("plan")
+                    # a new TENANT starts on the catalog's free tier, not on
+                    # DEFAULT_PLAN. DEFAULT_PLAN is unlimited with every
+                    # capability — right for the single "default" workspace an
+                    # operator runs locally, and wrong for a customer: a
+                    # provisioned tenant read `subscription: free` while holding
+                    # hosted_execution, private_registry, governance and no
+                    # limits at all, so the entitlement gate never fired and
+                    # there was nothing a plan could sell.
                     created = workspaces.add(Workspace(
                         id=ws_id, name=str(body.get("name", ws_id)),
                         token=secrets.token_hex(24),
-                        plan=plan if isinstance(plan, dict) else dict(DEFAULT_PLAN),
+                        plan=plan if isinstance(plan, dict)
+                        else dict(workspaces.plan_catalog.get(FREE_PLAN, {})),
                     ))
                     self._send(201, {**created.public(), "token": created.token})
                     return
@@ -1855,7 +1885,6 @@ def make_runtime_server(
                     # a token shown once. This is the substrate SSO/OIDC drives:
                     # an external IdP maps a login to a workspace + role and mints
                     # exactly this. Admin+ within the workspace.
-                    import secrets
 
                     from lab_server.workspaces import ROLES
 
@@ -1876,7 +1905,6 @@ def make_runtime_server(
                     # the returned url is the provider's hosted payment page; the
                     # server never touches a card. Payment confirmation arrives
                     # later at /billing/webhook. Admin+ (whoever manages billing).
-                    import secrets
 
                     self._require_control()
                     self._require_role("admin")
@@ -1903,23 +1931,69 @@ def make_runtime_server(
                     # goes active and the bought plan is applied, opening the gate.
                     if not billing_webhook_secret:
                         raise RuntimeJobsError(501, "billing webhook is not configured")
-                    if self.headers.get("X-Billing-Secret") != billing_webhook_secret:
+                    # constant-time: `!=` on a secret returns as soon as two
+                    # bytes differ, which is a prefix oracle over the one shared
+                    # credential that can move a workspace onto a paid plan.
+                    # Every other credential here is resolved by dict lookup,
+                    # which has no such shape; this one was compared directly.
+                    if not secrets.compare_digest(
+                        self.headers.get("X-Billing-Secret") or "", billing_webhook_secret
+                    ):
                         raise RuntimeJobsError(401, "invalid billing webhook secret")
                     body = self._read_json()
-                    session = workspaces.checkout(str(body.get("session_id", "")))
-                    if session is None:
-                        raise RuntimeJobsError(404, "unknown checkout session")
                     event = str(body.get("event", ""))
+                    session_id = str(body.get("session_id", ""))
+                    session = workspaces.checkout(session_id) if session_id else None
                     if event == "payment_succeeded":
+                        # a PURCHASE, and the only event that grants anything —
+                        # so it must name a checkout that has not been spent. The
+                        # status was recorded and never read, and a captured
+                        # delivery replayed is a plan granted twice.
+                        if session is None:
+                            raise RuntimeJobsError(404, "unknown checkout session")
+                        if str(session.get("status")) != "pending":
+                            raise RuntimeJobsError(
+                                409, "this checkout session is already settled")
                         workspaces.apply_plan(str(session["ws_id"]),
                                               str(session["plan_id"]), "active")
-                        workspaces.settle_checkout(str(body.get("session_id")))
+                        workspaces.settle_checkout(session_id)
                     elif event in ("payment_failed", "subscription_canceled"):
-                        # lapse to free — paid features close
-                        workspaces.apply_plan(str(session["ws_id"]),
-                                              str(session["plan_id"]),
-                                              "past_due" if event == "payment_failed"
-                                              else "canceled")
+                        # a LAPSE, which is where the shape mattered. A renewal
+                        # fails months after the purchase: a real provider sends
+                        # this against the SUBSCRIPTION, with no checkout in
+                        # sight, and this route could only address a pending
+                        # session — so the only way to express a lapse was to
+                        # replay the original purchase, which is exactly what
+                        # must not be replayable. Either address works now, and
+                        # a downgrade is idempotent by nature.
+                        if session is not None and str(session.get("status")) == "pending":
+                            # the initial charge failed, before anything was
+                            # granted — the checkout is the right address
+                            ws_id, plan_id = str(session["ws_id"]), str(session["plan_id"])
+                            workspaces.settle_checkout(session_id)
+                        elif session is not None:
+                            # a lapse pointing at a SPENT checkout is a stale or
+                            # duplicated delivery — the initial charge's failure
+                            # arriving after a later renewal succeeded. Acting on
+                            # it would downgrade a paying customer on a redelivery.
+                            raise RuntimeJobsError(
+                                409,
+                                "this checkout session is already settled; address a "
+                                "later lapse to the {workspace_id}",
+                            )
+                        else:
+                            ws_id = str(body.get("workspace_id", ""))
+                            lapsing = workspaces.get(ws_id)
+                            if lapsing is None:
+                                raise RuntimeJobsError(
+                                    404,
+                                    "a lapse must name a known {workspace_id}, or the "
+                                    "{session_id} of the checkout it lapses",
+                                )
+                            plan_id = str(lapsing.subscription.get("plan_id", "free"))
+                        workspaces.apply_plan(
+                            ws_id, plan_id,
+                            "past_due" if event == "payment_failed" else "canceled")
                     self._send(200, {"received": True})
                     return
                 if path == "/workspaces/current/plan":

@@ -5,7 +5,7 @@ import { Button, Card, Failed, Loading, Tag } from "../components/ui";
 import { navigate } from "../lib/router";
 
 export function Suites() {
-  const { data, error, loading, reload } = useAsync(() => api.suites());
+  const { data, error, status, loading, reload } = useAsync(() => api.suites());
   // the org's SHARED catalog, distinct from this workspace's own suites. It
   // fails for a workspace whose plan does not grant `private_registry`, and that
   // is not an error worth a red screen — the section simply does not appear.
@@ -53,7 +53,7 @@ export function Suites() {
   }
 
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
 
   return (
     <div className="screen">

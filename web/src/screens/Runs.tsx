@@ -24,9 +24,9 @@ function ago(epochSeconds?: number): string {
 export function Runs() {
   // every run, from the dedicated endpoint — the Runs screen used to read
   // home.recent_runs (capped at 5), so a sixth run silently vanished
-  const { data, error, loading, reload } = useAsync(() => api.runs());
+  const { data, error, status, loading, reload } = useAsync(() => api.runs());
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   const runs = data?.runs ?? [];
   return (
     <div className="screen">
@@ -272,12 +272,12 @@ function AggregatesTable({ rows }: { rows: Record<string, unknown>[] }) {
 }
 
 export function TrialScreen({ runId, trialId }: { runId: string; trialId: string }) {
-  const { data, error, loading, reload } = useAsync(
+  const { data, error, status, loading, reload } = useAsync(
     () => api.trial(runId, trialId),
     [runId, trialId],
   );
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   if (!data) return null;
 
   return (

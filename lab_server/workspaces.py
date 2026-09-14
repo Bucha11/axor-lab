@@ -107,6 +107,17 @@ EXAMPLE_PLAN_CATALOG: dict[str, dict[str, object]] = {
 }
 
 
+class GuestCapacityError(Exception):
+    """Every anonymous trial slot is taken. 429 — a real, temporary condition,
+    not a rejection of the caller."""
+
+    status = 429
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 class EntitlementError(Exception):
     """A gated action refused by the workspace's plan. 402 Payment Required —
     the request is well-formed and authorised, the PLAN does not include it."""
@@ -286,6 +297,36 @@ class Workspaces:
             workspace = self._by_id.get(ws_id)
         return (workspace, role) if workspace is not None else None
 
+    #: How many guest sessions may be ALIVE at once. `/guest-session` is the one
+    #: route a deployment exposes with no credential at all, and each call held a
+    #: Workspace plus two in-memory stores for half an hour with nothing to stop
+    #: a caller from repeating it. Refusing past a ceiling is the difference
+    #: between an anonymous trial and free unbounded memory.
+    MAX_LIVE_GUESTS = 200
+
+    def sweep_guests(self, now: float | None = None) -> int:
+        """Drop every EXPIRED guest session; return how many went.
+
+        Eviction used to happen only in `_resolve`, when that guest's own token
+        came back — so a session nobody returned to was never reaped at all. The
+        common case for an abandoned trial is exactly that: the tab is closed,
+        the token is never presented again, and its stores are held forever.
+        """
+        moment = time.time() if now is None else now
+        with self._lock:
+            expired = [ws_id for ws_id, at in self._guest_expiry.items() if moment > at]
+            for ws_id in expired:
+                for token, (bound, _role) in list(self._by_token.items()):
+                    if bound == ws_id:
+                        self._evict_guest(ws_id, token)
+                # a guest with no token binding left still has to lose its stores
+                self._evict_guest(ws_id, "")
+        return len(expired)
+
+    def live_guests(self) -> int:
+        with self._lock:
+            return len(self._guest_expiry)
+
     def create_guest(self, ttl_seconds: int = 1800) -> dict[str, object]:
         """Mint an anonymous, EPHEMERAL hosted session — no user, no
         registration. Its workspace is on the fixed TRIAL_PLAN and its stores are
@@ -294,6 +335,14 @@ class Workspaces:
         carries as its bearer."""
         from lab_server.runtime_jobs import RuntimeJobStore  # lazy: import cycle
 
+        # reclaim before allocating, so a steady trickle of abandoned trials
+        # cannot fill the ceiling with sessions that already ended
+        self.sweep_guests()
+        if self.live_guests() >= self.MAX_LIVE_GUESTS:
+            raise GuestCapacityError(
+                f"all {self.MAX_LIVE_GUESTS} guest sessions are in use; "
+                "try again shortly, or sign in"
+            )
         with self._lock:
             ws_id = "guest_" + secrets.token_hex(6)
             token = secrets.token_hex(24)

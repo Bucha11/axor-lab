@@ -237,9 +237,9 @@ function Publications() {
 }
 
 export function ArtifactList() {
-  const { data, error, loading, reload } = useAsync(() => api.artifacts());
+  const { data, error, status, loading, reload } = useAsync(() => api.artifacts());
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   const rows = data?.artifacts ?? [];
   return (
     <div className="screen">
@@ -269,9 +269,9 @@ export function ArtifactList() {
 }
 
 export function ArtifactScreen({ id }: { id: string }) {
-  const { data, error, loading, reload } = useAsync(() => api.artifact(id), [id]);
+  const { data, error, status, loading, reload } = useAsync(() => api.artifact(id), [id]);
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   if (!data) return null;
   const reproduce = data.reproduce as Record<string, unknown> | undefined;
   const suite = data.suite as Record<string, unknown> | undefined;
