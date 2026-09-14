@@ -48,8 +48,20 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 
 ## Then tier — built outward from the spine
 
-### B1 — BYOK model-backed AgentAdapter — ✅ implemented
+### B1 — BYOK model-backed AgentAdapter — ✗ RETIRED (was: implemented)
 *The scripted agent becomes real: run the researcher's own agent on their key.*
+
+> **RETIRED, and REPLACED — the goal was kept, the mechanism was not.** The
+> status below describes `lab_agent`, deleted in the v0.3 re-scope:
+> `grep -rn "ModelBackend\|WrappedModelAgent"` is empty, `axor-lab run` has no
+> `--agent` flag, and `pip install axor-lab[byok]` resolves to an empty alias
+> whose own comment says why — it drove a model against SIMULATED tools, so the
+> numbers described neither the caller's agent nor their tools.
+>
+> "Bring your own agent" now means a CONNECTED RUNTIME: the caller's agent runs
+> in the caller's process against the caller's real tools, wrapped by
+> `axor-wrap`, and pulls assignments from `GET /runtime/jobs`. Lab never holds a
+> model credential. See B3 and `contracts/ui-backend-contract.md`.
 
 > **Status:** `lab_agent` ships the `ModelBackend` protocol (`CassetteBackend`
 > offline, `AnthropicBackend` BYOK behind an optional dependency + key), a
@@ -100,7 +112,8 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 ### B2 — Control Plane export (the earned bridge) — ✅ implemented
 *Carry the validated policy + manifests into production; add what Lab can't provide.*
 
-> **Status:** `lab_runner/cp_export.py` + `axor-lab export-cp` emit an
+> **Status:** `lab_capabilities/governance/cp_export.py` (then `lab_runner/cp_export.py`)
+> + `axor-lab export-cp` emit an
 > `axor-cp-deploy/v1` config carrying the validated policy, the `config_hash`
 > (byte-identical carry-over key, recomputed and asserted against the recorded
 > condition), the tool manifests, and pinned regressions — plus a
@@ -217,8 +230,16 @@ Plane and can start as soon as `B3` gives it a hosted surface.
 
 ## Later tier — new subsystems (each needs its contract first)
 
-### B5 — Instrumented-endpoint contract — ◐ code slice implemented
+### B5 — Instrumented-endpoint contract — ✗ RETIRED (was: code slice implemented)
 *Govern an agent behind an endpoint that emits value-carrying events.*
+> **RETIRED, not shipped.** The status below describes code that was DELETED
+> in the v0.3 re-scope together with its package and its tests
+> (`docs/spec-v0.3/CONFORMANCE.md`, "Phase 1 — subsystems retired";
+> `contracts/architecture-boundary.md`, "Removed from Lab"). It is kept as
+> the record of what was built and why it was cut — enforcement and tool
+> dispatch are the runtime's, not Lab's. Every module, package and test it
+> names below is gone; nothing here can be run today.
+
 
 > **Status:** `lab_endpoint` assembles emitted value-carrying events into a
 > conformant `trace/v1` with `producer.mode=instrumented_endpoint`, gated by
@@ -256,8 +277,16 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   and the UI never offers gate-on/off for it. **Blocked by:** none for the
   instrumented path; the safety runner shares infra with B6's egress controls.
 
-### B6 — Sandbox + arbitrary cloud code — ◐ policy layer implemented
+### B6 — Sandbox + arbitrary cloud code — ✗ RETIRED (was: policy layer implemented)
 *The single most expensive subsystem; gates every "run untrusted code on Lab infra" path.*
+> **RETIRED, not shipped.** The status below describes code that was DELETED
+> in the v0.3 re-scope together with its package and its tests
+> (`docs/spec-v0.3/CONFORMANCE.md`, "Phase 1 — subsystems retired";
+> `contracts/architecture-boundary.md`, "Removed from Lab"). It is kept as
+> the record of what was built and why it was cut — enforcement and tool
+> dispatch are the runtime's, not Lab's. Every module, package and test it
+> names below is gone; nothing here can be run today.
+
 
 > **Status:** two layers ship. (1) The policy DECISION layer (`policy.py`):
 > egress deny-by-default + API allowlist, caps, no host mounts, secret
@@ -291,8 +320,16 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   produces a bundle byte-identical to the same run executed locally. **This is
   the critical-path gate for the rest of the Later tier.**
 
-### B7 — Multi-agent game runtime — ◐ core + honest stats implemented
+### B7 — Multi-agent game runtime — ✗ RETIRED (was: core + honest stats implemented)
 *Players are singles or federations; composition is a variable.*
+> **RETIRED, not shipped.** The status below describes code that was DELETED
+> in the v0.3 re-scope together with its package and its tests
+> (`docs/spec-v0.3/CONFORMANCE.md`, "Phase 1 — subsystems retired";
+> `contracts/architecture-boundary.md`, "Removed from Lab"). It is kept as
+> the record of what was built and why it was cut — enforcement and tool
+> dispatch are the runtime's, not Lab's. Every module, package and test it
+> names below is gone; nothing here can be run today.
+
 
 > **Status:** `lab_games` ships a deterministic iterated-game runtime and
 > honest per-run statistics: a run's cooperation rate is the run's SINGLE
@@ -325,8 +362,16 @@ Plane and can start as soon as `B3` gives it a hosted surface.
   structure-within-observation (a property test asserts a round-level n is
   rejected at aggregate time).
 
-### B8 — Population scale + arbitrary topology — ◐ population model implemented
+### B8 — Population scale + arbitrary topology — ✗ RETIRED (was: population model implemented)
 *Towns of N agents, arbitrary interaction graphs (the outreach targets).*
+> **RETIRED, not shipped.** The status below describes code that was DELETED
+> in the v0.3 re-scope together with its package and its tests
+> (`docs/spec-v0.3/CONFORMANCE.md`, "Phase 1 — subsystems retired";
+> `contracts/architecture-boundary.md`, "Removed from Lab"). It is kept as
+> the record of what was built and why it was cut — enforcement and tool
+> dispatch are the runtime's, not Lab's. Every module, package and test it
+> names below is gone; nothing here can be run today.
+
 
 > **Status:** `run_federation` scales to a town of N members and demonstrates
 > the outreach-target property (Prompt Infection / topology attacks): with
