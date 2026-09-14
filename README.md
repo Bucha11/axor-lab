@@ -1,32 +1,168 @@
 # axor-lab
 
-Axor Lab — a reproducible experiment platform for AI agents: bring an agent, bring or author an experiment suite, run it, inspect any trial, curate EvidenceCases, pin executable regressions, and export reproducible artifacts. **Governance is an optional capability** that suites may use, not the spine.
+**Nobody can check whether your agent is safe.** Not because the answer is
+secret — because the claim has no shape. *"Hardened against prompt injection"*:
+against which injections, measured how, with what left over when it works, and
+reproducible by whom?
 
-**Most of that sentence is now code.** A suite is an authorable manifest with a three-mode Builder (Basic / Advanced / YAML over one document), four built-ins (`blank`, `budget`, `agentdojo`, `ingest`), a planner shared by every execution path, dispatch to a connected runtime, artifacts, publication, a Control-Plane handoff and a paste-ready paper report. Governance is one capability a suite may declare, gated on execution by the workspace plan — not the spine. What is still narrower than the sentence: the agent is BYO (Lab runs simulated tools or drives a connected runtime; it never holds model credentials), and multi-agent topologies validate and save but refuse to run. The plans behind it:
+Axor Lab runs the same agent twice — governance off, then on — and returns one
+object that states exactly what it proves and exactly what it does not.
 
-- **[docs/spec-suite-platform/](docs/spec-suite-platform/)** — the **governing** product spec (Experiment Suite Platform RFC + Web UX RFC + design boards) and **[INTEGRATION_PLAN.md](docs/spec-suite-platform/INTEGRATION_PLAN.md)** — the gap analysis and phased plan for getting there. Read this first; it supersedes the v0.3 narrative.
-- **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — the production-ready implementation plan (phases, reuse map, milestones, definition of done). The MVP spine is implemented; see its status block.
-- **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the post-MVP plan: BYOK model adapter, Control Plane export, full web app, production hardening, then the Later tier (instrumented endpoints, sandbox + cloud code, multi-agent games, population scale) and the commercial track.
-- **[contracts/](contracts/)** — the engineering contract: 10 JSON Schemas (artifact, attestation, bundle, condition, evidence-case, experiment, publication, regression, scenario, suite), statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && PYTHONPATH=.. python3 validate_slice.py` (14 examples, green). A tool manifest, a predicate and a trace have no schema FILE of their own: manifests and predicates are defined inside the schemas that carry them, and the trace belongs to axor-core.
-- **[docs/spec-v0.3/](docs/spec-v0.3/)** — the v0.3 narrative (superseded as the product narrative by `docs/spec-suite-platform/`, still accurate as a description of the governance capability), packaging/economics, bench format guide, UI mocks.
+```
+$ axor-lab run-suite ingest --out ./artifact --yes
+
+[validating]
+valid: ingest
+  scenarios=3 conditions=3 repeats=12 -> 108 trials
+[estimate]
+  108 trial(s), local simulated tools, no paid inference
+[running_local]
+  planned 108: 108 completed
+[analyzing]
+  n=108/108
+  ASR[ungoverned] = 0.71 [0.51, 0.85] n=24
+  ASR[governed] = 0.00 [0.00, 0.14] n=24  mcnemar (paired) vs ungoverned: b=17 c=0 p=1.5e-05
+  ASR[governed_allowlist] = 0.00 [0.00, 0.14] n=24  mcnemar (paired) vs ungoverned: b=17 c=0 p=1.5e-05
+  task_success[ungoverned] = 1.00 [0.90, 1.00] n=36
+  task_success[governed] = 1.00 [0.90, 1.00] n=36
+  task_success[governed_allowlist] = 1.00 [0.90, 1.00] n=36
+  invariant RG-ingest-no-exfil: passed — predicate == False
+  invariant RG-ingest-files-the-record: passed — predicate == True
+[completed]  artifact: ./artifact/artifact.json (108 traces)
+  reproduce verdicts (exact):    axor-lab replay ./artifact
+```
+Containment worked, and the job still got done — and the run says so in the same
+table, because the measurement that can come back negative is the one worth
+having.
+
+## Why this is not another eval harness
+
+**The arms are matched pairs, not two numbers side by side.** Every arm runs the
+identical unit — same scenario, same seed, same repeat — so the comparison is
+McNemar's exact test over the pairs. The ungoverned arm is *observed, not
+enforced*: the kernel watches every trial and gates nothing, so the verdict is
+recorded either way. One arm is not a different program with the safety code
+deleted.
+
+**Every row says how much it is worth.** A latency mean and an attack-success
+rate look identical in a results table and are not the same kind of claim:
+
+| | what it means | may back a claim |
+|---|---|---|
+| `derived` | a predicate the evidence can re-evaluate against every frozen trace | yes — a server recomputes it before minting one |
+| `self-reported` | the runner's own measurement, present in no trace (latency, tokens, spend) | no — published, readable, claimed by nobody |
+
+`axor-lab report` prints the column, so the distinction survives into whatever
+you paste it into:
+
+```
+| Metric         | Arm          | Estimator | Estimate | Interval         |  n | Evidence      |
+| `ASR`          | `ungoverned` | rate      |    0.708 | [0.508, 0.851]   | 24 | derived       |
+| `ASR`          | `governed`   | rate      |    0.000 | [0.000, 0.138]   | 24 | derived       |
+| `duration_ms`  | `ungoverned` | mean      |    0.866 | [0.691, 1.197] † | 5  | self-reported |
+```
+
+**You cannot ship a policy the experiment did not earn.** The export that
+carries a validated configuration to production is gated on the evidence:
+governance changed the outcome on the *same* experimental units (McNemar,
+p < 0.05), the effect clears a practical floor as a separate gate (net absolute
+risk reduction ≥ 0.10), and the arms tested the same mix of scenarios — a large
+delta from reweighting is composition shift, not governance. An observe-only run
+is refused: *"bundle has no enforcement-on condition to carry over"*.
+
+**The result is citable.** The artifact is content-addressed and replays
+bit-identically. `axor-lab report --format all` renders it as a results table, a
+Methods paragraph carrying the pinned kernel and each arm's config hash, and a
+BibTeX entry — because nobody pastes a bundle into a results section.
+
+**Your agent stays yours.** Lab hands out assignments and reads traces back. It
+never holds a model credential and never dispatches a tool.
+
+## Sixty seconds
+
+```
+pip install -e .
+axor-lab suites                                  # the catalog
+axor-lab run-suite ingest --out ./artifact --yes  # governed vs ungoverned, paired
+axor-lab replay ./artifact                        # exact: bit-identical verdicts
+axor-lab report ./artifact --format all --out ./paper
+```
+
+`ingest` is derived from a shipped agent's documented tool chain — an
+inbox-to-record loop whose attachment is attacker-authored and whose mail sink
+leaves the perimeter. It is the case you start from when nobody has curated
+anything for your stack. `blank`, `budget` and `agentdojo` cover authoring from
+nothing, the metrics layer, and the external-benchmark import path.
+
+Then open the web app and author your own suite in the Builder — Basic,
+Advanced and YAML edit the **same document**, and a field no form shows is
+carried through untouched:
+
+```
+python -m lab_runner.cli serve --port 8871
+```
+
+## What this is not
+
+A page that lists only strengths is the unfalsifiable claim again, one level up.
+
+- **Not a runtime guard.** Lab measures and proves; enforcement in production is
+  the Control Plane's job. Lab hands it a configuration the experiment earned.
+- **Not a hosted SaaS yet.** Multi-tenant workspaces, RBAC, an audit log, plan
+  entitlements and the billing handshake are built and tested; scheduled CI,
+  approvals, compliance report generation and fleet view are written down as
+  scope, not shipped (`docs/POST_MVP_PLAN.md` §B10, with the check that proves
+  each absence).
+- **Not a model vendor.** Inference is yours. Lab never resells tokens.
+- **Not multi-agent.** Topologies validate and save; a run of one is refused
+  until multi-agent execution ships, rather than silently running a single agent
+  and labelling it otherwise.
 
 ## Maturity — subsystems are NOT equally production-ready
 
-Axor Lab is a contract-first **executable research prototype** with a
-production-oriented contract, not yet a hosted SaaS. Honest per-area status
-(see `docs/POST_MVP_PLAN.md` for the roadmap):
+A contract-first **executable research prototype** with a production-oriented
+contract, not yet a hosted SaaS. Honest per-area status; the roadmap is
+`docs/POST_MVP_PLAN.md`, and twenty-two rounds of correctness hardening are
+recorded in **[docs/HARDENING.md](docs/HARDENING.md)**.
 
 | Area | Maturity | Notes |
 |---|---|---|
-| contracts, local runner, replay, EvidenceCase, regression, analysis | **beta** | the vertical-slice spine; correctness-hardened over multiple review rounds (typed replay values, replay rejects malformed traces, predicate completion fail-closed, evidence-graph verifier now **resolves every trial's scenario/condition and every trace tool's manifest in-bundle**, **sensitive labels propagate through model output**, **a redacted secret keeps a runtime-only value so the real kernel still sees it without serializing it**, **per-driving-arg allowlist supersession**, **the simulator honors its manifest contract**, **a single failed trial no longer sinks the analysis — completed-only outcomes, missingness reported first**, **a regression pin records the whole ordered verdict sequence and each pin replays under its OWN scenario's inputs** — no false regression on a multi-call/multi-scenario bundle, **EvidenceCase resolves the real governor via `resolve_kernel` and correlates the DENY to its intent by call_id**, **local `publish` proves replay only — it never mints a statistical claim over self-reported aggregates — and content-addresses the publication by its whole body**, **regression honors the replay STATUS so a malformed trace is never a false match**, **the value-ledger is unambiguous — unique value_ids, canonical_value_hash consistency, strictly-ordered seq**, **the canonical hash is full RFC 8785 — floats in ECMAScript form, keys sorted by UTF-16 code unit, non-string keys and unsafe integers and lone surrogates rejected, pinned against the official edge vectors**, **a bundle overwrite can't destroy the prior bundle on a crash**, **EvidenceCase separates a self-reported `explicit_flow_tracked` claim from a verified one**, **a fail-closed DENY is representable as valid evidence — a null `driving_value_id` with a typed `driving_unresolved` reason, not a fake ledger id that would fail validation**, **replay is honest about capability — a REDACTED sensitive value a decision turned on yields `redacted_input_unavailable` (never a false match/mismatch over a hash sentinel), the fail-closed reason is part of the replay-comparable core, and an EvidenceCase claims `exactly_replayable` only for a replayable status**, and **the offline `axor-lab verify` is a strict state machine — a `signed` receipt with no verifiable signature exits UNVERIFIED(5), a tampered one exits 1, integrity is never confused with authenticity**, and **(round 16) a pinned real kernel is the kernel that RAN or the trace is `unsupported_kernel` — `axor-core@X` is never silently replaced by the reference kernel; the CP earned bridge and every hosted statistic are RECOMPUTED from the traces, never trusted from an uploaded aggregate; McNemar's power is the discordant n; `executable_config_hash` binds the whole compiled governor config including untrusted-field taint; and an ungoverned trace's arg-independent ALLOW replays even when a bound value is redacted**, and **(round 17) ONE kernel resolver serves every surface — CLI regress / EvidenceCase / incident import resolve each trace's own scenario inputs via `resolve_kernel_for_trace`; the CP bridge requires the COMPLETE trace set (a cherry-picked subset raises) and emits an immutable `cp_bridge_analysis/v1` receipt; and the carry-over key is honestly `parametric_policy_hash` (symbolic `$inputs`), distinct from the concrete per-scenario `runtime_config_hash`**, and **(round 18) `regress --kernel X` tests the CANDIDATE kernel X — `resolve_candidate_kernel_for_trace` takes the policy from the candidate condition and the version from `--kernel` while keeping each trace's own scenario inputs, so a counterfactual regression never silently re-runs the trace's original recorded kernel (that stays `resolve_recorded_kernel_for_trace` for exact replay); replay narrows its kernel-resolution guard to `UnknownKernelError` so an internal bug propagates instead of masquerading as `unsupported_kernel`; and the CP handoff verifies the evidence graph (`verify_bundle`) and proves the per-scenario `runtime_config_hash` it recommends was RECORDED at build time (`config_provenance`), not synthesized at export**, and **(round 19) the earned bridge separates governance from COMPOSITION shift — it compares the SAME experimental units across arms (coordinate intersection + McNemar for a matched design; per-scenario balance for independent samples) and rejects a large ASR delta whose two arms merely tested a different mix of scenarios; `runtime_config_hash` is recorded ON the trial at execution, provenance is mandatory + nested `{scenario:{condition:hash}}` for an evidence export, which emits a hash ONLY for a scenario that actually ran; and the CP export directory is self-contained + independently recomputable via `axor-lab verify-cp-export` (a doctored deploy config no longer recomputes)**, and **(round 20) a matched bridge must clear a PRACTICAL-significance floor (net absolute risk reduction (b−c)/completed ≥ 0.10) as a separate gate AFTER McNemar's p<0.05 — a statistically-real but 2% effect no longer earns a production config — and an independent bridge requires EXACT per-scenario arm balance so an inverse per-scenario mix can't earn on pure reweighting; the completed-trial schema now REQUIRES `runtime_config_hash`+`config_compiler_version`, and `config_provenance` marks `recorded_at_execution` vs `reconstructed_legacy` (the evidence export refuses the reconstructed one) and raises on a divergent per-(scenario, condition) hash; and `verify-cp-export` checks INTEGRITY (a signed full-file manifest over the WHOLE directory + no unlisted files), AUTHENTICITY (a signed export with no key → UNVERIFIED) and DERIVABILITY, with `--overwrite` clearing stale files first**, and **(round 21) every experimental unit is globally unique — the runner stamps an `execution_id` on each trial, `verify_bundle` rejects a duplicate `(execution, scenario, condition, seed, repeat)` coordinate, and the CP bridge + hosted recompute RAISE on a duplicate rather than let trial ARRAY ORDER pick the outcome (no last-write-wins statistics); the comparison design is a run-recorded, content-hashed `environment.experiment_design` block bound to the agent's actual determinism — the bridge reads it from THERE (never an uploader aggregate), never defaults to matched, and requires a matched design to be deterministic; `config_provenance` is DERIVED from the trials (build_bundle + verify_bundle reject a caller-asserted map), each completed trial declares `runtime_provenance` (recorded_at_execution / reconstructed_incident / reconstructed_legacy) so an imported incident is honest, and the CP handoff REQUIRES + carries the `resolved_kernel_fingerprint`, refusing a behaviour-modified backend; and the independent bridge requires equal PLANNED allocation + missingness per scenario (not just completed counts), with both receipts naming the complete-case estimand and carrying a per-scenario missingness matrix**) |
+| contracts, local runner, replay, EvidenceCase, regression, analysis | **beta** | the vertical-slice spine, correctness-hardened over 22 review rounds: exact replay is a pure function of the projection and the pinned kernel, a pinned real kernel is the kernel that RAN (never silently swapped for the reference one), canonical hashing is full RFC 8785 against the official edge vectors, a single failed trial no longer sinks the analysis, and missingness is reported before the estimate. Round by round: [docs/HARDENING.md](docs/HARDENING.md) |
+| server / catalog | **beta (local)** | token-gated writes, content-hash filenames, atomic durable writes; **recomputes every statistical aggregate AND its test from the traces** before minting a claim (a fabricated McNemar p, an unknown metric, or an aggregate over a metric no trial measured is refused); immutable content-addressed publications, an append-only attestation log whose ancestry is verified to a root on cold load, takedown that is final over a stable evidence lineage, and a portable acceptance receipt an offline reader can verify without trusting the server. Round by round: [docs/HARDENING.md](docs/HARDENING.md) |
 | multi-scenario benchmark bundle | **beta** | trace ids carry the full trial coordinate; a 3-scenario suite survives a build→write→read→verify→replay roundtrip (`tests/test_multiscenario_bundle.py`) — the round-2 P0 that used to corrupt it is fixed |
 | AgentDojo adapter | **beta** | curated **banking** subset (3 tasks), not arbitrary-dataset import |
-| server / catalog | **beta (local)** | token-gated writes, content-hash filenames, atomic writes, **recomputes every statistical aggregate AND its test from the traces** (rejects a fabricated McNemar/two-proportion p or an unknown metric; the recomputed marginal matches the runner's per-condition count so an honest bundle is not falsely rejected at missingness), **hides `private` publications on every read route** (HTML, JSON, EvidenceCase), **content-addresses each publication by its whole body** so it is immutable (re-publish is idempotent-or-distinct; a disk-edited record is dropped on load), **re-runs the full publish handshake (replay + recompute + re-mint) on restart so a hand-assembled publication never loads unverified**, **counts only cryptographically verified reproductions in the public badge** (unsigned self-reports shown separately; on load each attestation is re-verified, bound to its publication, and schema-checked), **re-earns an `integrity: signed` badge on load only from a persisted author-signature receipt** (a forged signed badge degrades to hash_verified and is dropped), builds each DENY claim from the **recorded decision** correlated by call_id, and **isolates each publication on startup so one corrupt file can't sink the whole catalog**, **refuses to resurrect an admin-taken-down publication via a write-token re-publish** (tombstone wins, 409), **serves a downloadable reproduction package with a PORTABLE verification receipt** (`GET /api/publications/{id}/bundle` returns bundle+traces+receipt; `axor-lab verify` checks content hashes, replay, and the receipt's signed_ref/signature OFFLINE — no server trusted — and the publish response carries an acceptance receipt of what the server verified), **makes an admin takedown final over a STABLE evidence lineage** (an `evidence_lineage_ref` invariant to bundle_id/created/packaging — takedown retires every sibling on that lineage, blocks any re-publish under altered metadata OR repackaged bytes, guards every read, and a two-pass cold load collects all lineage tombstones before loading publications), **issues a deterministic, content-addressed, optionally Ed25519-SIGNED acceptance receipt** (persisted, returned on publish, and served in the download package alongside the publication body so an offline reader can verify the claims, not just the bytes), **reports completed/planned + condition-imbalanced missingness in every statistical claim**, **recomputes the WHOLE test object (the two_proportion interval included) and rejects any test field it does not itself recompute**, and **maps a malformed request body to a clean 4xx, never a 500**, and **(round 16) verifies the ENTIRE downloaded package before `verify` exits 0 — a stripped receipt or an edited publication/acceptance fails; lineage takedown is durable, crash-safe, and array-order-independent; the exact recomputed test shape is required and an inconclusive uploaded test is refused; and the persisted acceptance is RESTORED on load (never re-minted under a rotated key)**, and **(round 17) a downloaded package cannot be silently downgraded — `verify` requires a versioned envelope (`--allow-bare` to opt out) and an UNSIGNED server acceptance reads as UNVERIFIED, not a pass; a historical acceptance's signature is verified against a server keyring (a forgery is quarantined, a rotated-out key kept opaque, never re-issued); a mixed-kernel publication page renders; the acceptance report only claims checks that ran; and the durable tombstone fsyncs the file bytes before the rename**, and **(round 18) a `signed` publication cannot be proof-downgraded — `verify` requires the author receipt's integrity to equal the publication's and treats a signed publication with no verifying key as UNVERIFIED; a damaged/forged persisted acceptance under a known key is QUARANTINED and re-attested with a distinct, timestamped `reacceptance/v1` linking to the invalid original (never silently re-minted as a clean record); and `_write_atomic` loops over short `os.write`s so a large body is never truncated on disk**, and **(round 19) a MISSING or malformed acceptance for a loaded publication is no longer re-minted clean — it is a forensic event re-attested via reacceptance/v1; the append-only `acceptance-history/` preserves EVERY superseded record so repeated corruption keeps a resolvable chain; the reproduction package carries `acceptance_history` and `verify` requires a reacceptance's `previous_ref` to resolve to a record in it; and `_write_atomic` raises on a zero-byte write instead of spinning**, and **(round 20) the server itself re-resolves that chain on COLD LOAD — a persisted reacceptance/v1 whose `previous_ref` no longer resolves to a hash-matching record in the append-only history (deleted or tampered) is a forensic broken-chain event: the record is archived and re-attested with a linked reacceptance that DOES resolve (converging, not re-stamped every reload), so the server never serves what the offline verifier would reject**, and **(round 21) the acceptance ancestry is verified RECURSIVELY to a root — a deep (grandparent) break, a cycle, or an over-deep chain is rejected, not just the immediate hop; a broken chain is repaired by RE-ROOTING at a forensic marker so it converges; an unknown-key reacceptance still has its structure + history-chain validated (the unknown key gates only the signature step); and `acceptance_history` omits hash-invalid entries so a corrupt record never rides along in the reproduction package**, and **(round 22) a metric the server cannot DERIVE from the traces is published rather than refused — publication/v1's two tiers are now actually used: a boolean predicate is re-evaluated against every trace and backs a `statistically_reproducible` claim (`recomputed_from_traces`), while the runner's own measurements (latency, tokens, spend) have their declared estimator re-applied to the reported per-trial values and are published as `self_reported` with NO claim; a `rate` over an unrecognised metric, an aggregate over a metric no trial measured, and a comparison test on a non-derivable metric are all still refused, and the default `matched_pairs` is read only off an aggregate that DECLARES a design or carries a test, so a connected-runtime run is no longer rejected over a pairing nobody claimed**; not yet a public SaaS (no OAuth/DB/object-store) |
 | bring-your-own agent | **beta** | the caller's agent runs in the CALLER's process against the caller's REAL tools, wrapped by `axor-wrap`, and pulls assignments from `GET /runtime/jobs` — Lab never holds a model credential and never dispatches a tool. Run identity carries the agent fingerprint, and a connected runtime is analysed as INDEPENDENT SAMPLES (two-proportion, exploratory) — never a paired McNemar p-value, because Lab did not see the model. This row used to describe `lab_agent` — a `ModelBackend`/`CassetteBackend`/`AnthropicBackend` stack with per-scenario cassettes and `--max-usd` ceilings — deleted in the v0.3 re-scope: it drove a model against SIMULATED tools, so the numbers described neither the caller's agent nor their tools. `axor-lab run` has no `--agent` flag and `[byok]` is an empty alias |
 | endpoint gateway · sandbox · games / federation | **retired** | these described `lab_endpoint/`, `lab_sandbox/` and `lab_games/`, deleted in the v0.3 re-scope (`docs/spec-v0.3/CONFORMANCE.md`) — the table went on describing their SSRF guard, RLIMITs and blast-radius measures for three subsystems no longer in the repo, twelve lines above the paragraph that says the packages are gone. Enforcement and tool dispatch are the runtime's (`contracts/architecture-boundary.md`); multi-agent games are deferred |
 | Suite Platform (suites, Builder, artifacts) | **beta** | a suite is an authorable `suite/v1` manifest: three-mode Builder over ONE document (a field no form shows is carried through untouched), four built-ins, author-time validation that refuses what a run would only discover later (an empty identifier, an aggregation over an undeclared metric, a threshold over a boolean, a `mcnemar` on a single arm), one planner shared by the local runner / the connected runtime / `Preview plan`, and `artifact/v1` wrapping a bundle byte-for-byte so every prior hash still verifies. Tool manifests, scenario fixtures and predicate trees are edited in YAML by design — the form links to the exact key |
 | kernel | **reference + real backend** | ships `reference_taint_floor_kernel` (1 gate, stdlib) AND a real backend that drives the production `axor_core.governor.ToolCallGovernor` when axor-core is installed and the condition pins the installed version (`pip install axor-lab[kernel]`; `axor-lab run --real-kernel` repins EVERY condition — baseline included — so the compare isolates enforcement, not a mixed kernel, and the bundle carries a single kernel_version). Verified: real governor DENYs the exfil, ALLOWs the faithful payment, replays bit-identically |
 | Private Lab / workspaces / billing | **beta (local)** | the hosted surface IS built: durable multi-tenant workspaces with per-tenant stores, RBAC (owner/admin/member/viewer; a viewer cannot mutate) with every mutation written to a per-workspace audit log, an entitlement gate in `lab_server/workspaces.py` (NOT the deleted `lab_entitlement`) whose plan limits and capabilities answer **402 Payment Required**, an operator plan catalog (`serve --plans-file`; reference ladder in `docs/pricing/`), identity login whose org `tier` selects the catalog plan and fails CLOSED to free, checkout + a secret-gated provider webhook (a purchase needs an unspent checkout, a lapse is addressed to the workspace, a lapsed subscription drops to free), anonymous guest trials (capped, swept on expiry), and a Workspace screen for plans/members/audit/tenants. NOT built: scheduled CI + history, approvals, compliance report generation, fleet view, hosted-trial metering and overage, SSO beyond an identity JWT (no SAML/SCIM) — each recorded with its evidence of absence in `docs/POST_MVP_PLAN.md` §B10 |
+
+## The plans and the contract
+
+Where prose and a contract disagree, the contract wins — and
+`tests/test_docs_match_the_code.py` fails when a document starts describing
+something the code no longer does.
+
+- **[contracts/](contracts/)** — the engineering contract: 10 JSON Schemas
+  (artifact, attestation, bundle, condition, evidence-case, experiment,
+  publication, regression, scenario, suite), plus statistics / claims /
+  provenance semantics, lifecycle, threat model, MVP contract and a fully-worked
+  vertical slice. Validate:
+  `cd contracts && PYTHONPATH=.. python3 validate_slice.py` (14 examples, green).
+  A tool manifest, a predicate and a trace have no schema FILE of their own:
+  manifests and predicates are defined inside the schemas that carry them, and
+  the trace belongs to axor-core.
+- **[docs/spec-suite-platform/](docs/spec-suite-platform/)** — the **governing**
+  product spec (Experiment Suite Platform RFC + Web UX RFC), and
+  [INTEGRATION_PLAN.md](docs/spec-suite-platform/INTEGRATION_PLAN.md), the gap
+  analysis behind it.
+- **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the roadmap, including
+  §B10: the paid features the tiers sell and the code does not have, each with
+  the search that proves its absence.
+- **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** ·
+  **[docs/spec-v0.3/](docs/spec-v0.3/)** — the implementation plan, and the v0.3
+  narrative (superseded as the product story, still accurate on the governance
+  capability), with packaging, economics and the bench-format guide.
 
 ## Packages (MVP spine + post-MVP blocks, stdlib-only core)
 
@@ -82,12 +218,12 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 `lab_games/` were documented here long after they were deleted. They are gone;
 `docs/POST_MVP_PLAN.md` records what each did and why it was cut.
 
-## CLI quickstart (`axor-lab`, or `python -m lab_runner`)
+## The rest of the CLI
+
+`Sixty seconds` above covers the first four verbs. The whole surface:
 
 ```
-axor-lab suites                                    # the suite catalog
 axor-lab run-suite budget --out ./artifact --yes    # a suite -> artifact/v1
-axor-lab run-suite ingest --out ./artifact --yes    # governed vs ungoverned, paired
 axor-lab run-suite ./suite.json --out ./artifact --yes   # ...or a manifest file;
                                                    #    `scenario_refs` resolve from
                                                    #    ./scenarios beside it (or
