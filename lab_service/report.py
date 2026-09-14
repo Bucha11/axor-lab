@@ -27,16 +27,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lab_analysis import missingness
+from lab_analysis import metric_is_derived, missingness
 from lab_contracts import content_hash
 
 from .outcomes import Outcome
 
 REPORT_FORMATS = ("md", "tex", "bib")
-
-#: estimators whose value the server can re-derive from the traces. The rest are
-#: the runner's own measurements, and the table says so per row.
-_DERIVED_METRICS = frozenset({"ASR", "task_success", "task_success_rate", "utility"})
 
 _LATEX_ESCAPES = {
     "\\": r"\textbackslash{}",
@@ -138,10 +134,6 @@ def _interval(aggregate: dict[str, object]) -> tuple[str, bool]:
     return f"[{low}, {high}]", method not in ("none", "")
 
 
-def _is_derived(metric: str) -> bool:
-    return metric in _DERIVED_METRICS
-
-
 def _rows(bundle: dict[str, object]) -> list[dict[str, object]]:
     aggregates: list[dict[str, object]] = list(bundle.get("aggregates") or [])  # type: ignore[arg-type]
     rows: list[dict[str, object]] = []
@@ -160,7 +152,7 @@ def _rows(bundle: dict[str, object]) -> list[dict[str, object]]:
             "interval": cell,
             "is_ci": is_ci,
             "n": int(aggregate["n"]),  # type: ignore[arg-type]
-            "derived": _is_derived(metric),
+            "derived": metric_is_derived(metric),
             "test": aggregate.get("test"),
         })
     return rows
@@ -273,13 +265,52 @@ def _methods(bundle: dict[str, object], suite: dict[str, object] | None) -> list
         lines.append(
             "Each arm's governor configuration is content-addressed: " + "; ".join(hashes) + "."
         )
+    if _no_enforcing_arm(bundle):
+        lines.append(
+            "No arm enforced: the kernel observed every trial and gated nothing, "
+            "so this run measures the agent's unprotected behaviour and makes no "
+            "claim about governance."
+        )
     if trials:
         lines.append("Denominator: " + missingness(trials).display() + ".")
     return lines
 
 
+def _no_enforcing_arm(bundle: dict[str, object]) -> bool:
+    conditions: list[dict[str, object]] = list(bundle.get("conditions") or [])  # type: ignore[arg-type]
+    return not any(str(c.get("enforcement", "")) == "on" for c in conditions)
+
+
+def _unattacked_scenarios(bundle: dict[str, object]) -> tuple[int, int]:
+    """(scenarios with no breach predicate, total). A scenario with no attack
+    model cannot contribute to a breach rate, so ASR's denominator is smaller
+    than task success's BY DESIGN — which a table shows as two different n and a
+    reviewer reads as missing data."""
+    scenarios: list[dict[str, object]] = list(bundle.get("scenarios") or [])  # type: ignore[arg-type]
+    return sum(1 for s in scenarios if s.get("violation") is None), len(scenarios)
+
+
 def _caveats(rows: list[dict[str, object]], bundle: dict[str, object]) -> list[str]:
     caveats: list[str] = []
+    # FIRST, because it changes what every row means. An observe-only run is the
+    # likeliest first run anyone does — wrap the agent, watch, enforce nothing —
+    # and an ASR printed with no treated arm reads as a finding about a governed
+    # system when it is a measurement of an unprotected one.
+    if _no_enforcing_arm(bundle):
+        caveats.append(
+            "NO ARM ENFORCED: every trial ran with enforcement off, the kernel "
+            "observing only. These are BASELINE measurements of an ungoverned "
+            "agent. Nothing here shows what governance would change — that needs "
+            "a second arm with enforcement on, compared against this one."
+        )
+    unattacked, total = _unattacked_scenarios(bundle)
+    if unattacked and total > unattacked and len({r["n"] for r in rows}) > 1:
+        caveats.append(
+            f"Denominators differ between metrics by DESIGN, not by missing data: "
+            f"{unattacked} of {total} scenarios declare no attack model, so a breach "
+            "rate is measured over the attacked trials only while task success is "
+            "measured over all of them."
+        )
     if any(not r["derived"] for r in rows):
         caveats.append(
             "Rows marked self-reported were measured by the runner and appear in no "
@@ -297,7 +328,7 @@ def _caveats(rows: list[dict[str, object]], bundle: dict[str, object]) -> list[s
     if provider in ("scripted", "cassette"):
         caveats.append(
             f"The agent is a {provider} stand-in, not a live model: these numbers "
-            "describe the harness under governance, not a production model's behaviour."
+            "describe the harness, not a production model's behaviour."
         )
     return caveats
 

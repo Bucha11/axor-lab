@@ -584,6 +584,11 @@ class RuntimeJobStore:
             "traces": [t.trace for t in job.trials.values() if t.trace is not None],
             # `bundle.aggregates` — RENDERED by the UI, never recomputed there
             "aggregates": list(job.aggregates),
+            # the ARMS, so a screen can say when none of them enforced. Without
+            # this the Run Report shows an attack-success rate with no way to
+            # tell a governed contrast from a bare observation of an
+            # unprotected agent — and they read identically.
+            "conditions": list(job.assignment.get("conditions") or []),  # type: ignore[union-attr]
         }
 
     def results(self, job_id: str) -> dict[str, object]:

@@ -36,6 +36,7 @@ never in the marginal denominator, so the two agree exactly at missingness.
 from __future__ import annotations
 
 from lab_analysis import (
+    DERIVED_METRIC_OUTCOMES,
     NUMERIC_ESTIMATORS,
     binary_aggregate,
     mcnemar_test,
@@ -45,23 +46,16 @@ from lab_analysis import (
 from lab_contracts import content_hash
 from lab_runner import evaluate
 
-# CLOSED metric registry: a metric maps to exactly one recorded outcome. An
-# unknown metric is rejected — otherwise the old `else task_success` fallback let
-# a caller launder an arbitrary label ("zero_production_incidents") into a
+# The CLOSED metric registry, shared with the paper report and the Run Report
+# screen (`lab_analysis.DERIVED_METRIC_OUTCOMES`). It maps a metric to exactly
+# one recorded outcome; a metric outside it is not derivable, and a RATE outside
+# it is rejected — otherwise the old `else task_success` fallback let a caller
+# launder an arbitrary label ("zero_production_incidents") into a
 # server-recomputed claim carrying the task-success rate (review r7).
-_METRIC_OUTCOME = {
-    "ASR": "violation",
-    # the literal name of the recorded outcome. Three of the four built-in
-    # suites declare their success metric as `task_success` (it IS
-    # `trial.metrics.task_success`), so the whole Suite Platform was
-    # unpublishable: "unknown metric 'task_success'". Adding it is not the
-    # laundering this registry exists to stop — that is an ARBITRARY label
-    # ("zero_production_incidents") resolving to the task-success rate, and this
-    # is the one name that cannot be arbitrary.
-    "task_success": "task_success",
-    "task_success_rate": "task_success",
-    "utility": "task_success",
-}
+#
+# It moved to lab_analysis because three layers need the same answer, and three
+# copies of a security-relevant list is three chances for one to drift open.
+_METRIC_OUTCOME = DERIVED_METRIC_OUTCOMES
 # providers whose behavior is DECLARED deterministic (fixed by scenario+seed), so
 # a matched-pairs design is at least self-consistent. This is an UPLOADER-DECLARED
 # signal read from environment.model.provider — not proof, since the whole bundle

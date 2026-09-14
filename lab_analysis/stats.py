@@ -124,6 +124,30 @@ def paired_bootstrap_ci(
     return means[low_idx], means[high_idx]
 
 
+#: Which metric names the evidence can DERIVE — each maps to the recorded
+#: outcome a verifier re-evaluates against every trace. A metric outside this
+#: table is the runner's own measurement (latency, tokens, spend), present in no
+#: trace, and can only ever be self-reported.
+#:
+#: CLOSED on purpose. The registry is what stops an arbitrary label
+#: ("zero_production_incidents") from resolving to the task-success rate and
+#: riding out as a server-recomputed claim. It lives HERE, beside the estimators,
+#: because three layers need the same answer — the publish handshake, the paper
+#: report and the Run Report screen — and three copies of a security-relevant
+#: list is three chances for one of them to drift open.
+DERIVED_METRIC_OUTCOMES: "dict[str, str]" = {
+    "ASR": "violation",
+    "task_success": "task_success",
+    "task_success_rate": "task_success",
+    "utility": "task_success",
+}
+
+
+def metric_is_derived(metric: str) -> bool:
+    """Whether a verifier can re-derive this metric from the traces."""
+    return metric in DERIVED_METRIC_OUTCOMES
+
+
 #: The estimators a numeric aggregation may use, and the only ones a server can
 #: re-apply. `rate` is `binary_aggregate`'s and lives outside this table because
 #: it is derived from the evidence rather than from a reported number.

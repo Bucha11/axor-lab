@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
 
+from lab_analysis import metric_is_derived
 from lab_contracts import validate_artifact
 
 # `scenario` is here so `scenario_refs` resolves to something. The suite schema
@@ -252,7 +253,24 @@ def run_report(results: dict[str, Any]) -> dict[str, Any]:
         # per metric: how many COMPLETED trials recorded it. An unmeasured
         # metric is absent from this map, never zero-with-a-value.
         "metric_coverage": measured,
-        "aggregates": list(results.get("aggregates", [])),
+        # every aggregate, plus the tier its number sits in. Decided HERE from
+        # the one shared registry rather than by the browser: a rate the
+        # evidence can re-derive and a latency only the runner ever saw look
+        # identical in a table, and a second copy of that list in TypeScript is
+        # a second chance for it to drift.
+        "aggregates": [
+            {**a, "evidence": ("derived" if metric_is_derived(str(a.get("metric", "")))
+                               else "self_reported")}
+            for a in results.get("aggregates", [])
+        ],
+        # arms and their enforcement, so the screen can say when NOTHING was
+        # gated. An observe-only run is the likeliest first run anyone does, and
+        # its ASR is a measurement of an unprotected agent — not a result about
+        # governance.
+        "conditions": [
+            {"id": str(c.get("id")), "enforcement": str(c.get("enforcement", ""))}
+            for c in results.get("conditions", []) if isinstance(c, dict)
+        ],
         # the plan/cost estimate — what the operator confirms before an
         # awaiting_confirmation run starts. It was carried by /results but
         # dropped here, so the Run screen had nothing to base a confirmation on.

@@ -136,6 +136,10 @@ export interface RunReport {
   coverage: { completed: number; planned: number };
   metric_coverage: Record<string, number>;
   aggregates: Json[];
+  /** The arms and what each enforced. A run where NONE enforced measures an
+   * unprotected agent, and its attack-success rate must not be read as a
+   * result about governance. */
+  conditions?: { id: string; enforcement: string }[];
   estimate?: Record<string, number>;
 }
 
