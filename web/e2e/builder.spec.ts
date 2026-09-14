@@ -805,3 +805,80 @@ test.describe("adding an item", () => {
     await expect(metric.locator("option")).toHaveText(["—", "duration_ms"]);
   });
 });
+
+/**
+ * Can the forms author a REAL suite? The ingest built-in, from the Blank
+ * starter, touching YAML for nothing the forms claim to cover.
+ *
+ * Not a coverage stunt: this is where the form/YAML boundary is DECIDED. The
+ * three arms with their policies, the metrics, the aggregation with its
+ * comparison test, the invariant scoped to the governed arms — all of that is
+ * the subject of the experiment, and every one of them was reachable only in
+ * YAML at some point. What stays in YAML (tool manifests, scenario fixtures,
+ * predicates) is tree-shaped and stays there on purpose.
+ */
+test.describe("authoring a real suite in the forms", () => {
+  test("the ingest suite's skeleton is formable, policies and all", async ({ page }) => {
+    const saved: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/suites/suite-alpha", async (route: Route) => {
+      if (route.request().method() !== "PUT") return json(200, MANIFEST)(route);
+      saved.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, { id: "suite-alpha" })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    // three arms, the treated two carrying the policy under test
+    const arms = page.locator(".field", { hasText: "Conditions (governance)" });
+    for (const [id, enforcement, profile] of [
+      ["ungoverned", "off", ""],
+      ["governed", "on", "strict"],
+      ["governed_allowlist", "on", "strict"],
+    ]) {
+      await page.getByRole("button", { name: "Add Conditions (governance)" }).click();
+      const card = arms.locator(".item-card").last();
+      await card.getByLabel("Id", { exact: true }).fill(id);
+      await card.getByLabel("Enforcement", { exact: true }).selectOption(enforcement);
+      if (profile) {
+        await card.getByLabel("Policy profile", { exact: true }).fill(profile);
+        await card.getByLabel("Trust model", { exact: true }).fill("content-ledger");
+      }
+      if (id === "governed_allowlist") {
+        await card.getByLabel("Allowlist", { exact: true })
+          .fill("$inputs.approved_recipients");
+      }
+    }
+
+    // an invariant that is a claim about SOME arms, not all of them
+    await page.getByRole("button", { name: "Add Invariants" }).click();
+    const rg = page.locator(".field", { hasText: "Invariants" }).locator(".item-card").last();
+    await rg.getByLabel("Id", { exact: true }).fill("RG-ingest-no-exfil");
+    await rg.getByLabel("Arms in scope", { exact: true })
+      .fill("governed, governed_allowlist");
+
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator(".tag", { hasText: /^saved$/ })).toBeVisible();
+
+    const suite = saved[0].suite as Record<string, unknown>;
+    const execution = suite.execution as Record<string, unknown>;
+    const conditions = execution.conditions as Record<string, unknown>[];
+    expect(conditions.map((c) => c.id)).toEqual([
+      "ungoverned", "governed", "governed_allowlist",
+    ]);
+    // the policy is the TREATMENT — a form that edits an arm and hides it is
+    // editing everything about the experiment except its subject
+    expect(conditions[1].policy).toEqual({
+      profile: "strict", trust_model: "content-ledger",
+    });
+    expect(conditions[2].policy).toMatchObject({
+      allowlist: ["$inputs.approved_recipients"],
+    });
+    const regressions = suite.regressions as Record<string, unknown>[];
+    expect(regressions[0].scope).toMatchObject({
+      condition_ids: ["governed", "governed_allowlist"],
+    });
+    // adding arms declared the capability they require
+    expect(suite.capabilities).toContain("governance");
+  });
+});

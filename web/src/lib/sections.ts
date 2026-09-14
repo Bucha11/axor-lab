@@ -37,9 +37,15 @@ export type Widget =
 /** A field of one item inside a `list` widget. Flat on purpose: an item field
  * that itself needs a list is the signal the item belongs in Advanced JSON. */
 export interface ItemFieldSpec {
+  /** a key of the item, or a DOTTED PATH into it (`policy.profile`).
+   *
+   * Nested because the thing a governance suite is actually varying lives one
+   * level down: an arm's `policy` was reachable only through the YAML link, so
+   * the profile, the trust model and the allowlist — the whole subject of the
+   * experiment — were invisible in the form that claims to edit the arm. */
   key: string;
   label: string;
-  widget: "text" | "textarea" | "number" | "select";
+  widget: "text" | "textarea" | "number" | "select" | "tags";
   options?: string[];
   placeholder?: string;
 }
@@ -107,6 +113,22 @@ export function declaredMetrics(manifest: Json): string[] {
   const metrics = Array.isArray(evaluation.metrics) ? evaluation.metrics : [];
   return metrics
     .filter((metric): metric is Json => !!metric && typeof metric === "object")
+    .map((metric) => metric.name)
+    .filter((name): name is string => typeof name === "string" && name !== "");
+}
+
+/** The declared metrics a THRESHOLD can read.
+ *
+ * A threshold reads its metric as a number; a boolean one is treated as
+ * unmeasured and the rule can never pass, which `validate_manifest` refuses.
+ * So a blank that has to name a metric names one a threshold can actually
+ * read. */
+export function numericMetrics(manifest: Json): string[] {
+  const evaluation = (manifest.evaluation ?? {}) as Record<string, unknown>;
+  const metrics = Array.isArray(evaluation.metrics) ? evaluation.metrics : [];
+  return metrics
+    .filter((metric): metric is Json => !!metric && typeof metric === "object")
+    .filter((metric) => !["boolean"].includes(String(metric.kind ?? "")))
     .map((metric) => metric.name)
     .filter((name): name is string => typeof name === "string" && name !== "");
 }
@@ -261,6 +283,10 @@ export const SECTIONS: SectionSpec[] = [
         item: [
           { key: "name", label: "Name", widget: "text", placeholder: "unique-scenario-01" },
           { key: "task", label: "Task", widget: "textarea" },
+          // prose, and the only reason it was in YAML is that nobody added the
+          // field — the rest of a scenario is predicates and fixtures, which
+          // genuinely are not formable
+          { key: "notes", label: "Notes", widget: "textarea" },
         ],
         // Derived from the suite, because a constant cannot be valid here. The
         // old literal seeded `tools: []` and `task_success: {event:
@@ -372,6 +398,21 @@ export const SECTIONS: SectionSpec[] = [
           // build or not at all, so the hint shows the SHAPE rather than a version
           // that rots the next time the kernel is released.
           { key: "kernel", label: "Kernel", widget: "text", placeholder: "axor-core@<installed version>" },
+          // the policy IS the treatment. `criticality_overrides` is a map and
+          // stays in YAML; these three are what an arm varies.
+          { key: "policy.profile", label: "Policy profile", widget: "text", placeholder: "strict" },
+          {
+            key: "policy.trust_model",
+            label: "Trust model",
+            widget: "text",
+            placeholder: "content-ledger",
+          },
+          {
+            key: "policy.allowlist",
+            label: "Allowlist",
+            widget: "tags",
+            placeholder: "$inputs.approved_recipients",
+          },
         ],
         blank: (manifest: Json) => ({
           schema_version: "condition/v1",
@@ -516,18 +557,42 @@ export const SECTIONS: SectionSpec[] = [
           { key: "id", label: "Id", widget: "text", placeholder: "RG-budget-reads" },
           { key: "name", label: "Name", widget: "text" },
           { key: "expectation", label: "Expectation", widget: "textarea" },
-        ],
-        blank: (manifest: Json) => ({
-          schema_version: "regression/v1",
-          id: nextId(manifest, "regressions", "RG"),
-          name: "",
-          rule: {
-            kind: "metric_threshold",
-            metric: declaredMetrics(manifest)[0] ?? "",
-            op: "lt",
-            value: 0,
+          // SCOPE decides what the invariant is even asked of. "a governed arm
+          // never mails an attacker's address" is a claim about two arms of
+          // three, and scoping it was reachable only in YAML — so the default
+          // (every trial) applied silently, and the ungoverned arm failed an
+          // invariant that was never about it.
+          {
+            key: "scope.condition_ids",
+            label: "Arms in scope",
+            widget: "tags",
+            placeholder: "every arm",
           },
-        }),
+          {
+            key: "scope.quantifier",
+            label: "Quantifier",
+            widget: "select",
+            options: ["all", "any"],
+          },
+        ],
+        // a PREDICATE over a tool this suite declares, not a threshold.
+        // `declaredMetrics(manifest)[0]` is `task_success` in most suites, and a
+        // threshold over a boolean is refused at author time (it reads its
+        // metric as a number and treats a boolean as UNMEASURED), so the blank
+        // was invalid the moment it appeared. A predicate is also the shape
+        // these are actually written in: "the agent did / did not do X".
+        blank: (manifest: Json) => {
+          const [tool] = suiteToolIds(manifest);
+          const numeric = numericMetrics(manifest)[0];
+          return {
+            schema_version: "regression/v1",
+            id: nextId(manifest, "regressions", "RG"),
+            name: "",
+            rule: tool
+              ? { kind: "predicate", expect: true, predicate: { event: "tool_call", tool } }
+              : { kind: "metric_threshold", metric: numeric ?? "", op: "lt", value: 0 },
+          };
+        },
         help: "the executable rule lives under each item's Details, in YAML",
       },
     ],

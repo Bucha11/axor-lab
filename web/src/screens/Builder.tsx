@@ -300,7 +300,8 @@ function ListField({
   const write = (next: Json[]) => onChange(next.length === 0 ? undefined : next);
   const writeItem = (index: number, item: Json) =>
     write(items.map((existing, i) => (i === index ? item : existing)));
-  const named = new Set(fields.map((field) => field.key));
+  const named = new Set(fields.map((field) => field.key.split(".")[0]));
+  const slug = `item-${label.replace(/[^A-Za-z0-9]+/g, "-").toLowerCase()}`;
 
   return (
     <div className="item-list">
@@ -311,21 +312,29 @@ function ListField({
         return (
           <div key={index} className="item-card">
             <div className="item-fields">
-              {fields.map((field) => (
-                <label key={field.key} className="field">
-                  <span className="field-label">{field.label}</span>
-                  <ItemInput
-                    field={field}
-                    value={item[field.key]}
-                    onChange={(next) => {
-                      const updated: Json = { ...item };
-                      if (next === undefined) delete updated[field.key];
-                      else updated[field.key] = next;
-                      writeItem(index, updated);
-                    }}
-                  />
-                </label>
-              ))}
+              {fields.map((field) => {
+                // the same explicit pairing the outer fields use, so every
+                // control in the Builder is addressed one way. A wrapping
+                // <label> is valid around ONE control, but it resolves
+                // inconsistently (a wrapped <select> is not found by label at
+                // all in some tooling), and half a form addressable one way and
+                // half the other is a form nobody can drive.
+                const id = `${slug}-${index}-${field.key}`;
+                return (
+                  <div key={field.key} className="field">
+                    <label className="field-label" htmlFor={id}>{field.label}</label>
+                    <ItemInput
+                      field={field}
+                      id={id}
+                      value={readPath(item, field.key)}
+                      // writePath prunes an emptied key and the object it
+                      // leaves behind, so clearing the allowlist does not leave
+                      // `policy: {}` on an arm that declares no policy
+                      onChange={(next) => writeItem(index, writePath(item, field.key, next))}
+                    />
+                  </div>
+                );
+              })}
             </div>
             {Object.keys(rest).length > 0 && (
               <div className="row">
@@ -367,10 +376,12 @@ function ListField({
 
 function ItemInput({
   field,
+  id,
   value,
   onChange,
 }: {
   field: ItemFieldSpec;
+  id: string;
   value: unknown;
   onChange: (next: unknown) => void;
 }) {
@@ -379,6 +390,7 @@ function ItemInput({
     case "number":
       return (
         <input
+          id={id}
           type="number"
           value={value === undefined || value === null ? "" : String(value)}
           onChange={(e) =>
@@ -389,6 +401,7 @@ function ItemInput({
     case "select":
       return (
         <select
+          id={id}
           value={value === undefined ? "" : String(value)}
           onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value)}
         >
@@ -403,14 +416,31 @@ function ItemInput({
     case "textarea":
       return (
         <textarea
+          id={id}
           className="small-area"
           value={value === undefined ? "" : String(value)}
           onChange={(e) => onChange(clear(e.target.value))}
         />
       );
+    case "tags":
+      return (
+        <input
+          id={id}
+          value={Array.isArray(value) ? value.join(", ") : ""}
+          placeholder={field.placeholder ?? "comma separated"}
+          onChange={(e) => {
+            const items = e.target.value
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean);
+            onChange(items.length === 0 ? undefined : items);
+          }}
+        />
+      );
     default:
       return (
         <input
+          id={id}
           value={value === undefined ? "" : String(value)}
           placeholder={field.placeholder}
           onChange={(e) => onChange(clear(e.target.value))}
