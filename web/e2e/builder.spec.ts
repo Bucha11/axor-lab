@@ -288,7 +288,7 @@ test.describe("Suite Builder", () => {
     const scenarios = page.locator(".card", {
       has: page.getByRole("heading", { name: "Scenarios" }),
     });
-    await scenarios.getByRole("button", { name: "+ Add" }).click();
+    await scenarios.getByRole("button", { name: "Add Scenarios" }).click();
     await page.getByRole("button", { name: "Save", exact: true }).click();
     await expect(page.locator(".tag", { hasText: /^saved$/ })).toBeVisible();
 
@@ -304,13 +304,13 @@ test.describe("Suite Builder", () => {
     const scenarios = page.locator(".card", {
       has: page.getByRole("heading", { name: "Scenarios", exact: true }),
     });
-    await expect(scenarios.getByRole("button", { name: "Remove" })).toHaveCount(1);
+    await expect(scenarios.getByRole("button", { name: /^Remove Scenarios/ })).toHaveCount(1);
 
-    await scenarios.getByRole("button", { name: "+ Add" }).click();
-    await expect(scenarios.getByRole("button", { name: "Remove" })).toHaveCount(2);
+    await scenarios.getByRole("button", { name: "Add Scenarios" }).click();
+    await expect(scenarios.getByRole("button", { name: /^Remove Scenarios/ })).toHaveCount(2);
 
-    await scenarios.getByRole("button", { name: "Remove" }).first().click();
-    await expect(scenarios.getByRole("button", { name: "Remove" })).toHaveCount(1);
+    await scenarios.getByRole("button", { name: /^Remove Scenarios/ }).first().click();
+    await expect(scenarios.getByRole("button", { name: /^Remove Scenarios/ })).toHaveCount(1);
   });
 
   test("toggling the simulated-tools checkbox updates state", async ({ page }) => {
@@ -708,5 +708,100 @@ test.describe("Suite Builder", () => {
     // dispatch → navigate(/runs/run-7) → the Run Report renders
     await expect(page.getByRole("heading", { name: "Run run-7" })).toBeVisible();
     expect(errs).toEqual([]);
+  });
+});
+
+
+/**
+ * The forms, driven the way a person drives them.
+ *
+ * Every widget lived inside a `<label className="field">`. A <label> owns
+ * exactly ONE control and <button> is labelable, so a chips/list/yaml-link
+ * field handed its whole text to whichever button came first: the field's
+ * words became click targets for it, and its accessible name became a
+ * paragraph. Reading the hint under Conditions ADDED a condition.
+ */
+test.describe("the form is not a minefield", () => {
+  test("reading a field's help does not edit the document", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    const help = page.getByText(/adding one declares the 'governance' capability/);
+    await help.click();
+    // no arm was added by reading about arms
+    await expect(
+      page.locator(".field", { hasText: "Conditions (governance)" }).locator(".item-card"),
+    ).toHaveCount(0);
+  });
+
+  test("clicking a field's LABEL does not toggle a chip", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    const chip = page.locator(".chip", { hasText: /^governance$/ });
+    const before = await chip.getAttribute("class");
+    await page.locator(".field-label", { hasText: /^Capabilities$/ }).click();
+    // the word "Capabilities" used to be a click target for the first chip
+    await expect(chip).toHaveAttribute("class", before ?? "");
+  });
+
+  test("each control is addressable by its own label", async ({ page }) => {
+    // three "Edit in YAML →" buttons sit side by side under Environment; before
+    // the fix they were one button repeated three times, and afterwards they
+    // briefly had no field context at all
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    for (const name of ["Edit Tool manifests in YAML", "Edit Fixtures in YAML",
+                        "Edit Variables in YAML"]) {
+      await expect(page.getByRole("button", { name })).toHaveCount(1);
+    }
+    // and a help sentence is a DESCRIPTION, not part of the control's name
+    await expect(page.getByRole("combobox", { name: "Topology", exact: true })).toHaveCount(1);
+  });
+});
+
+test.describe("adding an item", () => {
+  test("an arm declares the capability the schema requires with it", async ({ page }) => {
+    // the most common authoring action in this product used to land on
+    // "execution.conditions is set but 'governance' is not in capabilities"
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByRole("button", { name: "Add Conditions (governance)" }).click();
+    await expect(page.locator(".chip.chip-on", { hasText: /^governance$/ })).toHaveCount(1);
+  });
+
+  test("a new item names itself rather than starting empty", async ({ page }) => {
+    // an empty id is refused — an aggregation resolves its metric BY NAME, a
+    // condition is addressed by id in every trial — so + Add used to turn the
+    // screen red before anything was typed
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByRole("button", { name: "Add Conditions (governance)" }).click();
+    const id = page.locator(".field", { hasText: "Conditions (governance)" })
+      .locator(".item-card").first().locator("input").first();
+    await expect(id).not.toHaveValue("");
+  });
+
+  test("an aggregation picks from the metrics the suite declares", async ({ page }) => {
+    await routes(page, {
+      manifest: {
+        ...MANIFEST,
+        evaluation: {
+          metrics: [{ name: "duration_ms", kind: "duration_ms", source: "trial_metric" }],
+          aggregations: [{ metric: "duration_ms", fn: "mean", unit_of_analysis: "trial" }],
+        },
+      },
+    });
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    const metric = page.locator(".field", { hasText: "Aggregations" })
+      .locator(".item-card").first().locator("select").first();
+    // a select, not free text: a typo is not a new metric, it is an
+    // aggregation over nothing
+    await expect(metric).toHaveValue("duration_ms");
+    await expect(metric.locator("option")).toHaveText(["—", "duration_ms"]);
   });
 });

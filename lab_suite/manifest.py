@@ -178,6 +178,7 @@ def validate_manifest(
     errors.extend(_scripted_agent_errors(agents))
     errors.extend(_suite_config_errors(manifest))
     errors.extend(_invariant_metric_errors(manifest))
+    errors.extend(_blank_identifier_errors(manifest))
     errors.extend(_condition_config_hash_errors(conditions))
     return errors
 
@@ -220,6 +221,52 @@ def _condition_config_hash_errors(
 #: unmeasured, so a threshold over one of these can only ever come back
 #: "was not measured on N/N". Every other declared kind is numeric.
 _NON_NUMERIC_METRIC_KINDS = frozenset({"boolean"})
+
+
+def _blank_identifier_errors(manifest: dict[str, object]) -> list[str]:
+    """An identifier that names something must actually name it.
+
+    The Builder's "+ Add" starts every item with its id empty — a metric named
+    "", an evaluator with no id, an invariant over metric "" — and each of those
+    validated CLEAN. So the form's most ordinary action produced a document the
+    product called valid and nothing downstream could use: an aggregation
+    resolves metrics BY NAME, an invariant reads its metric by name, a condition
+    is addressed by id in every trial and aggregate.
+
+    Empty is the case worth naming separately from missing. The schema requires
+    the key and the key is there, so schema validation passes and the failure
+    surfaces a run later as "metric '' was not measured".
+    """
+    errors: list[str] = []
+
+    def check(items: object, key: str, where: str) -> None:
+        for index, item in enumerate(items or []):  # type: ignore[union-attr]
+            if not isinstance(item, dict):
+                continue
+            if key in item and not str(item.get(key, "")).strip():
+                errors.append(
+                    f"[suite] {where}[{index}].{key} is empty — it is the name the "
+                    "rest of the manifest refers to this by"
+                )
+
+    evaluation: dict[str, object] = manifest.get("evaluation") or {}  # type: ignore[assignment]
+    execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
+    check(manifest.get("scenarios"), "name", "scenarios")
+    check(manifest.get("agents"), "ref", "agents")
+    check(manifest.get("regressions"), "id", "regressions")
+    check(execution.get("conditions"), "id", "execution.conditions")
+    check(evaluation.get("metrics"), "name", "evaluation.metrics")
+    check(evaluation.get("evaluators"), "id", "evaluation.evaluators")
+    for index, regression in enumerate(manifest.get("regressions") or []):  # type: ignore[union-attr]
+        if not isinstance(regression, dict):
+            continue
+        rule: dict[str, object] = regression.get("rule") or {}  # type: ignore[assignment]
+        if str(rule.get("kind")) == "metric_threshold" and not str(rule.get("metric", "")).strip():
+            errors.append(
+                f"[suite] regressions[{index}].rule.metric is empty — a threshold "
+                "over no metric can never be checked"
+            )
+    return errors
 
 
 def _invariant_metric_errors(manifest: dict[str, object]) -> list[str]:

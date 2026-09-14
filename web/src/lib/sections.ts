@@ -59,6 +59,13 @@ export interface FieldSpec {
    * reference a tool that exists in THIS suite, and no literal can know that.
    * Resolved by `blankFor` against the manifest being edited. */
   blank?: Json | ((manifest: Json) => Json);
+  /** A second edit this field's write REQUIRES.
+   *
+   * Not sugar: the schema binds `execution.conditions` and the `governance`
+   * capability BOTH ways, so a form that writes one and leaves the other is a
+   * form that knowingly produces an invalid document. Applied after the write,
+   * over the already-updated document. */
+  couples?: (document: Json, value: unknown) => Json;
   advanced?: boolean;
   help?: string;
 }
@@ -94,6 +101,31 @@ export function suiteToolIds(manifest: Json): string[] {
     .filter((id): id is string => typeof id === "string");
 }
 
+/** The metric names this suite declares — what an aggregation may name. */
+export function declaredMetrics(manifest: Json): string[] {
+  const evaluation = (manifest.evaluation ?? {}) as Record<string, unknown>;
+  const metrics = Array.isArray(evaluation.metrics) ? evaluation.metrics : [];
+  return metrics
+    .filter((metric): metric is Json => !!metric && typeof metric === "object")
+    .map((metric) => metric.name)
+    .filter((name): name is string => typeof name === "string" && name !== "");
+}
+
+/** This suite's capabilities with `capability` present, order preserved. */
+export function withCapability(manifest: Json, capability: string): string[] {
+  const declared = Array.isArray(manifest.capabilities)
+    ? manifest.capabilities.map(String)
+    : [];
+  return declared.includes(capability) ? declared : [...declared, capability];
+}
+
+/** Options an ITEM field inside a `list` can only get from the document being
+ * edited, keyed `<field path>.<item key>`. The field-level `options` map does
+ * the same job one level up. */
+export function itemOptions(manifest: Json): Record<string, string[]> {
+  return { "evaluation.aggregations.metric": declaredMetrics(manifest) };
+}
+
 /**
  * The smallest scenario that RESOLVES, for this suite.
  *
@@ -118,7 +150,7 @@ export function blankScenario(manifest: Json): Json {
   const [tool] = suiteToolIds(manifest);
   return {
     schema_version: "scenario/v1",
-    name: "",
+    name: nextId(manifest, "scenarios", "scenario"),
     task: "",
     inputs: {},
     tools: tool ? [{ $ref: tool }] : [],
@@ -127,6 +159,30 @@ export function blankScenario(manifest: Json): Json {
       ? { task_success: { event: "tool_call", tool } }
       : { task_success: { event: "tool_call" } }),
   };
+}
+
+/** A distinct placeholder identifier for a newly added list item.
+ *
+ * Every "+ Add" used to start its item with an empty id, and an empty id is
+ * refused: an aggregation resolves its metric BY NAME, an invariant reads its
+ * metric by name, a condition is addressed by id in every trial. So the form's
+ * most ordinary action produced a document the validator rejects — you clicked
+ * Add and the screen went red before you typed anything.
+ *
+ * A visible placeholder is the honest middle: it is obviously a name to change,
+ * and it keeps Add → Validate green, which is the property a form should have.
+ */
+export function nextId(manifest: Json, path: string, prefix: string): string {
+  const existing = readPath(manifest, path);
+  const count = Array.isArray(existing) ? existing.length : 0;
+  const taken = new Set(
+    (Array.isArray(existing) ? existing : [])
+      .map((item) => (item && typeof item === "object" ? String((item as Json).id ?? (item as Json).name ?? "") : ""))
+      .filter(Boolean),
+  );
+  let candidate = `${prefix}-${count + 1}`;
+  for (let bump = count + 2; taken.has(candidate); bump++) candidate = `${prefix}-${bump}`;
+  return candidate;
 }
 
 /** A field's blank item, resolved against the document being edited. */
@@ -177,7 +233,7 @@ export const SECTIONS: SectionSpec[] = [
           { key: "provider", label: "Provider", widget: "text", placeholder: "openai" },
           { key: "model", label: "Model", widget: "text", placeholder: "gpt-4o" },
         ],
-        blank: { ref: "" },
+        blank: (manifest: Json) => ({ ref: nextId(manifest, "agents", "agent") }),
       },
       {
         path: "topology.kind",
@@ -317,8 +373,26 @@ export const SECTIONS: SectionSpec[] = [
           // that rots the next time the kernel is released.
           { key: "kernel", label: "Kernel", widget: "text", placeholder: "axor-core@<installed version>" },
         ],
-        blank: { schema_version: "condition/v1", id: "", enforcement: "on" },
-        help: "omit for a single-arm run; present requires 'governance' in capabilities",
+        blank: (manifest: Json) => ({
+          schema_version: "condition/v1",
+          // a second arm named "governed" is the ordinary case; an id is
+          // required and "" is refused, so start on a usable one
+          id: nextId(manifest, "execution.conditions", "arm"),
+          enforcement: "on",
+        }),
+        // the schema binds these two BOTH ways, so a form that writes one and
+        // not the other knowingly produces an invalid document. Adding the
+        // first arm used to leave you on "execution.conditions is set but
+        // 'governance' is not in capabilities" — the most common authoring
+        // action in this product, landing in an error you fix in another
+        // section.
+        couples: (document, value) =>
+          Array.isArray(value) && value.length > 0
+            ? writePath(document, "capabilities", withCapability(document, "governance"))
+            : document,
+        help:
+          "an arm is a governed variant of the same run; adding one declares the " +
+          "'governance' capability, which the schema requires alongside it",
       },
     ],
   },
@@ -356,14 +430,23 @@ export const SECTIONS: SectionSpec[] = [
             options: ["higher_is_better", "lower_is_better", "neutral"],
           },
         ],
-        blank: { name: "", kind: "number", source: "trial_metric" },
+        blank: (manifest: Json) => ({
+          name: nextId(manifest, "evaluation.metrics", "metric"),
+          kind: "number",
+          source: "trial_metric",
+        }),
       },
       {
         path: "evaluation.aggregations",
         label: "Aggregations",
         widget: "list",
         item: [
-          { key: "metric", label: "Metric", widget: "text", placeholder: "a declared metric" },
+          // a SELECT, not free text: an aggregation resolves its metric BY NAME
+          // against the ones this suite declares, so a typo is not a new metric
+          // — it is an aggregation over nothing, and the validator says so only
+          // after you have typed it. The options come from the manifest being
+          // edited (`itemOptions`).
+          { key: "metric", label: "Metric", widget: "select", options: [] },
           {
             key: "fn",
             label: "Fn",
@@ -371,6 +454,12 @@ export const SECTIONS: SectionSpec[] = [
             options: [
               "rate", "mean", "median", "sum", "count", "min", "max", "p50", "p95", "p99",
             ],
+          },
+          {
+            key: "test",
+            label: "Comparison test",
+            widget: "select",
+            options: ["none", "mcnemar", "two_proportion"],
           },
           {
             key: "unit_of_analysis",
@@ -385,7 +474,14 @@ export const SECTIONS: SectionSpec[] = [
             options: ["wilson", "bootstrap", "none"],
           },
         ],
-        blank: { metric: "", fn: "mean", unit_of_analysis: "trial" },
+        // starts on a metric the suite HAS — the same rule as a new scenario
+        // starting on a tool it declares. "" validated as "an aggregation over
+        // metric '' which the suite does not declare" the moment it appeared.
+        blank: (manifest: Json) => ({
+          metric: declaredMetrics(manifest)[0] ?? "",
+          fn: "mean",
+          unit_of_analysis: "trial",
+        }),
       },
       {
         path: "evaluation.evaluators",
@@ -404,7 +500,11 @@ export const SECTIONS: SectionSpec[] = [
           { key: "hook", label: "Hook", widget: "text", placeholder: "suite_hook: entry point" },
           { key: "produces", label: "Produces", widget: "text", placeholder: "reads" },
         ],
-        blank: { id: "", kind: "suite_hook", produces: "" },
+        blank: (manifest: Json) => ({
+          id: nextId(manifest, "evaluation.evaluators", "evaluator"),
+          kind: "suite_hook",
+          produces: "",
+        }),
         help: "a 'predicate' evaluator's predicate object is edited in YAML",
       },
       {
@@ -417,12 +517,17 @@ export const SECTIONS: SectionSpec[] = [
           { key: "name", label: "Name", widget: "text" },
           { key: "expectation", label: "Expectation", widget: "textarea" },
         ],
-        blank: {
+        blank: (manifest: Json) => ({
           schema_version: "regression/v1",
-          id: "",
+          id: nextId(manifest, "regressions", "RG"),
           name: "",
-          rule: { kind: "metric_threshold", metric: "", op: "lt", value: 0 },
-        },
+          rule: {
+            kind: "metric_threshold",
+            metric: declaredMetrics(manifest)[0] ?? "",
+            op: "lt",
+            value: 0,
+          },
+        }),
         help: "the executable rule lives under each item's Details, in YAML",
       },
     ],

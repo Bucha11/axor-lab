@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { Json } from "./api";
 import {
   IDENTITY,
+  type FieldSpec,
   SECTIONS,
   blankFor,
   blankScenario,
+  declaredMetrics,
   configFields,
   readPath,
   renderedPaths,
@@ -160,10 +162,87 @@ describe("a new scenario is one that RESOLVES", () => {
   });
 
   it("a constant blank still works", () => {
+    // no shipped field uses one any more — every list's blank now derives a
+    // placeholder id from the document — but the constant branch is the
+    // contract for a field that does not need the document
+    const constant = { path: "x", label: "X", widget: "list", blank: { ref: "" } } as const;
+    expect(blankFor(constant as unknown as FieldSpec, MANIFEST)).toEqual({ ref: "" });
+  });
+
+  it("every list's blank names itself, so + Add never lands on invalid", () => {
+    // an empty id is refused by the validator — an aggregation resolves its
+    // metric BY NAME, a condition is addressed by id in every trial — so the
+    // form's most ordinary action used to turn the screen red before you typed
+    for (const [path, key] of [
+      ["scenarios", "name"],
+      ["agents", "ref"],
+      ["execution.conditions", "id"],
+      ["evaluation.metrics", "name"],
+      ["evaluation.evaluators", "id"],
+      ["regressions", "id"],
+    ] as [string, string][]) {
+      const spec = SECTIONS.flatMap((s) => s.fields).find((f) => f.path === path);
+      const blank = blankFor(spec!, MANIFEST) as Record<string, unknown>;
+      expect(String(blank[key] ?? "")).not.toBe("");
+    }
+  });
+
+  it("a second + Add does not reuse the first placeholder", () => {
+    const spec = SECTIONS.flatMap((s) => s.fields).find((f) => f.path === "scenarios")!;
+    const first = blankFor(spec, MANIFEST) as Record<string, unknown>;
+    const grown = writePath(MANIFEST, "scenarios", [
+      ...((MANIFEST.scenarios ?? []) as unknown[]), first,
+    ]);
+    const second = blankFor(spec, grown) as Record<string, unknown>;
+    expect(second.name).not.toBe(first.name);
+  });
+
+  it("a new aggregation starts on a metric the suite HAS", () => {
+    // "" was refused the moment it appeared — "an aggregation over metric ''
+    // which the suite does not declare" — so + Add produced an invalid document
+    // every time, the same trap the scenario blank already fixed one field over
+    const spec = SECTIONS.flatMap((s) => s.fields).find(
+      (f) => f.path === "evaluation.aggregations",
+    );
+    const blank = blankFor(spec!, MANIFEST) as Record<string, unknown>;
+    expect(declaredMetrics(MANIFEST)).toContain(blank.metric);
+  });
+
+  it("a new arm gets a usable id, because an empty one is refused", () => {
     const spec = SECTIONS.flatMap((s) => s.fields).find(
       (f) => f.path === "execution.conditions",
     );
-    expect(blankFor(spec!, MANIFEST)).toEqual(spec?.blank);
+    const blank = blankFor(spec!, MANIFEST) as Record<string, unknown>;
+    expect(String(blank.id)).not.toBe("");
+  });
+});
+
+describe("a field whose write requires a second one", () => {
+  it("adding an arm declares the governance capability", () => {
+    // the schema binds the two BOTH ways, so writing one and not the other is
+    // a form knowingly producing an invalid document. Adding the first arm used
+    // to land on "execution.conditions is set but 'governance' is not in
+    // capabilities" — the most common authoring action in this product.
+    const spec = SECTIONS.flatMap((s) => s.fields).find(
+      (f) => f.path === "execution.conditions",
+    )!;
+    const arms = [{ schema_version: "condition/v1", id: "governed", enforcement: "on" }];
+    const written = writePath(MANIFEST, spec.path, arms);
+    const coupled = spec.couples!(written, arms);
+    expect(coupled.capabilities).toContain("governance");
+    // and it is not duplicated on a second edit
+    const again = spec.couples!(coupled, arms);
+    expect((again.capabilities as string[]).filter((c) => c === "governance")).toHaveLength(1);
+  });
+
+  it("removing every arm leaves the capability alone", () => {
+    // dropping it silently would be the same overreach in the other direction:
+    // the validator says what is wrong, and the author decides
+    const spec = SECTIONS.flatMap((s) => s.fields).find(
+      (f) => f.path === "execution.conditions",
+    )!;
+    const governed = { ...MANIFEST, capabilities: ["governance"] };
+    expect(spec.couples!(governed, undefined).capabilities).toEqual(["governance"]);
   });
 });
 

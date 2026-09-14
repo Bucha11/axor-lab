@@ -191,9 +191,12 @@ class TestTheBuilderBlankScenario(unittest.TestCase):
     """
 
     #: verbatim `blankScenario(manifest)` for a suite whose first tool is `note`
+    #: and one existing scenario. The name is DERIVED (`nextId`) rather than
+    #: empty: a scenario is addressed by name, and an empty one is now refused —
+    #: so "+ Add" would have turned the screen red before anything was typed.
     BLANK = {
         "schema_version": "scenario/v1",
-        "name": "",
+        "name": "scenario-2",
         "task": "",
         "inputs": {},
         "tools": [{"$ref": "note"}],
@@ -205,6 +208,11 @@ class TestTheBuilderBlankScenario(unittest.TestCase):
         from lab_suite import builtin_registry
 
         return copy.deepcopy(builtin_registry().get("blank").manifest())
+
+    def test_the_derived_name_matches_the_document_it_is_added_to(self) -> None:
+        """`nextId` counts what is already there, so the fixture above is the
+        blank for a suite that already has one scenario."""
+        self.assertEqual(len(self._blank_suite()["scenarios"]), 1)
 
     def test_the_first_tool_of_the_blank_suite_is_the_one_it_refs(self) -> None:
         """`blankScenario` takes `environment.tools[0].id`; if that stops being
@@ -540,3 +548,71 @@ class TestSliceExampleParity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnIdentifierMustNameSomething(unittest.TestCase):
+    """The Builder's "+ Add" starts an item, and an item is addressed by name.
+
+    Every list's blank used to begin with its id empty, and an empty id
+    validated CLEAN: a metric named "", an evaluator with no id, an invariant
+    over metric "". So the form's most ordinary action produced a document the
+    product called valid and nothing downstream could resolve — an aggregation
+    looks its metric up BY NAME, an invariant reads its metric by name, a
+    condition is addressed by id in every trial and every aggregate.
+
+    Empty is worth naming separately from missing: the schema requires the key
+    and the key is there, so schema validation passes and the failure surfaces a
+    whole run later as "metric '' was not measured".
+    """
+
+    def _blank(self) -> dict[str, object]:
+        from lab_suite import builtin_registry
+
+        return copy.deepcopy(builtin_registry().get("blank").manifest())
+
+    def test_each_kind_of_empty_identifier_is_refused(self) -> None:
+        from lab_suite.manifest import validate_manifest
+
+        cases = {
+            "evaluation.metrics": lambda m: m["evaluation"]["metrics"].append(
+                {"name": "", "kind": "number", "source": "trial_metric"}),
+            "evaluation.evaluators": lambda m: m["evaluation"].setdefault(
+                "evaluators", []).append({"id": "", "kind": "suite_hook", "produces": "x"}),
+            "agents": lambda m: m.setdefault("agents", []).append({"ref": ""}),
+            "regressions": lambda m: m.setdefault("regressions", []).append({
+                "schema_version": "regression/v1", "id": "", "name": "n",
+                "rule": {"kind": "metric_threshold", "metric": "duration_ms",
+                         "op": "lt", "value": 1},
+            }),
+        }
+        for where, mutate in cases.items():
+            with self.subTest(where=where):
+                manifest = self._blank()
+                mutate(manifest)
+                errors = validate_manifest(manifest)
+                self.assertTrue(
+                    any("is empty" in e and where in e for e in errors),
+                    f"{where} accepted an empty identifier: {errors}",
+                )
+
+    def test_a_threshold_over_no_metric_is_refused(self) -> None:
+        from lab_suite.manifest import validate_manifest
+
+        manifest = self._blank()
+        manifest.setdefault("regressions", []).append({  # type: ignore[union-attr]
+            "schema_version": "regression/v1", "id": "RG-1", "name": "n",
+            "rule": {"kind": "metric_threshold", "metric": "", "op": "lt", "value": 1},
+        })
+        errors = validate_manifest(manifest)
+        self.assertTrue(any("rule.metric is empty" in e for e in errors), errors)
+
+    def test_every_built_in_still_validates(self) -> None:
+        """The guard has to be narrower than the real suites, or it is a rule
+        that outlaws the product's own catalog."""
+        from lab_suite import builtin_registry
+        from lab_suite.manifest import validate_manifest
+
+        registry = builtin_registry()
+        for suite_id in registry.ids():
+            with self.subTest(suite=suite_id):
+                self.assertEqual(validate_manifest(registry.get(suite_id).manifest()), [])

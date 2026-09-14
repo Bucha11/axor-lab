@@ -12,8 +12,10 @@ import {
   SECTIONS,
   type FieldSpec,
   type ItemFieldSpec,
+  type Widget,
   blankFor,
   configFields,
+  itemOptions,
   readPath,
   writePath,
 } from "../lib/sections";
@@ -59,9 +61,17 @@ function Widget({
   blank,
   onChange,
   onJump,
+  control,
+  itemChoices,
 }: {
   spec: FieldSpec;
+  itemChoices: Record<string, string[]>;
   value: unknown;
+  /** id + aria-describedby for the ONE control a simple widget renders, so its
+   * label points at it by id and its help is DESCRIPTION rather than part of
+   * the control's name. A composite widget has no single control to carry
+   * them and labels its own buttons instead. */
+  control: { id: string; "aria-describedby"?: string };
   /** `list` only: what "+ Add" starts a new item as, already resolved against
    * the document (a new scenario has to reference a tool THIS suite declares,
    * so the blank cannot be a constant). */
@@ -75,6 +85,7 @@ function Widget({
     case "number":
       return (
         <input
+          {...control}
           type="number"
           value={value === undefined || value === null ? "" : String(value)}
           onChange={(e) =>
@@ -85,6 +96,7 @@ function Widget({
     case "select":
       return (
         <select
+          {...control}
           value={value === undefined ? "" : String(value)}
           onChange={(e) => {
             const raw = e.target.value;
@@ -105,6 +117,7 @@ function Widget({
     case "tags":
       return (
         <input
+          {...control}
           value={Array.isArray(value) ? value.join(", ") : ""}
           placeholder="comma separated"
           onChange={(e) => {
@@ -119,6 +132,7 @@ function Widget({
     case "textarea":
       return (
         <textarea
+          {...control}
           className="small-area"
           value={value === undefined ? "" : String(value)}
           onChange={(e) => onChange(clear(e.target.value))}
@@ -128,6 +142,7 @@ function Widget({
       return (
         <span className="toggle">
           <input
+            {...control}
             type="checkbox"
             checked={value === true}
             onChange={(e) => onChange(e.target.checked)}
@@ -137,13 +152,22 @@ function Widget({
       );
     case "chips":
       return (
-        <ChipsField value={value} options={spec.options ?? []} onChange={onChange} />
+        <ChipsField
+          value={value}
+          options={spec.options ?? []}
+          onChange={onChange}
+          describedBy={control["aria-describedby"]}
+        />
       );
     case "list":
       return (
         <ListField
           value={value}
-          fields={spec.item ?? []}
+          label={spec.label}
+          fields={(spec.item ?? []).map((field) => {
+            const choices = itemChoices[`${spec.path}.${field.key}`];
+            return choices ? { ...field, options: choices } : field;
+          })}
           blank={blank}
           onChange={onChange}
           onJump={() => onJump(spec.path)}
@@ -153,7 +177,14 @@ function Widget({
       return (
         <div className="row">
           <span className="muted small">{summaryOf(value)}</span>
-          <button type="button" className="item-add" onClick={() => onJump(spec.path)}>
+          {/* three of these sit side by side under Environment; without the
+              field in the name they are one button repeated three times */}
+          <button
+            type="button"
+            className="item-add"
+            aria-label={`Edit ${spec.label} in YAML`}
+            onClick={() => onJump(spec.path)}
+          >
             Edit in YAML →
           </button>
         </div>
@@ -161,6 +192,7 @@ function Widget({
     default:
       return (
         <input
+          {...control}
           value={value === undefined ? "" : String(value)}
           onChange={(e) => onChange(clear(e.target.value))}
         />
@@ -180,10 +212,12 @@ function ChipsField({
   value,
   options,
   onChange,
+  describedBy,
 }: {
   value: unknown;
   options: string[];
   onChange: (next: unknown) => void;
+  describedBy?: string;
 }) {
   const [draft, setDraft] = useState("");
   const selected = Array.isArray(value) ? value.map(String) : [];
@@ -197,11 +231,12 @@ function ChipsField({
   const custom = selected.filter((item) => !options.includes(item));
 
   return (
-    <div className="chips">
+    <div className="chips" aria-describedby={describedBy}>
       {options.map((option) => (
         <button
           key={option}
           type="button"
+          aria-pressed={selected.includes(option)}
           className={`chip${selected.includes(option) ? " chip-on" : ""}`}
           onClick={() => toggle(option)}
         >
@@ -244,12 +279,16 @@ function ChipsField({
  */
 function ListField({
   value,
+  label,
   fields,
   blank,
   onChange,
   onJump,
 }: {
   value: unknown;
+  /** the FIELD's label, so this list's buttons say what they act on — a screen
+   * with six lists otherwise offers six identical "+ Add" and "Remove" */
+  label: string;
   fields: ItemFieldSpec[];
   blank: Json;
   onChange: (next: unknown) => void;
@@ -293,7 +332,12 @@ function ListField({
                 <span className="muted small">
                   also: {Object.keys(rest).join(", ")}
                 </span>
-                <button type="button" className="item-add" onClick={onJump}>
+                <button
+                  type="button"
+                  className="item-add"
+                  aria-label={`Edit ${label} ${index + 1} in YAML`}
+                  onClick={onJump}
+                >
                   Edit in YAML →
                 </button>
               </div>
@@ -301,6 +345,7 @@ function ListField({
             <button
               type="button"
               className="item-remove"
+              aria-label={`Remove ${label} ${index + 1}`}
               onClick={() => write(items.filter((_, i) => i !== index))}
             >
               Remove
@@ -308,7 +353,12 @@ function ListField({
           </div>
         );
       })}
-      <button type="button" className="item-add" onClick={() => write([...items, { ...blank }])}>
+      <button
+        type="button"
+        className="item-add"
+        aria-label={`Add ${label}`}
+        onClick={() => write([...items, { ...blank }])}
+      >
         + Add
       </button>
     </div>
@@ -369,11 +419,16 @@ function ItemInput({
   }
 }
 
+/** Widgets that hold MORE THAN ONE control, so a wrapping <label> would bind
+ * the field's whole text to whichever comes first. */
+const COMPOSITE_WIDGETS = new Set<Widget>(["chips", "list", "yaml-link"]);
+
 function Fields({
   fields,
   manifest,
   advanced,
   options,
+  itemChoices,
   onChange,
   onJump,
 }: {
@@ -384,6 +439,9 @@ function Fields({
    * state rather than a property of the manifest — the scenario registry is
    * the case that forced this. Keyed by field path. */
   options: Record<string, string[]>;
+  /** the same thing one level down, for a field INSIDE a list item, keyed
+   * `<field path>.<item key>` */
+  itemChoices: Record<string, string[]>;
   onChange: (next: Json) => void;
   onJump: (path: string) => void;
 }) {
@@ -394,27 +452,53 @@ function Fields({
     );
   return (
     <div className="builder-fields">
-      {shown.map((spec) => (
-        <label
-          key={spec.path}
-          className={spec.widget === "checkbox" ? "field field-inline" : "field"}
-        >
-          {/* a toggle reads as "[switch] label", not a label floating over a
-              lone control — so the checkbox renders before its text */}
-          {spec.widget !== "checkbox" && (
-            <span className="field-label">{spec.label}</span>
-          )}
-          <Widget
-            spec={spec}
-            value={readPath(manifest, spec.path)}
-            blank={blankFor(spec, manifest)}
-            onChange={(next) => onChange(writePath(manifest, spec.path, next))}
-            onJump={onJump}
-          />
-          {spec.widget === "checkbox" && <span>{spec.label}</span>}
-          {spec.help && <span className="muted small">{spec.help}</span>}
-        </label>
-      ))}
+      {shown.map((spec) => {
+        // A <label> may own exactly ONE control, and <button> is labelable. So
+        // wrapping a chips/list/yaml-link widget in one handed the field's
+        // whole text to its first button as an accessible name AND made every
+        // word of that text a click target for it: clicking the sentence
+        // "omit for a single-arm run…" ADDED a condition, and clicking the word
+        // "Capabilities" switched governance on. A composite widget gets a
+        // plain container and a label that labels nothing.
+        const composite = COMPOSITE_WIDGETS.has(spec.widget);
+        const id = `field-${spec.path.replace(/[^A-Za-z0-9]+/g, "-")}`;
+        const helpId = spec.help ? `${id}-help` : undefined;
+        // the label points AT the control by id and the help is a description,
+        // so a field reads as "Topology, combobox" with the caveat announced
+        // after — not as one control named by a paragraph
+        const text = composite
+          ? <span className="field-label">{spec.label}</span>
+          : <label className="field-label" htmlFor={id}>{spec.label}</label>;
+        return (
+          <div
+            key={spec.path}
+            className={spec.widget === "checkbox" ? "field field-inline" : "field"}
+          >
+            {/* a toggle reads as "[switch] label", not a label floating over a
+                lone control — so the checkbox renders before its text */}
+            {spec.widget !== "checkbox" && text}
+            <Widget
+              spec={spec}
+              value={readPath(manifest, spec.path)}
+              blank={blankFor(spec, manifest)}
+              control={{ id, ...(helpId ? { "aria-describedby": helpId } : {}) }}
+              itemChoices={itemChoices}
+              onChange={(next) => {
+                const written = writePath(manifest, spec.path, next);
+                // a coupled field finishes its own edit — see FieldSpec.couples
+                onChange(spec.couples ? spec.couples(written, next) : written);
+              }}
+              onJump={onJump}
+            />
+            {spec.widget === "checkbox" && (
+              <label className="field-label" htmlFor={id}>{spec.label}</label>
+            )}
+            {spec.help && (
+              <span id={helpId} className="muted small">{spec.help}</span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -773,6 +857,9 @@ export function Builder({ suiteId }: { suiteId: string }) {
   const dynamicOptions: Record<string, string[]> = {
     scenario_refs: registryScenarios,
   };
+  // choices an item field can only get from the document being edited: an
+  // aggregation names one of THIS suite's metrics
+  const itemChoices = itemOptions(manifest);
   const suiteConfig = configFields(manifest);
 
   return (
@@ -818,6 +905,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
               manifest={manifest}
               advanced={mode === "advanced"}
               options={dynamicOptions}
+                  itemChoices={itemChoices}
               onChange={edited}
               onJump={jumpToYaml}
             />
@@ -846,6 +934,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
                   manifest={manifest}
                   advanced={mode === "advanced"}
                   options={dynamicOptions}
+                  itemChoices={itemChoices}
                   onChange={edited}
                   onJump={jumpToYaml}
                 />
@@ -864,6 +953,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
                 manifest={manifest}
                 advanced={mode === "advanced"}
                 options={dynamicOptions}
+                  itemChoices={itemChoices}
                 onChange={edited}
                 onJump={jumpToYaml}
               />
