@@ -90,7 +90,10 @@ jobs:
       - name: ruff (pyflakes + bugbear; no style noise)
         run: |
           pip install ruff
-          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_suite lab_capabilities
+          # every package the wheel ships. `lab_service` was in neither this list
+          # nor `[tool.setuptools] packages`, so the product's verb layer was
+          # unlinted AND unshipped.
+          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_service lab_suite lab_capabilities
 
   determinism:
     name: Replay determinism matrix (${{ matrix.os }})
@@ -158,19 +161,24 @@ jobs:
           # kernel nobody in the ecosystem actually runs. Full suite re-run green.
           # Bumped 0.10.0 -> 0.10.2: the governance extraction (gate_of) and the
           # wrap trace (ToolCallGovernor.trace_events) need the 0.10.2 kernel.
-          pip install "axor-core==0.10.2"
+          # Bumped 0.10.2 -> 0.11.0: pyproject moved to `axor-core>=0.11,<0.12`
+          # and this pin did not follow, so the one job whose whole purpose is to
+          # measure against the REAL kernel was measuring against a version the
+          # package itself declares incompatible — the exact failure the 0.9.2
+          # bump above was written to prevent, repeated.
+          pip install "axor-core==0.11.0"
           # Lab's runner now imports axor-wrap (the shared wrapping engine), so it
           # must be present for discovery to import at all. Install it AFTER the
           # exact axor-core pin, from the same public branch the wrap-integration
-          # job uses; its own axor-core>=0.10.2,<0.11 is already satisfied by the
-          # pinned 0.10.2, so pip leaves the pinned kernel untouched.
+          # job uses; its own axor-core>=0.10.2,<0.12 is already satisfied by the
+          # pinned 0.11.0, so pip leaves the pinned kernel untouched.
           pip install "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m"
           # axor-eval too: the tool-fabrication experiment (and its test, picked up
           # by discovery here) imports it. Same public-repo git pin as everywhere
-          # else; its axor-core>=0.8,<0.11 is satisfied by the pinned 0.10.2.
+          # else; its axor-core>=0.8,<0.12 is satisfied by the pinned 0.11.0.
           pip install "axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
-          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.10.2' else 'axor-core version drift: expected 0.10.2, got ' + axor_core.__version__)"
+          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.11.0' else 'axor-core version drift: expected 0.11.0, got ' + axor_core.__version__)"
           python -c "from lab_capabilities.governance import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.
@@ -274,7 +282,7 @@ jobs:
         # PyPI predates — installing `axor-wrap>=0.1` there imports a wrap without
         # it and every test in the suite errors at setUp. Pin the integration
         # branch (axor-wrap is public, so this clones tokenless); its own
-        # `axor-core>=0.10.2,<0.11` resolves to the same 0.10.2 Lab pins.
+        # `axor-core>=0.10.2,<0.12` resolves to the same 0.11.0 Lab pins.
         # Switch back to a PyPI pin once axor-wrap cuts a release carrying it.
         run: |
           pip install -e .

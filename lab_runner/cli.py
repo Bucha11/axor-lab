@@ -18,35 +18,21 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-from lab_analysis import binary_aggregate, mcnemar_test, missingness, two_proportion_test
 from lab_analysis.errors import AnalysisError
 from lab_contracts import (
     BundleIntegrityError,
     ContractsError,
-    build_bundle,
-    build_publication,
-    content_hash,
-    finalize_publication_id,
-    make_claim,
-    validate_artifact,
 )
 
 from .bundle_io import (
-    PACKAGING,
     read_bundle_dir,
-    read_bundle_source,
-    write_bundle_dir,
-    write_superseded_attempts,
 )
 from lab_service import REPORT_FORMATS, ReportError
 from lab_suite.errors import SuiteError
 
 from .errors import ExperimentFileError, RunnerError
-from .invariants import STATUS_ERROR, STATUS_FAILED
-from .verdicts import contained
 
 # The CLI is a COMPOSITION ROOT, not part of the platform spine: it wires
 # whatever the user's command needs. Every governance command below —
@@ -55,25 +41,9 @@ from .verdicts import contained
 # here and nowhere else in `lab_runner`. That is why this file is a declared
 # wiring point in `tests/test_capability_boundary.py`.
 from lab_capabilities.governance import (
-    AxorKernel,
-    RegressionPin,
     ResolvedExperiment,
-    build_evidence_case,
-    check_pins,
-    default_registry,
-    evidence_condition,
-    governor_config,
     load_axl,
-    pin,
-    replay_bundle,
-    resolve,
-    resolve_candidate_kernel_for_trace,
-    resolve_kernel,
-    run_experiment_suite,
-    validate_twin,
 )
-from lab_capabilities.governance.claims import deny_claim_text
-from lab_capabilities.governance.regression import STATUS_DIFFERS, STATUS_MATCHES
 
 # Statistics failures are a separate hierarchy from RunnerError;
 # main() maps them to stable exit codes instead of leaking a traceback
@@ -176,7 +146,6 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     serves none of the screens. An interface a user cannot launch is the same
     island the Suite SDK was.
     """
-    import os
 
     from lab_server.runtime_jobs import make_runtime_server
     from lab_server.static import default_root

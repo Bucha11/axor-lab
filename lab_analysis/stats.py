@@ -12,7 +12,7 @@ import random
 from dataclasses import dataclass
 from typing import Sequence
 
-from .errors import InsufficientDataError, UnitOfAnalysisError
+from .errors import AnalysisError, InsufficientDataError, UnitOfAnalysisError
 
 WILSON_Z_95 = 1.959963984540054
 INCONCLUSIVE_MIN_N = 10

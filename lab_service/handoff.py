@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lab_contracts import content_hash
-from lab_runner.bundle_io import write_bundle_dir
 
 from .checks import Check, CheckStatus
 from .errors import OutputRefused

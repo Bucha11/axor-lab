@@ -18,6 +18,7 @@ mention may be excused — but only by an explicit entry here, with the reason.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -170,6 +171,40 @@ class TestTheDocsNameThingsThatExist(unittest.TestCase):
                     self.assertTrue(served, f"{verb} {route} is served by neither server")
 
 
+class TestTheWorkflowAgreesWithThePackage(unittest.TestCase):
+    """CI is a document about the code, and it drifts the same way prose does.
+
+    The real-kernel job pins axor-core to an EXACT version on purpose — a
+    floating range means a green run no longer proves the same kernel the
+    evidence was measured against still behaves. That makes the pin a claim,
+    and it went stale: `pyproject` moved to `>=0.11,<0.12` while the job stayed
+    on 0.10.2, so the one job whose whole purpose is to measure against the real
+    kernel was measuring against a version the package declares incompatible.
+    """
+
+    def test_the_pinned_kernel_satisfies_what_pyproject_requires(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        pins = set(re.findall(r'pip install "axor-core==([0-9.]+)"', workflow))
+        self.assertEqual(len(pins), 1, f"expected exactly one exact pin, got {pins}")
+        pinned = tuple(int(p) for p in pins.pop().split("."))
+
+        spec = re.search(r'"axor-core>=([0-9.]+),<([0-9.]+)"',
+                         (ROOT / "pyproject.toml").read_text())
+        self.assertIsNotNone(spec, "pyproject no longer states an axor-core range")
+        low = tuple(int(p) for p in spec.group(1).split("."))
+        high = tuple(int(p) for p in spec.group(2).split("."))
+        self.assertGreaterEqual(pinned[: len(low)], low, "CI pins below the floor")
+        self.assertLess(pinned[: len(high)], high, "CI pins at or above the ceiling")
+
+    def test_the_drift_assertion_names_the_same_version_as_the_pin(self) -> None:
+        """The job also asserts the version at runtime; two copies of a number
+        is one copy that goes stale."""
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        pin = re.search(r'pip install "axor-core==([0-9.]+)"', workflow).group(1)
+        asserted = set(re.findall(r"__version__ == '([0-9.]+)'", workflow))
+        self.assertEqual(asserted, {pin})
+
+
 class TestTheCountsAreRight(unittest.TestCase):
     """A number in prose is a claim like any other, and the cheapest to check."""
 
@@ -188,10 +223,10 @@ class TestTheCountsAreRight(unittest.TestCase):
         there is no `validate.py`, and `validate_slice.py` needs the repo root on
         the path and its own directory as the cwd."""
         self.assertFalse((ROOT / "contracts" / "validate.py").exists())
+        env = {**os.environ, "PYTHONPATH": str(ROOT)}
         done = subprocess.run(
             [sys.executable, "validate_slice.py"],
-            cwd=ROOT / "contracts", capture_output=True, text=True,
-            env={"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin"},
+            cwd=ROOT / "contracts", capture_output=True, text=True, env=env,
         )
         self.assertEqual(done.returncode, 0, done.stderr[-400:])
         self.assertIn("0 example(s) failing", done.stdout)

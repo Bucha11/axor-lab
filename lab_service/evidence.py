@@ -151,7 +151,7 @@ def pin_trace(
         trace_id=recorded.trace_id,
         expected_sequence=tuple(recorded.expected_sequence),
         record=record,
-        pins=tuple([*kept, record]),
+        pins=(*kept, record),
     )
 
 

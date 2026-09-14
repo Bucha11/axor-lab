@@ -48,6 +48,11 @@ packages = [
     "lab_runner",
     "lab_adapters",
     "lab_server",
+    # the product's verbs. `lab_runner/cli.py` imports it at MODULE level, so a
+    # wheel without it fails on `axor-lab --help` — and it was absent from this
+    # list since the layer was extracted, which made every installed verb that
+    # reaches it (publish, verify, export-cp, report) a ModuleNotFoundError.
+    "lab_service",
     "lab_suite",
     "lab_suite.builtin",
     "lab_capabilities",
