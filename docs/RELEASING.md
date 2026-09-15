@@ -6,41 +6,35 @@ Publishing (OIDC)**, the same arrangement the Control Plane uses — so no API
 token ever lives in this repo. A test asserts that
 (`tests/test_release_preflight.py::TestTheWorkflowWiring`).
 
-This is the one-time setup plus the per-release procedure, and it opens with
-the part that matters most right now: **Lab cannot be published yet, and the
-workflow will tell you so instead of burning a tag.**
+This is the one-time setup plus the per-release procedure.
 
-## Blocker: two dependencies are git pins
+## The blocker that used to be here — cleared
 
-`pyproject.toml` requires:
-
-```
-axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m
-axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m
-```
-
-PyPI **rejects** any upload whose metadata carries a PEP 508 direct reference:
+`pyproject.toml` pinned `axor-wrap` and `axor-eval` to git branches, because
+neither had cut a release carrying the API Lab imports. PyPI **rejects** any
+upload whose metadata holds a PEP 508 direct reference:
 
 ```
 400 Bad Request — Invalid value for requires_dist.
 Error: Can't have direct dependency: 'axor-wrap@ git+https://…'
 ```
 
-That failure lands on the *last* step of a release, after the tag is pushed and
-the version number is spent. So `tools/release_preflight.py` runs before the
-publish leg, reads the built wheel's `METADATA` (the text PyPI validates, not
-`pyproject.toml`), and fails the run with the remedy in the message.
+`axor-wrap 0.2.0` and `axor-eval 0.2.0` are on PyPI now, and both carry every
+symbol Lab imports (`axor_wrap.WrappedToolset` / `ToolDenied` /
+`toolset_for_arm` / `trial_of` / `LabRuntimeConnector` / `compile_manifests`,
+`axor_wrap.trace.verdict_events`, `axor_wrap.compile.governor_kwargs`;
+`axor_eval.claims.reconstruct_claim`, `axor_eval.audit.tool_audit`,
+`axor_eval.contracts`, `axor_eval.deprivation.engine`). Both dependencies are
+version ranges now (`>=0.2,<0.3`), and the full suite — 1240 tests — runs green
+against the published wheels with no wrap/eval skip.
 
-**To unblock a release:** cut an `axor-wrap` release and an `axor-eval` release
-carrying the APIs Lab imports (`axor_wrap.WrappedToolset` / `build_trace` /
-`toolset_for_arm` / `trial_of`, and `axor_eval.claims.reconstruct_claim`), then
-replace both git pins in `pyproject.toml` with version ranges. `axor-core` is
-already on PyPI at 0.11.0, which satisfies Lab's `>=0.11,<0.12` — the preflight
-probes that too, with `pip download --no-deps`, because a floor no published
-version satisfies uploads *fine* and then breaks every install.
+So `axor-lab` is publishable. What is left is the one-time PyPI setup below;
+nothing in the package blocks a release.
 
-Until then, `pip install axor-lab` from a checkout or a git URL works (pip
-resolves direct references; PyPI just will not host them).
+The gate stays either way. `tools/release_preflight.py` fails the workflow if a
+direct reference comes back, and `tests/test_docs_match_the_code.py` fails on
+every push if one reappears in `pyproject` — a release-time check is too late
+to be the only one.
 
 ## One-time setup
 
@@ -78,7 +72,7 @@ exactly, or PyPI rejects the OIDC token.
 does the clean-room install and runs the preflight gate, and then skips the
 publish leg because the ref is not a tag (`if: github.ref_type == 'tag'`). Use
 it from the Actions tab whenever you want to know whether a release *would*
-work — today it reports the two git pins above and nothing else.
+work. It comes back clean today.
 
 You can do the same locally:
 
@@ -124,14 +118,26 @@ version instead of failing the whole workflow.
 
 ## Verify on a clean machine
 
-Once the git pins are gone and a release is out, the check is:
+Once a release is out, the check is:
 
 ```bash
 python -m venv cleanroom
-./cleanroom/bin/pip install axor-lab      # pulls axor-core, axor-wrap, axor-eval from PyPI
-cd / && ~/cleanroom/bin/axor-lab suites   # the catalog, from package data
-cd / && ~/cleanroom/bin/axor-lab run-suite ingest-agent --trials 20
+./cleanroom/bin/pip install axor-lab   # pulls axor-core, axor-wrap, axor-eval from PyPI
+mkdir -p /tmp/cleanroom-check && cd /tmp/cleanroom-check
+~/cleanroom/bin/axor-lab suites                             # the catalog, from package data
+~/cleanroom/bin/axor-lab run-suite ingest --out ./run --yes # a real run, outside any checkout
+~/cleanroom/bin/axor-lab replay ./run                       # and it replays bit-identically
 ```
+
+This was run against the 0.1.0 wheel built from this tree: the catalog resolves
+from package data (13 schemas, no `AXOR_LAB_CONTRACTS`), `run-suite ingest`
+completes 108 trials, and the analysis comes back with
+ASR 0.71 → 0.00 and McNemar p=1.5e-05 across the governed arms.
+
+It is worth doing in a scratch directory, and not only for tidiness: this check
+is what found `resolve_suite_target` treating a *directory* named after a suite
+id as a manifest path. In a checkout the cwd is the repo root and the collision
+never happens.
 
 The `packaging` job in `ci.yml` asserts the first half of this on every push;
 the release workflow repeats it against the exact files being uploaded.

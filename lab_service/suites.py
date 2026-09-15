@@ -88,7 +88,13 @@ def resolve_suite_target(target: str) -> tuple[dict[str, object], object]:
 
     registry = builtin_registry()
     path = Path(target)
-    if path.exists():
+    # is_file(), not exists(): a DIRECTORY whose name happens to match a suite id
+    # is not a manifest. With exists() here, running `axor-lab run-suite ingest`
+    # from a directory that has an `ingest/` subdirectory in it — the output
+    # folder of an earlier run, say — resolved the id as a path and died on
+    # `IsADirectoryError` from json.loads, instead of running the registered
+    # suite. Found by running the built suite from a clean install.
+    if path.is_file():
         manifest = load_manifest(path)
         try:
             return manifest, registry.get(str(manifest.get("id", "")))
@@ -142,7 +148,10 @@ def default_scenario_dir(target: str) -> Path | None:
     FILE. A built-in suite id has no directory, and therefore no registry —
     which is correct, not a gap: nothing shipped names a ref."""
     path = Path(target)
-    return path.parent / LOCAL_SCENARIO_DIR if path.exists() else None
+    # is_file() for the same reason as resolve_suite_target: a directory sharing
+    # a suite id's name would otherwise hand a built-in suite a scenario registry
+    # it has no business having, silently changing what its refs resolve against.
+    return path.parent / LOCAL_SCENARIO_DIR if path.is_file() else None
 
 
 def plan_suite_run(

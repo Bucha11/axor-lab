@@ -17,6 +17,7 @@ says so instead of reporting zeros:
 from __future__ import annotations
 
 import collections
+import pathlib
 import unittest
 
 from lab_runner.invariants import STATUS_ERROR, STATUS_PASSED, check_invariant
@@ -295,3 +296,55 @@ class TestTheInvariantsAreWellFormed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestASuiteIdIsNotShadowedByADirectory(unittest.TestCase):
+    """`run-suite <id>` must run the registered suite even when a directory of
+    that name sits in the cwd.
+
+    `resolve_suite_target` decides "id or path?" by looking at the filesystem.
+    It asked `exists()`, so a *directory* named after a suite id won its own id:
+    `axor-lab run-suite ingest`, from a directory holding an `ingest/` folder,
+    tried to `json.loads` the folder and died with `IsADirectoryError` — no
+    error message, just a traceback out of the CLI. That folder is not exotic;
+    it is what `--out ingest` leaves behind, so the second run of a suite could
+    break because the first one succeeded.
+
+    Found by running the built wheel outside the checkout, which is the only
+    place the cwd is not the repo root.
+    """
+
+    def setUp(self) -> None:
+        import os
+        import tempfile
+
+        from lab_service.suites import default_scenario_dir, resolve_suite_target
+
+        self.resolve = resolve_suite_target
+        self.default_scenario_dir = default_scenario_dir
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self._tmp.name)
+        # the collision: a directory named exactly like a registered suite
+        (pathlib.Path(self._tmp.name) / "ingest").mkdir()
+
+    def test_the_registered_suite_still_resolves(self) -> None:
+        manifest, suite = self.resolve("ingest")
+        self.assertEqual(manifest.get("id"), "ingest")
+        self.assertIsInstance(suite, IngestSuite)
+
+    def test_the_directory_is_not_handed_a_scenario_registry(self) -> None:
+        # a built-in id has no manifest file, so it has no `scenarios/` beside one
+        self.assertIsNone(self.default_scenario_dir("ingest"))
+
+    def test_a_real_manifest_path_still_wins(self) -> None:
+        import json
+
+        path = pathlib.Path(self._tmp.name) / "ingest" / "manifest.json"
+        path.write_text(json.dumps({"schema": "suite/v1", "id": "ingest"}))
+        manifest, suite = self.resolve(str(path))
+        self.assertEqual(manifest.get("id"), "ingest")
+        self.assertIsInstance(suite, IngestSuite)
+        self.assertEqual(self.default_scenario_dir(str(path)), path.parent / "scenarios")

@@ -64,6 +64,13 @@ def _cli_commands() -> set[str]:
     return set(found.group(1).split(",")) if found else set()
 
 
+def _cli_flags(command: str) -> set[str]:
+    """The option strings `axor-lab <command> --help` actually offers."""
+    out = subprocess.run([sys.executable, "-m", "lab_runner.cli", command, "--help"],
+                         capture_output=True, text=True, cwd=ROOT).stdout
+    return set(re.findall(r"(--[a-z][a-z-]+)", out))
+
+
 def _routes() -> tuple[set[str], set[str]]:
     """(normalised literal routes, normalised regex routes) across both servers."""
     literal: set[str] = set()
@@ -94,7 +101,14 @@ class TestTheDocsNameThingsThatExist(unittest.TestCase):
         cls.web = {str(p.relative_to(ROOT)) for p in (ROOT / "web" / "src").rglob("*")
                    if p.is_file()}
         cls.commands = _cli_commands()
+        cls._flag_cache = {}
         cls.literal, cls.pattern = _routes()
+
+    def _flags(self, command: str) -> set[str]:
+        # one subprocess per command, not per mention
+        if command not in self.__class__._flag_cache:
+            self.__class__._flag_cache[command] = _cli_flags(command)
+        return self.__class__._flag_cache[command]
 
     def _docs(self):
         for doc in DOCS:
@@ -128,6 +142,46 @@ class TestTheDocsNameThingsThatExist(unittest.TestCase):
                     continue
                 with self.subTest(doc=name, command=command):
                     self.assertIn(command, self.commands)
+
+    def test_every_flag_the_docs_give_a_command_actually_exists(self) -> None:
+        """A command name that exists is a weaker claim than the docs make.
+
+        The real claim is the whole invocation: `axor-lab run-suite ingest-agent
+        --trials 20` names a command that exists, a suite that does not, and a
+        flag that does not. Someone following the runbook gets `unrecognized
+        arguments` and then `no suite`. Checking the command alone passed it.
+        """
+        for doc, name, text in self._docs():
+            if name in HISTORICAL:
+                continue
+            for line in re.findall(r"axor-lab ([a-z][a-z-]+[^\n`]*)", text):
+                command, _, rest = line.partition(" ")
+                if command not in self.commands:
+                    continue  # the command check above owns that failure
+                flags = set(re.findall(r"(--[a-z][a-z-]+)", rest))
+                if not flags:
+                    continue
+                known = self._flags(command)
+                for flag in sorted(flags):
+                    with self.subTest(doc=name, command=command, flag=flag):
+                        self.assertIn(flag, known,
+                                      f"`axor-lab {command} {flag}` — no such flag")
+
+    def test_every_suite_the_docs_run_is_in_the_catalog(self) -> None:
+        """`run-suite <id>` names a registered suite, or the reader gets
+        `no suite 'ingest-agent'` as their first experience of the product."""
+        from lab_suite import builtin_registry
+
+        catalog = set(builtin_registry().ids())
+        self.assertTrue(catalog, "the built-in registry is empty")
+        for doc, name, text in self._docs():
+            if name in HISTORICAL:
+                continue
+            for suite in sorted(set(re.findall(r"axor-lab run-suite ([a-z][a-z0-9-]*)", text))):
+                if "/" in suite or suite.endswith(".json"):
+                    continue  # a manifest path, not an id
+                with self.subTest(doc=name, suite=suite):
+                    self.assertIn(suite, catalog)
 
     def test_every_named_test_file_exists(self) -> None:
         for doc, name, text in self._docs():
@@ -195,6 +249,40 @@ class TestTheWorkflowAgreesWithThePackage(unittest.TestCase):
         high = tuple(int(p) for p in spec.group(2).split("."))
         self.assertGreaterEqual(pinned[: len(low)], low, "CI pins below the floor")
         self.assertLess(pinned[: len(high)], high, "CI pins at or above the ceiling")
+
+    def test_every_ecosystem_pin_in_ci_satisfies_what_pyproject_requires(self) -> None:
+        """axor-wrap and axor-eval are exact pins for the same reason the kernel
+        is, so they are claims that go stale the same way.
+
+        Both were git pins to an integration branch until they cut releases; the
+        day they moved to PyPI ranges in `pyproject`, CI's pins became a second
+        copy of a number, which is the shape the kernel drift already took once.
+        """
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        pyproject = (ROOT / "pyproject.toml").read_text()
+        for package in ("axor-wrap", "axor-eval"):
+            with self.subTest(package=package):
+                pins = set(re.findall(rf'"{package}==([0-9.]+)"', workflow))
+                self.assertTrue(pins, f"CI no longer pins {package} exactly")
+                spec = re.search(rf'"{package}>=([0-9.]+),<([0-9.]+)"', pyproject)
+                self.assertIsNotNone(spec, f"pyproject no longer states a {package} range")
+                low = tuple(int(n) for n in spec.group(1).split("."))
+                high = tuple(int(n) for n in spec.group(2).split("."))
+                for pin in pins:
+                    pinned = tuple(int(n) for n in pin.split("."))
+                    self.assertGreaterEqual(pinned[: len(low)], low,
+                                            f"CI pins {package}=={pin}, below the floor")
+                    self.assertLess(pinned[: len(high)], high,
+                                    f"CI pins {package}=={pin}, at or above the ceiling")
+
+    def test_no_dependency_is_a_git_pin_anymore(self) -> None:
+        """A PEP 508 direct reference cannot be published: PyPI answers
+        "400 Can't have direct dependency". One creeping back into `pyproject`
+        makes `axor-lab` unpublishable again, and `tools/release_preflight.py`
+        would only say so at release time — this says so on every push."""
+        deps = (ROOT / "pyproject.toml").read_text().split("dependencies = [", 1)[1]
+        deps = deps.split("]", 1)[0]
+        self.assertNotIn("git+", deps, "a git pin is back in pyproject dependencies")
 
     def test_the_drift_assertion_names_the_same_version_as_the_pin(self) -> None:
         """The job also asserts the version at runtime; two copies of a number
