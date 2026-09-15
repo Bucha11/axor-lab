@@ -23,6 +23,10 @@ from .outcomes import Outcome
 REPRODUCTION_PACKAGE_SCHEMA = "axor-reproduction-package/v1"
 
 
+class PackageMalformed(ValueError):
+    """The package is not shaped like a package — before any claim is checked."""
+
+
 @dataclass(frozen=True)
 class PackageVerifyResult:
     """What an offline verification of a reproduction package concluded."""
@@ -81,6 +85,30 @@ def verify_package(
     )
 
 
+def normalise_traces(raw: object) -> dict[str, dict[str, object]]:
+    """A package's traces as a {trace_id: trace} map, from either shape.
+
+    `/api/publications/{id}/bundle` serves `traces` as a LIST — it is a JSON
+    document, and a list is the natural shape there — while everything that
+    verifies wants them keyed. Whoever held the package had to convert, so the
+    hosted verify demanded a map and answered 400 for the very file the download
+    button produces. One conversion, here, and both shapes are the same package.
+    """
+    if isinstance(raw, dict):
+        return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+    traces: dict[str, dict[str, object]] = {}
+    if not isinstance(raw, list):
+        raise PackageMalformed("'traces' must be a list of traces or a {id: trace} map")
+    for trace in raw:
+        if not isinstance(trace, dict) or "trace_id" not in trace:
+            raise PackageMalformed("a trace in the package is not a trace object")
+        trace_id = str(trace["trace_id"])
+        if trace_id in traces:
+            raise PackageMalformed(f"duplicate trace_id {trace_id!r} in package — corrupt")
+        traces[trace_id] = trace
+    return traces
+
+
 def verify_package_document(
     bundle: dict[str, object],
     traces: dict[str, dict[str, object]],
@@ -105,10 +133,43 @@ def verify_package_document(
         verify_acceptance,
         verify_receipt,
     )
+    from lab_contracts import validate_artifact
+    from lab_contracts.bundle import verify_bundle
+    from lab_contracts.errors import BundleIntegrityError
+
     checks: list[Check] = []
+
+    # RECOMPUTE the hashes here rather than trusting that someone upstream did.
+    #
+    # This function used to append "content hashes: OK" without computing
+    # anything: the loader (`read_bundle_package`) called `verify_bundle` before
+    # reaching here, so the CLI was honest by accident of call order. Every other
+    # caller — the hosted verify, which takes the bundle straight out of a
+    # request body — got a green "content hashes OK" over bytes nothing had
+    # checked, and a tampered trace verified clean. A check that reports a
+    # property it did not test is worse than no check: it is the reader's whole
+    # reason to believe the page.
+    #
+    # The loader still verifies, so the CLI now hashes twice. That is the right
+    # trade: this function is the one both faces share, so the guarantee belongs
+    # in it, not in a precondition each caller must remember.
+    schema_errors = validate_artifact(bundle, "bundle")
+    for trace in traces.values():
+        schema_errors += [f"trace {trace.get('trace_id')}: {e}"
+                          for e in validate_artifact(trace, "trace")]
+    if schema_errors:
+        return _done(checks, Outcome.VALIDATION, "content hashes", CheckStatus.INVALID,
+                     "package failed schema validation: " + "; ".join(schema_errors[:5]),
+                     trace_count=len(traces))
+    try:
+        verify_bundle(bundle, traces)
+    except BundleIntegrityError as exc:
+        return _done(checks, Outcome.FAILURE, "content hashes", CheckStatus.INVALID,
+                     f"MISMATCH — {exc}", trace_count=len(traces))
+
     conditions: list[dict[str, object]] = bundle["conditions"]  # type: ignore[assignment]
     checks.append(Check("content hashes", CheckStatus.OK,
-                        f"OK ({len(traces)} trace(s), {len(conditions)} conditions)"))
+                        f"recomputed OK ({len(traces)} trace(s), {len(conditions)} conditions)"))
     versions = tuple(str(c["kernel"]) for c in conditions)
     kernels = {k.version: k for k in default_registry(versions).kernels}
     report = replay_bundle(bundle, traces, kernels)

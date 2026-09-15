@@ -2354,6 +2354,7 @@ def make_runtime_server(
                     # actually holds up. The SAME checks run here — the two faces
                     # cannot drift, because there is one implementation.
                     from lab_service import CheckStatus, verify_package_document
+                    from lab_service.packages import PackageMalformed, normalise_traces
 
                     # verification is compute on caller-supplied bytes, so it is
                     # gated like every other POST rather than left open
@@ -2363,10 +2364,18 @@ def make_runtime_server(
                     if not isinstance(envelope, dict):
                         raise RuntimeJobsError(400, "verify requires {package: <envelope>}")
                     bundle = envelope.get("bundle")
-                    traces = envelope.get("traces")
-                    if not isinstance(bundle, dict) or not isinstance(traces, dict):
+                    if not isinstance(bundle, dict):
                         raise RuntimeJobsError(
-                            400, "package envelope must carry a bundle and a traces map")
+                            400, "package envelope must carry a bundle and traces")
+                    # accept the download VERBATIM. This required a {id: trace}
+                    # map, while `/api/publications/{id}/bundle` — the download
+                    # button on every publication page — serves a LIST, so the one
+                    # file a reader actually has was answered with a 400 telling
+                    # them their package was malformed. It was not.
+                    try:
+                        traces = normalise_traces(envelope.get("traces"))
+                    except PackageMalformed as exc:
+                        raise RuntimeJobsError(400, str(exc)) from exc
                     result = verify_package_document(
                         bundle, traces, envelope,
                         pubkey=body.get("pubkey"),  # type: ignore[arg-type]

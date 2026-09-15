@@ -302,7 +302,21 @@ Run the catalog/publish server (stdlib only, no live agents):
 ```
 python -m lab_server --root ./lab-store --port 8000
 # GET / catalog · GET /e/{id} publication · GET /e/{id}/evidence/{trace_id}
+# GET /e/{id}/verify  — check the evidence in the browser, no install, no token
 ```
+
+**A reader can check the claim without trusting you, or installing anything.**
+Every publication page carries a *Verify* button above the results: content
+hashes recomputed, every frozen trace replayed through the pinned kernel, and
+each proof checked against what it binds to — rendered check by check. A
+reviewer holding nothing but the link can use it.
+
+The page says what that is worth, because a server verifying its own bytes
+catches a corrupted download and a doctored file but cannot prove itself
+honest. So the package downloads too, and any *other* Lab instance will check
+it at `POST /api/verify` — as will `axor-lab verify` offline. The same
+implementation answers all three, so the faces cannot drift into three opinions
+about whether a package holds up.
 
 ## Executable acceptance suite
 
