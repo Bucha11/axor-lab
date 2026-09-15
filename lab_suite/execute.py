@@ -18,7 +18,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from lab_analysis import binary_aggregate, mcnemar_test, two_proportion_test
+from lab_analysis import (
+    NUMERIC_ESTIMATORS,
+    binary_aggregate,
+    mcnemar_test,
+    numeric_aggregate,
+    two_proportion_test,
+)
 from lab_contracts import build_artifact, build_bundle, content_hash, reproducibility_of
 from lab_capabilities.governance import gate_for_condition
 from lab_runner.invariants import InvariantResult, check_invariant
@@ -35,13 +41,6 @@ from .manifest import (
     topology_execution_error,
 )
 from .sdk import BaseSuite, SuiteRegistry, builtin_registry
-
-_STATS_AGGREGATORS = {
-    "mean": lambda vs: sum(vs) / len(vs),
-    "sum": sum,
-    "min": min,
-    "max": max,
-}
 
 
 @dataclass
@@ -301,19 +300,15 @@ def _aggregate(run: SuiteRun) -> list[dict[str, object]]:
                 if isinstance((t.get("metrics") or {}).get(metric), (int, float))  # type: ignore[union-attr]
                 and not isinstance((t.get("metrics") or {}).get(metric), bool)  # type: ignore[union-attr]
             ]
-            if not values or fn not in _STATS_AGGREGATORS:
+            if not values or fn not in NUMERIC_ESTIMATORS:
                 # an aggregation over a metric nobody measured produces NOTHING,
                 # not a zero — the Run Report shows a gap, which is the truth
                 continue
-            aggregates.append({
-                "metric": metric, "condition_id": cid,
-                "estimate": float(_STATS_AGGREGATORS[fn](values)),
-                # a point summary of a continuous metric carries no interval;
-                # naming the method 'none' is honest, inventing a CI is not
-                "interval": {"method": "none", "low": float(min(values)),
-                             "high": float(max(values))},
-                "n": len(values), "unit_of_analysis": unit,
-            })
+            # the SHARED estimator, so the server re-applying it later cannot
+            # compute the same summary a second way
+            aggregates.append(
+                numeric_aggregate(metric, cid, values, fn, unit_of_analysis=unit)
+            )
     return aggregates
 
 

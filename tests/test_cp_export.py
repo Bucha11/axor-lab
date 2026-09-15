@@ -15,7 +15,12 @@ import unittest
 
 from tests import support
 from lab_analysis import binary_aggregate, mcnemar_test
-from lab_contracts import build_bundle, condition_config_hash, content_hash
+from lab_contracts import (
+    build_bundle,
+    compiled_governor_config,
+    condition_config_hash,
+    content_hash,
+)
 from lab_capabilities.governance import run_experiment_suite
 from lab_capabilities.governance.cp_export import (
     PRODUCTION_TODO,
@@ -232,6 +237,56 @@ class TestCPExport(unittest.TestCase):
                 condition["config_hash"] = "sha256:deadbeef"
         with self.assertRaises(CPExportError):
             export_cp_template(bundle)
+
+    def test_every_executed_scenario_brings_the_config_it_ran_under(self) -> None:
+        bundle, traces = _bundle_and_traces()
+        export = export_cp(bundle, traces=traces)
+        hashes = export.config["runtime_config_hashes"]
+        configs = export.config["runtime_configs"]
+        self.assertTrue(hashes, "the run recorded no runtime config at all")
+        self.assertEqual(set(hashes), set(configs))  # type: ignore[arg-type]
+
+    def test_each_carried_config_hashes_to_its_recorded_fingerprint(self) -> None:
+        """The hash was already exported. Carrying the config NEXT to it means a
+        consumer can prove the config is the one that ran, instead of compiling a
+        second one from the manifests — which is what the Control Plane did, and
+        the two compilers disagreed on every point that mattered."""
+        bundle, traces = _bundle_and_traces()
+        export = export_cp(bundle, traces=traces)
+        for scenario_id, config in export.config["runtime_configs"].items():  # type: ignore[union-attr]
+            recorded = export.config["runtime_config_hashes"][scenario_id]  # type: ignore[index]
+            self.assertEqual(content_hash(config), recorded, scenario_id)
+
+    def test_the_carried_config_carries_no_symbolic_input_ref(self) -> None:
+        """What is emitted is the CONCRETE config a verdict happened under, not
+        the symbolic carry-over one. Replaying against the parametric config would
+        compare a recipient to the literal string `$inputs.known_ibans` and deny
+        the payment the trace recorded as allowed. The parametric config is what
+        transfers to production; only the concrete one reproduces a verdict."""
+        bundle, traces = _bundle_and_traces()
+        export = export_cp(bundle, traces=traces)
+        configs: dict = export.config["runtime_configs"]  # type: ignore[assignment]
+        self.assertTrue(configs)
+        self.assertNotIn("$inputs.", json.dumps(configs), "the config was left symbolic")
+
+    def test_an_input_backed_allowlist_is_expanded_in_the_compiled_config(self) -> None:
+        """The property the export above relies on, pinned at its source: the
+        compiler resolves `$inputs` against the scenario's inputs, so what the
+        export emits is a destination a replay can actually compare against."""
+        policy = {"profile": "strict", "trust_model": "content-ledger",
+                  "allowlist": ["$inputs.known_ibans"]}
+        compiled = compiled_governor_config(
+            KERNEL, policy, list(support.manifests().values()),
+            {"known_ibans": [support.LANDLORD_IBAN]},
+        )
+        rendered = json.dumps(compiled)
+        self.assertNotIn("$inputs.", rendered)
+        self.assertIn(support.LANDLORD_IBAN, rendered)
+
+    def test_a_template_carries_no_configs_because_nothing_ran(self) -> None:
+        """A template is the shape, not an exported run: no scenario executed, so
+        there is no concrete config any verdict happened under."""
+        self.assertEqual(export_cp_template(_bundle()).config["runtime_configs"], {})
 
 
 KERNEL = support.KERNEL_PINNED

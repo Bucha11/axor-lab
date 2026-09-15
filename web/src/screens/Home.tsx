@@ -38,9 +38,9 @@ const QUICK_ROUTES: Record<string, string> = {
 };
 
 export function Home() {
-  const { data, error, loading, reload } = useAsync(() => api.home());
+  const { data, error, status, loading, reload } = useAsync(() => api.home());
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   if (!data) return null;
 
   const step = STEP_COPY[data.onboarding_step] ?? {

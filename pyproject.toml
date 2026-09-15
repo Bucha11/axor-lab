@@ -19,23 +19,31 @@ requires-python = ">=3.11"
 # Everything else stays stdlib: the contract validator, replay and the
 # statistics engine pull in nothing.
 # axor-wrap is the single wrapping engine both Lab and the Control Plane run on:
-# CP already drives it via axor_wrap.plane, and Lab's runner is being moved onto
+# CP drives it via axor_wrap.plane, and Lab's runner is built on
 # axor_wrap.WrappedToolset/build_trace so the two produce identical trace/v1
-# through ONE builder instead of Lab's own (retiring the reference kernel and
-# Lab's duplicate trace construction). It is not yet on PyPI with this API
-# (0.1.0 predates it), so pin the integration branch from git for now — axor-wrap
-# is public, so this clones tokenless. Swap to a version pin once wrap releases.
+# through ONE builder instead of Lab's own (which is how the reference kernel and
+# Lab's duplicate trace construction came to be retired).
+#
+# These were git pins to an integration branch until wrap and eval cut releases
+# carrying the API Lab imports. They are version ranges now, which is what makes
+# `axor-lab` publishable at all: PyPI refuses any distribution whose metadata
+# holds a PEP 508 direct reference ("400 Can't have direct dependency"), so the
+# git form could be installed from a checkout and never hosted.
+# `tools/release_preflight.py` fails the release workflow if one comes back.
+#
+# Each is bounded to one minor line, the same rule as the kernel: an environment
+# must not resolve a version Lab's integration jobs never ran against.
 dependencies = [
-    "axor-core>=0.10.2,<0.11",
-    "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m",
+    "axor-core>=0.11,<0.12",
+    "axor-wrap>=0.2,<0.3",
     # axor-eval is the shared fault-injection evaluator (silent_fail deprivation,
     # the ToolAuditLayer that emits FABRICATED_TOOL_RESULT). Lab reuses it for the
     # tool-fabrication experiment (silent_fail + ToolAuditLayer + the shared
     # reconstruct_claim in axor_eval.claims) rather than re-implementing the
     # deviation machinery — the same "one engine, no duplicate" rule the wrap
-    # migration followed. Public repo, pinned to the integration branch (which
-    # carries axor_eval.claims); its axor-core>=0.8,<0.11 is met by Lab's 0.10.2.
-    "axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m",
+    # migration followed. 0.2.0 declares axor-core>=0.8,<0.12 and
+    # axor-wrap>=0.2,<0.3, so all three resolve together.
+    "axor-eval>=0.2,<0.3",
 ]
 
 [project.scripts]
@@ -48,6 +56,11 @@ packages = [
     "lab_runner",
     "lab_adapters",
     "lab_server",
+    # the product's verbs. `lab_runner/cli.py` imports it at MODULE level, so a
+    # wheel without it fails on `axor-lab --help` — and it was absent from this
+    # list since the layer was extracted, which made every installed verb that
+    # reaches it (publish, verify, export-cp, report) a ModuleNotFoundError.
+    "lab_service",
     "lab_suite",
     "lab_suite.builtin",
     "lab_capabilities",
@@ -58,6 +71,10 @@ packages = [
 # self-contained (no AXOR_LAB_CONTRACTS needed outside a checkout). The source
 # of truth is contracts/schemas/; lab_contracts/schemas/ is a build-time copy
 # kept byte-identical by tests/test_packaging.py.
+# Only the Lab's OWN ten schemas ship as package data. `trace`,
+# `tool-manifest` and `predicate` come from axor-core, which ships them as its
+# own package data — a wheel that carried a fourth copy would reintroduce the
+# thing this split removed.
 [tool.setuptools.package-data]
 lab_contracts = ["schemas/*.schema.json"]
 

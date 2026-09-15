@@ -52,7 +52,7 @@ class TestFailureCompleteAnalysis(unittest.TestCase):
         self.assertLessEqual(len(pairs), 5)
 
     def test_aggregates_and_missingness_survive_a_failed_trial(self) -> None:
-        from lab_runner.cli import _aggregates
+        from lab_service import compute_aggregates
         result = self._result()
         resolved = ResolvedExperiment(
             experiment={"id": "e", "agent_ref": "scripted@0.6", "repeats": 6},
@@ -61,7 +61,7 @@ class TestFailureCompleteAnalysis(unittest.TestCase):
             kernel_registry=support.kernel_registry(),
         )
         # analysis must not crash on the failed trials
-        aggregates = _aggregates(resolved, result, _FlakyAgent())
+        aggregates = compute_aggregates(resolved, result, _FlakyAgent())
         self.assertTrue(aggregates)  # completed trials still produce aggregates
         summary = missingness(result.trials)
         self.assertGreater(summary.n_missing, 0)

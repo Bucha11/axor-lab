@@ -110,3 +110,84 @@ class TestGating(RegistryTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSharedScenarios(RegistryTestCase):
+    """The org tier for the scenarios `scenario_refs` resolves against.
+
+    Suites already had it; scenarios did not have a registry at all, so the
+    Builder's `scenario_refs` field could only ever break a suite. Sharing them
+    the same way is what makes a ref worth writing: one team authors a scenario,
+    every workspace in the org can build a suite on it.
+    """
+
+    def _shared_scenario(self, token: str, name: str = "shared-note") -> tuple[int, dict]:
+        manifest = builtin_registry().get("blank").manifest()
+        tools = {t["id"]: t for t in manifest["environment"]["tools"]}
+        scenario = {**manifest["scenarios"][0], "name": name}
+        status, body = self.call(
+            "POST", "/scenarios", {"scenario": scenario, "manifests": tools}, token=token)
+        self.assertEqual(status, 201, body)
+        return self.call("POST", f"/scenarios/{name}/publish", None, token=token)
+
+    def test_a_published_scenario_is_reffable_from_a_sibling_workspace(self) -> None:
+        self.assertEqual(self._shared_scenario("acme-a-t")[0], 201)
+        # acme-b never saved it, but can build a suite that refs it
+        suite = {**builtin_registry().get("blank").manifest(),
+                 "id": "b-suite", "name": "B", "scenario_refs": ["shared-note"]}
+        self.assertEqual(
+            self.call("POST", "/suites/validate", {"suite": suite}, token="acme-b-t")[1],
+            {"ok": True, "errors": []},
+        )
+        status, plan = self.call("POST", "/suites/plan", {"suite": suite}, token="acme-b-t")
+        self.assertEqual((status, plan["trials"][-1]), (200, "shared-note:ungoverned:0"))
+
+    def test_another_org_cannot_ref_it(self) -> None:
+        self._shared_scenario("acme-a-t")
+        suite = {**builtin_registry().get("blank").manifest(),
+                 "id": "g-suite", "scenario_refs": ["shared-note"]}
+        self.assertEqual(
+            self.call("POST", "/suites/validate", {"suite": suite}, token="globex-t")[1],
+            {"ok": False,
+             "errors": ["[suite] scenario_ref 'shared-note' resolves to nothing"]},
+        )
+
+    def test_an_unpublished_scenario_stays_in_its_own_workspace(self) -> None:
+        manifest = builtin_registry().get("blank").manifest()
+        tools = {t["id"]: t for t in manifest["environment"]["tools"]}
+        self.call("POST", "/scenarios",
+                  {"scenario": {**manifest["scenarios"][0], "name": "private-one"},
+                   "manifests": tools}, token="acme-a-t")
+        self.assertEqual(
+            [s["name"] for s in self.call("GET", "/scenarios", token="acme-a-t")[1]["scenarios"]],
+            ["private-one"],
+        )
+        self.assertEqual(
+            self.call("GET", "/scenarios", token="acme-b-t")[1], {"scenarios": []})
+
+    def test_a_local_scenario_wins_over_the_orgs(self) -> None:
+        """Same layering as a saved suite over its built-in."""
+        self._shared_scenario("acme-a-t")
+        manifest = builtin_registry().get("blank").manifest()
+        tools = {t["id"]: t for t in manifest["environment"]["tools"]}
+        local = {**manifest["scenarios"][0], "name": "shared-note",
+                 "task": "The local version."}
+        self.call("POST", "/scenarios", {"scenario": local, "manifests": tools},
+                  token="acme-b-t")
+        self.assertEqual(
+            self.call("GET", "/scenarios/shared-note", token="acme-b-t")[1]["task"],
+            "The local version.",
+        )
+        self.assertEqual(
+            self.call("GET", "/scenarios/shared-note", token="acme-a-t")[1]["task"],
+            "Record a note.",
+        )
+
+    def test_publishing_needs_the_capability_and_an_org(self) -> None:
+        self.workspaces.add(Workspace(id="nocap2", name="No cap", token="nocap2-t",
+                                      plan={"capabilities": []}, org="acme"))
+        self.assertEqual(
+            self.call("POST", "/scenarios/x/publish", None, token="nocap2-t")[0], 402)
+        self.assertEqual(
+            self.call("POST", "/scenarios/x/publish", None, token="lone-t")[0], 409)
+

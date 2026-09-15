@@ -16,7 +16,20 @@ Control surface (Lab operator / UI):
   POST /runtimes/connect     register a runtime  -> { runtime_ref, ingest_key }
   GET  /runtimes             list connected runtimes
   POST /scenarios/validate   validate a scenario -> { ok, errors[] }
+  GET  /scenarios            the registry `scenario_refs` resolves against
+  GET  /scenarios/{name}     one registry scenario
+  POST /scenarios            save one -> { name }
+  DELETE /scenarios/{name}   drop this workspace's copy
+  POST /scenarios/{name}/publish   share it with the org (private_registry)
+  GET  /artifacts/{id}/download   the artifact/v1 document, as a file
+  GET  /artifacts/{id}/package    {bundle, traces} — `axor-lab verify --allow-bare`
+  POST /artifacts/{id}/publish    mint a publication/v1 (locally, or via {server})
+  GET  /artifacts/{id}/report     the run as a paste-ready md/tex/bib report
+  GET  /publications              what this workspace published
+  GET  /publications/{id}         one publication
   POST /experiments/plan     expand an experiment -> { trials, estimate }
+  POST /suites/plan          expand a SUITE -> { trials, conditions, blockers, estimate }
+                             (the same planner a dispatch runs)
   POST /runs                 assign an experiment to a runtime -> { run_id, state }
   POST /runs/{id}/confirm    confirm an awaiting_confirmation run -> { state }
   POST /runs/{id}/aggregates attach bundle.aggregates + finalize -> { state }
@@ -42,7 +55,12 @@ import json
 import pathlib
 import queue
 import re
+# module-level, and it must STAY that way: `do_POST` carried three redundant
+# `import secrets` lines inside route branches, which makes the name local to
+# the WHOLE function — so any use in a branch that does not reach one of them
+# raises UnboundLocalError, as a 500 with no message.
 import secrets
+import tempfile
 import threading
 import time
 from urllib.parse import unquote
@@ -87,20 +105,60 @@ _RUN_CONFIRM_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/confirm$")
 _RUN_CANCEL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/cancel$")
 _RUN_AGG_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/aggregates$")
 _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/trace$")
-# `validate` is a POST sibling, not a suite id — without the lookahead a GET to
+# These are POST siblings, not suite ids. Without the lookahead a GET to
 # /suites/validate answers `no suite 'validate'`, which reads like the endpoint
-# is missing rather than like the method is wrong.
-_SUITE_RE = re.compile(r"^/suites/(?!validate$)([A-Za-z0-9_-]+)$")
+# is missing rather than like the method is wrong — and a PUT to one of them
+# would have UPSERTED a suite under that name, because the save route is an
+# upsert keyed by the path segment. The hyphenated ones matched the id pattern
+# too, so the list is every single-segment POST path under /suites.
+_SUITE_ACTIONS = "validate|validate-yaml|to-yaml|plan"
+_SUITE_RE = re.compile(rf"^/suites/(?!(?:{_SUITE_ACTIONS})$)([A-Za-z0-9_-]+)$")
 _SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
 _SUITE_DISPATCH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/dispatch$")
 _SUITE_PUBLISH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/publish$")
+_VERIFY_PACKAGE_RE = re.compile(r"^/verify/package$")
+def _bundle_and_traces(
+    body: dict[str, object]
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """A bundle + traces out of a request body, accepting either shape.
+
+    A reproduction package carries `traces` as a LIST; the in-memory form is a
+    map keyed by trace_id. Callers legitimately hold either, so normalize rather
+    than make the caller guess which one this endpoint wanted.
+    """
+    bundle = body.get("bundle")
+    raw = body.get("traces")
+    if not isinstance(bundle, dict):
+        raise RuntimeJobsError(400, "this endpoint needs a bundle object")
+    if isinstance(raw, list):
+        traces = {str(t["trace_id"]): t for t in raw if isinstance(t, dict)}
+    elif isinstance(raw, dict):
+        traces = {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+    else:
+        raise RuntimeJobsError(400, "this endpoint needs traces (a list or a map)")
+    return bundle, traces
+
+
+_HANDOFF_EXPORT_RE = re.compile(r"^/handoff/export$")
+_HANDOFF_VERIFY_RE = re.compile(r"^/handoff/verify$")
+_INCIDENT_IMPORT_RE = re.compile(r"^/incidents/import$")
 _REGISTRY_SUITE_RE = re.compile(r"^/registry/suites/([A-Za-z0-9_-]+)$")
+# a scenario is addressed by its `name`, which the schema leaves free-form; the
+# pattern is the same conservative id shape every other path segment uses, so a
+# scenario whose name needs more than this is reachable by listing, not by URL
+_SCENARIO_RE = re.compile(r"^/scenarios/(?!validate$)([A-Za-z0-9_.-]+)$")
+_SCENARIO_PUBLISH_RE = re.compile(r"^/scenarios/([A-Za-z0-9_.-]+)/publish$")
 _RUN_REPORT_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/report$")
 _RUN_TRIAL_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)$")
 _EVIDENCE_RE = re.compile(r"^/evidence/([A-Za-z0-9_.:-]+)$")
 _REGRESSION_RE = re.compile(r"^/regressions/([A-Za-z0-9_.:-]+)$")
 _REGRESSION_RUN_RE = re.compile(r"^/regressions/([A-Za-z0-9_.:-]+)/run$")
 _ARTIFACT_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)$")
+_ARTIFACT_DOWNLOAD_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/download$")
+_ARTIFACT_PACKAGE_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/package$")
+_ARTIFACT_PUBLISH_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/publish$")
+_ARTIFACT_REPORT_RE = re.compile(r"^/artifacts/([A-Za-z0-9_.:-]+)/report$")
+_PUBLICATION_RE = re.compile(r"^/publications/([A-Za-z0-9_.:-]+)$")
 
 
 class RuntimeJobsError(Exception):
@@ -230,8 +288,22 @@ def _verify_artifact_integrity(artifact: dict[str, object]) -> None:
 
 
 def _run_environment(manifest: dict[str, object]) -> dict[str, object]:
-    return {"model": {"provider": "connected_runtime",
-                      "id": str(manifest.get("id", "suite"))}}
+    from lab_suite import builtin_registry, comparison_design
+    from lab_suite.errors import SuiteNotFound
+
+    try:
+        suite: object = builtin_registry().get(str(manifest.get("id", "")))
+    except SuiteNotFound:
+        suite = None
+    return {
+        "model": {"provider": "connected_runtime",
+                  "id": str(manifest.get("id", "suite"))},
+        # INDEPENDENT samples, whatever the suite says about its own agent: a
+        # connected runtime ran a model Lab never saw, and a paired design
+        # asserted over independently sampled arms is a spurious p-value with a
+        # signature on it.
+        "experiment_design": comparison_design(suite, executed_by_runtime=True),
+    }
 
 
 def _now_iso() -> str:
@@ -516,6 +588,11 @@ class RuntimeJobStore:
             "traces": [t.trace for t in job.trials.values() if t.trace is not None],
             # `bundle.aggregates` — RENDERED by the UI, never recomputed there
             "aggregates": list(job.aggregates),
+            # the ARMS, so a screen can say when none of them enforced. Without
+            # this the Run Report shows an attack-success rate with no way to
+            # tell a governed contrast from a bare observation of an
+            # unprotected agent — and they read identically.
+            "conditions": list(job.assignment.get("conditions") or []),  # type: ignore[union-attr]
         }
 
     def results(self, job_id: str) -> dict[str, object]:
@@ -867,6 +944,59 @@ def make_runtime_server(
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_download(self, payload: object, filename: str) -> None:
+            """JSON the browser SAVES rather than renders.
+
+            The web app could look at evidence and not hand it to anyone: no
+            artifact download existed at all, so the only way out of the hosted
+            face was a shell. `Content-Disposition` is the whole difference
+            between a screen and a deliverable.
+            """
+            body = json.dumps(payload, indent=1).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_text_file(self, text: str, filename: str, content_type: str) -> None:
+            """Text the browser SAVES — distinct from `_send_text`, which serves
+            a body inline. A LaTeX table is not JSON and must not be wrapped in
+            it: the point is a file that pastes into a manuscript."""
+            body = text.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_zip(self, files: dict[str, str], filename: str) -> None:
+            """A file MAP as the directory it describes.
+
+            Deterministic on purpose: sorted names and a fixed timestamp, so the
+            same export downloads to the same bytes and a reader can hash what
+            they received.
+            """
+            import io
+            import zipfile
+
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name in sorted(files):
+                    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = 0o644 << 16
+                    archive.writestr(info, files[name])
+            body = buffer.getvalue()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _send_text(self, status: int, text: str, content_type: str) -> None:
             body = text.encode()
             self.send_response(status)
@@ -1053,6 +1183,87 @@ def make_runtime_server(
             except SuiteNotFound:
                 raise
 
+        def _artifact_evidence(
+            self, artifact_id: str,
+        ) -> tuple[dict[str, object], dict[str, object], dict[str, dict[str, object]]]:
+            """One artifact as (artifact, bundle, traces).
+
+            The artifact document carries the bundle; the trace BODIES live in
+            the job store, keyed by the run the artifact is named after
+            (`a_{run_id}`). Every export needs all three, and joining them here
+            keeps the naming convention server-side instead of making each
+            caller reproduce it — the same thing `/handoff/export` does.
+            """
+            artifact: dict[str, object] = shelf.get("artifact", artifact_id)
+            bundle = artifact.get("bundle")
+            if not isinstance(bundle, dict):
+                raise RuntimeJobsError(
+                    409, f"artifact {artifact_id!r} carries no bundle to export")
+            run_id = artifact_id[2:] if artifact_id.startswith("a_") else artifact_id
+            try:
+                traces = {
+                    str(t["trace_id"]): t
+                    for t in jobs.results(run_id)["traces"]  # type: ignore[union-attr]
+                }
+            except (RuntimeJobsError, KeyError, TypeError):
+                traces = {}
+            expected = {
+                str(t.get("trace_ref")) for t in bundle.get("trials", [])  # type: ignore[union-attr]
+                if t.get("trace_ref")
+            }
+            if expected and not traces:
+                # Refused, not handed over empty: a package with no trace bodies
+                # cannot be replayed, and a reader who receives one learns that
+                # only after downloading it and running the verifier. This
+                # server holds the bodies for runs IT dispatched; an artifact
+                # that arrived some other way brought its metrics and left its
+                # evidence behind.
+                raise RuntimeJobsError(
+                    409,
+                    f"artifact {artifact_id!r} names {len(expected)} trace(s) this server "
+                    "does not hold, so it cannot produce a reproduction package — the "
+                    "run was not dispatched here",
+                )
+            return artifact, bundle, traces
+
+        def _suite_drives_itself(self, manifest: dict[str, object]) -> bool:
+            """Does a registered implementation drive this manifest's trials?
+
+            A manifest with no implementation still RUNS locally — the loop just
+            finishes immediately and every metric comes back false — so the
+            Builder has to be able to say that before someone clicks, instead of
+            presenting an artifact of zeros afterwards.
+            """
+            from lab_suite import builtin_registry, drives_its_own_trials
+            from lab_suite.errors import SuiteNotFound
+
+            try:
+                suite = builtin_registry().get(str(manifest.get("id", "")))
+            except SuiteNotFound:
+                return False
+            return drives_its_own_trials(suite)
+
+        def _scenario_registry(self) -> dict[str, dict[str, object]]:
+            """The scenarios `scenario_refs` resolves against, by name.
+
+            This workspace's own, with the ORG's shared ones underneath — the
+            same layering suites get, so a scenario published to the org is
+            reusable across its workspaces and a local one of the same name
+            wins. Frozen into the assignment at plan time, so a later edit here
+            cannot retroactively change what a finished run claims to have
+            executed (suite.schema.json says exactly that about these refs).
+            """
+            org = self._current_workspace().org
+            shared = workspaces.org_registry(org).list("scenario") if org else []
+            registry: dict[str, dict[str, object]] = {
+                str(d.get("name", "")): d for d in shared
+            }
+            registry.update(
+                {str(d.get("name", "")): d for d in shelf.list("scenario")}
+            )
+            registry.pop("", None)
+            return registry
+
         def _catalog(self, builtin: list[dict[str, object]]) -> list[dict[str, object]]:
             """Built-ins and announced placeholders, with saved suites layered
             over them — an edited built-in shows the EDITED name, and a suite the
@@ -1100,7 +1311,7 @@ def make_runtime_server(
             from lab_suite.errors import SuiteNotFound
             from lab_server.workspaces import require_within
 
-            errors = validate_manifest(document)
+            errors = validate_manifest(document, self._scenario_registry())
             if errors:
                 raise RuntimeJobsError(422, "; ".join(errors[:5]))
             suite_id = str(document.get("id", ""))
@@ -1213,6 +1424,28 @@ def make_runtime_server(
                     self._require_control()
                     self._send(200, regression_list(shelf))
                     return
+                if path == "/publications":
+                    # What this workspace HANDED OVER. The publish server has
+                    # had a catalog from the start and the product could not
+                    # reach it — publishing had no hosted surface at all, so
+                    # there was nothing to list.
+                    self._require_control()
+                    self._send(200, {"publications": [
+                        {"publication_id": d.get("publication_id"),
+                         "question": d.get("question"),
+                         "created": d.get("created"),
+                         "visibility": d.get("visibility"),
+                         "origin": d.get("origin"),
+                         "statistics_integrity": d.get("statistics_integrity"),
+                         "claims": len(d.get("claims") or [])}  # type: ignore[arg-type]
+                        for d in shelf.list("publication")
+                    ]})
+                    return
+                m = _PUBLICATION_RE.match(path)
+                if m:
+                    self._require_control()
+                    self._send(200, shelf.get("publication", m.group(1)))
+                    return
                 if path == "/artifacts":
                     # the artifact registry: newest first, optionally the version
                     # history of one suite via ?suite=<id>
@@ -1231,6 +1464,63 @@ def make_runtime_server(
                 if m:
                     self._require_control()
                     self._send(200, shelf.get("regression", m.group(1)))
+                    return
+                m = _ARTIFACT_DOWNLOAD_RE.match(path)
+                if m:
+                    # the artifact ITSELF, as a file. Not a new document — the
+                    # same `artifact/v1` the screen renders, so what a reader
+                    # receives is what the screen showed.
+                    self._require_control()
+                    self._send_download(
+                        shelf.get("artifact", m.group(1)), f"{m.group(1)}.json")
+                    return
+                m = _ARTIFACT_REPORT_RE.match(path)
+                if m:
+                    # The run as a manuscript holds it: a results table, the
+                    # comparison sentences, a Methods paragraph and a citation.
+                    # Every other door here hands over JSON, and nobody pastes a
+                    # bundle into a results section — so the numbers were being
+                    # retyped by hand out of a viewer, which is where a figure
+                    # quietly stops matching its evidence.
+                    from urllib.parse import parse_qs, urlparse
+
+                    from lab_service import REPORT_FORMATS, ReportError, build_paper_report
+
+                    self._require_control()
+                    query = parse_qs(urlparse(self.path).query)
+                    fmt = (query.get("format") or ["md"])[0]
+                    if fmt not in REPORT_FORMATS:
+                        raise RuntimeJobsError(
+                            400, f"format must be one of {list(REPORT_FORMATS)}, got {fmt!r}")
+                    artifact = shelf.get("artifact", m.group(1))
+                    try:
+                        report = build_paper_report(artifact)
+                    except ReportError as exc:
+                        # a run that measured nothing has no table — an answer,
+                        # not a 500
+                        raise RuntimeJobsError(422, str(exc)) from exc
+                    self._send_text_file(
+                        report.render(fmt), f"{m.group(1)}-report.{fmt}",
+                        "text/plain" if fmt != "md" else "text/markdown",
+                    )
+                    return
+                m = _ARTIFACT_PACKAGE_RE.match(path)
+                if m:
+                    # What `axor-lab verify` reads: the bundle plus every trace
+                    # BODY, so a reader can reconstruct the bundle directory and
+                    # replay it. Bare `{bundle, traces}` on purpose —
+                    # `axor-reproduction-package/v1` is the SERVER-ISSUED shape
+                    # and the verifier treats every proof object in it as
+                    # mandatory, so labelling an unpublished artifact that way
+                    # would hand out a package that fails verification for
+                    # missing proofs it never had. `verify --allow-bare` is the
+                    # matching door: integrity and replay, claimed as no more.
+                    self._require_control()
+                    _, bundle, traces = self._artifact_evidence(m.group(1))
+                    self._send_download(
+                        {"bundle": bundle, "traces": list(traces.values())},
+                        f"{m.group(1)}-package.json",
+                    )
                     return
                 m = _ARTIFACT_RE.match(path)
                 if m:
@@ -1265,6 +1555,28 @@ def make_runtime_server(
 
                     self._require_control()
                     self._send(200, {"suites": self._catalog(suite_catalog())})
+                    return
+                if path == "/scenarios":
+                    # The scenario registry `scenario_refs` resolves against.
+                    # Listed with the org's shared ones layered underneath, so
+                    # the Builder can OFFER the refs that will actually resolve
+                    # instead of asking a user to type a name and find out at
+                    # validation time that nothing answers to it.
+                    self._require_control()
+                    registry = self._scenario_registry()
+                    self._send(200, {"scenarios": [
+                        {"name": name, "task": str(doc.get("task", ""))}
+                        for name, doc in sorted(registry.items())
+                    ]})
+                    return
+                m = _SCENARIO_RE.match(path)
+                if m:
+                    self._require_control()
+                    scenario = self._scenario_registry().get(m.group(1))
+                    if scenario is None:
+                        raise RuntimeJobsError(
+                            404, f"no scenario {m.group(1)!r} in this workspace")
+                    self._send(200, scenario)
                     return
                 if path == "/registry/suites":
                     # the ORG's private registry — suites shared across the
@@ -1340,8 +1652,19 @@ def make_runtime_server(
                 if path == "/billing/plans":
                     # the plan CATALOG — what a customer can buy, with prices and
                     # limits. This is what a "choose a plan" screen renders.
+                    #
+                    # Each entry carries its ID. The catalog is a map of id ->
+                    # plan and this used to send the VALUES, so the id a client
+                    # must quote back to /billing/checkout never left the server:
+                    # the screen fell back to the display name, and every catalog
+                    # whose name differs from its id — which is every real one —
+                    # answered "unknown plan 'Team'". The example catalog names
+                    # each plan after its own id, so the fixture hid it.
                     self._require_control()
-                    self._send(200, {"plans": list(workspaces.plan_catalog.values())})
+                    self._send(200, {"plans": [
+                        {"plan_id": plan_id, **plan}
+                        for plan_id, plan in workspaces.plan_catalog.items()
+                    ]})
                     return
                 if path == "/workspaces/current/subscription":
                     self._require_control()
@@ -1464,6 +1787,15 @@ def make_runtime_server(
                     shelf.delete("suite", m.group(1))
                     self._send(200, {"id": m.group(1), "deleted": True})
                     return
+                m = _SCENARIO_RE.match(path)
+                if m:
+                    self._require_control()
+                    # only this workspace's copy; an org-shared scenario of the
+                    # same name stays and becomes visible again, exactly as a
+                    # deleted suite falls back to its built-in
+                    shelf.delete("scenario", m.group(1))
+                    self._send(200, {"name": m.group(1), "deleted": True})
+                    return
                 self._send(404, {"error": "not found"})
             except (RuntimeJobsError, ScreenStoreError, EntitlementError) as exc:
                 self._send(exc.status, {"error": exc.message})
@@ -1486,14 +1818,20 @@ def make_runtime_server(
                     # route does not exist so no one can spin up free compute.
                     if not guest_sessions:
                         raise RuntimeJobsError(404, "guest sessions are not enabled")
-                    self._send(201, workspaces.create_guest())
+                    from lab_server.workspaces import GuestCapacityError
+
+                    try:
+                        self._send(201, workspaces.create_guest())
+                    except GuestCapacityError as exc:
+                        # the one route with no credential at all: full is a
+                        # temporary 429, never unbounded allocation
+                        raise RuntimeJobsError(exc.status, exc.message) from None
                     return
                 if path == "/workspaces":
                     # provision a new tenant (ADMIN only) → returns its token,
                     # shown once. Its stores are created lazily on first use.
-                    import secrets
 
-                    from lab_server.workspaces import DEFAULT_PLAN, Workspace, new_id
+                    from lab_server.workspaces import FREE_PLAN, Workspace, new_id
 
                     self._require_control()
                     if not self._current_workspace().is_admin:
@@ -1501,10 +1839,19 @@ def make_runtime_server(
                     body = self._read_json()
                     ws_id = new_id("ws", {w.id for w in workspaces.list()})
                     plan = body.get("plan")
+                    # a new TENANT starts on the catalog's free tier, not on
+                    # DEFAULT_PLAN. DEFAULT_PLAN is unlimited with every
+                    # capability — right for the single "default" workspace an
+                    # operator runs locally, and wrong for a customer: a
+                    # provisioned tenant read `subscription: free` while holding
+                    # hosted_execution, private_registry, governance and no
+                    # limits at all, so the entitlement gate never fired and
+                    # there was nothing a plan could sell.
                     created = workspaces.add(Workspace(
                         id=ws_id, name=str(body.get("name", ws_id)),
                         token=secrets.token_hex(24),
-                        plan=plan if isinstance(plan, dict) else dict(DEFAULT_PLAN),
+                        plan=plan if isinstance(plan, dict)
+                        else dict(workspaces.plan_catalog.get(FREE_PLAN, {})),
                     ))
                     self._send(201, {**created.public(), "token": created.token})
                     return
@@ -1538,7 +1885,6 @@ def make_runtime_server(
                     # a token shown once. This is the substrate SSO/OIDC drives:
                     # an external IdP maps a login to a workspace + role and mints
                     # exactly this. Admin+ within the workspace.
-                    import secrets
 
                     from lab_server.workspaces import ROLES
 
@@ -1559,7 +1905,6 @@ def make_runtime_server(
                     # the returned url is the provider's hosted payment page; the
                     # server never touches a card. Payment confirmation arrives
                     # later at /billing/webhook. Admin+ (whoever manages billing).
-                    import secrets
 
                     self._require_control()
                     self._require_role("admin")
@@ -1586,23 +1931,69 @@ def make_runtime_server(
                     # goes active and the bought plan is applied, opening the gate.
                     if not billing_webhook_secret:
                         raise RuntimeJobsError(501, "billing webhook is not configured")
-                    if self.headers.get("X-Billing-Secret") != billing_webhook_secret:
+                    # constant-time: `!=` on a secret returns as soon as two
+                    # bytes differ, which is a prefix oracle over the one shared
+                    # credential that can move a workspace onto a paid plan.
+                    # Every other credential here is resolved by dict lookup,
+                    # which has no such shape; this one was compared directly.
+                    if not secrets.compare_digest(
+                        self.headers.get("X-Billing-Secret") or "", billing_webhook_secret
+                    ):
                         raise RuntimeJobsError(401, "invalid billing webhook secret")
                     body = self._read_json()
-                    session = workspaces.checkout(str(body.get("session_id", "")))
-                    if session is None:
-                        raise RuntimeJobsError(404, "unknown checkout session")
                     event = str(body.get("event", ""))
+                    session_id = str(body.get("session_id", ""))
+                    session = workspaces.checkout(session_id) if session_id else None
                     if event == "payment_succeeded":
+                        # a PURCHASE, and the only event that grants anything —
+                        # so it must name a checkout that has not been spent. The
+                        # status was recorded and never read, and a captured
+                        # delivery replayed is a plan granted twice.
+                        if session is None:
+                            raise RuntimeJobsError(404, "unknown checkout session")
+                        if str(session.get("status")) != "pending":
+                            raise RuntimeJobsError(
+                                409, "this checkout session is already settled")
                         workspaces.apply_plan(str(session["ws_id"]),
                                               str(session["plan_id"]), "active")
-                        workspaces.settle_checkout(str(body.get("session_id")))
+                        workspaces.settle_checkout(session_id)
                     elif event in ("payment_failed", "subscription_canceled"):
-                        # lapse to free — paid features close
-                        workspaces.apply_plan(str(session["ws_id"]),
-                                              str(session["plan_id"]),
-                                              "past_due" if event == "payment_failed"
-                                              else "canceled")
+                        # a LAPSE, which is where the shape mattered. A renewal
+                        # fails months after the purchase: a real provider sends
+                        # this against the SUBSCRIPTION, with no checkout in
+                        # sight, and this route could only address a pending
+                        # session — so the only way to express a lapse was to
+                        # replay the original purchase, which is exactly what
+                        # must not be replayable. Either address works now, and
+                        # a downgrade is idempotent by nature.
+                        if session is not None and str(session.get("status")) == "pending":
+                            # the initial charge failed, before anything was
+                            # granted — the checkout is the right address
+                            ws_id, plan_id = str(session["ws_id"]), str(session["plan_id"])
+                            workspaces.settle_checkout(session_id)
+                        elif session is not None:
+                            # a lapse pointing at a SPENT checkout is a stale or
+                            # duplicated delivery — the initial charge's failure
+                            # arriving after a later renewal succeeded. Acting on
+                            # it would downgrade a paying customer on a redelivery.
+                            raise RuntimeJobsError(
+                                409,
+                                "this checkout session is already settled; address a "
+                                "later lapse to the {workspace_id}",
+                            )
+                        else:
+                            ws_id = str(body.get("workspace_id", ""))
+                            lapsing = workspaces.get(ws_id)
+                            if lapsing is None:
+                                raise RuntimeJobsError(
+                                    404,
+                                    "a lapse must name a known {workspace_id}, or the "
+                                    "{session_id} of the checkout it lapses",
+                                )
+                            plan_id = str(lapsing.subscription.get("plan_id", "free"))
+                        workspaces.apply_plan(
+                            ws_id, plan_id,
+                            "past_due" if event == "payment_failed" else "canceled")
                     self._send(200, {"received": True})
                     return
                 if path == "/workspaces/current/plan":
@@ -1663,6 +2054,33 @@ def make_runtime_server(
                     self._require_control()
                     self._send(201, {"id": self._save_suite(self._document("suite"))})
                     return
+                if path == "/scenarios":
+                    # Save a scenario so other suites can `scenario_ref` it.
+                    # Semantically checked here, not only schema-checked: a
+                    # scenario the registry accepts and `resolve_suite` then
+                    # refuses would make every suite that refs it unrunnable,
+                    # and the failure would surface on the SUITE rather than on
+                    # the scenario that caused it.
+                    from lab_contracts import ScenarioValidationError, validate_scenario
+                    from lab_server.screens import SCENARIO_ID_FIELD
+
+                    self._require_control()
+                    body = self._read_json()
+                    scenario = body.get("scenario")
+                    manifests = body.get("manifests") or {}
+                    if not isinstance(scenario, dict) or not isinstance(manifests, dict):
+                        raise RuntimeJobsError(
+                            400, "this endpoint requires {scenario, manifests}")
+                    try:
+                        validate_scenario(scenario, manifests)  # type: ignore[arg-type]
+                    except ScenarioValidationError as exc:
+                        raise RuntimeJobsError(422, "; ".join(exc.errors[:5])) from None
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise RuntimeJobsError(400, f"malformed scenario: {exc}") from None
+                    self._send(201, {
+                        "name": shelf.put("scenario", scenario, SCENARIO_ID_FIELD),
+                    })
+                    return
                 if path == "/evidence":
                     self._require_control()
                     self._send(201, {
@@ -1709,6 +2127,276 @@ def make_runtime_server(
                         evaluators=body.get("evaluators") or context["evaluators"],  # type: ignore[arg-type]
                     ))
                     return
+                m = _ARTIFACT_PUBLISH_RE.match(path)
+                if m:
+                    # Publishing had NO hosted surface at all: `publish` did not
+                    # exist in the web client, so the only way to hand evidence
+                    # to a reader was a shell. The verb is `lab_service.
+                    # publishing`'s either way, so both faces mint the same
+                    # claims — and the local path keeps refusing to assert
+                    # statistics over numbers it did not recompute.
+                    from lab_service import (
+                        Outcome,
+                        build_local_publication,
+                        check_publishable,
+                        upload_publication,
+                    )
+
+                    self._require_control()
+                    body = self._read_json()
+                    question = body.get("question")
+                    if not isinstance(question, str) or not question.strip():
+                        raise RuntimeJobsError(
+                            400, "a publication requires {question} — what it answers")
+                    _, bundle, traces = self._artifact_evidence(m.group(1))
+                    if not check_publishable(bundle, traces):
+                        raise RuntimeJobsError(
+                            422,
+                            "this artifact's recorded verdicts do not recompute, so it "
+                            "cannot be published — replay it to see which trace differs",
+                        )
+                    license_id = body.get("license")
+                    visibility = str(body.get("visibility") or "unlisted")
+                    server_url = body.get("server")
+                    if isinstance(server_url, str) and server_url:
+                        # the HOSTED handshake: the server re-verifies and
+                        # recomputes the statistics before minting, which is the
+                        # only way a statistical claim is ever asserted
+                        result = upload_publication(
+                            bundle, traces, server=server_url, question=question,
+                            license_id=license_id if isinstance(license_id, str) else None,
+                            visibility=visibility,
+                            token=body.get("token") if isinstance(body.get("token"), str) else None,  # type: ignore[arg-type]
+                        )
+                        if result.outcome is not Outcome.OK:
+                            raise RuntimeJobsError(
+                                result.status or 502,
+                                result.error or "the publish handshake was rejected")
+                        self._send(201, {
+                            "publication_id": result.publication_id,
+                            "url": result.url,
+                            "origin": "server",
+                            # WHICH tier the statistics landed in, taken from the
+                            # receipt rather than guessed here: the remote server
+                            # decides what it could derive, and a reader who is
+                            # told "recomputed" about a self-reported figure has
+                            # been told the wrong thing by us, not by it.
+                            "statistics_integrity": (
+                                (result.acceptance or {})
+                                .get("semantic_report", {})  # type: ignore[union-attr]
+                                .get("statistics")
+                            ),
+                            "acceptance": result.acceptance,
+                            "acceptance_is_signed": result.acceptance_is_signed,
+                        })
+                        return
+                    local = build_local_publication(
+                        bundle, traces, question=question,
+                        license_id=license_id if isinstance(license_id, str) else None,
+                        visibility=visibility,
+                    )
+                    from lab_server.screens import PUBLICATION_ID_FIELD
+
+                    shelf.put("publication", local.publication, PUBLICATION_ID_FIELD)
+                    self._send(201, {
+                        "publication_id": local.publication_id,
+                        "origin": "local",
+                        # said out loud, because it is the difference between the
+                        # two doors: a local mint proves REPLAY and deliberately
+                        # does not assert the aggregates as claims — a
+                        # hand-edited bundle could carry a fabricated one
+                        "aggregates_not_claimed": local.aggregate_count,
+                        "statistics_integrity": local.publication.get("statistics_integrity"),
+                        "publication": local.publication,
+                    })
+                    return
+                if _HANDOFF_EXPORT_RE.match(path):
+                    # The Control Plane handoff, from the hosted face. This verb
+                    # had no HTTP surface at all — `grep export_cp lab_server/`
+                    # came back empty — because materializing the package lived
+                    # in an argparse handler. The DIRECTORY is a CLI
+                    # materialization; over HTTP the deliverable is the file map
+                    # the directory is written from, so both faces ship the same
+                    # bytes and the same manifest binds them.
+                    from lab_capabilities.governance.cp_export import CPExportError
+                    from lab_service import build_cp_export_files
+
+                    self._require_control()
+                    body = self._read_json()
+                    if body.get("run_id"):
+                        # the web face holds a RUN, not a bundle: the stored
+                        # artifact carries the bundle and the job store carries
+                        # the trace bodies. Joining them here keeps the naming
+                        # convention (`a_{run_id}`) server-side instead of making
+                        # every caller reproduce it.
+                        run_id = str(body["run_id"])
+                        artifact: dict[str, object] = shelf.get("artifact", f"a_{run_id}")
+                        bundle = artifact.get("bundle")  # type: ignore[assignment]
+                        if not isinstance(bundle, dict):
+                            raise RuntimeJobsError(
+                                409, f"run {run_id!r} has no collected artifact to export")
+                        traces = {
+                            str(t["trace_id"]): t
+                            for t in jobs.results(run_id)["traces"]  # type: ignore[union-attr]
+                        }
+                    else:
+                        bundle, traces = _bundle_and_traces(body)
+                    try:
+                        package = build_cp_export_files(
+                            bundle, traces,
+                            regressions=body.get("regressions") or [],  # type: ignore[arg-type]
+                            condition_id=body.get("condition"),  # type: ignore[arg-type]
+                            author=body.get("author"),  # type: ignore[arg-type]
+                            sign_key=body.get("sign_key"),  # type: ignore[arg-type]
+                        )
+                    except CPExportError as exc:
+                        # the evidence does not EARN a handoff — the caller's
+                        # answer, not a server fault
+                        raise RuntimeJobsError(409, str(exc)) from None
+                    source = package.source
+                    if str(body.get("format") or "") == "zip":
+                        # The CLI writes a DIRECTORY, and `verify-cp-export`
+                        # checks a directory. Handing the web a nested JSON of
+                        # 160 files meant the hosted deliverable could not be
+                        # run through the verifier without the reader
+                        # reconstructing the tree by hand — the two faces shipped
+                        # the same bytes in a shape only one of them could check.
+                        self._send_zip(
+                            package.files,
+                            f"{source.get('condition_id') or 'cp'}-handoff.zip",
+                        )
+                        return
+                    self._send(200, {
+                        "files": package.files,
+                        "manifest": package.manifest,
+                        "config": package.config,
+                        "signed": package.signed,
+                        "condition_id": source.get("condition_id"),
+                        "baseline_condition_id": source.get("baseline_condition_id"),
+                        "regressions_carried": package.regressions_carried,
+                        "earned_bridge": package.earned_bridge,
+                    })
+                    return
+                if _HANDOFF_VERIFY_RE.match(path):
+                    # Verifying a handoff someone else produced. INTEGRITY,
+                    # AUTHENTICITY and DERIVABILITY come back as separate checks
+                    # because they are separate claims: an export can be intact
+                    # without being authentic, and a signature nobody holds a key
+                    # for is UNVERIFIED, not a pass.
+                    from lab_service import CheckStatus, verify_cp_files
+
+                    self._require_control()
+                    body = self._read_json()
+                    files = body.get("files")
+                    if not isinstance(files, dict) or not all(
+                        isinstance(v, str) for v in files.values()
+                    ):
+                        raise RuntimeJobsError(
+                            400, "verify requires {files: {path: text}}")
+                    result = verify_cp_files(
+                        files,  # type: ignore[arg-type]
+                        pubkey=body.get("pubkey"),  # type: ignore[arg-type]
+                        expect_author=body.get("expect_author"),  # type: ignore[arg-type]
+                        allow_unsigned=bool(body.get("allow_unsigned")),
+                    )
+                    self._send(200, {
+                        "outcome": result.outcome.value,
+                        "traces": result.trace_count,
+                        "earned_bridge": result.earned_bridge,
+                        "checks": [
+                            {"name": c.name, "status": c.status.value, "message": c.message}
+                            for c in result.checks
+                        ],
+                        "failed": [c.name for c in result.checks
+                                   if c.status is not CheckStatus.OK],
+                    })
+                    return
+                if _INCIDENT_IMPORT_RE.match(path):
+                    # The second funnel (control-plane-handoff.md): a production
+                    # trace becomes a bundle a policy can be tested against. The
+                    # recorded condition is REQUIRED and used verbatim, and
+                    # nothing is returned until the incident REPLAYS under it.
+                    from lab_service import import_incident
+
+                    self._require_control()
+                    body = self._read_json()
+                    missing = [k for k in ("trace", "scenario", "manifests", "condition")
+                               if k not in body]
+                    if missing:
+                        raise RuntimeJobsError(
+                            400, f"import needs {{trace, scenario, manifests, condition}}; "
+                                 f"missing {missing}")
+                    with tempfile.TemporaryDirectory() as staging:
+                        result = import_incident(
+                            body["trace"], body["scenario"],  # type: ignore[arg-type]
+                            body["manifests"], body["condition"],  # type: ignore[arg-type]
+                            out=pathlib.Path(staging) / "bundle",
+                        )
+                        from lab_service import bundle_files
+
+                        from lab_runner.bundle_io import read_bundle_dir
+
+                        imported, traces = read_bundle_dir(result.directory)
+                    self._send(201, {
+                        "bundle_id": result.bundle_id,
+                        "trace_id": result.trace_id,
+                        "replay_status": result.replay_status,
+                        "bundle": imported,
+                        "traces": list(traces.values()),
+                        "files": bundle_files(imported, traces),
+                    })
+                    return
+                if _VERIFY_PACKAGE_RE.match(path):
+                    # Offline package verification, from the hosted face. This
+                    # verb existed only behind argv: `lab_service.verify_package`
+                    # lived in lab_runner/cli.py, so having a shell was a
+                    # precondition for checking whether a downloaded package
+                    # actually holds up. The SAME checks run here — the two faces
+                    # cannot drift, because there is one implementation.
+                    from lab_service import CheckStatus, verify_package_document
+                    from lab_service.packages import PackageMalformed, normalise_traces
+
+                    # verification is compute on caller-supplied bytes, so it is
+                    # gated like every other POST rather than left open
+                    self._require_control()
+                    body = self._read_json()
+                    envelope = body.get("package")
+                    if not isinstance(envelope, dict):
+                        raise RuntimeJobsError(400, "verify requires {package: <envelope>}")
+                    bundle = envelope.get("bundle")
+                    if not isinstance(bundle, dict):
+                        raise RuntimeJobsError(
+                            400, "package envelope must carry a bundle and traces")
+                    # accept the download VERBATIM. This required a {id: trace}
+                    # map, while `/api/publications/{id}/bundle` — the download
+                    # button on every publication page — serves a LIST, so the one
+                    # file a reader actually has was answered with a 400 telling
+                    # them their package was malformed. It was not.
+                    try:
+                        traces = normalise_traces(envelope.get("traces"))
+                    except PackageMalformed as exc:
+                        raise RuntimeJobsError(400, str(exc)) from exc
+                    result = verify_package_document(
+                        bundle, traces, envelope,
+                        pubkey=body.get("pubkey"),  # type: ignore[arg-type]
+                        author=body.get("author"),  # type: ignore[arg-type]
+                        server_pubkey=body.get("server_pubkey"),  # type: ignore[arg-type]
+                        allow_bare=bool(body.get("allow_bare")),
+                        allow_unsigned_server=bool(body.get("allow_unsigned_server")),
+                    )
+                    self._send(200, {
+                        "outcome": result.outcome.value,
+                        "bit_identical": result.bit_identical,
+                        "traces": result.trace_count,
+                        # a report claims only the checks that actually ran
+                        "checks": [
+                            {"name": c.name, "status": c.status.value, "message": c.message}
+                            for c in result.checks
+                        ],
+                        "failed": [c.name for c in result.checks
+                                   if c.status is not CheckStatus.OK],
+                    })
+                    return
                 m = _SUITE_PUBLISH_RE.match(path)
                 if m:
                     # PUBLISH a suite to the org's private registry (gated by the
@@ -1733,6 +2421,30 @@ def make_runtime_server(
                     # not a field on the document
                     workspaces.org_registry(workspace.org).put("suite", dict(suite))
                     self._send(201, {"id": m.group(1), "org": workspace.org})
+                    return
+                m = _SCENARIO_PUBLISH_RE.match(path)
+                if m:
+                    # the same move as publishing a suite, for the scenarios
+                    # other suites `scenario_ref`. Without it `_scenario_registry`
+                    # would read an org store nothing could ever write to, and
+                    # sharing a scenario would mean re-typing it per workspace.
+                    from lab_server.workspaces import require_capability
+
+                    self._require_control()
+                    workspace = self._current_workspace()
+                    require_capability(workspace, "private_registry")
+                    if not workspace.org:
+                        raise RuntimeJobsError(
+                            409, "this workspace belongs to no org — nothing to publish to")
+                    scenario = self._scenario_registry().get(m.group(1))
+                    if scenario is None:
+                        raise RuntimeJobsError(
+                            404, f"no scenario {m.group(1)!r} in this workspace")
+                    from lab_server.screens import SCENARIO_ID_FIELD
+
+                    workspaces.org_registry(workspace.org).put(
+                        "scenario", dict(scenario), SCENARIO_ID_FIELD)
+                    self._send(201, {"name": m.group(1), "org": workspace.org})
                     return
                 m = _SUITE_DISPATCH_RE.match(path)
                 if m:
@@ -1767,7 +2479,9 @@ def make_runtime_server(
 
                         require_capability(self._current_workspace(), "governance")
                     try:
-                        planned = build_assignment(manifest, runtime_ref)
+                        planned = build_assignment(
+                            manifest, runtime_ref, self._scenario_registry(),
+                        )
                     except SuiteError as exc:
                         # a manifest that resolves but cannot be executed on a
                         # remote runtime is the user's to fix, not a crash
@@ -1791,7 +2505,7 @@ def make_runtime_server(
                     manifest = body.get("suite")
                     if not isinstance(manifest, dict):
                         raise RuntimeJobsError(400, "validate requires {suite}")
-                    errors = validate_manifest(manifest)
+                    errors = validate_manifest(manifest, self._scenario_registry())
                     self._send(200, {"ok": not errors, "errors": errors})
                     return
                 if path == "/suites/to-yaml":
@@ -1833,7 +2547,7 @@ def make_runtime_server(
                     except Exception as exc:  # noqa: BLE001 — a parse error is the user's
                         self._send(200, {"ok": False, "errors": [f"invalid YAML: {exc}"]})
                         return
-                    errors = validate_manifest(parsed)
+                    errors = validate_manifest(parsed, self._scenario_registry())
                     # the PARSED manifest comes back whenever the text PARSES —
                     # including when validation then fails. The Builder's modes
                     # edit one document, and a semantically invalid document is
@@ -1862,6 +2576,50 @@ def make_runtime_server(
                         self._send(200, {"ok": False, "errors": [f"malformed scenario: {exc}"]})
                     else:
                         self._send(200, {"ok": True, "errors": []})
+                    return
+                if path == "/suites/plan":
+                    # The Builder's plan preview. NOT `/experiments/plan`:
+                    # that one plans an `experiment/v1`, and the Builder was
+                    # hand-building one out of the manifest — which substituted
+                    # the literal arm id "condition" for a suite declaring none
+                    # (2 of 3 built-ins) and dropped `scenario_refs`. The count
+                    # was right and the trial ids were wrong, under a caption
+                    # promising they were deterministic. This plans the SUITE,
+                    # through the same `plan_suite` a dispatch runs.
+                    from lab_suite import plan_suite
+                    from lab_suite.errors import SuiteValidationError
+
+                    self._require_control()
+                    manifest = self._document("suite")
+                    try:
+                        planned = plan_suite(manifest, self._scenario_registry())
+                    except SuiteValidationError as exc:
+                        raise RuntimeJobsError(
+                            422,
+                            "this suite does not resolve, so there is nothing to "
+                            "plan: " + "; ".join(str(e) for e in exc.errors),
+                        ) from None
+                    self._send(200, {
+                        "trials": list(planned.planned),
+                        # whether this suite decides what its agent DOES. False
+                        # means a LOCAL run produces empty traces and an
+                        # artifact full of zeros; a dispatch is unaffected,
+                        # because the connected runtime drives the loop.
+                        "drives_itself": self._suite_drives_itself(manifest),
+                        # the arms actually planned, INCLUDING a synthesized
+                        # ungoverned one — the preview has to name the arm the
+                        # run will name, or its trial ids are fiction
+                        "conditions": [str(c.get("id")) for c in planned.conditions],
+                        # a dispatch would refuse on these; a preview reports
+                        # them, because seeing the plan is how you find out
+                        "blockers": list(planned.blockers),
+                        "estimate": {
+                            "trials": len(planned.planned),
+                            "scenarios": len(planned.resolved.scenarios),
+                            "conditions": len(planned.conditions),
+                            "repeats": planned.resolved.repeats,
+                        },
+                    })
                     return
                 if path == "/experiments/plan":
                     self._require_control()

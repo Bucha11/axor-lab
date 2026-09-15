@@ -6,6 +6,13 @@ helpers. Everything except the manifest itself has a default, so the smallest
 possible suite is a manifest and nothing else — which is exactly what the Blank
 suite is, and what a third-party author starts from.
 
+The config and UI schemas are NOT hooks: they are `config_schema`, `config` and
+`ui_schema` on the manifest itself. One place to declare them, so the document
+a Builder edits and a runtime receives already carries the suite's own options
+— a hook would put the declaration somewhere the manifest cannot reach, and the
+manifest is what travels. `lab_suite.manifest` validates `config` against
+`config_schema` at author time; the Builder renders it.
+
 The hooks are deliberately narrow. A suite decides WHAT its agent does and WHAT
 its own metrics mean; it never touches provenance, gating or the ledger. Those
 belong to the runtime, and a suite that could reach them could launder taint.
@@ -93,10 +100,80 @@ class BaseSuite:
         """Invariants this suite pins from a trial. Default: none."""
         return []
 
+    # --- comparison design ------------------------------------------------
+    def agent_is_deterministic(self) -> bool:
+        """Is this suite's agent behaviour fixed by (scenario, seed)?
+
+        It decides the run's COMPARISON DESIGN. Matched pairs — and therefore
+        McNemar — are only valid when the same seed produces the same behaviour
+        under both arms; a sampled agent draws each condition independently and
+        its "pairs" are nominal, so the paired p-value would be spurious.
+
+        Default FALSE, which yields `independent_samples`. The CP bridge reads
+        the attested design and refuses to assume a paired one — "never a silent
+        default to matched_pairs" — so an author who does not answer gets the
+        weaker claim rather than an unearned one. A suite whose `program_for` is
+        a pure function of the seed says so by overriding this.
+
+        It describes the SUITE's own agent. A run executed by a connected
+        runtime is attested `independent_samples` regardless: a live model is
+        sampled, and this hook cannot speak for someone else's machine.
+        """
+        return False
+
     # --- presentation ----------------------------------------------------
     def render_artifact(self, artifact: dict[str, object]) -> dict[str, object]:
         """A suite-specific artifact view. Default: the artifact unchanged."""
         return artifact
+
+
+def comparison_design(
+    suite: object, *, executed_by_runtime: bool = False
+) -> dict[str, object]:
+    """The run's attested `comparison-design/v1`, for `environment`.
+
+    Bound to the ACTUAL agent's determinism and recorded at run time, because
+    this — not an uploader-controlled aggregate — is what the Control-Plane
+    bridge reads to choose matched_pairs over independent_samples. A suite
+    bundle used to carry no design at all, so `_bridge_design` returned None and
+    the bridge could never be earned: every suite could be exported to
+    production, and none could say governance had changed an outcome.
+
+    `executed_by_runtime` forces independent samples. Lab does not know what a
+    connected runtime ran; a live model draws each condition separately, and a
+    paired design asserted over that is a spurious p-value with a signature on
+    it.
+    """
+    deterministic = (
+        False if executed_by_runtime
+        else bool(getattr(suite, "agent_is_deterministic", lambda: False)())
+    )
+    kind = "matched_pairs" if deterministic else "independent_samples"
+    return {
+        "schema_version": "comparison-design/v1",
+        "kind": kind,
+        "unit_key": ["execution_id", "scenario_id", "condition_id", "seed", "repeat_index"],
+        "assignment": ("shared_deterministic_agent_state" if deterministic
+                       else "independent_per_condition"),
+        "agent_deterministic": deterministic,
+    }
+
+
+def drives_its_own_trials(suite: object) -> bool:
+    """Whether this suite decides what its agent DOES.
+
+    A manifest says which tools exist and what they mean; it cannot say the
+    order an agent calls them in. That is `program_for`, and a suite that does
+    not override it gets `_NullProgram` — the loop finishes immediately, the
+    trace is empty, every metric is false, and an artifact is written anyway.
+
+    So a locally-run suite without this is not measuring anything, and the
+    screens that offer to run one locally have to say so BEFORE the click
+    rather than present 108 zeros afterwards. A DISPATCHED suite does not need
+    it: the connected runtime drives the loop with a real model, which is what
+    the manifest was written for.
+    """
+    return type(suite).program_for is not BaseSuite.program_for
 
 
 class SuiteRegistry:
@@ -187,21 +264,24 @@ def suite_catalog(registry: "SuiteRegistry | None" = None) -> list[dict[str, obj
 
 
 def builtin_registry() -> SuiteRegistry:
-    """The launch set: Blank, AgentDojo, Budget.
+    """The launch set: Blank, AgentDojo, Budget, Ingest.
 
-    Three, not the six the design's catalog shows. Together they exercise every
-    SDK surface once — Blank proves a suite is authorable from nothing,
-    AgentDojo proves the import path, Budget proves the metrics layer — and the
-    catalog is expected to mark the other three unavailable rather than render a
-    card that runs nothing.
+    Each exercises a different SDK surface once — Blank proves a suite is
+    authorable from nothing, AgentDojo proves the import path, Budget proves the
+    metrics layer, Ingest proves a suite can be derived from a shipped agent's
+    documented tool chain (the case a customer starts from, where nobody has
+    curated anything). The catalog is expected to mark the remaining announced
+    suites unavailable rather than render a card that runs nothing.
     """
     from .builtin.agentdojo import AgentDojoSuite
     from .builtin.blank import BlankSuite
     from .builtin.budget import BudgetSuite
+    from .builtin.ingest import IngestSuite
 
     registry = SuiteRegistry()
     registry.register(BlankSuite())
     registry.register(AgentDojoSuite())
+    registry.register(IngestSuite())
     registry.register(BudgetSuite())
     return registry
 

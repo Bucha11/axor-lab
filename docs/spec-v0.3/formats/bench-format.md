@@ -6,14 +6,14 @@
 
 A scenario is an executable world plus a breach/success criterion:
 - `inputs` — structured ground-truth values predicates compare against (never scraped from prompt text).
-- `tools` — each a full `tool-manifest.schema.json` (or a `{ "$ref": "<tool id>" }` to one in the bundle). A tool carries args/result JSON-Schema, an `effect` model (operation+resource+args → READ/WRITE/EXPORT/EXEC), field-level `untrusted_fields`, `side_effecting`, and a `simulation`/`reset` strategy.
+- `tools` — each a full `tool-manifest/v1` object — defined inline by the schemas that carry it (`scenario`, `suite`, `bundle`), not a schema file of its own — or a `{ "$ref": "<tool id>" }` to one in the bundle. A tool carries args/result JSON-Schema, an `effect` model (operation+resource+args → READ/WRITE/EXPORT/EXEC), field-level `untrusted_fields`, `side_effecting`, and a `simulation`/`reset` strategy.
 - `fixtures` — what each tool returns, and exactly where `$injection` lands (`injection_placement.field`).
 - `injection` — the attacker payload substituted for `$injection`.
-- `violation` / `task_success` — typed predicates (`predicate.schema.json`), never prose.
+- `violation` / `task_success` — typed predicates — defined inside `scenario.schema.json` and `regression.schema.json`, not a schema file of their own — never prose.
 
 **Conditions do not live in a scenario.** They belong to `experiment.schema.json` (a scenario is reused across conditions). This was a real inconsistency in the old format.
 
-## Predicates are typed (canonical: `predicate.schema.json`)
+## Predicates are typed (canonical: the predicate definition in `scenario.schema.json`)
 
 Not natural language. A predicate matches an `event` (`tool_call`, `tool_result`, `final_output`, …), optionally a `tool`, and a `where` map of typed matchers over fields:
 - field addresses: `args.<name>`, `result.<path>`, `output.<path>`, and `prov(args.<name>)` for the provenance label.

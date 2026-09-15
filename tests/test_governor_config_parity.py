@@ -154,13 +154,12 @@ class TestEveryDenialCanBeWrittenIntoATrace(unittest.TestCase):
     the two ends still meet."""
 
     def _gate_enum(self) -> set[str]:
-        import json
-        from pathlib import Path
+        # through the loader, not off disk: trace/v1 is axor-core's and is not a
+        # file in this repo any more. Reading the owner's schema from the owner
+        # is the point — a path here would be the fourth copy.
+        from lab_contracts import load_schemas
 
-        schema = json.loads(
-            (Path(__file__).resolve().parent.parent / "contracts" / "schemas"
-             / "trace.schema.json").read_text()
-        )
+        schema = load_schemas()["trace"]
         return set(schema["$defs"]["decision"]["properties"]["gate"]["enum"])
 
     def test_every_gate_the_kernel_can_name_is_a_valid_trace_gate(self) -> None:
@@ -173,18 +172,12 @@ class TestEveryDenialCanBeWrittenIntoATrace(unittest.TestCase):
             f"rejects — such a denial cannot be recorded at all",
         )
 
-    def test_the_runtime_schema_mirror_agrees(self) -> None:
-        import json
-        from pathlib import Path
-
-        mirror = json.loads(
-            (Path(__file__).resolve().parent.parent / "lab_contracts" / "schemas"
-             / "trace.schema.json").read_text()
-        )
-        self.assertEqual(
-            set(mirror["$defs"]["decision"]["properties"]["gate"]["enum"]),
-            self._gate_enum(),
-        )
+    # `test_the_runtime_schema_mirror_agrees` lived here: it checked that the
+    # package-data copy of trace/v1 listed the same gates as the one under
+    # contracts/. Neither copy exists now — axor-core owns the schema and the
+    # loader serves it — so there are no two things left to agree. The stronger
+    # statement replacing it is that no copy may reappear at all, which
+    # `tests/test_packaging.py::TestTheKernelSchemasAreNotKeptHere` asserts.
 
     def test_a_real_denial_records_a_schema_valid_gate(self) -> None:
         """End to end rather than by inspection: deny for a non-taint reason and

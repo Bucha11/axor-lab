@@ -4,9 +4,26 @@ import { useAsync } from "../lib/useAsync";
 import { Button, Card, Empty, Failed, Field, Json, Link, Loading, Tag, outcomeTone } from "../components/ui";
 
 export function RegressionList() {
-  const { data, error, loading, reload } = useAsync(() => api.regressions());
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  async function create() {
+    setBusy(true);
+    setCreateError(null);
+    try {
+      await api.createRegression(JSON.parse(draft));
+      setDraft("");
+      reload();
+    } catch (exc) {
+      setCreateError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const { data, error, status, loading, reload } = useAsync(() => api.regressions());
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   const rows = data?.regressions ?? [];
   return (
     <div className="screen">
@@ -29,12 +46,32 @@ export function RegressionList() {
           ))}
         </ul>
       )}
+
+      <Card>
+        <h4>Create from JSON</h4>
+        <p className="muted small">
+          A regression is an executable invariant derived from a trial — it is re-evaluated over later runs, and a change is surfaced rather than silently passed.
+        </p>
+        <Field label="regression/v1" hint="Validated by the server against its schema; a malformed document is refused, not stored.">
+          <textarea
+            id="regression-json"
+            rows={4}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder='{\"schema_version\": \"regression/v1\", \"id\": \"rg_1\", …}'
+          />
+        </Field>
+        <Button onClick={create} disabled={busy || !draft}>
+          {busy ? "Creating…" : "Create regression"}
+        </Button>
+        {createError && <p className="errors">{createError}</p>}
+      </Card>
     </div>
   );
 }
 
 export function RegressionScreen({ id }: { id: string }) {
-  const { data, error, loading, reload } = useAsync(() => api.regression(id), [id]);
+  const { data, error, status, loading, reload } = useAsync(() => api.regression(id), [id]);
   const [runId, setRunId] = useState("");
   const [outcome, setOutcome] = useState<InvariantOutcome | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -50,7 +87,7 @@ export function RegressionScreen({ id }: { id: string }) {
   }
 
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   if (!data) return null;
 
   return (

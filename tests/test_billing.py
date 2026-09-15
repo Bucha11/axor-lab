@@ -135,20 +135,36 @@ class TestPurchaseFlow(BillingTestCase):
         _, sub = self.call("GET", "/workspaces/current/subscription", token=token)
         self.assertEqual(sub["subscription"], {"plan_id": "pro", "status": "active"})
 
-    def test_a_failed_payment_lapses_to_free(self) -> None:
+    def test_a_failed_renewal_lapses_to_free(self) -> None:
+        """A renewal fails months after the purchase. A provider sends that
+        against the SUBSCRIPTION, with no checkout in sight — this used to be
+        expressible only by REPLAYING the original purchase, which is the one
+        delivery that must not be replayable."""
         token = self._free_tenant()
+        _, current = self.call("GET", "/workspaces/current", token=token)
+        ws_id = str(current["id"])
         _, checkout = self.call("POST", "/billing/checkout", {"plan_id": "pro"},
                                 token=token)
-        # activate, then fail a subsequent payment
         self.call("POST", "/billing/webhook",
                   {"session_id": checkout["session_id"], "event": "payment_succeeded"},
                   token=None, headers={"X-Billing-Secret": WEBHOOK})
-        self.call("POST", "/billing/webhook",
-                  {"session_id": checkout["session_id"], "event": "payment_failed"},
-                  token=None, headers={"X-Billing-Secret": WEBHOOK})
+        status, _ = self.call("POST", "/billing/webhook",
+                              {"workspace_id": ws_id, "event": "payment_failed"},
+                              token=None, headers={"X-Billing-Secret": WEBHOOK})
+        self.assertEqual(status, 200)
         # paid feature closes again
         self.assertEqual(
             self.call("POST", "/hosted-runtimes", {"model": "m"}, token=token)[0], 402)
+        _, sub = self.call("GET", "/workspaces/current/subscription", token=token)
+        # the subscription REMEMBERS what was bought; the plan does not grant it
+        self.assertEqual(sub["subscription"], {"plan_id": "pro", "status": "past_due"})
+
+    def test_a_lapse_addressed_to_nothing_is_refused(self) -> None:
+        status, body = self.call(
+            "POST", "/billing/webhook", {"event": "subscription_canceled"},
+            token=None, headers={"X-Billing-Secret": WEBHOOK})
+        self.assertEqual(status, 404)
+        self.assertIn("workspace_id", body["error"])
 
 
 class TestWebhookSecurity(BillingTestCase):

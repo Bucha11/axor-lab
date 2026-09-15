@@ -83,6 +83,70 @@ def plan_trials(
     ]
 
 
+@dataclass(frozen=True)
+class PlannedSuite:
+    """What a suite WOULD run, and what would stop it — without dispatching.
+
+    Exists so a preview and a dispatch cannot disagree. They did: the Builder's
+    preview hand-built an `experiment/v1` from the manifest and planned that,
+    which substituted the literal arm id ``"condition"`` for a suite declaring
+    none and dropped `scenario_refs` entirely. The count was right and the trial
+    ids were wrong, under a caption promising they were deterministic.
+
+    `blockers` are the reasons a dispatch would be REFUSED, in the order
+    `build_assignment` raises them. A preview reports them instead of raising:
+    seeing the plan is exactly how you find out the suite cannot run.
+    """
+
+    resolved: ResolvedSuite
+    conditions: tuple[dict[str, object], ...]
+    planned: tuple[str, ...]
+    blockers: tuple[str, ...]
+
+
+def plan_suite(
+    manifest: dict[str, object],
+    scenario_registry: dict[str, dict[str, object]] | None = None,
+    tool_manifests: dict[str, dict[str, object]] | None = None,
+) -> PlannedSuite:
+    """Resolve a suite and expand it into the trial units a run would execute.
+
+    Raises `SuiteValidationError` for a manifest that does not resolve; every
+    other refusal comes back as a `blocker`, because a preview that raises
+    instead of answering cannot tell you WHY the run you are previewing is
+    impossible.
+    """
+    resolved = resolve_suite(manifest, scenario_registry, tool_manifests)
+    blockers: list[str] = []
+    # a multi-agent topology is authorable and valid, but no runtime can execute
+    # one yet — refuse the dispatch rather than hand a runtime an assignment it
+    # would run as a single agent and report as a topology run
+    unrunnable_topology = topology_execution_error(manifest)
+    if unrunnable_topology:
+        blockers.append(unrunnable_topology)
+    # A connected runtime IS the wrap: the agent runs under axor-core whether
+    # or not gates enforce. So a suite that declares no conditions gets the
+    # UNGOVERNED arm — enforcement off, kernel present — and never a
+    # kernel-free one. Otherwise the agent would not be observed, switching
+    # governance on later would mean re-integrating rather than flipping
+    # `enforcement`, and an ungoverned/governed comparison would contrast two
+    # different machines instead of one machine under two policies.
+    conditions = list(resolved.conditions) or [connected_runtime_condition()]
+    # ...and whatever the suite declared has to be executable THERE, not here.
+    unrunnable = remote_executable_kernel_errors(conditions)
+    if unrunnable:
+        blockers.append(
+            "this suite cannot be dispatched to a connected runtime: "
+            + "; ".join(unrunnable)
+        )
+    return PlannedSuite(
+        resolved=resolved,
+        conditions=tuple(conditions),
+        planned=tuple(plan_trials(resolved, conditions)),
+        blockers=tuple(blockers),
+    )
+
+
 def build_assignment(
     manifest: dict[str, object],
     runtime_ref: str,
@@ -95,30 +159,17 @@ def build_assignment(
     and conditions, not references — because the runtime has no access to Lab's
     registries, and because freezing them here is what stops a later registry
     edit from changing what a finished run claims to have executed.
+
+    The plan itself is `plan_suite`'s, so what a preview showed is what this
+    dispatches; the only thing added here is refusing the blockers a preview
+    merely reports.
     """
-    resolved = resolve_suite(manifest, scenario_registry, tool_manifests)
-    # a multi-agent topology is authorable and valid, but no runtime can execute
-    # one yet — refuse the dispatch rather than hand a runtime an assignment it
-    # would run as a single agent and report as a topology run
-    unrunnable_topology = topology_execution_error(manifest)
-    if unrunnable_topology:
-        raise DispatchError(unrunnable_topology)
-    # A connected runtime IS the wrap: the agent runs under axor-core whether
-    # or not gates enforce. So a suite that declares no conditions gets the
-    # UNGOVERNED arm — enforcement off, kernel present — and never a
-    # kernel-free one. Otherwise the agent would not be observed, switching
-    # governance on later would mean re-integrating rather than flipping
-    # `enforcement`, and an ungoverned/governed comparison would contrast two
-    # different machines instead of one machine under two policies.
-    conditions = list(resolved.conditions) or [connected_runtime_condition()]
-    # ...and whatever the suite declared has to be executable THERE, not here.
-    unrunnable = remote_executable_kernel_errors(conditions)
-    if unrunnable:
-        raise DispatchError(
-            "this suite cannot be dispatched to a connected runtime: "
-            + "; ".join(unrunnable)
-        )
-    planned = plan_trials(resolved, conditions)
+    plan = plan_suite(manifest, scenario_registry, tool_manifests)
+    if plan.blockers:
+        raise DispatchError(plan.blockers[0])
+    resolved = plan.resolved
+    conditions = list(plan.conditions)
+    planned = list(plan.planned)
     assignment: dict[str, object] = {
         "schema_version": "experiment/v1",
         "id": f"exp_{resolved.id}",

@@ -79,11 +79,23 @@ export function Loading() {
 }
 
 /** A failed request says so. It never renders as an empty workspace. */
-export function Failed({ error, onRetry }: { error: string; onRetry?: () => void }) {
+export function Failed(
+  { error, status, onRetry }: { error: string; status?: number | null; onRetry?: () => void },
+) {
+  // 402 is not a failure of the screen, it is an ANSWER: the request was
+  // well-formed and authorised and the plan does not include it. It is also the
+  // only error here a user can fix, and it used to render as a red sentence
+  // like any other — the server refused, and nothing said where to go.
+  const planned = status === 402;
   return (
     <div className="failed">
-      <strong>Could not load this screen.</strong>
+      <strong>{planned ? "Your plan does not include this." : "Could not load this screen."}</strong>
       <p className="muted">{error}</p>
+      {planned && (
+        <p className="muted small">
+          <a href="#/workspace">Workspace</a> lists the plans and what each one grants.
+        </p>
+      )}
       {onRetry && (
         <Button variant="secondary" onClick={onRetry}>
           Retry

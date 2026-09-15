@@ -28,25 +28,25 @@ class TestRunIdExecutionNonce(unittest.TestCase):
     EXP = {"id": "exp_banking_01", "agent_ref": "scripted"}
 
     def test_deterministic_agent_reproduces_the_same_run_id(self) -> None:
-        from lab_runner.cli import _derive_run_id
+        from lab_service import derive_run_id
 
-        a = _derive_run_id(None, self.EXP, "scripted", deterministic=True)
-        b = _derive_run_id(None, self.EXP, "scripted", deterministic=True)
+        a = derive_run_id(None, self.EXP, "scripted", deterministic=True)
+        b = derive_run_id(None, self.EXP, "scripted", deterministic=True)
         self.assertEqual(a, b)
 
     def test_nondeterministic_agent_gets_a_fresh_id_each_execution(self) -> None:
-        from lab_runner.cli import _derive_run_id
+        from lab_service import derive_run_id
 
-        a = _derive_run_id(None, self.EXP, "anthropic:claude-opus-4-8", deterministic=False)
-        b = _derive_run_id(None, self.EXP, "anthropic:claude-opus-4-8", deterministic=False)
+        a = derive_run_id(None, self.EXP, "anthropic:claude-opus-4-8", deterministic=False)
+        b = derive_run_id(None, self.EXP, "anthropic:claude-opus-4-8", deterministic=False)
         self.assertNotEqual(a, b)  # different executions, not retries
         self.assertTrue(a.startswith("r_") and b.startswith("r_"))
 
     def test_explicit_run_id_always_wins(self) -> None:
-        from lab_runner.cli import _derive_run_id
+        from lab_service import derive_run_id
 
         self.assertEqual(
-            _derive_run_id("r_fixed", self.EXP, "anthropic:x", deterministic=False), "r_fixed"
+            derive_run_id("r_fixed", self.EXP, "anthropic:x", deterministic=False), "r_fixed"
         )
 
 

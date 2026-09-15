@@ -51,3 +51,13 @@ equals the tier (`team` → the `team` plan). An unknown tier fails **closed** t
   pricing; grant it to a Security workspace with a custom plan, or use the
   Enterprise tier which includes it. Per-node metering is an operator/billing
   concern, not a Lab entitlement limit.
+
+  **Lab does not enforce this one.** The first three are checked by
+  `require_capability` and answer 402; `control_plane` is carried so a tier can
+  express it end to end, and no Lab route reads it — governed-node operation is
+  the Control Plane's, and `architecture-boundary.md` puts entitlement at
+  platform level. Granting it changes nothing a Lab user can observe today.
+  Whether the HOSTED Control-Plane handoff (`POST /handoff/export`) belongs
+  behind it is an open pricing question: the CLI `export-cp` runs locally and is
+  free by the Line-1 rule, so gating the hosted route would be consistent, and
+  it has not been decided. Tracked in `docs/POST_MVP_PLAN.md` §B10.
