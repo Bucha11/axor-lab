@@ -159,6 +159,10 @@ something the code no longer does.
 - **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the roadmap, including
   §B10: the paid features the tiers sell and the code does not have, each with
   the search that proves its absence.
+- **[docs/RELEASING.md](docs/RELEASING.md)** — how `axor-lab` publishes to PyPI
+  (tag-driven, credential-free via Trusted Publishing), and the one thing
+  blocking a release today: two dependencies are still git pins, which PyPI
+  refuses. The release workflow fails on that before the tag is spent.
 - **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** ·
   **[docs/spec-v0.3/](docs/spec-v0.3/)** — the implementation plan, and the v0.3
   narrative (superseded as the product story, still accurate on the governance

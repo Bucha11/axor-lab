@@ -93,7 +93,9 @@ jobs:
           # every package the wheel ships. `lab_service` was in neither this list
           # nor `[tool.setuptools] packages`, so the product's verb layer was
           # unlinted AND unshipped.
-          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_service lab_suite lab_capabilities
+          # `tools/` is not shipped in the wheel, but the release gate runs from it
+          # on every tag — an unlinted gate is one that can fail the release itself.
+          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_service lab_suite lab_capabilities tools
 
   determinism:
     name: Replay determinism matrix (${{ matrix.os }})
