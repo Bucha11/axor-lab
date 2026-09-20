@@ -123,6 +123,14 @@ cd web && npm install && npm run build     # -> web/dist
 axor-lab serve                             # screen API + the built app
 ```
 
+## Deploying it
+
+`docker compose up --build` runs the platform behind a proxy that terminates
+TLS and rate-limits — the two things the app deliberately does not do itself.
+Single node: live run state is in memory, so do not scale it to two replicas.
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** has first boot, TLS, backup and
+restore, upgrade, and what was verified against a running stack.
+
 ## Executable acceptance suite
 
 `contracts/acceptance-tests.md` §1–10 runs as code against these packages —
