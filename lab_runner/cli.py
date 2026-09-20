@@ -60,6 +60,7 @@ from lab_capabilities.governance import (
     build_evidence_case,
     check_pins,
     default_registry,
+    difference_reason,
     evidence_condition,
     governor_config,
     load_axl,
@@ -745,6 +746,13 @@ def _cmd_regress(args: argparse.Namespace) -> int:
             f"{result['trace_id']}: expected {result['expected']}, got {result['actual']} "
             f"under {result['kernel']} -> {result['status']}"
         )
+        # The headline verdicts above are single verdicts and the status is one
+        # word, so a pin that differs by its SEQUENCE or by an inexact replay
+        # printed "expected DENY, got DENY -> differs_from_pinned_expected" and
+        # left the user with no way to tell which. Say which.
+        reason = difference_reason(result)
+        if reason is not None:
+            print(f"    reason: {reason}")
     # ANY status other than a clean match is unresolved — a differing verdict, a
     # missing/tampered/malformed trace, or an unsupported kernel. A malformed
     # trace whose recomputed sequence coincidentally equals the pin used to fall
