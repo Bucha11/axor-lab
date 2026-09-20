@@ -2,12 +2,12 @@
 
 Axor Lab — a reproducible experiment platform for AI agents: bring an agent, bring or author an experiment suite, run it, inspect any trial, curate EvidenceCases, pin executable regressions, and export reproducible artifacts. **Governance is an optional capability** that suites may use, not the spine.
 
-**Today the code is narrower than that.** What is implemented is the governance capability end-to-end (paired ungoverned/governed runs on simulated tools, exact verdict replay, injection EvidenceCases, verdict-pin regressions, publishable bundles). The path from here to the platform above is written down:
+**Today the code is narrower than that.** Implemented end to end: the governance capability (paired ungoverned/governed runs on simulated tools, exact verdict replay, injection EvidenceCases, verdict-pin regressions, publishable bundles a third party can verify offline), the suite platform around it (`lab_suite`, the screen API, the web app), and the hosted substrate it needs (workspaces, entitlement, connected runtimes). What is narrow is the **input**: the agents and benchmarks you can point it at. The curated AgentDojo banking subset is the one benchmark, and a connected runtime is the one way to bring your own agent. The path from here to the platform above is written down:
 
 - **[docs/spec-suite-platform/](docs/spec-suite-platform/)** — the **governing** product spec (Experiment Suite Platform RFC + Web UX RFC + design boards) and **[INTEGRATION_PLAN.md](docs/spec-suite-platform/INTEGRATION_PLAN.md)** — the gap analysis and phased plan for getting there. Read this first; it supersedes the v0.3 narrative.
 - **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — the production-ready implementation plan (phases, reuse map, milestones, definition of done). The MVP spine is implemented; see its status block.
 - **[docs/POST_MVP_PLAN.md](docs/POST_MVP_PLAN.md)** — the post-MVP plan: BYOK model adapter, Control Plane export, full web app, production hardening, then the Later tier (instrumented endpoints, sandbox + cloud code, multi-agent games, population scale) and the commercial track.
-- **[contracts/](contracts/)** — the engineering contract: 9 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
+- **[contracts/](contracts/)** — the engineering contract: 13 JSON Schemas, statistics/claims/provenance semantics, lifecycle, threat model, MVP contract, vertical slice, acceptance tests. Where prose and a contract disagree, the contract wins. Validate: `cd contracts && python3 validate.py && python3 validate_slice.py`.
 - **[docs/design/](docs/design/)** — product narrative (spec-lab v0.3 — superseded as narrative by `docs/spec-suite-platform/`), packaging/economics, bench format guide, UI mocks.
 
 ## Maturity — subsystems are NOT equally production-ready
@@ -22,12 +22,11 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 | multi-scenario benchmark bundle | **beta** | trace ids carry the full trial coordinate; a 3-scenario suite survives a build→write→read→verify→replay roundtrip (`tests/test_multiscenario_bundle.py`) — the round-2 P0 that used to corrupt it is fixed |
 | AgentDojo adapter | **beta** | curated **banking** subset (3 tasks), not arbitrary-dataset import |
 | server / catalog | **beta (local)** | token-gated writes, content-hash filenames, atomic writes, **recomputes every statistical aggregate AND its test from the traces** (rejects a fabricated McNemar/two-proportion p or an unknown metric; the recomputed marginal matches the runner's per-condition count so an honest bundle is not falsely rejected at missingness), **hides `private` publications on every read route** (HTML, JSON, EvidenceCase), **content-addresses each publication by its whole body** so it is immutable (re-publish is idempotent-or-distinct; a disk-edited record is dropped on load), **re-runs the full publish handshake (replay + recompute + re-mint) on restart so a hand-assembled publication never loads unverified**, **counts only cryptographically verified reproductions in the public badge** (unsigned self-reports shown separately; on load each attestation is re-verified, bound to its publication, and schema-checked), **re-earns an `integrity: signed` badge on load only from a persisted author-signature receipt** (a forged signed badge degrades to hash_verified and is dropped), builds each DENY claim from the **recorded decision** correlated by call_id, and **isolates each publication on startup so one corrupt file can't sink the whole catalog**, **refuses to resurrect an admin-taken-down publication via a write-token re-publish** (tombstone wins, 409), **serves a downloadable reproduction package with a PORTABLE verification receipt** (`GET /api/publications/{id}/bundle` returns bundle+traces+receipt; `axor-lab verify` checks content hashes, replay, and the receipt's signed_ref/signature OFFLINE — no server trusted — and the publish response carries an acceptance receipt of what the server verified), **makes an admin takedown final over a STABLE evidence lineage** (an `evidence_lineage_ref` invariant to bundle_id/created/packaging — takedown retires every sibling on that lineage, blocks any re-publish under altered metadata OR repackaged bytes, guards every read, and a two-pass cold load collects all lineage tombstones before loading publications), **issues a deterministic, content-addressed, optionally Ed25519-SIGNED acceptance receipt** (persisted, returned on publish, and served in the download package alongside the publication body so an offline reader can verify the claims, not just the bytes), **reports completed/planned + condition-imbalanced missingness in every statistical claim**, **recomputes the WHOLE test object (the two_proportion interval included) and rejects any test field it does not itself recompute**, and **maps a malformed request body to a clean 4xx, never a 500**, and **(round 16) verifies the ENTIRE downloaded package before `verify` exits 0 — a stripped receipt or an edited publication/acceptance fails; lineage takedown is durable, crash-safe, and array-order-independent; the exact recomputed test shape is required and an inconclusive uploaded test is refused; and the persisted acceptance is RESTORED on load (never re-minted under a rotated key)**, and **(round 17) a downloaded package cannot be silently downgraded — `verify` requires a versioned envelope (`--allow-bare` to opt out) and an UNSIGNED server acceptance reads as UNVERIFIED, not a pass; a historical acceptance's signature is verified against a server keyring (a forgery is quarantined, a rotated-out key kept opaque, never re-issued); a mixed-kernel publication page renders; the acceptance report only claims checks that ran; and the durable tombstone fsyncs the file bytes before the rename**, and **(round 18) a `signed` publication cannot be proof-downgraded — `verify` requires the author receipt's integrity to equal the publication's and treats a signed publication with no verifying key as UNVERIFIED; a damaged/forged persisted acceptance under a known key is QUARANTINED and re-attested with a distinct, timestamped `reacceptance/v1` linking to the invalid original (never silently re-minted as a clean record); and `_write_atomic` loops over short `os.write`s so a large body is never truncated on disk**, and **(round 19) a MISSING or malformed acceptance for a loaded publication is no longer re-minted clean — it is a forensic event re-attested via reacceptance/v1; the append-only `acceptance-history/` preserves EVERY superseded record so repeated corruption keeps a resolvable chain; the reproduction package carries `acceptance_history` and `verify` requires a reacceptance's `previous_ref` to resolve to a record in it; and `_write_atomic` raises on a zero-byte write instead of spinning**, and **(round 20) the server itself re-resolves that chain on COLD LOAD — a persisted reacceptance/v1 whose `previous_ref` no longer resolves to a hash-matching record in the append-only history (deleted or tampered) is a forensic broken-chain event: the record is archived and re-attested with a linked reacceptance that DOES resolve (converging, not re-stamped every reload), so the server never serves what the offline verifier would reject**, and **(round 21) the acceptance ancestry is verified RECURSIVELY to a root — a deep (grandparent) break, a cycle, or an over-deep chain is rejected, not just the immediate hop; a broken chain is repaired by RE-ROOTING at a forensic marker so it converges; an unknown-key reacceptance still has its structure + history-chain validated (the unknown key gates only the signature step); and `acceptance_history` omits hash-invalid entries so a corrupt record never rides along in the reproduction package**; not yet a public SaaS (no OAuth/DB/object-store) |
-| BYOK agent | **beta** | wrapped runtime is banking-slice-shaped; run identity carries the agent fingerprint; **live runs are analyzed as independent samples (two-proportion, exploratory) — never a paired McNemar p-value**; **a per-scenario cassette keys on the scenario name (not task text), so scenarios can't silently share a transcript**; **`--max-usd/--max-input-tokens/--max-output-tokens` are a HARD run-wide ceiling checked BEFORE the first trial and BEFORE every provider call inside a trial's loop (not just between trials, so one trial can't overshoot by its whole fan-out of calls); a ≤ 0 limit is rejected, the remaining output budget caps the next call's `max_tokens`, and actual usage+spend is recorded in the bundle**; **a USD-only budget reserves output tokens and counts the tool schema in its pre-spend projection**; **the trial plan is block-balanced (scenario→repeat→condition) so a cost stop keeps matched pairs, missingness is condition-aware, and a cost-stopped run is labelled `[completed_partial]`/`[stopped_cost_ceiling]` — never `[completed]` — with planned/completed/failed/excluded reported separately**; **a USD-only budget is a HARD ceiling (the next call's max_tokens is capped at what the remaining USD can buy, not just estimated), and condition order is counterbalanced across blocks with the execution order recorded on each trial**; generic multi-tool loop is roadmap |
-| endpoint gateway | **experimental** | fail-closed governance + **SSRF guard: `safe_open()` self-resolves DNS, validates every address, connects pinned to a validated IP (no library re-resolution), keeps Host/SNI, and re-checks each redirect** (`ssrf_check` alone is only an address validator) + bearer token + per-run secret + quotas + per-run locking, atomic seq, finalize-before-read, 400/413 body limits; **BOTH the HTTP gateway AND the in-process SDK path share one gating rule — the gate decides on the BOUND ledger value, never a client-forged concrete arg (a clean binding + malicious arg is refused, not laundered), and returns the authoritative args a cooperating proxy must run**; **it is an advisory DECISION point, not a tool executor — enforcement needs a cooperating/attested runtime, and an untrusted client's self-reported labels are `heuristic_attribution`, never `explicit_flow_tracked`** (`contracts/endpoint-protocol.md` documents exactly this, no phantom dispatch route); **`authoritative_args` is the COMPLETE bound call — every required arg must have a value id**; **it is a real conformity boundary — every event shape is validated, an unknown tool is a clean 400 (not a KeyError→500), a redacted sensitive value must pin its bytes with a canonical_value_hash, the assembled trace is validated as a conformant trace/v1 at finalize before it can be served, and a finalized run is evicted for quota ONLY after its trace has actually been DELIVERED (a finalized-but-unread trace is never dropped)**, and **(round 16) delivery is CLIENT-ACKNOWLEDGED, not inferred from a GET — the trace is frozen at finalize and served repeatably, and only an explicit `POST /trace/ack` marks it evictable, so a failed socket write or a client crash leaves the trace retrievable**, and **(round 17) the gateway/in-process endpoint resolve the REAL governor through the shared resolver (a real-kernel pin that isn't installed fails at construction, never a disguised reference kernel), the ack is BOUND to the bytes (finalize returns a `trace_ref`, the ack must echo `content_hash(frozen_trace)` after a real GET), and `max_runs` bounds only ACTIVE runs so finalized-unacked runs can't exhaust the quota**, and **(round 18) retention NEVER sheds unread evidence — the count AND byte caps evict only an acknowledged (DELIVERED) trace, else fail closed (429); a real-kernel gate on BOTH surfaces DENYs `provenance_unavailable` when a redacted untrusted value is bound to a gated arg (the governor can't register taint it can't see, so it fails closed, not open); the in-process endpoint rejects an unknown event type instead of silently dropping it; a per-run byte quota bounds memory beyond the event count; and the ack response is honestly `client-declared`, not server-verified delivery**, and **(round 19) retained count AND byte capacity is RESERVED at the finalize transition (measured from the frozen trace), so pre-opening many runs and finalizing them together can no longer overrun the retained cap; a repeated finalize returns the same `trace_ref`; and a fail-closed `provenance_unavailable` DENY with no driving args emits a null `driving_value_id` + `driving_unresolved` so the trace passes its own semantics**, and **(round 20) an IMPOSSIBLE finalize never sheds delivered evidence — a run larger than the whole byte budget (or under a disabled retention) is refused BEFORE any eviction, so it can no longer delete every acknowledged trace one-by-one on its way to a guaranteed 429**; per-tenant quotas + TTL/durable spill + manifest-derived labels + a per-event attestation envelope + a full isolation runtime are roadmap |
-| sandbox | **experimental** | real RLIMIT limits (CPU/mem/**per-file size — `max_file_mb`, not a total-disk quota**/nproc) + streaming output cap (boundary-exact) + **whole-process-group sweep on exit** (a forked descendant can't outlive the run) + isolated cwd; NOT namespace/seccomp/cgroup isolation — a per-file cap is not a disk quota, absolute-path writes and a child's own `setsid()` are not contained; do not run hostile code from untrusted users |
-| games / federation | **experimental** | a deterministic toy model; containment is demonstrated, not proven; measure names are honest — `governed` (was `carried_taint`), `contained()`, and `blast_radius()` (spread BEYOND the recorded origin compromise) |
-| kernel | **reference + real backend** | ships `reference_taint_floor_kernel` (1 gate, stdlib) AND a real backend that drives the production `axor_core.governor.ToolCallGovernor` when axor-core is installed and the condition pins the installed version (`pip install axor-lab[kernel]`; `axor-lab run --real-kernel` repins EVERY condition — baseline included — so the compare isolates enforcement, not a mixed kernel, and the bundle carries a single kernel_version). Verified: real governor DENYs the exfil, ALLOWs the faithful payment, replays bit-identically |
-| Private Lab / workspaces / billing | **design-only** | `lab_entitlement` gates features; hosted workspace surface not built |
+| kernel | **the real one, and the only one** | `axor-core` is a required dependency and the production `axor_core.governor.ToolCallGovernor` — driven through the shared `axor-wrap` engine — makes every verdict. The one-gate `reference_taint_floor_kernel` this used to ship is **deleted**: while it lived, every default run and this entire test suite measured a reimplementation while the nine-gate kernel sat installed and unexercised, and three real defects in the axor-core path hid behind it (replay fabricating a `v_none` driving value, `value_policies` compiled into a shape the governor cannot consume, a category map keyed on names the kernel never emits). `axor-lab run --real-kernel` repins EVERY condition — baseline included — so a compare isolates enforcement, not a mixed kernel. Verified: the real governor DENYs the exfil, ALLOWs the faithful payment, replays bit-identically |
+| suite platform · screen API · web app | **beta (local)** | `lab_suite` makes a Suite a first-class object — the `Suite` protocol and `BaseSuite`, a registry with three built-ins (Blank, AgentDojo, Budget), manifest load/validate/resolve, and dispatch to a connected runtime. `axor-lab serve` serves the nine screens of `contracts/ui-backend-contract.md` and the built React app in `web/`, with Playwright specs driving the real API |
+| connected runtimes | **beta (local)** | the spec-v0.3 execution contract, deliberately simple: one process, an in-memory job store, stdlib `http.server`. **Lab assigns, the runtime executes** — Lab never connects to, executes or proxies an agent (`contracts/architecture-boundary.md`), which is why there is no model adapter here to rate. Durability, per-tenant scoping, SSE streaming and bundle assembly are named extension points, not silent gaps |
+| workspaces / entitlement | **beta (local)** | durable per-org workspaces with members and an audit log; an operator-supplied plan catalog (`docs/pricing/axor-plans.json`, never baked into the code); capability flags and numeric limits enforced as 402 over a limit; optional axor-identity login, whose token's `org`+`tier` provision a workspace and fail **closed** to free on an unknown tier |
+| billing | **shape only** | the plan/subscription state machine is implemented and tested — checkout, provider webhook activates, lapse falls back to free, admin may grant directly, and the server never touches a card. No payment provider is wired: `/billing/checkout` returns a placeholder URL |
 
 ## Packages (MVP spine + post-MVP blocks, stdlib-only core)
 
@@ -45,18 +44,21 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 - **`lab_adapters/`** — benchmark imports (MVP item 2): the curated AgentDojo
   banking data-flow suite materialized as `scenario/v1` objects (mirrors
   axor-eval's property map), each schema-valid and author-time-validated.
-- **`lab_server/`** — the hosted surface (Phase 4 + minimal Phase 5): the
-  publish handshake (schema + hash + safe replay verification, `origin=local`),
-  an append-only attestation log, `integrity=signed` for known author keys,
-  takedown that preserves attestations, and escaped HTML catalog / publication
-  / EvidenceCase pages with three-axis provenance. Stdlib `http.server`; runs
-  no live agents.
+- **`lab_server/`** — the hosted surface. The publish handshake (schema + hash
+  + safe replay verification, `origin=local`), an append-only attestation log,
+  `integrity=signed` for known author keys, takedown that preserves
+  attestations, and escaped HTML catalog / publication / EvidenceCase pages
+  with three-axis provenance. Also the screen API behind `axor-lab serve`
+  (`contracts/ui-backend-contract.md`), the connected-runtime job contract,
+  durable workspaces + entitlement + billing, and a vendored verifier for
+  axor-identity tokens. Stdlib `http.server` throughout; **runs no live
+  agents** — Lab assigns, a connected runtime executes.
 - **`lab_suite/`** — the Suite SDK: the `Suite` protocol and `BaseSuite`, a
   registry with three built-in suites (Blank, AgentDojo, Budget), manifest
   load/validate/resolve, suite execution, and dispatch to a connected runtime.
 - **`lab_capabilities/governance/`** — governance as an opt-in capability
-  (Suite Platform RFC §10): the reference kernel and the real axor-core backend,
-  the gate a condition resolves to, exact verdict replay, EvidenceCase
+  (Suite Platform RFC §10): the real axor-core backend (the reference kernel is
+  gone), the gate a condition resolves to, exact verdict replay, EvidenceCase
   rendering, verdict pinning, the Control Plane bridge, and the paired `.axl`
   experiment runner. `lab_runner` imports none of it — the dependency direction
   and the short list of composition roots are enforced by
@@ -64,7 +66,14 @@ production-oriented contract, not yet a hosted SaaS. Honest per-area status
 
 `lab_agent/`, `lab_entitlement/`, `lab_endpoint/`, `lab_sandbox/` and
 `lab_games/` were documented here long after they were deleted. They are gone;
-`docs/POST_MVP_PLAN.md` records what each did and why it was cut.
+`docs/POST_MVP_PLAN.md` records what each did and why it was cut. Two notes so
+the deletions are not mistaken for regressions: entitlement did not vanish, it
+moved into `lab_server/` (`workspaces.py`, `tests/test_entitlements.py`); and
+BYOK was **retired on purpose** — it drove a model against SIMULATED tools, so
+its numbers described neither the caller's agent nor their tools. Bring your own
+agent through a connected runtime instead. `pip install axor-lab[byok]` and
+`[kernel]` still resolve, as empty aliases, so an existing script does not
+break on an unknown extra.
 
 ## CLI quickstart (`axor-lab`, or `python -m lab_runner`)
 
@@ -80,17 +89,38 @@ axor-lab regress ./bundle --pins pins.json     # surfaces changes, exit 4 if any
 axor-lab evidence ./bundle <trace_id>          # the three-mode EvidenceCase
 axor-lab publish ./bundle --question "…" --out publication.json   # local
 axor-lab publish ./bundle --question "…" --server http://127.0.0.1:8000   # hosted
+axor-lab verify ./package.json                 # offline: hashes + replay + receipt
+axor-lab export-cp ./bundle --out ./cp-export  # policy + manifests + pins -> CP
 ```
 
-Lifecycle, exit codes, and the estimate-confirm gate follow
+A local `publish` proves **replay only** and mints no statistical claim — it
+prints how many aggregates it declined to publish. Server-side, every aggregate
+*and its test* is recomputed from the traces, so a fabricated p-value is
+rejected. `verify` then re-checks a downloaded package with no server in the
+loop, and distinguishes intact-but-unauthenticated (exit 5) from tampered
+(exit 1). Lifecycle, exit codes, and the estimate-confirm gate follow
 `contracts/runner-protocol.md` and `contracts/lifecycle.md`. The bundle
 directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
+
+`axor-lab --help` lists the rest: `suite-yaml`, `verify-cp-export`, `serve`,
+and `import-incident` (a production incident trace replayed as a bundle — it
+takes the trace, scenario, manifests and condition explicitly, because an
+incident arrives without the experiment that would have named them).
 
 Run the catalog/publish server (stdlib only, no live agents):
 
 ```
 python -m lab_server --root ./lab-store --port 8000
 # GET / catalog · GET /e/{id} publication · GET /e/{id}/evidence/{trace_id}
+```
+
+Or the screen API plus the built web app — the nine screens of
+`contracts/ui-backend-contract.md` (Home, Suites, Playground, Runs, Run Report,
+Trial, EvidenceCase, Regressions, Suite Builder):
+
+```
+cd web && npm install && npm run build     # -> web/dist
+axor-lab serve                             # screen API + the built app
 ```
 
 ## Executable acceptance suite
@@ -101,13 +131,18 @@ one test file per criterion, plus two golden paths (in-process
 is validated against the real schemas in `contracts/`.
 
 ```
-python -m unittest discover -s tests -t .      # full suite, no required dependencies
+python -m unittest discover -s tests -t .      # the full suite
 ```
+
+It needs the package installed (`pip install -e .`): `axor-core`, `axor-wrap`
+and `axor-eval` are required dependencies now, not extras, and `lab_runner`
+imports the wrap engine at module scope. Optional Ed25519 (`[crypto]`) and
+identity (`[identity]`) paths skip cleanly when their extras are absent.
 
 Beyond the ten acceptance criteria, the suite covers the AgentDojo adapter,
 the CLI (subprocess), the server over real HTTP (publish handshake, escaped
-pages, three-axis provenance, takedown), a terminology lint, and the post-MVP
-blocks: BYOK agent (cassette-driven), Control Plane export, entitlement,
-bundle signing, instrumented/black-box endpoints, the sandbox red-team suite,
-and per-run game statistics. Optional Ed25519/BYOK paths skip cleanly when
-PyNaCl / the Anthropic SDK are absent.
+pages, three-axis provenance, takedown, security), the suite SDK and its
+platform contracts, the screen API, connected-runtime jobs and runtime parity,
+durable workspaces, entitlement and billing, Control Plane export, bundle
+signing, the capability boundary (`lab_runner` may not import governance), and
+a terminology lint.

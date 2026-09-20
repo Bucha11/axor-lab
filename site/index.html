@@ -260,11 +260,16 @@ acceptance     : <span style="color:#e6891d">UNVERIFIED</span> — an unsigned s
     <tr><td>catalog / publish server</td><td class="ok">beta (local)</td>
         <td>recomputes every statistic; no OAuth, no database, no object store — not a public SaaS</td></tr>
     <tr><td>AgentDojo adapter</td><td class="ok">beta</td><td>a curated <b>banking</b> subset of 3 tasks — not arbitrary dataset import</td></tr>
-    <tr><td>BYOK agent</td><td class="ok">beta</td><td>banking-slice-shaped; hard USD/token ceilings; a generic multi-tool loop is roadmap</td></tr>
-    <tr><td>endpoint gateway</td><td class="warn">experimental</td><td>an advisory decision point — enforcement needs a cooperating runtime</td></tr>
-    <tr><td>sandbox</td><td class="warn">experimental</td><td>RLIMIT-based, <b>not</b> namespace/seccomp/cgroup — do not run hostile code in it</td></tr>
-    <tr><td>games / federation</td><td class="warn">experimental</td><td>a deterministic toy model; containment is demonstrated, not proven</td></tr>
-    <tr><td>hosted workspaces / billing</td><td class="design">design-only</td><td>the tier gate exists; the hosted workspace surface is not built</td></tr>
+    <tr><td>suite platform · screen API · web app</td><td class="ok">beta (local)</td>
+        <td>a Suite is a first-class object; <span class="mono">axor-lab serve</span> serves nine screens and the built React app</td></tr>
+    <tr><td>connected runtimes</td><td class="ok">beta (local)</td>
+        <td>one process, an in-memory job store — <b>Lab assigns, the runtime executes</b>; Lab never runs your agent</td></tr>
+    <tr><td>workspaces / entitlement</td><td class="ok">beta (local)</td>
+        <td>durable per-org workspaces, an operator-supplied plan catalog, limits enforced as 402, optional identity login</td></tr>
+    <tr><td>billing</td><td class="warn">shape only</td>
+        <td>the plan/subscription state machine is tested; no payment provider is wired</td></tr>
+    <tr><td>kernel</td><td class="ok">the real one</td>
+        <td><span class="mono">axor-core</span> is a required dependency and makes every verdict — the one-gate reference kernel is deleted</td></tr>
   </table>
   <p class="caption">Kept current in the repository's own README, where each line carries the specific defect it was hardened
   against. If a row here is ahead of the code, the README is the one to believe.</p>
@@ -330,7 +335,7 @@ acceptance     : <span style="color:#e6891d">UNVERIFIED</span> — an unsigned s
       <p>Everything above plus production governance — governed-node operation in the Control Plane, on a contract.</p>
       <p style="margin-top:10px"><a class="mono" href="mailto:sales@axor.dev?subject=Axor%20Lab%20Enterprise">talk to us →</a></p></div>
   </div>
-  <p class="under-cta mono" style="margin-top:12px">hosted workspaces are <b style="color:var(--warning)">design-only</b> today — see the maturity table. the tier gate is real; the hosted surface is not built, and this page will say so until it is.</p>
+  <p class="under-cta mono" style="margin-top:12px">workspaces, the entitlement gate and hosted execution are <b>built and tested</b> — on a single-process stdlib server, with no payment provider wired and no OAuth/DB/object store. that is a self-hostable platform, not a public SaaS, and this page will say so until it is one.</p>
   <p class="under-cta mono">the plans catalog is an operator file (<span class="mono">docs/pricing/axor-plans.json</span>), not baked into the code — tier names and prices are the product's; numeric resource limits are yours.</p>
 </div></section>
 
@@ -349,10 +354,12 @@ acceptance     : <span style="color:#e6891d">UNVERIFIED</span> — an unsigned s
     <p>The catalog recomputes every aggregate and its test from the traces and rejects what it cannot reproduce, including a
     fabricated McNemar or two-proportion p. A local publish mints no statistical claim at all. And a matched result still has to
     clear a practical-significance floor before it can earn a production config.</p></details>
-  <details><summary><b>Is the sandbox safe for untrusted code?</b></summary>
-    <p>No, and the repository says so in the same words. It is RLIMIT-based — CPU, memory, per-file size, process count — plus a
-    process-group sweep on exit. It is <em>not</em> namespace, seccomp or cgroup isolation; a per-file cap is not a disk quota.
-    Do not run hostile code from untrusted users in it.</p></details>
+  <details><summary><b>Does Axor Lab run my agent for me?</b></summary>
+    <p>No — and that is a boundary, not a gap. <b>Lab assigns, the runtime executes:</b> you connect an Axor runtime adapter once,
+    it pulls experiment assignments, runs them on your machine and pushes back kernel events and finished traces. Lab never
+    connects to, executes or proxies an agent (<span class="mono">contracts/architecture-boundary.md</span>). The BYOK model
+    adapter that used to live here was retired on purpose: it drove a model against <em>simulated</em> tools, so its numbers
+    described neither the caller's agent nor their tools.</p></details>
   <details><summary><b>Can I check a result without running your server?</b></summary>
     <p>That is the point. <span class="mono">GET /api/publications/{id}/bundle</span> returns the bundle, its traces and a portable
     receipt; <span class="mono">axor-lab verify</span> then checks content hashes, re-runs replay and validates the receipt with no
