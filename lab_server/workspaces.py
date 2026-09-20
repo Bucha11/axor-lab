@@ -19,6 +19,8 @@ every existing single-token client and test is that one tenant, unchanged.
 
 from __future__ import annotations
 
+import hashlib
+
 import secrets
 import threading
 import time
@@ -146,6 +148,17 @@ def require_capability(workspace: "Workspace", capability: str) -> None:
         )
 
 
+def token_digest(token: str) -> str:
+    """What a credential is stored AS. Never the token itself.
+
+    A token is shown once at creation and thereafter only compared, so nothing
+    needs the original. Hashing is applied to the in-memory map too, not just
+    the durable one: two lookup keys for one credential is how a backend starts
+    disagreeing with itself about who someone is.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class Workspace:
     id: str
@@ -197,6 +210,81 @@ class Workspaces:
         self._checkouts: dict[str, dict[str, object]] = {}  # session id -> pending buy
         self._guest_expiry: dict[str, float] = {}  # guest ws id -> expiry epoch
         self._current = threading.local()
+        if self._dsn is not None:
+            self._load_registry()
+
+    # -- durable registry -------------------------------------------------
+    def _conn(self):  # noqa: ANN202 - psycopg types are optional at import time
+        from lab_server.db import pool
+
+        return pool(self._dsn).connection()  # type: ignore[arg-type]
+
+    def _load_registry(self) -> None:
+        """Rebuild tenants and their credentials at startup.
+
+        Loaded eagerly, unlike documents and runs: the registry is small (a row
+        per tenant), and every single request authenticates against it. A lazy
+        registry would mean a database round-trip on the auth path of every
+        request to say "no such token".
+        """
+        with self._conn() as conn:
+            for ws_id, stored in conn.execute(
+                    "select ws_id, workspace from lab_workspaces").fetchall():
+                workspace = Workspace(
+                    id=ws_id, name=str(stored.get("name") or ws_id),
+                    # the token is NOT stored; a rehydrated workspace has no
+                    # usable one of its own, which is what shown-once means
+                    token=secrets.token_hex(24),
+                    plan=dict(stored.get("plan") or DEFAULT_PLAN),
+                    is_admin=bool(stored.get("is_admin")),
+                    org=stored.get("org"),
+                    subscription=dict(stored.get("subscription") or {}),
+                    created_at=float(stored.get("created_at") or 0.0))
+                self._by_id[ws_id] = workspace
+                self._members.setdefault(ws_id, {})
+            for digest, ws_id, role, kind in conn.execute(
+                    "select token_sha256, ws_id, role, kind from lab_members"
+            ).fetchall():
+                self._by_token[digest] = (ws_id, role)
+                self._members.setdefault(ws_id, {})
+                # the workspace's OWN credential authenticates but is not a
+                # member row: `members_of` already counts the owner implicitly,
+                # and loading it here reported the tenant as having two
+                if kind != "workspace":
+                    self._members[ws_id][digest] = role
+            for digest, ws_id in conn.execute(
+                    "select key_sha256, ws_id from lab_runtime_keys").fetchall():
+                self._key_ws[digest] = ws_id
+
+    def _save_workspace_locked(self, workspace: Workspace) -> None:
+        if self._dsn is None:
+            return
+        from psycopg.types.json import Jsonb
+
+        with self._conn() as conn:
+            conn.execute(
+                "insert into lab_workspaces (ws_id, workspace) values (%s,%s) "
+                "on conflict (ws_id) do update set workspace=excluded.workspace, "
+                "updated_at=now()",
+                (workspace.id, Jsonb(workspace.public())))
+
+    def _save_member_locked(self, digest: str, ws_id: str, role: str,
+                            kind: str = "member") -> None:
+        if self._dsn is None:
+            return
+        with self._conn() as conn:
+            conn.execute(
+                "insert into lab_members (token_sha256, ws_id, role, kind) "
+                "values (%s,%s,%s,%s) "
+                "on conflict (token_sha256) do update set ws_id=excluded.ws_id, "
+                "role=excluded.role, kind=excluded.kind",
+                (digest, ws_id, role, kind))
+
+    def _forget_member_locked(self, digest: str) -> None:
+        if self._dsn is None:
+            return
+        with self._conn() as conn:
+            conn.execute("delete from lab_members where token_sha256=%s", (digest,))
 
     # -- billing ----------------------------------------------------------
     def apply_plan(self, ws_id: str, plan_id: str, status: str = "active") -> Workspace | None:
@@ -213,6 +301,9 @@ class Workspaces:
             fallback = self.plan_catalog.get(FREE_PLAN, dict(DEFAULT_PLAN))
             workspace.plan = dict(self.plan_catalog.get(effective, fallback))
             workspace.subscription = {"plan_id": plan_id, "status": status}
+            # a paid plan that a restart reverted to free is a billing incident,
+            # not a cache miss
+            self._save_workspace_locked(workspace)
             return workspace
 
     def open_checkout(self, ws_id: str, plan_id: str, session_id: str) -> dict[str, object]:
@@ -236,9 +327,12 @@ class Workspaces:
     # -- registry ---------------------------------------------------------
     def add(self, workspace: Workspace) -> Workspace:
         with self._lock:
-            self._by_token[workspace.token] = (workspace.id, "owner")
+            digest = token_digest(workspace.token)
+            self._by_token[digest] = (workspace.id, "owner")
             self._by_id[workspace.id] = workspace
             self._members.setdefault(workspace.id, {})
+            self._save_workspace_locked(workspace)
+            self._save_member_locked(digest, workspace.id, "owner", kind="workspace")
         return workspace
 
     def ensure_org_workspace(self, org_id: str, name: str | None = None,
@@ -260,6 +354,10 @@ class Workspaces:
                                       token=secrets.token_hex(24), org=org_id)
                 self._by_id[org_id] = workspace
                 self._members.setdefault(org_id, {})
+                # an identity org's workspace is durable too — otherwise the
+                # first request after a deploy re-provisions it from scratch and
+                # its audit history has nothing to attach to
+                self._save_workspace_locked(workspace)
             current_plan = str(workspace.subscription.get("plan_id", FREE_PLAN))
         if tier is not None and (created or current_plan != tier):
             plan_id = tier if tier in self.plan_catalog else FREE_PLAN
@@ -278,7 +376,7 @@ class Workspaces:
         if not token:
             return None
         with self._lock:
-            binding = self._by_token.get(token)
+            binding = self._by_token.get(token_digest(token))
             if binding is None:
                 return None
             ws_id, role = binding
@@ -307,7 +405,9 @@ class Workspaces:
                 plan=dict(TRIAL_PLAN),
                 subscription={"plan_id": "trial", "status": "active"})
             self._by_id[ws_id] = workspace
-            self._by_token[token] = (ws_id, "owner")
+            # a guest is EPHEMERAL by design: never written to the registry,
+            # so it cannot outlive the process that minted it
+            self._by_token[token_digest(token)] = (ws_id, "owner")
             self._members.setdefault(ws_id, {})
             self._stores[ws_id] = (RuntimeJobStore(), ScreenStore(persist_dir=None))
             expires = time.time() + ttl_seconds
@@ -315,9 +415,9 @@ class Workspaces:
         return {"token": token, "workspace_id": ws_id, "expires_at": expires,
                 "plan": dict(TRIAL_PLAN)}
 
-    def _evict_guest(self, ws_id: str, token: str) -> None:
+    def _evict_guest(self, ws_id: str, token: str) -> None:  # noqa: D401
         """Drop an expired guest session (caller holds the lock)."""
-        self._by_token.pop(token, None)
+        self._by_token.pop(token_digest(token), None)
         self._by_id.pop(ws_id, None)
         self._stores.pop(ws_id, None)
         self._members.pop(ws_id, None)
@@ -326,14 +426,18 @@ class Workspaces:
     # -- members (RBAC) ---------------------------------------------------
     def add_member(self, ws_id: str, token: str, role: str) -> None:
         with self._lock:
-            self._by_token[token] = (ws_id, role)
-            self._members.setdefault(ws_id, {})[token] = role
+            digest = token_digest(token)
+            self._by_token[digest] = (ws_id, role)
+            self._members.setdefault(ws_id, {})[digest] = role
+            self._save_member_locked(digest, ws_id, role)
 
     def remove_member(self, ws_id: str, token: str) -> bool:
         with self._lock:
-            existed = self._members.get(ws_id, {}).pop(token, None) is not None
+            digest = token_digest(token)
+            existed = self._members.get(ws_id, {}).pop(digest, None) is not None
             if existed:
-                self._by_token.pop(token, None)
+                self._by_token.pop(digest, None)
+                self._forget_member_locked(digest)
             return existed
 
     def members_of(self, ws_id: str) -> list[dict[str, object]]:
@@ -348,11 +452,27 @@ class Workspaces:
     # -- audit log (compliance) ------------------------------------------
     def audit(self, ws_id: str, actor_role: str, action: str, at: float,
               detail: str = "") -> None:
+        entry = {"at": at, "actor_role": actor_role, "action": action,
+                 "detail": detail}
         with self._lock:
-            self._audit.setdefault(ws_id, []).append(
-                {"at": at, "actor_role": actor_role, "action": action, "detail": detail})
+            self._audit.setdefault(ws_id, []).append(entry)
+            if self._dsn is not None:
+                # append-only, and written through rather than buffered: an audit
+                # log that a crash can shorten is not one
+                with self._conn() as conn:
+                    conn.execute(
+                        "insert into lab_audit (ws_id, at, actor_role, action, detail) "
+                        "values (%s,%s,%s,%s,%s)",
+                        (ws_id, at, actor_role, action, detail))
 
     def audit_log(self, ws_id: str) -> list[dict[str, object]]:
+        if self._dsn is not None:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    "select at, actor_role, action, detail from lab_audit "
+                    "where ws_id=%s order by id", (ws_id,)).fetchall()
+            return [{"at": r[0], "actor_role": r[1], "action": r[2], "detail": r[3]}
+                    for r in rows]
         with self._lock:
             return list(self._audit.get(ws_id, []))
 
@@ -407,13 +527,20 @@ class Workspaces:
         """A runtime's ingest key belongs to the workspace that connected it, so
         a later runtime call (which carries only the key) resolves to it."""
         with self._lock:
-            self._key_ws[ingest_key] = ws_id
+            digest = token_digest(ingest_key)
+            self._key_ws[digest] = ws_id
+            if self._dsn is not None:
+                with self._conn() as conn:
+                    conn.execute(
+                        "insert into lab_runtime_keys (key_sha256, ws_id) values (%s,%s) "
+                        "on conflict (key_sha256) do update set ws_id=excluded.ws_id",
+                        (digest, ws_id))
 
     def workspace_for_key(self, ingest_key: str | None) -> str | None:
         if not ingest_key:
             return None
         with self._lock:
-            return self._key_ws.get(ingest_key)
+            return self._key_ws.get(token_digest(ingest_key))
 
     # -- current-request workspace (thread-local) ------------------------
     def set_current(self, ws_id: str) -> None:

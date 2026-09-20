@@ -70,6 +70,46 @@ create index if not exists lab_runs_recent
     on lab_runs (workspace_id, updated_at desc);
 create index if not exists lab_runs_gin
     on lab_runs using gin (job jsonb_path_ops);
+
+-- The tenant registry. A workspace row never holds its own token: a token is
+-- shown once at creation and thereafter only ever COMPARED, so what is stored
+-- is a SHA-256 of it. In memory a plaintext token was merely careless; in a
+-- database it is a credential dump waiting for a `pg_dump`, and the same
+-- reasoning the control plane applies to its API keys applies here.
+create table if not exists lab_workspaces (
+    ws_id      text        not null primary key,
+    workspace  jsonb       not null,
+    updated_at timestamptz not null default now()
+);
+create table if not exists lab_members (
+    token_sha256 text        not null primary key,
+    ws_id        text        not null references lab_workspaces(ws_id) on delete cascade,
+    role         text        not null,
+    -- 'workspace' is the tenant's OWN credential, which `members_of` counts
+    -- implicitly; 'member' is one an admin added. Storing both in one table
+    -- without the distinction made a reloaded workspace report two owners.
+    kind         text        not null default 'member',
+    created_at   timestamptz not null default now()
+);
+create index if not exists lab_members_ws on lab_members (ws_id);
+-- Compliance: who changed what, by ROLE. Append-only, and it outlived nothing
+-- before — the log a deployment would be asked for in an audit was the first
+-- thing a restart threw away.
+create table if not exists lab_audit (
+    id         bigserial   primary key,
+    ws_id      text        not null,
+    at         double precision not null,
+    actor_role text        not null,
+    action     text        not null,
+    detail     text        not null default ''
+);
+create index if not exists lab_audit_ws on lab_audit (ws_id, id);
+-- Which workspace a connected runtime's ingest key belongs to, so a runtime
+-- does not have to re-register after a deploy.
+create table if not exists lab_runtime_keys (
+    key_sha256 text not null primary key,
+    ws_id      text not null
+);
 """
 
 

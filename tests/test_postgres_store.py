@@ -214,3 +214,122 @@ class TestPostgresRunStore(unittest.TestCase):
         run_id, _, _ = self._finished_run()
         other = RuntimeJobStore(dsn=DSN, workspace_id="ws_" + uuid.uuid4().hex[:10])
         self.assertNotIn(run_id, other.run_ids())
+
+
+@unittest.skipUnless(DSN, "set AXOR_LAB_TEST_POSTGRES_URL to run")
+class TestPostgresRegistry(unittest.TestCase):
+    """Tenants, their members and their audit log survive the process.
+
+    Measured before this existed: a workspace showing owner 1 / member 2 /
+    viewer 1 came back from a restart with only its owner, and a member token
+    that had just worked returned 401.
+    """
+
+    def setUp(self) -> None:
+        from lab_server.workspaces import Workspaces
+
+        self.make = lambda: Workspaces(dsn=DSN)
+        self.registry = self.make()
+
+    def _workspace(self) -> tuple[str, str]:
+        from lab_server.workspaces import Workspace
+
+        ws_id = "ws_" + uuid.uuid4().hex[:10]
+        owner = "owner-" + uuid.uuid4().hex
+        self.registry.add(Workspace(id=ws_id, name="W", token=owner))
+        return ws_id, owner
+
+    def test_members_survive_a_restart(self) -> None:
+        ws_id, owner = self._workspace()
+        member = "member-" + uuid.uuid4().hex
+        self.registry.add_member(ws_id, member, "member")
+
+        reopened = self.make()
+        self.assertIsNotNone(reopened.resolve_token(owner))
+        resolved = reopened.resolve_token(member)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.id, ws_id)  # type: ignore[union-attr]
+        self.assertEqual(reopened.role_of(member), "member")
+
+    def test_a_removed_member_stays_removed(self) -> None:
+        ws_id, _ = self._workspace()
+        member = "gone-" + uuid.uuid4().hex
+        self.registry.add_member(ws_id, member, "member")
+        self.assertTrue(self.registry.remove_member(ws_id, member))
+        self.assertIsNone(self.make().resolve_token(member))
+
+    def test_tokens_are_stored_HASHED_never_in_the_clear(self) -> None:
+        """A plaintext token in memory was careless; in a database it is a
+        credential dump waiting for a pg_dump."""
+        import psycopg
+
+        from lab_server.workspaces import token_digest
+
+        ws_id, owner = self._workspace()
+        member = "secret-" + uuid.uuid4().hex
+        self.registry.add_member(ws_id, member, "admin")
+
+        with psycopg.connect(DSN) as conn:
+            rows = conn.execute(
+                "select token_sha256 from lab_members where ws_id=%s", (ws_id,)
+            ).fetchall()
+            stored = {r[0] for r in rows}
+            # nothing anywhere in the registry tables echoes the token
+            dumped = conn.execute(
+                "select count(*) from lab_members "
+                "where token_sha256 like %s", (f"%{member}%",)).fetchone()[0]
+            ws_json = conn.execute(
+                "select workspace::text from lab_workspaces where ws_id=%s",
+                (ws_id,)).fetchone()[0]
+
+        self.assertIn(token_digest(member), stored)
+        self.assertIn(token_digest(owner), stored)
+        self.assertEqual(dumped, 0)
+        self.assertNotIn(member, ws_json)
+        self.assertNotIn(owner, ws_json)
+
+    def test_a_paid_plan_survives_a_restart(self) -> None:
+        """A plan a restart reverted to free is a billing incident."""
+        ws_id, _ = self._workspace()
+        catalog = {"free": {"name": "Community"},
+                   "team": {"name": "Team Workspace", "capabilities": ["hosted_execution"]}}
+        self.registry.plan_catalog = catalog
+        self.registry.apply_plan(ws_id, "team")
+
+        reopened = self.make()
+        reopened.plan_catalog = catalog
+        workspace = reopened.get(ws_id)
+        self.assertIsNotNone(workspace)
+        self.assertEqual(workspace.plan["name"], "Team Workspace")  # type: ignore[union-attr]
+        self.assertEqual(
+            workspace.subscription["plan_id"], "team")  # type: ignore[union-attr]
+
+    def test_the_audit_log_outlives_the_process(self) -> None:
+        ws_id, _ = self._workspace()
+        self.registry.audit(ws_id, "admin", "PUT /suites/x", 1000.0, "detail")
+        self.registry.audit(ws_id, "member", "POST /runs", 1001.0)
+
+        entries = self.make().audit_log(ws_id)
+        self.assertEqual([e["action"] for e in entries],
+                         ["PUT /suites/x", "POST /runs"])
+        self.assertEqual(entries[0]["actor_role"], "admin")
+
+    def test_a_reloaded_workspace_does_not_report_two_owners(self) -> None:
+        """`members_of` counts the owner implicitly, so persisting the
+        workspace's OWN credential as a member row double-counted it. Found by
+        driving the real server, not by a unit test — the member count read
+        "owner 2" after a restart."""
+        ws_id, _ = self._workspace()
+        self.registry.add_member(ws_id, "m-" + uuid.uuid4().hex, "member")
+        before = self.registry.members_of(ws_id)
+        after = self.make().members_of(ws_id)
+        self.assertEqual(after, before)
+        owners = next(r for r in after if r["role"] == "owner")
+        self.assertEqual(owners["count"], 1)
+
+    def test_a_guest_session_is_NOT_persisted(self) -> None:
+        """Ephemeral by design — it must not come back from the dead."""
+        guest = self.registry.create_guest(ttl_seconds=60)
+        token = str(guest["token"])
+        self.assertIsNotNone(self.registry.resolve_token(token))
+        self.assertIsNone(self.make().resolve_token(token))

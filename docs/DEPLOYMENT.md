@@ -37,15 +37,16 @@ docker compose up --build                  # → http://localhost:8443
   by a query inside Postgres rather than by loading every run into memory.
   Without `AXOR_LAB_DATABASE_URL` the server keeps the old file behaviour, and
   the CLI never needs a database at all.
-- **Workspace MEMBERSHIP still does not survive a restart.** This is the one piece of
-  state the data directory does not hold: the registry of workspaces, member
-  tokens, roles and plans lives in memory. Verified — a workspace with two
-  members and a viewer came back with only its owner, and the member tokens
-  401'd. What survives a restart is the control token (it comes from the
-  environment) and anything provisioned by identity login (re-provisioned from
-  the token's own claims on the next request). Plan an identity deployment
-  before you invite people, or expect to re-issue member tokens after every
-  deploy.
+- **Workspace membership survives on Postgres, and only there.** The registry —
+  workspaces, member tokens, roles, plans and the audit log — is durable with a
+  DSN and in-memory without one. Verified both ways: without a database a
+  workspace showing owner 1 / member 2 came back with only its owner and the
+  member tokens 401'd; with one, the same member token still authenticates
+  after a restart. A guest session is the deliberate exception — ephemeral by
+  design, never written.
+- **Tokens are stored hashed.** A member token is shown once at creation and
+  thereafter only compared, so the registry keeps a SHA-256 and never the token.
+  A `pg_dump` therefore carries no usable credential.
 
 ## First boot
 
