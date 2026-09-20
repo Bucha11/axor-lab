@@ -26,6 +26,18 @@ docker compose up --build                  # → http://localhost:8443
   a plan is granted by an admin today. See the maturity table in `README.md`.
 - **No TLS until you provide certificates.** The shipped config listens on plain
   HTTP and says so. Three lines in `deploy/nginx.conf` switch it.
+- **There is no database.** Every store is JSON files under the data directory,
+  written atomically. Back up that directory and you have backed up the system
+  of record; there is no dump to take and no migration to run.
+- **Workspace MEMBERSHIP does not survive a restart.** This is the one piece of
+  state the data directory does not hold: the registry of workspaces, member
+  tokens, roles and plans lives in memory. Verified — a workspace with two
+  members and a viewer came back with only its owner, and the member tokens
+  401'd. What survives a restart is the control token (it comes from the
+  environment) and anything provisioned by identity login (re-provisioned from
+  the token's own claims on the next request). Plan an identity deployment
+  before you invite people, or expect to re-issue member tokens after every
+  deploy.
 
 ## First boot
 
@@ -59,10 +71,34 @@ Put `fullchain.pem` and `privkey.pem` in `deploy/certs/`, then in
 it and map the port in `docker-compose.yml`. Renew by replacing the files and
 `docker compose restart proxy` — nginx reads them at start.
 
+## Authentication, in one place
+
+Three kinds of credential reach the server, all as `Authorization: Bearer …`:
+
+| Credential | Where it comes from | Survives restart |
+|---|---|---|
+| control token | `AXOR_LAB_CONTROL_TOKEN`, the environment | yes |
+| member token | minted by the server on `POST /workspaces/current/members`, returned **once** | no |
+| identity access token | an axor-identity deployment, verified against its JWKS | yes (re-provisions) |
+| runtime ingest key | minted on `POST /runtimes/connect`, for a connected runtime only | no |
+
+RBAC is a four-rung ladder — `owner` > `admin` > `member` > `viewer`. Any
+POST/PUT/DELETE needs at least `member`, so a viewer is read-only; managing
+members needs `admin`. Every mutation is appended to the workspace audit log by
+ROLE, not by token — an audit log is not a place to leak credentials. With no
+control token set at all the server runs OPEN, as a single owner, and says so
+at startup; that is a local-development mode.
+
+An identity token's `org` selects or provisions the workspace, its `role` drives
+RBAC and its `tier` selects the plan, failing **closed** to free on a tier the
+catalog does not name. An action the plan does not cover is `402`, not `403`:
+authorised and well-formed, just not in the plan.
+
 ## Backup and restore
 
 One directory is the whole system of record: the `labdata` volume (`/data` in
-the container). Everything else in the image is rebuildable from the repo.
+the container). There is no database. Everything else in the image is
+rebuildable from the repo.
 
 ```
 # backup
@@ -131,7 +167,10 @@ itself is unverified):
 - the security headers nginx adds, and `server_tokens off`;
 - durability: a suite created through the proxy landed at
   `/data/suite/<id>.json` and was still listed after the process was stopped and
-  started again;
+  started again — while the same restart dropped the workspace's member tokens,
+  which is how the membership limit above was established rather than inferred;
+- the RBAC ladder: a viewer's `POST /suites` refused with 403, a member's
+  attempt to add a member refused with 403, both roles reading fine;
 - the image's install shape, simulated without Docker: a NON-editable
   `pip install .` into a clean venv, the built `dist/` copied to a separate
   path, and `axor-lab serve` run from outside the source tree. Without
