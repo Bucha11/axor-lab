@@ -143,3 +143,74 @@ class TestContainsAgreesAcrossBackends(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(DSN, "set AXOR_LAB_TEST_POSTGRES_URL to run")
+class TestPostgresRunStore(unittest.TestCase):
+    """Runs and their TRACES outlive the process.
+
+    This is the data-loss bug, not a scaling nicety: `SCREEN_KINDS` never held
+    a trace, so a finished run's artifact survived a restart while the traces
+    it references did not — the Trial screen for any past run went blank.
+    """
+
+    def setUp(self) -> None:
+        from lab_server.runtime_jobs import RuntimeJobStore
+
+        self.ws = "ws_" + uuid.uuid4().hex[:10]
+        self.make = lambda: RuntimeJobStore(dsn=DSN, workspace_id=self.ws)
+        self.store = self.make()
+
+    def _finished_run(self) -> tuple[str, str, dict[str, object]]:
+        """A run completed with a schema-VALID trace — the store requires one,
+        and a hand-rolled shape would test persistence against a document the
+        product rejects."""
+        from tests.test_runtime_jobs import _valid_trace
+
+        runtime = self.store.connect_runtime(runtime_label="rt")["runtime_ref"]
+        run = self.store.create_run(runtime, {"id": "e"}, planned=["t0"])
+        run_id = str(run["run_id"])
+        if self.store.run_state(run_id) == "awaiting_confirmation":
+            self.store.confirm_run(run_id)
+        self.store.claim(run_id, runtime)
+        trace = _valid_trace()
+        self.store.complete_trial(run_id, "t0", runtime, trace)
+        return run_id, runtime, trace
+
+    def test_a_finished_runs_trace_survives_a_new_process(self) -> None:
+        run_id, _, trace = self._finished_run()
+        reopened = self.make()  # a different store: nothing shared in memory
+        self.assertEqual(reopened.trial_trace(run_id, "t0")["trace_id"],
+                         trace["trace_id"])
+
+    def test_the_run_is_listed_after_a_restart(self) -> None:
+        run_id, _, _ = self._finished_run()
+        reopened = self.make()
+        self.assertIn(run_id, reopened.run_ids())
+        summary = next(r for r in reopened.list_runs() if r["run_id"] == run_id)
+        self.assertEqual(summary["planned"], 1)
+        self.assertEqual(summary["completed"], 1)
+
+    def test_a_run_saved_at_creation_is_not_lost_before_its_first_transition(self) -> None:
+        runtime = self.store.connect_runtime(runtime_label="rt")["runtime_ref"]
+        run_id = str(self.store.create_run(
+            runtime, {"id": "e"}, planned=["t0"])["run_id"])
+        self.assertIn(run_id, self.make().run_ids())
+
+    def test_listeners_are_not_persisted(self) -> None:
+        """They are live queues belonging to connections this process holds;
+        a later process must not inherit a reference to them."""
+        from lab_server.runtime_jobs import _job_to_row
+
+        run_id, _, _ = self._finished_run()
+        self.store.subscribe(run_id)
+        row = _job_to_row(self.store._jobs[run_id])  # noqa: SLF001
+        self.assertNotIn("listeners", row)
+        json.dumps(row)  # and the row is serializable at all
+
+    def test_runs_are_isolated_between_workspaces(self) -> None:
+        from lab_server.runtime_jobs import RuntimeJobStore
+
+        run_id, _, _ = self._finished_run()
+        other = RuntimeJobStore(dsn=DSN, workspace_id="ws_" + uuid.uuid4().hex[:10])
+        self.assertNotIn(run_id, other.run_ids())

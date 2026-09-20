@@ -54,6 +54,22 @@ create index if not exists lab_documents_doc_gin
     on lab_documents using gin (doc jsonb_path_ops);
 create index if not exists lab_documents_kind
     on lab_documents (workspace_id, kind, updated_at desc);
+
+-- A run and everything it produced: its assignment, per-trial events, metrics
+-- and the finished TRACES. Traces were the one thing the job store never
+-- persisted, so the Trial screen for any past run went blank after a restart
+-- while its artifact — which references those traces — survived.
+create table if not exists lab_runs (
+    workspace_id text        not null,
+    job_id       text        not null,
+    job          jsonb       not null,
+    updated_at   timestamptz not null default now(),
+    primary key (workspace_id, job_id)
+);
+create index if not exists lab_runs_recent
+    on lab_runs (workspace_id, updated_at desc);
+create index if not exists lab_runs_gin
+    on lab_runs using gin (job jsonb_path_ops);
 """
 
 

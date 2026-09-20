@@ -377,10 +377,12 @@ class Workspaces:
                 return existing
             if self._dsn is not None:
                 shelf = ScreenStore(dsn=self._dsn, workspace_id=ws_id)
+                jobs = RuntimeJobStore(dsn=self._dsn, workspace_id=ws_id)
             else:
                 persist = str(self._data_dir / ws_id) if self._data_dir is not None else None
                 shelf = ScreenStore(persist_dir=persist)
-            pair = (RuntimeJobStore(), shelf)
+                jobs = RuntimeJobStore()
+            pair = (jobs, shelf)
             self._stores[ws_id] = pair
             return pair
 

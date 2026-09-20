@@ -16,8 +16,10 @@ docker compose up --build                  # → http://localhost:8443
   other is executing, so do not scale `lab`. Everything finished — suites,
   artifacts, evidence, regressions, workspaces — is on disk and shared by
   nothing.
-- **A restart drops runs in flight.** Finished work survives (verified below);
-  a run mid-execution does not. Deploy when nothing is running, or accept it.
+- **A restart drops runs in flight.** Finished runs — including their traces —
+  survive on Postgres (verified below); a run mid-execution does not: the
+  runtime executing it has to be told again. Deploy when nothing is running, or
+  accept it.
 - **Rate limiting lives at the proxy, not in the app.** The app has none. If you
   put something other than `deploy/nginx.conf` in front of it, carry the limits
   over — especially the one on `/guest-session`.
@@ -30,7 +32,9 @@ docker compose up --build                  # → http://localhost:8443
   EvidenceCases, regressions and artifacts are `jsonb` rows scoped by workspace
   — durable, searchable inside, and not preloaded into RAM. The publication
   catalog and proxy traces are still files under the data directory. So a
-  backup is two things now: a `pg_dump` and the `labdata` volume.
+  backup is two things now: a `pg_dump` and the `labdata` volume. Runs, their
+  trials and their finished traces are rows too — the Runs screen is computed
+  by a query inside Postgres rather than by loading every run into memory.
   Without `AXOR_LAB_DATABASE_URL` the server keeps the old file behaviour, and
   the CLI never needs a database at all.
 - **Workspace MEMBERSHIP still does not survive a restart.** This is the one piece of
