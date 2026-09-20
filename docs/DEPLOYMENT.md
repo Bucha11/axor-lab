@@ -26,10 +26,14 @@ docker compose up --build                  # → http://localhost:8443
   a plan is granted by an admin today. See the maturity table in `README.md`.
 - **No TLS until you provide certificates.** The shipped config listens on plain
   HTTP and says so. Three lines in `deploy/nginx.conf` switch it.
-- **There is no database.** Every store is JSON files under the data directory,
-  written atomically. Back up that directory and you have backed up the system
-  of record; there is no dump to take and no migration to run.
-- **Workspace MEMBERSHIP does not survive a restart.** This is the one piece of
+- **Documents live in Postgres; everything else is still files.** Suites,
+  EvidenceCases, regressions and artifacts are `jsonb` rows scoped by workspace
+  — durable, searchable inside, and not preloaded into RAM. The publication
+  catalog and proxy traces are still files under the data directory. So a
+  backup is two things now: a `pg_dump` and the `labdata` volume.
+  Without `AXOR_LAB_DATABASE_URL` the server keeps the old file behaviour, and
+  the CLI never needs a database at all.
+- **Workspace MEMBERSHIP still does not survive a restart.** This is the one piece of
   state the data directory does not hold: the registry of workspaces, member
   tokens, roles and plans lives in memory. Verified — a workspace with two
   members and a viewer came back with only its owner, and the member tokens
@@ -96,9 +100,12 @@ authorised and well-formed, just not in the plan.
 
 ## Backup and restore
 
-One directory is the whole system of record: the `labdata` volume (`/data` in
-the container). There is no database. Everything else in the image is
-rebuildable from the repo.
+Two things now: the Postgres database (suites, evidence, regressions,
+artifacts) and the `labdata` volume (the publication catalog, traces).
+
+```
+docker compose exec postgres pg_dump -U axor axor_lab | gzip > axor-lab-$(date +%F).sql.gz
+```
 
 ```
 # backup

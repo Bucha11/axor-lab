@@ -10,6 +10,20 @@
 # be lost on restart. Finished artifacts, suites, evidence and workspaces live
 # in the `labdata` volume and survive.
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: axor_lab
+      POSTGRES_USER: axor
+      POSTGRES_PASSWORD: ${AXOR_LAB_PG_PASSWORD:?set AXOR_LAB_PG_PASSWORD in .env}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U axor -d axor_lab"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   lab:
     build:
       context: .
@@ -21,6 +35,9 @@ services:
       # Required. The operator/admin bearer; every write is gated on it until a
       # workspace has members of its own.
       AXOR_LAB_CONTROL_TOKEN: ${AXOR_LAB_CONTROL_TOKEN:?set AXOR_LAB_CONTROL_TOKEN in .env}
+      # Documents become rows scoped by workspace: durable, queryable, and
+      # nothing preloaded into RAM. This REPLACES the data directory for them.
+      AXOR_LAB_DATABASE_URL: postgresql://axor:${AXOR_LAB_PG_PASSWORD}@postgres/axor_lab
       AXOR_LAB_DATA_DIR: /data
       # Your price list. Omitted, the server falls back to a placeholder catalog
       # that carries no pricing authority.
@@ -36,6 +53,9 @@ services:
       # anyone who can POST /guest-session can mint workspaces.
       AXOR_LAB_GUEST_SESSIONS: ${AXOR_LAB_GUEST_SESSIONS:-}
     volumes: ["labdata:/data"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8871/').status==200 else 1)\""]
@@ -58,6 +78,7 @@ services:
 
 volumes:
   labdata: {}
+  pgdata: {}
 
 # Optional token for the build, which clones axor-wrap and axor-eval from git.
 # Both are public, so an empty value builds fine on a network that reaches

@@ -81,6 +81,10 @@ identity = ["pyjwt[crypto]>=2.8", "cryptography>=42.0"]
 # empty alias so `pip install axor-lab[kernel]` in an existing script keeps
 # working instead of erroring on an unknown extra.
 kernel = []
+# Postgres storage for a HOSTED lab_server. Deliberately an extra: the CLI is
+# offline and local-first, and a Lab that could not produce a bundle on a laptop
+# without a database would be a different product.
+postgres = ["psycopg[binary,pool]>=3.1"]
 
 [tool.ruff]
 target-version = "py311"

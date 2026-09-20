@@ -46,60 +46,26 @@ class ScreenStore:
     the renderer was wrong.
     """
 
-    def __init__(self, persist_dir: str | Path | None = None) -> None:
+    def __init__(self, persist_dir: str | Path | None = None, *,
+                 dsn: str | None = None, workspace_id: str = "default") -> None:
         self._lock = threading.Lock()
-        self._by_kind: dict[str, dict[str, dict[str, Any]]] = {
-            kind: {} for kind in SCREEN_KINDS
-        }
-        # DURABLE storage (open-core plan §4.8 / RFC §16 "hosted workspace"): a
-        # workspace that vanishes on restart is a demo, not a product. With a
-        # directory, every document is written to disk and reloaded on startup —
-        # the swap this class's own docstring anticipated. Without one, the store
-        # is in-memory exactly as before (the tests' default, and the offline
-        # single-shot CLI's).
-        self._root = Path(persist_dir) if persist_dir is not None else None
-        if self._root is not None:
-            self._load_from_disk()
-
-    # -- persistence ------------------------------------------------------
-    def _dir_for(self, kind: str) -> Path:
-        assert self._root is not None
-        path = self._root / kind
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _path_for(self, kind: str, identifier: str) -> Path:
-        # the id can carry colons and slashes (sha256:..., paths); quote it so it
-        # is one safe filename, reversible on load
-        return self._dir_for(kind) / f"{quote(identifier, safe='')}.json"
-
-    def _load_from_disk(self) -> None:
-        for kind in SCREEN_KINDS:
-            directory = self._dir_for(kind)
-            for file in directory.glob("*.json"):
-                try:
-                    document = json.loads(file.read_text())
-                except (OSError, ValueError):
-                    continue  # a corrupt file is skipped, not fatal on startup
-                identifier = unquote(file.stem)
-                self._by_kind[kind][identifier] = document
-
-    def _write(self, kind: str, identifier: str, document: dict[str, Any]) -> None:
-        if self._root is None:
-            return
-        target = self._path_for(kind, identifier)
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(document, ensure_ascii=False))
-        os.replace(tmp, target)  # atomic: a reader never sees a half-written file
-
-    def _erase(self, kind: str, identifier: str) -> None:
-        if self._root is None:
-            return
-        self._path_for(kind, identifier).unlink(missing_ok=True)
+        # Three backends, one interface. The file and memory ones keep the whole
+        # workspace in RAM and mirror writes to disk — that is what they have
+        # always done, and every test depends on it. The Postgres one does not
+        # preload: reads are queries. Keeping load-everything semantics on a
+        # database would have migrated the RAM ceiling along with the data,
+        # which is most of what the migration is for.
+        self._backend: _Backend
+        if dsn is not None:
+            self._backend = _PostgresBackend(dsn, workspace_id)
+        elif persist_dir is not None:
+            self._backend = _FileBackend(Path(persist_dir))
+        else:
+            self._backend = _MemoryBackend()
 
     # -- API --------------------------------------------------------------
     def put(self, kind: str, document: dict[str, Any], id_field: str = "id") -> str:
-        if kind not in self._by_kind:
+        if kind not in SCREEN_KINDS:
             raise ScreenStoreError(400, f"unknown kind {kind!r}")
         errors = validate_artifact(document, kind)
         if errors:
@@ -110,13 +76,12 @@ class ScreenStore:
         if not identifier:
             raise ScreenStoreError(422, f"{kind} has no {id_field}")
         with self._lock:
-            self._by_kind[kind][identifier] = dict(document)
-            self._write(kind, identifier, self._by_kind[kind][identifier])
+            self._backend.write(kind, identifier, dict(document))
         return identifier
 
     def get(self, kind: str, identifier: str) -> dict[str, Any]:
         with self._lock:
-            document = self._by_kind.get(kind, {}).get(identifier)
+            document = self._backend.read(kind, identifier)
         if document is None:
             raise ScreenStoreError(404, f"no {kind} {identifier!r}")
         return document
@@ -124,18 +89,198 @@ class ScreenStore:
     def delete(self, kind: str, identifier: str) -> bool:
         """Remove a stored document. Missing is a no-op (idempotent delete)."""
         with self._lock:
-            existed = self._by_kind.get(kind, {}).pop(identifier, None) is not None
-            if existed:
-                self._erase(kind, identifier)
-            return existed
+            return self._backend.erase(kind, identifier)
 
     def list(self, kind: str) -> list[dict[str, Any]]:
         with self._lock:
-            return [dict(d) for d in self._by_kind.get(kind, {}).values()]
+            return self._backend.all(kind)
 
     def ids(self, kind: str) -> list[str]:
         with self._lock:
-            return sorted(self._by_kind.get(kind, {}))
+            return self._backend.ids(kind)
+
+    def find(self, kind: str, contains: dict[str, Any]) -> list[dict[str, Any]]:
+        """Documents of `kind` that CONTAIN `contains` — the query a file tree
+        cannot answer.
+
+        On Postgres this is one `doc @> …` against the GIN index. On the file
+        and memory backends it is the same predicate applied in Python, so a
+        caller gets the same answer either way and no screen has to know which
+        backend it is talking to.
+        """
+        with self._lock:
+            return self._backend.find(kind, contains)
+
+
+def _contains(document: Any, pattern: Any) -> bool:
+    """Python's reading of Postgres `@>`, so both backends agree."""
+    if isinstance(pattern, dict):
+        if not isinstance(document, dict):
+            return False
+        return all(key in document and _contains(document[key], value)
+                   for key, value in pattern.items())
+    if isinstance(pattern, list):
+        if not isinstance(document, list):
+            return False
+        return all(any(_contains(item, wanted) for item in document)
+                   for wanted in pattern)
+    return bool(document == pattern)
+
+
+class _Backend:
+    """What a ScreenStore needs from storage. Five operations, plus a query."""
+
+    def read(self, kind: str, identifier: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def write(self, kind: str, identifier: str, document: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def erase(self, kind: str, identifier: str) -> bool:
+        raise NotImplementedError
+
+    def all(self, kind: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def ids(self, kind: str) -> list[str]:
+        raise NotImplementedError
+
+    def find(self, kind: str, contains: dict[str, Any]) -> list[dict[str, Any]]:
+        return [d for d in self.all(kind) if _contains(d, contains)]
+
+
+class _MemoryBackend(_Backend):
+    def __init__(self) -> None:
+        self._by_kind: dict[str, dict[str, dict[str, Any]]] = {
+            kind: {} for kind in SCREEN_KINDS
+        }
+
+    def read(self, kind: str, identifier: str) -> dict[str, Any] | None:
+        return self._by_kind.get(kind, {}).get(identifier)
+
+    def write(self, kind: str, identifier: str, document: dict[str, Any]) -> None:
+        self._by_kind[kind][identifier] = document
+
+    def erase(self, kind: str, identifier: str) -> bool:
+        return self._by_kind.get(kind, {}).pop(identifier, None) is not None
+
+    def all(self, kind: str) -> list[dict[str, Any]]:
+        return [dict(d) for d in self._by_kind.get(kind, {}).values()]
+
+    def ids(self, kind: str) -> list[str]:
+        return sorted(self._by_kind.get(kind, {}))
+
+
+class _FileBackend(_MemoryBackend):
+    """In-memory, mirrored to a directory and reloaded on startup.
+
+    DURABLE storage (open-core plan §4.8 / RFC §16 "hosted workspace"): a
+    workspace that vanishes on restart is a demo, not a product.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self._root = root
+        for kind in SCREEN_KINDS:
+            for file in self._dir_for(kind).glob("*.json"):
+                try:
+                    document = json.loads(file.read_text())
+                except (OSError, ValueError):
+                    continue  # a corrupt file is skipped, not fatal on startup
+                self._by_kind[kind][unquote(file.stem)] = document
+
+    def _dir_for(self, kind: str) -> Path:
+        path = self._root / kind
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _path_for(self, kind: str, identifier: str) -> Path:
+        # the id can carry colons and slashes (sha256:..., paths); quote it so it
+        # is one safe filename, reversible on load
+        return self._dir_for(kind) / f"{quote(identifier, safe='')}.json"
+
+    def write(self, kind: str, identifier: str, document: dict[str, Any]) -> None:
+        super().write(kind, identifier, document)
+        target = self._path_for(kind, identifier)
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(document, ensure_ascii=False))
+        os.replace(tmp, target)  # atomic: a reader never sees a half-written file
+
+    def erase(self, kind: str, identifier: str) -> bool:
+        existed = super().erase(kind, identifier)
+        if existed:
+            self._path_for(kind, identifier).unlink(missing_ok=True)
+        return existed
+
+
+class _PostgresBackend(_Backend):
+    """Rows, scoped to one workspace. Nothing is preloaded."""
+
+    def __init__(self, dsn: str, workspace_id: str) -> None:
+        self._dsn = dsn
+        self._ws = workspace_id
+
+    def _pool(self):  # noqa: ANN202 - psycopg types are optional at import time
+        from lab_server.db import pool
+
+        return pool(self._dsn)
+
+    def read(self, kind: str, identifier: str) -> dict[str, Any] | None:
+        with self._pool().connection() as conn:
+            row = conn.execute(
+                "select doc from lab_documents "
+                "where workspace_id=%s and kind=%s and doc_id=%s",
+                (self._ws, kind, identifier)).fetchone()
+        return row[0] if row else None
+
+    def write(self, kind: str, identifier: str, document: dict[str, Any]) -> None:
+        from psycopg.types.json import Jsonb
+
+        from lab_server.db import reject_unstorable
+
+        reject_unstorable(document)
+        with self._pool().connection() as conn:
+            conn.execute(
+                "insert into lab_documents (workspace_id, kind, doc_id, doc) "
+                "values (%s,%s,%s,%s) "
+                "on conflict (workspace_id, kind, doc_id) "
+                "do update set doc=excluded.doc, updated_at=now()",
+                (self._ws, kind, identifier, Jsonb(document)))
+
+    def erase(self, kind: str, identifier: str) -> bool:
+        with self._pool().connection() as conn:
+            result = conn.execute(
+                "delete from lab_documents "
+                "where workspace_id=%s and kind=%s and doc_id=%s",
+                (self._ws, kind, identifier))
+            return bool(result.rowcount)
+
+    def all(self, kind: str) -> list[dict[str, Any]]:
+        with self._pool().connection() as conn:
+            rows = conn.execute(
+                "select doc from lab_documents where workspace_id=%s and kind=%s "
+                "order by updated_at desc",
+                (self._ws, kind)).fetchall()
+        return [row[0] for row in rows]
+
+    def ids(self, kind: str) -> list[str]:
+        with self._pool().connection() as conn:
+            rows = conn.execute(
+                "select doc_id from lab_documents where workspace_id=%s and kind=%s "
+                "order by doc_id",
+                (self._ws, kind)).fetchall()
+        return [row[0] for row in rows]
+
+    def find(self, kind: str, contains: dict[str, Any]) -> list[dict[str, Any]]:
+        from psycopg.types.json import Jsonb
+
+        with self._pool().connection() as conn:
+            rows = conn.execute(
+                "select doc from lab_documents "
+                "where workspace_id=%s and kind=%s and doc @> %s "
+                "order by updated_at desc",
+                (self._ws, kind, Jsonb(contains))).fetchall()
+        return [row[0] for row in rows]
 
 
 # ── payload builders ─────────────────────────────────────────────────────────

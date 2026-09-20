@@ -39,6 +39,16 @@ class TestServeFlags(unittest.TestCase):
         self.assertIsNone(args.identity_jwks_file)
         self.assertIsNone(args.identity_issuer)
 
+    def test_serve_accepts_a_database_url(self) -> None:
+        args = _build_parser().parse_args(
+            ["serve", "--database-url", "postgresql://h/db"])
+        self.assertEqual(args.database_url, "postgresql://h/db")
+
+    def test_database_url_defaults_off(self) -> None:
+        """No DSN means the file/in-memory backend — the CLI and a laptop
+        deployment must keep working with no database installed."""
+        self.assertIsNone(_build_parser().parse_args(["serve"]).database_url)
+
     def test_serve_accepts_a_web_root(self) -> None:
         args = _build_parser().parse_args(["serve", "--web-root", "/srv/app"])
         self.assertEqual(args.web_root, "/srv/app")
@@ -61,7 +71,8 @@ class TestServeFindsTheWebApp(unittest.TestCase):
     def _args(self, **over: object) -> argparse.Namespace:
         base: dict[str, object] = dict(
             host="127.0.0.1", port=0, control_token="t", data_dir=None,
-            web_root=None, billing_webhook_secret=None, plans_file=None,
+            database_url=None, web_root=None, billing_webhook_secret=None,
+            plans_file=None,
             identity_jwks_url=None, identity_jwks_file=None,
             identity_issuer=None, guest_sessions=False)
         base.update(over)

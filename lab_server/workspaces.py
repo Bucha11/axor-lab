@@ -171,9 +171,14 @@ class Workspaces:
     """The tenant registry: tokens, per-workspace stores, and the current-request
     workspace (thread-local, set by the handler after it authenticates)."""
 
-    def __init__(self, data_dir: str | Path | None = None,
+    def __init__(self, data_dir: str | Path | None = None, *, dsn: str | None = None,
                  plan_catalog: dict[str, dict[str, object]] | None = None) -> None:
         self._data_dir = Path(data_dir) if data_dir is not None else None
+        # With a DSN every workspace's documents are rows scoped by workspace id,
+        # so a per-workspace directory is not created at all. The DSN wins: a
+        # deployment configured for both would otherwise write to one and read
+        # from the other depending on which store a request reached.
+        self._dsn = dsn
         # the operator's plan catalog. Defaults to the EXAMPLE (placeholder
         # pricing) so a bare server runs, but a real deployment supplies its own —
         # the code makes no pricing claim of its own.
@@ -370,8 +375,12 @@ class Workspaces:
             existing = self._stores.get(ws_id)
             if existing is not None:
                 return existing
-            persist = str(self._data_dir / ws_id) if self._data_dir is not None else None
-            pair = (RuntimeJobStore(), ScreenStore(persist_dir=persist))
+            if self._dsn is not None:
+                shelf = ScreenStore(dsn=self._dsn, workspace_id=ws_id)
+            else:
+                persist = str(self._data_dir / ws_id) if self._data_dir is not None else None
+                shelf = ScreenStore(persist_dir=persist)
+            pair = (RuntimeJobStore(), shelf)
             self._stores[ws_id] = pair
             return pair
 
@@ -383,8 +392,11 @@ class Workspaces:
             existing = self._org_stores.get(org_id)
             if existing is not None:
                 return existing
-            persist = str(self._data_dir / "org" / org_id) if self._data_dir else None
-            shelf = ScreenStore(persist_dir=persist)
+            if self._dsn is not None:
+                shelf = ScreenStore(dsn=self._dsn, workspace_id=f"org/{org_id}")
+            else:
+                persist = str(self._data_dir / "org" / org_id) if self._data_dir else None
+                shelf = ScreenStore(persist_dir=persist)
             self._org_stores[org_id] = shelf
             return shelf
 
@@ -440,13 +452,14 @@ class _ShelfRouter:
 
 
 def single_workspace(token: str | None, data_dir: str | Path | None = None,
-                     plan_catalog: dict[str, dict[str, object]] | None = None) -> Workspaces:
+                     plan_catalog: dict[str, dict[str, object]] | None = None,
+                     *, dsn: str | None = None) -> Workspaces:
     """A one-tenant registry from a lone control token — the back-compat path.
 
     When no token is set the workspace is OPEN (the existing unauthenticated
     local-dev mode); its fixed token is a sentinel the handler treats as the
     always-current default rather than a credential to check."""
-    workspaces = Workspaces(data_dir=data_dir, plan_catalog=plan_catalog)
+    workspaces = Workspaces(data_dir=data_dir, plan_catalog=plan_catalog, dsn=dsn)
     # the lone workspace is admin, so a single-token operator can provision more
     workspaces.add(Workspace(id="default", name="Default workspace",
                              token=token or "\x00open\x00", is_admin=True))

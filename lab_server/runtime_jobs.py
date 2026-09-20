@@ -810,6 +810,7 @@ def make_runtime_server(
     screens: "ScreenStore | None" = None,
     web_root: "pathlib.Path | None" = None,
     data_dir: "str | pathlib.Path | None" = None,
+    dsn: str | None = None,
     workspaces: "Workspaces | None" = None,
     billing_webhook_secret: str | None = None,
     plan_catalog: "dict[str, dict[str, object]] | None" = None,
@@ -840,11 +841,16 @@ def make_runtime_server(
     from lab_server.workspaces import _JobsRouter, _ShelfRouter, single_workspace
 
     if workspaces is None:
-        workspaces = single_workspace(control_token, data_dir, plan_catalog)
+        workspaces = single_workspace(control_token, data_dir, plan_catalog, dsn=dsn)
         # honour an explicitly-passed store/screens by seeding the default
         # workspace's stores with them (the in-process test path)
         default_jobs = store or RuntimeJobStore()
-        default_shelf = screens if screens is not None else ScreenStore(persist_dir=data_dir)
+        if screens is not None:
+            default_shelf = screens
+        elif dsn is not None:
+            default_shelf = ScreenStore(dsn=dsn, workspace_id="default")
+        else:
+            default_shelf = ScreenStore(persist_dir=data_dir)
         workspaces._stores["default"] = (default_jobs, default_shelf)  # noqa: SLF001
     # the handler's `jobs`/`shelf` become routers to the CURRENT request's
     # workspace, set by _require_control / _runtime_ref after authentication

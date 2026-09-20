@@ -203,6 +203,21 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                        or os.environ.get("AXOR_LAB_IDENTITY_ISSUER") or "axor-identity")
     guest_sessions = (getattr(args, "guest_sessions", False)
                       or os.environ.get("AXOR_LAB_GUEST_SESSIONS") == "1")
+    dsn = (getattr(args, "database_url", None)
+           or os.environ.get("AXOR_LAB_DATABASE_URL") or None)
+    if dsn is not None:
+        # Reach the database HERE, not on the first request. psycopg_pool opens
+        # in the background and retries forever, so an unreachable database let
+        # the server start, answer `/` and then 500 every screen while the log
+        # filled with connection errors — the operator finds out from a user.
+        # A storage backend that is not there is a startup failure.
+        from lab_server.db import StorageError, pool
+
+        try:
+            pool(dsn).wait(timeout=10)
+        except (StorageError, Exception) as exc:  # noqa: BLE001 - reported, not swallowed
+            print(f"error: cannot reach the database: {exc}", file=sys.stderr)
+            return EXIT_VALIDATION
     requested_web_root = args.web_root or os.environ.get("AXOR_LAB_WEB_ROOT")
     if requested_web_root:
         site: Path | None = Path(requested_web_root).expanduser().resolve()
@@ -219,9 +234,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         host=args.host, port=args.port, control_token=token, data_dir=data_dir,
         billing_webhook_secret=billing_secret, plan_catalog=plan_catalog,
         identity_jwks=identity_jwks, identity_issuer=identity_issuer,
-        guest_sessions=guest_sessions, web_root=site)
+        guest_sessions=guest_sessions, web_root=site, dsn=dsn)
     print(f"axor-lab on http://{args.host}:{args.port}")
-    print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
+    if dsn is not None:
+        # never echo the DSN: it carries a password
+        print("  storage:  postgres (durable, queryable)")
+    else:
+        print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
     if site is None:
         # said plainly rather than serving a 404 the user has to diagnose
         print("  web app:  NOT BUILT — run `npm --prefix web install && "
@@ -1768,6 +1787,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="persist the workspace (suites, evidence, regressions, artifacts) "
              "in this directory and reload it on restart (or AXOR_LAB_DATA_DIR); "
              "omitted, storage is in-memory",
+    )
+    p_serve.add_argument(
+        "--database-url", default=None,
+        help="Postgres DSN for durable, queryable storage (or "
+             "AXOR_LAB_DATABASE_URL). Set, it REPLACES --data-dir for documents: "
+             "they become rows scoped by workspace, nothing is preloaded, and "
+             "screens can search inside them. Omitted, storage is the data "
+             "directory (or memory)",
     )
     p_serve.add_argument(
         "--web-root", default=None,
