@@ -5,12 +5,10 @@
 # Two stages. The first builds the React app with node; the second carries only
 # its `dist/` into the Python image, so node never ships to production.
 #
-# The Python install is DELIBERATELY editable (`pip install -e .`). `axor-lab
-# serve` finds the web app at `lab_server/../../web/dist`, which resolves only
-# while the package sits beside `web/` in a source tree; a normal install puts
-# `lab_server` in site-packages, where that path is a directory that does not
-# exist and the server starts with no UI and says so. Editable keeps the layout
-# the code expects instead of teaching the image to work around it.
+# The app is installed normally — `pip install .`, no source tree left behind —
+# and told where its UI lives with AXOR_LAB_WEB_ROOT. The implicit default
+# (`lab_server/../../web/dist`) only resolves for a source checkout, which is
+# why this used to need an editable install to work at all.
 
 # ── stage 1: the web app ─────────────────────────────────────────────────────
 FROM node:22-slim AS web
@@ -32,18 +30,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
-# Dependency metadata first: this layer is the slow one (a git clone per
-# ecosystem dep) and it must not be invalidated by an ordinary source edit.
+# One install, reading pyproject — deliberately not split into a cached
+# dependency layer. Splitting means naming axor-core's range and the two git
+# refs a second time here, and a Dockerfile pin that drifts from pyproject is
+# an image built against a version nothing tested. A slower rebuild is the
+# cheaper mistake.
 COPY pyproject.toml README.md ./
-COPY lab_contracts/__init__.py ./lab_contracts/
-RUN --mount=type=secret,id=github_token sh -eu -c '\
-    if [ -s /run/secrets/github_token ]; then \
-      git config --global url."https://x-access-token:$(cat /run/secrets/github_token)@github.com/".insteadOf "https://github.com/"; \
-    fi; \
-    pip install --no-cache-dir -e . ; \
-    rm -f /root/.gitconfig'
-
-# Now the source, and the web bundle built in stage 1.
 COPY lab_contracts/ ./lab_contracts/
 COPY lab_runner/ ./lab_runner/
 COPY lab_analysis/ ./lab_analysis/
@@ -54,12 +46,22 @@ COPY lab_capabilities/ ./lab_capabilities/
 COPY contracts/ ./contracts/
 COPY examples/ ./examples/
 COPY docs/pricing/ ./docs/pricing/
-COPY --from=web /web/dist ./web/dist
+RUN --mount=type=secret,id=github_token sh -eu -c '\
+    if [ -s /run/secrets/github_token ]; then \
+      git config --global url."https://x-access-token:$(cat /run/secrets/github_token)@github.com/".insteadOf "https://github.com/"; \
+    fi; \
+    pip install --no-cache-dir . ; \
+    rm -f /root/.gitconfig'
+
+# The UI, built in stage 1, at a path the server is told about explicitly.
+COPY --from=web /web/dist /srv/axor-lab/web
 
 # The data directory is what makes a deployment durable; compose mounts a volume
 # here. Without it the server keeps everything in memory and says so at startup.
-ENV AXOR_LAB_DATA_DIR=/data
-RUN mkdir -p /data && useradd -r -u 10001 axor && chown -R axor:axor /app /data
+ENV AXOR_LAB_DATA_DIR=/data \
+    AXOR_LAB_WEB_ROOT=/srv/axor-lab/web
+RUN mkdir -p /data && useradd -r -u 10001 axor \
+    && chown -R axor:axor /app /data /srv/axor-lab
 USER axor
 
 EXPOSE 8871

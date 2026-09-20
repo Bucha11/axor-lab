@@ -203,18 +203,29 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                        or os.environ.get("AXOR_LAB_IDENTITY_ISSUER") or "axor-identity")
     guest_sessions = (getattr(args, "guest_sessions", False)
                       or os.environ.get("AXOR_LAB_GUEST_SESSIONS") == "1")
+    requested_web_root = args.web_root or os.environ.get("AXOR_LAB_WEB_ROOT")
+    if requested_web_root:
+        site: Path | None = Path(requested_web_root).expanduser().resolve()
+        if not (site / "index.html").is_file():
+            print(f"error: --web-root {site} holds no index.html — nothing to "
+                  "serve there. Build the app (`npm --prefix web install && "
+                  "npm --prefix web run build`) and point at its `dist`.",
+                  file=sys.stderr)
+            return EXIT_VALIDATION
+    else:
+        site = default_root()
+
     server = make_runtime_server(
         host=args.host, port=args.port, control_token=token, data_dir=data_dir,
         billing_webhook_secret=billing_secret, plan_catalog=plan_catalog,
         identity_jwks=identity_jwks, identity_issuer=identity_issuer,
-        guest_sessions=guest_sessions)
-    site = default_root()
+        guest_sessions=guest_sessions, web_root=site)
     print(f"axor-lab on http://{args.host}:{args.port}")
     print(f"  storage:  {'durable → ' + str(data_dir) if data_dir else 'in-memory (lost on restart)'}")
     if site is None:
         # said plainly rather than serving a 404 the user has to diagnose
         print("  web app:  NOT BUILT — run `npm --prefix web install && "
-              "npm --prefix web run build`")
+              "npm --prefix web run build`, or point --web-root at a built one")
     else:
         print(f"  web app:  {site}")
     print(
@@ -1757,6 +1768,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="persist the workspace (suites, evidence, regressions, artifacts) "
              "in this directory and reload it on restart (or AXOR_LAB_DATA_DIR); "
              "omitted, storage is in-memory",
+    )
+    p_serve.add_argument(
+        "--web-root", default=None,
+        help="directory holding the built web app, i.e. the one with "
+             "index.html in it (or AXOR_LAB_WEB_ROOT). Omitted, `web/dist` "
+             "beside the source tree is used when it exists — which it does "
+             "not for an installed package, so a deployment sets this",
     )
     p_serve.add_argument(
         "--billing-webhook-secret", default=None,

@@ -128,6 +128,9 @@ axor-lab serve                             # screen API + the built app
 `docker compose up --build` runs the platform behind a proxy that terminates
 TLS and rate-limits — the two things the app deliberately does not do itself.
 Single node: live run state is in memory, so do not scale it to two replicas.
+Outside the image, `axor-lab serve --web-root <dir>` (or `AXOR_LAB_WEB_ROOT`)
+points at the built app; the implicit `web/dist` default only exists in a source
+checkout.
 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** has first boot, TLS, backup and
 restore, upgrade, and what was verified against a running stack.
 

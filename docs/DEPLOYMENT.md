@@ -106,6 +106,13 @@ its volume reports `in-memory` and will look fine until the first restart.
   than remove the limit, and keep `/guest-session` tight regardless.
 - **`storage: in-memory (lost on restart)`.** `AXOR_LAB_DATA_DIR` is unset or
   the volume did not mount. Stop before anyone puts work in.
+- **The API answers but `GET /` is 404, and the log says `web app: NOT
+  BUILT`.** The server was not told where the UI is. The image sets
+  `AXOR_LAB_WEB_ROOT=/srv/axor-lab/web`; outside the image, pass `--web-root`
+  at the directory holding `index.html`. The implicit default is `web/dist`
+  beside the source tree, which an installed package does not have. A root you
+  name explicitly and that holds no `index.html` is a startup error (exit 2),
+  not a silent API-only server.
 - **A build fails cloning axor-wrap / axor-eval.** They are pinned to git refs
   because the API Lab needs is not on PyPI. Both repositories are public; set
   `GITHUB_TOKEN` only if your build network needs one to reach GitHub.
@@ -125,5 +132,11 @@ itself is unverified):
 - durability: a suite created through the proxy landed at
   `/data/suite/<id>.json` and was still listed after the process was stopped and
   started again;
+- the image's install shape, simulated without Docker: a NON-editable
+  `pip install .` into a clean venv, the built `dist/` copied to a separate
+  path, and `axor-lab serve` run from outside the source tree. Without
+  `AXOR_LAB_WEB_ROOT` it reported `web app: NOT BUILT` and `GET /` was 404 —
+  the failure the editable install had been hiding; with it, `/`, the hashed
+  assets and `/home` all answered 200;
 - `nginx -t` on the shipped configuration, and `docker compose config`,
   including that it refuses to render without `AXOR_LAB_CONTROL_TOKEN`.
