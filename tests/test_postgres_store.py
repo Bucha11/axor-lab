@@ -17,6 +17,7 @@ import unittest
 import uuid
 
 from lab_contracts.canonical import content_hash
+from lab_server.errors import NotFound, PublishRejected
 from lab_server.screens import ScreenStore, ScreenStoreError
 
 DSN = os.environ.get("AXOR_LAB_TEST_POSTGRES_URL", "").strip()
@@ -333,3 +334,96 @@ class TestPostgresRegistry(unittest.TestCase):
         token = str(guest["token"])
         self.assertIsNotNone(self.registry.resolve_token(token))
         self.assertIsNone(self.make().resolve_token(token))
+
+
+@unittest.skipUnless(DSN, "set AXOR_LAB_TEST_POSTGRES_URL to run")
+class TestPostgresCatalogKeepsItsForensics(unittest.TestCase):
+    """The publication catalog on Postgres must behave EXACTLY as on files.
+
+    Its value is not the storage; it is the chain over it — a two-pass cold load
+    that collects every tombstone before admitting any publication, lineage
+    tombstones that outrank a surviving sibling, an acceptance restored rather
+    than re-minted. That logic is untouched by this migration: only the leaf
+    reads and writes changed. These tests are the evidence for that claim,
+    running the same scenarios the file-backed suites run.
+    """
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from tests.test_evidence_lineage_takedown import _bundle
+
+        self._bundle = _bundle
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # a unique root per test: the object keys are relative to it, so this
+        # namespaces one test's rows from another's inside the shared table
+        self.root = Path(self.tmp.name) / ("cat_" + uuid.uuid4().hex[:8])
+
+    def _store(self):  # noqa: ANN202
+        from lab_server.store import PublicationStore
+
+        return PublicationStore(root=self.root, dsn=DSN)
+
+    def test_a_publication_survives_a_cold_reload(self) -> None:
+        bundle, traces = self._bundle()
+        published = self._store().publish(bundle, traces, question="q?")
+        pid = str(published.publication["publication_id"])
+
+        reloaded = self._store()  # a new store: nothing shared in memory
+        self.assertEqual(
+            str(reloaded.get(pid).publication["publication_id"]), pid)
+
+    def test_the_acceptance_is_RESTORED_not_re_minted(self) -> None:
+        """A persisted acceptance must come back as itself — re-minting it under
+        a rotated key would rewrite the attestation of an already-published
+        result."""
+        bundle, traces = self._bundle()
+        published = self._store().publish(bundle, traces, question="q?")
+        pid = str(published.publication["publication_id"])
+        minted = published.acceptance
+
+        restored = self._store().get(pid).acceptance
+        self.assertEqual(restored, minted)
+
+    def test_a_takedown_outranks_a_reload(self) -> None:
+        bundle, traces = self._bundle()
+        store = self._store()
+        published = store.publish(bundle, traces, question="q?")
+        pid = str(published.publication["publication_id"])
+        store.takedown(pid)
+
+        reloaded = self._store()
+        self.assertTrue(reloaded.is_taken_down(pid))
+        with self.assertRaises(NotFound):
+            reloaded.get(pid)
+
+    def test_a_taken_down_lineage_cannot_be_republished_after_a_reload(self) -> None:
+        """The property the two-pass cold load exists for: repackaging the same
+        evidence must not get it back."""
+        bundle, traces = self._bundle(bundle_id="b_one", created="2026-07-20T00:00:00+00:00")
+        store = self._store()
+        published = store.publish(bundle, traces, question="q?")
+        store.takedown(str(published.publication["publication_id"]))
+
+        repackaged, traces2 = self._bundle(
+            bundle_id="b_two", created="2026-07-21T09:30:00+00:00")
+        reloaded = self._store()
+        with self.assertRaises(PublishRejected):
+            reloaded.publish(repackaged, traces2, question="different question?")
+
+    def test_traces_come_back_with_the_publication(self) -> None:
+        bundle, traces = self._bundle()
+        published = self._store().publish(bundle, traces, question="q?")
+        pid = str(published.publication["publication_id"])
+        restored = self._store().get(pid)
+        self.assertEqual(sorted(restored.traces), sorted(traces))
+
+    def test_the_catalog_lists_what_was_published(self) -> None:
+        bundle, traces = self._bundle()
+        published = self._store().publish(bundle, traces, question="q?",
+                                          visibility="public")
+        pid = str(published.publication["publication_id"])
+        listed = [str(s.publication["publication_id"]) for s in self._store().catalog()]
+        self.assertIn(pid, listed)

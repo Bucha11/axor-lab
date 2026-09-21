@@ -110,6 +110,24 @@ create table if not exists lab_runtime_keys (
     key_sha256 text not null primary key,
     ws_id      text not null
 );
+
+-- The publication catalog, as an OBJECT store keyed by the path each record
+-- already had. Deliberately not decomposed into per-record tables like the
+-- others: the catalog's value is the forensic chain over it — two-pass cold
+-- load, lineage tombstones that outrank a surviving sibling, append-only
+-- acceptance history resolved recursively to a root — and that logic is
+-- Python, hardened over twenty-one review rounds, not a property of the
+-- filesystem. Re-expressing forty I/O sites as SQL would put every one of
+-- those invariants back in play to buy a query nobody asked for; a publication
+-- is read by id and served as a downloadable package, so keys-to-bytes is the
+-- shape it already has. What moves is WHERE the bytes live: shared storage and
+-- one backup, with the semantics untouched.
+create table if not exists lab_objects (
+    key        text        not null primary key,
+    body       text        not null,
+    updated_at timestamptz not null default now()
+);
+create index if not exists lab_objects_prefix on lab_objects (key text_pattern_ops);
 """
 
 

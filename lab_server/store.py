@@ -155,9 +155,110 @@ class StoredPublication:
         )
 
 
+class _Objects:
+    """Where a publication's bytes live, keyed by the path they already had.
+
+    The store keeps computing `root / pub_id / "publication.json"` exactly as
+    before; only the leaf read/write/list/delete go through here. That is the
+    whole point: the catalog's invariants — the two-pass cold load, lineage
+    tombstones outranking a surviving sibling, the recursively-resolved
+    acceptance chain — are Python, and this leaves every line of them alone.
+    """
+
+    def __init__(self, root: Path, dsn: str | None = None) -> None:
+        self.root = root
+        self._dsn = dsn
+        if dsn is None:
+            root.mkdir(parents=True, exist_ok=True)
+
+    def key(self, path: Path) -> str:
+        """The object key: the FULL path, not one relative to the root.
+
+        A relative key made two catalogs with different roots share a namespace
+        — a lineage tombstone written by one then blocked a publish in the
+        other, since both spell it `_lineage_tombstones/<hash>.json`. In
+        production the root is fixed and the two are equivalent; the isolation
+        is what makes that true rather than lucky.
+        """
+        return str(path)
+
+    def _conn(self):  # noqa: ANN202 - psycopg types are optional at import time
+        from lab_server.db import pool
+
+        return pool(self._dsn).connection()  # type: ignore[arg-type]
+
+    def write(self, path: Path, text: str, *, durable: bool = False) -> None:
+        if self._dsn is None:
+            _write_atomic(path, text, durable=durable)
+            return
+        # `durable` needs no analogue: a committed row is already durable, which
+        # is what the fsync dance on a temp file was emulating.
+        with self._conn() as conn:
+            conn.execute(
+                "insert into lab_objects (key, body) values (%s,%s) "
+                "on conflict (key) do update set body=excluded.body, updated_at=now()",
+                (self.key(path), text))
+
+    def read(self, path: Path) -> str | None:
+        if self._dsn is None:
+            try:
+                return path.read_text()
+            except OSError:
+                return None
+        with self._conn() as conn:
+            row = conn.execute("select body from lab_objects where key=%s",
+                               (self.key(path),)).fetchone()
+        return row[0] if row else None
+
+    def exists(self, path: Path) -> bool:
+        if self._dsn is None:
+            return path.is_file()
+        with self._conn() as conn:
+            row = conn.execute("select 1 from lab_objects where key=%s",
+                               (self.key(path),)).fetchone()
+        return row is not None
+
+    def delete(self, path: Path) -> None:
+        if self._dsn is None:
+            path.unlink(missing_ok=True)
+            return
+        with self._conn() as conn:
+            conn.execute("delete from lab_objects where key=%s", (self.key(path),))
+
+    def glob(self, directory: Path, pattern: str = "*.json") -> list[Path]:
+        """Paths under `directory` matching `pattern`, sorted — the same order
+        the filesystem walk produced, because the two-pass load depends on a
+        deterministic one."""
+        if self._dsn is None:
+            return sorted(directory.glob(pattern)) if directory.is_dir() else []
+        prefix = self.key(directory) + "/"
+        suffix = pattern.lstrip("*")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "select key from lab_objects where key like %s and key like %s "
+                "and key not like %s order by key",
+                (prefix + "%", "%" + suffix, prefix + "%/%")).fetchall()
+        return [Path(r[0]) for r in rows]
+
+    def children(self) -> list[Path]:
+        """The publication directories — every first path segment under root."""
+        if self._dsn is None:
+            return sorted(d for d in self.root.glob("*/"))
+        prefix = str(self.root) + "/"
+        with self._conn() as conn:
+            rows = conn.execute(
+                "select distinct split_part(substr(key, %s), '/', 1) as d "
+                "  from lab_objects where key like %s order by d",
+                (len(prefix) + 1, prefix + "%")).fetchall()
+        return [self.root / r[0] for r in rows]
+
+
 @dataclass
 class PublicationStore:
-    """File-backed store of published bundles + append-only attestations.
+    """Store of published bundles + append-only attestations.
+
+    Bytes live in files by default and in Postgres when a DSN is configured;
+    the layout, and every rule enforced over it, is identical either way.
 
     Optional `known_keys` maps author id → Ed25519 public key (hex); a bundle
     that arrives with a `signature` verifying against one upgrades the
@@ -165,6 +266,8 @@ class PublicationStore:
     """
 
     root: Path
+    # Postgres DSN for the catalog's bytes. None keeps the file layout.
+    dsn: str | None = None
     known_keys: dict[str, str] = field(default_factory=dict)
     # optional server identity + Ed25519 signing key (hex) so the acceptance
     # receipt is a SIGNED attestation of what the server verified, not an
@@ -202,14 +305,13 @@ class PublicationStore:
         return self.root / "_lineage_tombstones"
 
     def __post_init__(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
+        self._objects = _Objects(self.root, self.dsn)
         # a DURABLE lineage-tombstone registry, independent of any publication
         # directory: takedown finality does not depend on a complete per-directory
         # sweep (review r16). Load it FIRST.
-        if self._lineage_dir.is_dir():
-            for tomb_file in self._lineage_dir.glob("*.json"):
+        for tomb_file in self._objects.glob(self._lineage_dir):
                 try:
-                    rec = json.loads(tomb_file.read_text())
+                    rec = json.loads(self._objects.read(tomb_file) or "")
                     if isinstance(rec, dict) and rec.get("evidence_lineage_ref"):
                         self._lineage_tombstones.add(str(rec["evidence_lineage_ref"]))
                 except (OSError, ValueError):
@@ -219,12 +321,14 @@ class PublicationStore:
         # taken-down evidence can never be admitted just because its directory
         # sorts ahead of the tombstone's. A one-pass sorted walk could load the
         # sibling first and then never remove it.
-        directories = sorted(d for d in self.root.glob("*/") if d.name != "_lineage_tombstones")
+        directories = [d for d in self._objects.children()
+                       if d.name != "_lineage_tombstones"]
         for directory in directories:
             try:
-                if (directory / "tombstone.json").is_file():
+                if self._objects.exists(directory / "tombstone.json"):
                     self._tombstones.add(directory.name)
-                    tomb = json.loads((directory / "tombstone.json").read_text())
+                    tomb = json.loads(
+                        self._objects.read(directory / "tombstone.json") or "")
                     if isinstance(tomb, dict):
                         # a stable lineage ref → the lineage set; a legacy
                         # bundle_ref-only tombstone → the legacy set (r16)
@@ -239,9 +343,9 @@ class PublicationStore:
             # non-object array element, a missing key) must skip that ONE
             # publication, never crash the whole catalog on startup (review r10).
             try:
-                if (directory / "tombstone.json").is_file():
+                if self._objects.exists(directory / "tombstone.json"):
                     self._load_reproductions_only(directory.name)
-                elif (directory / "publication.json").is_file():
+                elif self._objects.exists(directory / "publication.json"):
                     self._load(directory.name)
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
                 # ValueError covers json.JSONDecodeError; the record is quarantined
@@ -430,29 +534,27 @@ class PublicationStore:
                 directory = self._dir(pid)
                 # tombstone the directory BEFORE deleting its bodies, so a crash
                 # mid-delete still leaves a tombstone, not a resurrectable orphan
-                _write_atomic(
+                self._objects.write(
                     directory / "tombstone.json",
                     json.dumps({
                         "publication_id": pid, "status": "taken_down",
                         "evidence_lineage_ref": lineage,
                     }),
+                    durable=True,
                 )
                 self._tombstones.add(pid)
                 for name in ("publication.json", "bundle.json"):
-                    (directory / name).unlink(missing_ok=True)
-                traces_dir = directory / "traces"
-                if traces_dir.is_dir():
-                    for path in traces_dir.glob("*.json"):
-                        path.unlink()
+                    self._objects.delete(directory / name)
+                for path in self._objects.glob(directory / "traces"):
+                    self._objects.delete(path)
 
     def _write_lineage_tombstone(self, lineage: str) -> None:
         """Persist a lineage tombstone to the standalone durable registry (a file
         named by the lineage hash). ``durable=True`` fsyncs the file CONTENTS
         before the rename and the directory after, so the tombstone's bytes — not
         just its name — survive a power loss (review r16/r17)."""
-        self._lineage_dir.mkdir(parents=True, exist_ok=True)
         name = lineage.removeprefix("sha256:") + ".json"
-        _write_atomic(
+        self._objects.write(
             self._lineage_dir / name,
             json.dumps({"evidence_lineage_ref": lineage}),
             durable=True,
@@ -577,13 +679,13 @@ class PublicationStore:
             return stored.reproductions
         directory = self._dir(publication_id)
         reproductions_file = directory / "reproductions.json"
-        if reproductions_file.is_file():
+        if self._objects.exists(reproductions_file):
             # re-derive a TRUSTED log from the on-disk bytes: re-check kind,
             # re-dedup, re-verify signatures, and bind to THIS publication_id
             # (review r8/r9) rather than trust the file. A corrupt/non-list file
             # yields an empty log, never an exception (review r10).
             try:
-                parsed = json.loads(reproductions_file.read_text())
+                parsed = json.loads(self._objects.read(reproductions_file) or "")
                 raw = tuple(parsed) if isinstance(parsed, list) else ()
             except (OSError, ValueError):
                 raw = ()
@@ -730,18 +832,18 @@ class PublicationStore:
 
     def _persist(self, stored: StoredPublication) -> None:
         directory = self._dir(str(stored.publication["publication_id"]))
-        (directory / "traces").mkdir(parents=True, exist_ok=True)
-        _write_atomic(directory / "publication.json", json.dumps(stored.publication, indent=2))
-        _write_atomic(directory / "bundle.json", json.dumps(stored.bundle, indent=2))
+        self._objects.write(directory / "publication.json",
+                            json.dumps(stored.publication, indent=2))
+        self._objects.write(directory / "bundle.json", json.dumps(stored.bundle, indent=2))
         for trace in stored.traces.values():
             # filename is a server-computed content hash, NEVER the caller-supplied
             # trace_id — a hostile trace_id like '../../x' cannot escape traces/
             name = content_hash(trace).removeprefix("sha256:")
-            _write_atomic(directory / "traces" / f"{name}.json", json.dumps(trace))
+            self._objects.write(directory / "traces" / f"{name}.json", json.dumps(trace))
         # the signing receipt: present ONLY for a signed publication, so load can
         # re-verify the author signature instead of trusting integrity from disk
         if stored.author and stored.signature:
-            _write_atomic(
+            self._objects.write(
                 directory / "receipt.json",
                 json.dumps({"author": stored.author, "signature": stored.signature}),
             )
@@ -751,17 +853,18 @@ class PublicationStore:
         # attestation of an already-published result — in memory or on disk (r16).
         acceptance = self.acceptance(stored)
         stored.acceptance = acceptance
-        _write_atomic(directory / "acceptance.json", json.dumps(acceptance, indent=2))
+        self._objects.write(directory / "acceptance.json", json.dumps(acceptance, indent=2))
         self._persist_reproductions(stored)
 
     def _persist_reproductions(self, stored: StoredPublication) -> None:
         directory = self._dir(str(stored.publication["publication_id"]))
-        _write_atomic(directory / "reproductions.json", json.dumps(stored.reproductions, indent=2))
+        self._objects.write(directory / "reproductions.json",
+                            json.dumps(stored.reproductions, indent=2))
 
     def _load(self, publication_id: str) -> None:
         directory = self._dir(publication_id)
-        publication = json.loads((directory / "publication.json").read_text())
-        bundle = json.loads((directory / "bundle.json").read_text())
+        publication = json.loads(self._objects.read(directory / "publication.json") or "")
+        bundle = json.loads(self._objects.read(directory / "bundle.json") or "")
         # never resurrect a publication whose evidence lineage was taken down —
         # e.g. a sibling whose files survived a takedown that crashed mid-sweep
         # (the two-pass load has already collected every lineage tombstone, r15)
@@ -769,9 +872,8 @@ class PublicationStore:
             return
         traces: dict[str, dict[str, object]] = {}
         traces_dir = directory / "traces"
-        if traces_dir.is_dir():
-            for path in sorted(traces_dir.glob("*.json")):
-                trace = json.loads(path.read_text())
+        for path in self._objects.glob(traces_dir):
+                trace = json.loads(self._objects.read(path) or "")
                 traces[str(trace["trace_id"])] = trace
         # re-verify integrity on load: a locally tampered file must not become
         # trusted catalog state (review §7.3)
@@ -807,11 +909,11 @@ class PublicationStore:
         # the re-mint below no longer matches the stored body and is dropped (r9).
         receipt_file = directory / "receipt.json"
         author = signature = None
-        if receipt_file.is_file():
+        if self._objects.exists(receipt_file):
             # a corrupt receipt → treat as no receipt (integrity degrades to
             # hash_verified), never crash the load (review r10)
             try:
-                receipt = json.loads(receipt_file.read_text())
+                receipt = json.loads(self._objects.read(receipt_file) or "")
                 if isinstance(receipt, dict):
                     author, signature = receipt.get("author"), receipt.get("signature")
             except ValueError:
@@ -836,9 +938,9 @@ class PublicationStore:
         # r8/r9). A corrupt/non-list reproductions file degrades to an empty log
         # so it doesn't drop the whole (otherwise valid) publication (review r10).
         raw: tuple[object, ...] = ()
-        if reproductions_file.is_file():
+        if self._objects.exists(reproductions_file):
             try:
-                parsed = json.loads(reproductions_file.read_text())
+                parsed = json.loads(self._objects.read(reproductions_file) or "")
                 raw = tuple(parsed) if isinstance(parsed, list) else ()
             except ValueError:
                 raw = ()
@@ -883,10 +985,11 @@ class PublicationStore:
           - a missing / malformed / non-binding receipt returns None, and
             acceptance() deterministically mints a fresh one."""
         path = directory / "acceptance.json"
-        if not path.is_file():
+        body = self._objects.read(path)
+        if body is None:
             return None
         try:
-            acc = json.loads(path.read_text())
+            acc = json.loads(body)
         except ValueError:
             return None
         if not isinstance(acc, dict) or str(acc.get("schema_version", "")) != "axor-lab-acceptance/v1":
