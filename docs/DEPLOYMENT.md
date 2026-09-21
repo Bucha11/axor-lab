@@ -28,15 +28,15 @@ docker compose up --build                  # → http://localhost:8443
   a plan is granted by an admin today. See the maturity table in `README.md`.
 - **No TLS until you provide certificates.** The shipped config listens on plain
   HTTP and says so. Three lines in `deploy/nginx.conf` switch it.
-- **Documents live in Postgres; everything else is still files.** Suites,
-  EvidenceCases, regressions and artifacts are `jsonb` rows scoped by workspace
-  — durable, searchable inside, and not preloaded into RAM. The publication
-  catalog and proxy traces are still files under the data directory. So a
-  backup is two things now: a `pg_dump` and the `labdata` volume. Runs, their
-  trials and their finished traces are rows too — the Runs screen is computed
-  by a query inside Postgres rather than by loading every run into memory.
-  Without `AXOR_LAB_DATABASE_URL` the server keeps the old file behaviour, and
-  the CLI never needs a database at all.
+- **With a DSN, the whole server is on Postgres.** Documents (suites,
+  EvidenceCases, regressions, artifacts) and runs are `jsonb` rows scoped by
+  workspace — durable, searchable inside, and not preloaded into RAM; the Runs
+  screen is a query rather than every run loaded into memory. The tenant
+  registry and its audit log are rows, with credentials stored hashed. The
+  publication catalog's bytes are objects keyed by the path each record already
+  had. A backup is one `pg_dump`. Without `AXOR_LAB_DATABASE_URL` the server
+  keeps the old file behaviour byte for byte, and the CLI never needs a
+  database at all.
 - **Workspace membership survives on Postgres, and only there.** The registry —
   workspaces, member tokens, roles, plans and the audit log — is durable with a
   DSN and in-memory without one. Verified both ways: without a database a
@@ -111,6 +111,9 @@ artifacts) and the `labdata` volume (the publication catalog, traces).
 ```
 docker compose exec postgres pg_dump -U axor axor_lab | gzip > axor-lab-$(date +%F).sql.gz
 ```
+
+On a DSN deployment the `labdata` volume holds nothing; it is still where a
+file-backed deployment keeps its catalog and its traces.
 
 ```
 # backup
