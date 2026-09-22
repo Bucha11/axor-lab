@@ -136,6 +136,10 @@ recorded in **[docs/HARDENING.md](docs/HARDENING.md)**.
 | Suite Platform (suites, Builder, artifacts) | **beta** | a suite is an authorable `suite/v1` manifest: three-mode Builder over ONE document (a field no form shows is carried through untouched), four built-ins, author-time validation that refuses what a run would only discover later (an empty identifier, an aggregation over an undeclared metric, a threshold over a boolean, a `mcnemar` on a single arm), one planner shared by the local runner / the connected runtime / `Preview plan`, and `artifact/v1` wrapping a bundle byte-for-byte so every prior hash still verifies. Tool manifests, scenario fixtures and predicate trees are edited in YAML by design — the form links to the exact key |
 | kernel | **reference + real backend** | ships `reference_taint_floor_kernel` (1 gate, stdlib) AND a real backend that drives the production `axor_core.governor.ToolCallGovernor` when axor-core is installed and the condition pins the installed version (`pip install axor-lab[kernel]`; `axor-lab run --real-kernel` repins EVERY condition — baseline included — so the compare isolates enforcement, not a mixed kernel, and the bundle carries a single kernel_version). Verified: real governor DENYs the exfil, ALLOWs the faithful payment, replays bit-identically |
 | Private Lab / workspaces / billing | **beta (local)** | the hosted surface IS built: durable multi-tenant workspaces with per-tenant stores, RBAC (owner/admin/member/viewer; a viewer cannot mutate) with every mutation written to a per-workspace audit log, an entitlement gate in `lab_server/workspaces.py` (NOT the deleted `lab_entitlement`) whose plan limits and capabilities answer **402 Payment Required**, an operator plan catalog (`serve --plans-file`; reference ladder in `docs/pricing/`), identity login whose org `tier` selects the catalog plan and fails CLOSED to free, checkout + a secret-gated provider webhook (a purchase needs an unspent checkout, a lapse is addressed to the workspace, a lapsed subscription drops to free), anonymous guest trials (capped, swept on expiry), and a Workspace screen for plans/members/audit/tenants. NOT built: scheduled CI + history, approvals, compliance report generation, fleet view, hosted-trial metering and overage, SSO beyond an identity JWT (no SAML/SCIM) — each recorded with its evidence of absence in `docs/POST_MVP_PLAN.md` §B10 |
+| publication catalog storage | **beta** | with a DSN the catalog's bytes are objects in Postgres, keyed by the path each record already had. Deliberately NOT decomposed into per-record tables like the other three: the catalog's value is the forensic chain over it — the two-pass cold load, lineage tombstones that outrank a surviving sibling, an acceptance history resolved recursively to a root — and that logic is Python hardened across twenty-one review rounds, not a property of the filesystem. Only the leaf reads and writes moved, so every rule is the same code on either backend; the file-backed suites plus the same scenarios re-run against a real Postgres are the evidence. A package served from Postgres still verifies OFFLINE — content hashes, bit-identical replay, publication binding |
+| tenant registry | **beta** | with a DSN, workspaces, member tokens, roles, plans and the compliance audit log are rows — all of it was in memory, so a restart dropped every member token and the audit log a deployment would be asked for. Credentials are stored as SHA-256 and never in the clear: plaintext in memory was careless, in a database it is a credential dump waiting for a `pg_dump`. A guest session stays deliberately ephemeral. The registry is the one thing loaded eagerly at startup — every request authenticates against it, and a lazy one would mean a round-trip just to say "no such token" |
+| run storage | **beta** | with a DSN a run is saved on every published transition and rehydrated on demand, so a finished run's **traces outlive the process** — they never used to: `SCREEN_KINDS` held no trace, and a past run's artifact survived a restart while the traces it references did not, blanking the Trial screen. Runs are not all loaded at startup, and the Runs list is a projection computed INSIDE Postgres (`jsonb_each` over the trials), so rendering a list of runs pulls no trace through the driver. Live SSE listeners are deliberately not persisted — they are queues belonging to connections this process holds |
+| document storage | **beta** | suites, EvidenceCases, regressions and artifacts are Postgres `jsonb` rows scoped by workspace when `AXOR_LAB_DATABASE_URL` is set — durable, **not preloaded into RAM**, and queryable INSIDE the document (`ScreenStore.find` → one `doc @> …` against a GIN index; a directory of files can answer neither). jsonb is safe for content-addressed documents because `content_hash` canonicalizes the parsed OBJECT (RFC 8785), not the bytes a store happened to keep — a document round-trips with its hash intact, asserted against a real Postgres rather than assumed. A document holding a NUL — which canonical JSON accepts and jsonb cannot store — is refused BY NAME, never stripped: stripping it would change the document and therefore its hash, which is the one thing a store may not do to a receipt. Without a DSN the file backend is byte-for-byte what it was, and the CLI never needs a database |
 
 ## The plans and the contract
 
@@ -184,12 +188,15 @@ something the code no longer does.
 - **`lab_adapters/`** — benchmark imports (MVP item 2): the curated AgentDojo
   banking data-flow suite materialized as `scenario/v1` objects (mirrors
   axor-eval's property map), each schema-valid and author-time-validated.
-- **`lab_server/`** — the hosted surface (Phase 4 + minimal Phase 5): the
-  publish handshake (schema + hash + safe replay verification, `origin=local`),
-  an append-only attestation log, `integrity=signed` for known author keys,
-  takedown that preserves attestations, and escaped HTML catalog / publication
-  / EvidenceCase pages with three-axis provenance. Stdlib `http.server`; runs
-  no live agents.
+- **`lab_server/`** — the hosted surface. The publish handshake (schema + hash
+  + safe replay verification, `origin=local`), an append-only attestation log,
+  `integrity=signed` for known author keys, takedown that preserves
+  attestations, and escaped HTML catalog / publication / EvidenceCase pages
+  with three-axis provenance. Also the screen API behind `axor-lab serve`
+  (`contracts/ui-backend-contract.md`), the connected-runtime job contract,
+  durable workspaces + entitlement + billing, and a vendored verifier for
+  axor-identity tokens. Stdlib `http.server` throughout; **runs no live
+  agents** — Lab assigns, a connected runtime executes.
 - **`lab_suite/`** — the Suite SDK: the `Suite` protocol and `BaseSuite`, a
   registry with four built-in suites, manifest load/validate/resolve, suite
   execution, and dispatch to a connected runtime. Each built-in covers a
@@ -211,8 +218,8 @@ something the code no longer does.
   org registry) on the server, and from a `scenarios/` directory beside the
   manifest on the CLI.
 - **`lab_capabilities/governance/`** — governance as an opt-in capability
-  (Suite Platform RFC §10): the reference kernel and the real axor-core backend,
-  the gate a condition resolves to, exact verdict replay, EvidenceCase
+  (Suite Platform RFC §10): the real axor-core backend (the reference kernel is
+  gone), the gate a condition resolves to, exact verdict replay, EvidenceCase
   rendering, verdict pinning, the Control Plane bridge, and the paired `.axl`
   experiment runner. `lab_runner` imports none of it — the dependency direction
   and the short list of composition roots are enforced by
@@ -220,7 +227,14 @@ something the code no longer does.
 
 `lab_agent/`, `lab_entitlement/`, `lab_endpoint/`, `lab_sandbox/` and
 `lab_games/` were documented here long after they were deleted. They are gone;
-`docs/POST_MVP_PLAN.md` records what each did and why it was cut.
+`docs/POST_MVP_PLAN.md` records what each did and why it was cut. Two notes so
+the deletions are not mistaken for regressions: entitlement did not vanish, it
+moved into `lab_server/` (`workspaces.py`, `tests/test_entitlements.py`); and
+BYOK was **retired on purpose** — it drove a model against SIMULATED tools, so
+its numbers described neither the caller's agent nor their tools. Bring your own
+agent through a connected runtime instead. `pip install axor-lab[byok]` and
+`[kernel]` still resolve, as empty aliases, so an existing script does not
+break on an unknown extra.
 
 ## The rest of the CLI
 
@@ -244,7 +258,12 @@ axor-lab publish ./bundle --question "…" --server http://127.0.0.1:8000   # ho
 axor-lab report ./bundle --format all --out ./paper   # results table + Methods + BibTeX
 ```
 
-Lifecycle, exit codes, and the estimate-confirm gate follow
+A local `publish` proves **replay only** and mints no statistical claim — it
+prints how many aggregates it declined to publish. Server-side, every aggregate
+*and its test* is recomputed from the traces, so a fabricated p-value is
+rejected. `verify` then re-checks a downloaded package with no server in the
+loop, and distinguishes intact-but-unauthenticated (exit 5) from tampered
+(exit 1). Lifecycle, exit codes, and the estimate-confirm gate follow
 `contracts/runner-protocol.md` and `contracts/lifecycle.md`. The bundle
 directory is the `axor-bundle-dir/v1` layout (`bundle.json` + `traces/`).
 
@@ -318,6 +337,17 @@ it at `POST /api/verify` — as will `axor-lab verify` offline. The same
 implementation answers all three, so the faces cannot drift into three opinions
 about whether a package holds up.
 
+## Deploying it
+
+`docker compose up --build` runs the platform behind a proxy that terminates
+TLS and rate-limits — the two things the app deliberately does not do itself.
+Single node: live run state is in memory, so do not scale it to two replicas.
+Outside the image, `axor-lab serve --web-root <dir>` (or `AXOR_LAB_WEB_ROOT`)
+points at the built app; the implicit `web/dist` default only exists in a source
+checkout.
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** has first boot, TLS, backup and
+restore, upgrade, and what was verified against a running stack.
+
 ## Executable acceptance suite
 
 `contracts/acceptance-tests.md` §1–10 runs as code against these packages —
@@ -326,8 +356,13 @@ one test file per criterion, plus two golden paths (in-process
 is validated against the real schemas in `contracts/`.
 
 ```
-python -m unittest discover -s tests -t .      # full suite, no required dependencies
+python -m unittest discover -s tests -t .      # the full suite
 ```
+
+It needs the package installed (`pip install -e .`): `axor-core`, `axor-wrap`
+and `axor-eval` are required dependencies now, not extras, and `lab_runner`
+imports the wrap engine at module scope. Optional Ed25519 (`[crypto]`) and
+identity (`[identity]`) paths skip cleanly when their extras are absent.
 
 Beyond the ten acceptance criteria, the suite covers the AgentDojo adapter,
 the CLI (subprocess), the server over real HTTP (publish handshake, escaped

@@ -1,0 +1,81 @@
+# Self-hosted Axor Lab — the platform behind a proxy that terminates TLS and
+# rate-limits, which is what separates "it runs" from "it is exposed".
+#
+#   cp .env.example .env     # set AXOR_LAB_CONTROL_TOKEN
+#   docker compose up --build
+#   open http://localhost:8443   (https once you mount real certificates)
+#
+# One process holds the live run state in memory, so this is a SINGLE-NODE
+# deployment: do not scale `lab` to two replicas, and expect in-flight runs to
+# be lost on restart. Finished artifacts, suites, evidence and workspaces live
+# in the `labdata` volume and survive.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: axor_lab
+      POSTGRES_USER: axor
+      POSTGRES_PASSWORD: ${AXOR_LAB_PG_PASSWORD:?set AXOR_LAB_PG_PASSWORD in .env}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U axor -d axor_lab"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  lab:
+    build:
+      context: .
+    # Not published: the proxy is the only way in. Publish 8871 only to debug,
+    # and never on a host that is reachable from outside.
+    expose: ["8871"]
+    environment:
+      # Required. The operator/admin bearer; every write is gated on it until a
+      # workspace has members of its own.
+      AXOR_LAB_CONTROL_TOKEN: ${AXOR_LAB_CONTROL_TOKEN:?set AXOR_LAB_CONTROL_TOKEN in .env}
+      # Documents become rows scoped by workspace: durable, queryable, and
+      # nothing preloaded into RAM. This REPLACES the data directory for them.
+      AXOR_LAB_DATABASE_URL: postgresql://axor:${AXOR_LAB_PG_PASSWORD}@postgres/axor_lab
+      AXOR_LAB_DATA_DIR: /data
+      # Your price list. Omitted, the server falls back to a placeholder catalog
+      # that carries no pricing authority.
+      AXOR_LAB_PLANS_FILE: ${AXOR_LAB_PLANS_FILE:-/app/docs/pricing/axor-plans.json}
+      # Human login via axor-identity. Empty = static tokens only.
+      AXOR_LAB_IDENTITY_JWKS_URL: ${AXOR_LAB_IDENTITY_JWKS_URL:-}
+      AXOR_LAB_IDENTITY_ISSUER: ${AXOR_LAB_IDENTITY_ISSUER:-axor-identity}
+      # Payment provider callback. Empty = the webhook route is off, and plans
+      # are granted by an admin instead.
+      AXOR_LAB_BILLING_WEBHOOK_SECRET: ${AXOR_LAB_BILLING_WEBHOOK_SECRET:-}
+      # Anonymous ephemeral trial workspaces. OFF by default, and it should stay
+      # off until the rate limits below have been tried under real traffic:
+      # anyone who can POST /guest-session can mint workspaces.
+      AXOR_LAB_GUEST_SESSIONS: ${AXOR_LAB_GUEST_SESSIONS:-}
+    volumes: ["labdata:/data"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8871/').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  proxy:
+    image: nginx:1.27-alpine
+    ports: ["${AXOR_LAB_HTTP_PORT:-8443}:8080"]
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Drop fullchain.pem + privkey.pem here and switch the server block to TLS
+      # (deploy/nginx.conf documents the three lines).
+      - ./deploy/certs:/etc/nginx/certs:ro
+    depends_on:
+      lab:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  labdata: {}
+  pgdata: {}
+

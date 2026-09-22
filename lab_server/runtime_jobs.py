@@ -357,18 +357,129 @@ class _Job:
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 
 
+def _job_to_row(job: _Job) -> dict[str, object]:
+    """A job as a storable document. `listeners` is deliberately absent: they
+    are live queues belonging to the connections currently watching this run,
+    which means nothing to a later process."""
+    return {
+        "job_id": job.job_id,
+        "runtime_ref": job.runtime_ref,
+        "assignment": job.assignment,
+        "planned": list(job.planned),
+        "state": job.state,
+        "estimate": job.estimate,
+        "aggregates": job.aggregates,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "trials": {
+            trial_id: {
+                "trial_id": trial.trial_id,
+                "events": trial.events,
+                "trace": trial.trace,
+                "metrics": trial.metrics,
+                "runtime_config_hash": trial.runtime_config_hash,
+                "status": trial.status,
+                "attempt": trial.attempt,
+                "superseded": trial.superseded,
+            }
+            for trial_id, trial in job.trials.items()
+        },
+    }
+
+
+def _job_from_row(row: dict[str, object]) -> _Job:
+    """Rebuild a job from storage, with no listeners — nobody is watching a run
+    this process has not served yet."""
+    job = _Job(
+        job_id=str(row["job_id"]),
+        runtime_ref=str(row["runtime_ref"]),
+        assignment=dict(row.get("assignment") or {}),  # type: ignore[arg-type]
+        planned=tuple(row.get("planned") or ()),  # type: ignore[arg-type]
+        state=str(row.get("state") or "waiting_for_runtime"),
+        estimate=dict(row.get("estimate") or {}),  # type: ignore[arg-type]
+        aggregates=list(row.get("aggregates") or []),  # type: ignore[arg-type]
+        created_at=float(row.get("created_at") or 0.0),  # type: ignore[arg-type]
+        updated_at=float(row.get("updated_at") or 0.0),  # type: ignore[arg-type]
+    )
+    for trial_id, stored in (row.get("trials") or {}).items():  # type: ignore[union-attr]
+        job.trials[str(trial_id)] = _Trial(
+            trial_id=str(stored.get("trial_id") or trial_id),
+            events=list(stored.get("events") or []),
+            trace=stored.get("trace"),
+            metrics=dict(stored.get("metrics") or {}),
+            runtime_config_hash=stored.get("runtime_config_hash"),
+            status=str(stored.get("status") or "pending"),
+            attempt=int(stored.get("attempt") or 1),
+            superseded=int(stored.get("superseded") or 0),
+        )
+    return job
+
+
 class RuntimeJobStore:
     """Thread-safe, in-memory assignment store. Lab hands out jobs; a connected
     runtime claims one, streams its trials' events, and completes each trial by
     uploading the finished trace. A job reaches `completed` once every planned
     trial has completed."""
 
-    def __init__(self) -> None:
+    def __init__(self, dsn: str | None = None, workspace_id: str = "default") -> None:
         self._lock = threading.Lock()
         self._runtimes: dict[str, dict[str, object]] = {}  # runtime_ref -> {..., ingest_key}
         self._by_key: dict[str, str] = {}                  # ingest_key -> runtime_ref
         self._jobs: dict[str, _Job] = {}
         self._n = 0
+        # With a DSN a job is saved on every published transition and rehydrated
+        # on demand — so a finished run's TRACES outlive the process, which they
+        # did not before. Jobs are NOT all loaded at startup: a run is fetched
+        # when something asks for it, and a server that has been up for a month
+        # does not hold every run it ever served.
+        self._dsn = dsn
+        self._ws = workspace_id
+
+    # -- durable jobs -----------------------------------------------------
+    def _save_locked(self, job: _Job) -> None:
+        if self._dsn is None:
+            return
+        from psycopg.types.json import Jsonb
+
+        from lab_server.db import pool, reject_unstorable
+
+        row = _job_to_row(job)
+        reject_unstorable(row)
+        with pool(self._dsn).connection() as conn:
+            conn.execute(
+                "insert into lab_runs (workspace_id, job_id, job) values (%s,%s,%s) "
+                "on conflict (workspace_id, job_id) "
+                "do update set job=excluded.job, updated_at=now()",
+                (self._ws, job.job_id, Jsonb(row)))
+
+    def _job_locked(self, job_id: str) -> _Job | None:
+        """This run, from memory or from storage. The single read path, so a
+        rehydrated run behaves exactly like one this process created."""
+        job = self._jobs.get(job_id)
+        if job is not None or self._dsn is None:
+            return job
+        from lab_server.db import pool
+
+        with pool(self._dsn).connection() as conn:
+            found = conn.execute(
+                "select job from lab_runs where workspace_id=%s and job_id=%s",
+                (self._ws, job_id)).fetchone()
+        if not found:
+            return None
+        job = _job_from_row(found[0])
+        self._jobs[job_id] = job
+        return job
+
+    def _stored_ids_locked(self) -> list[str]:
+        if self._dsn is None:
+            return []
+        from lab_server.db import pool
+
+        with pool(self._dsn).connection() as conn:
+            rows = conn.execute(
+                "select job_id from lab_runs where workspace_id=%s "
+                "order by updated_at asc", (self._ws,)).fetchall()
+        return [row[0] for row in rows]
 
     def _next(self, prefix: str) -> str:
         self._n += 1
@@ -421,17 +532,22 @@ class RuntimeJobStore:
             # ever offered to a runtime. Default stays waiting_for_runtime so the
             # unconfirmed simple flow is unchanged.
             state = "awaiting_confirmation" if require_confirmation else "waiting_for_runtime"
-            self._jobs[job_id] = _Job(
+            job = _Job(
                 job_id=job_id, runtime_ref=runtime_ref, assignment=dict(experiment),
                 planned=plan, state=state, estimate=dict(estimate or {}),
             )
+            self._jobs[job_id] = job
+            # saved here rather than at the first transition, so a run that is
+            # created and then abandoned still appears in the Runs screen after
+            # a restart instead of vanishing with the process
+            self._save_locked(job)
             return {"run_id": job_id, "state": state, "estimate": dict(estimate or {})}
 
     def confirm_run(self, job_id: str) -> dict[str, object]:
         """Confirm an `awaiting_confirmation` run (the operator accepted the
         estimate) → it becomes claimable (`waiting_for_runtime`)."""
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             if job.state != "awaiting_confirmation":
@@ -447,7 +563,7 @@ class RuntimeJobStore:
         Lab RENDERS aggregates (ui-backend-contract §3), it does not compute them —
         the runner/analysis assembles them and posts them here."""
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             if any(not isinstance(a, dict) for a in aggregates):
@@ -483,7 +599,7 @@ class RuntimeJobStore:
         """
         listener: queue.SimpleQueue = queue.SimpleQueue()
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             job.listeners.append(listener)
@@ -493,7 +609,7 @@ class RuntimeJobStore:
 
     def unsubscribe(self, job_id: str, listener: "queue.SimpleQueue") -> None:
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 return
             job.listeners = [x for x in job.listeners if x is not listener]
@@ -525,6 +641,10 @@ class RuntimeJobStore:
         so a screen sees a transition when it happens rather than up to an
         interval later."""
         job.updated_at = time.time()
+        # Saved BEFORE the listener check: a run nobody is watching is exactly
+        # the one whose traces used to be lost, and "has a live subscriber" is
+        # not a reason to keep data.
+        self._save_locked(job)
         if not job.listeners:
             return
         frames = self._frames_locked(job)
@@ -536,18 +656,20 @@ class RuntimeJobStore:
         """Every run this store knows, oldest first — the Launchpad's recent
         activity reads the tail."""
         with self._lock:
-            return list(self._jobs)
+            stored = self._stored_ids_locked()
+            live = [job_id for job_id in self._jobs if job_id not in set(stored)]
+            return stored + live
 
     def run_state(self, job_id: str) -> str:
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             return job.state
 
     def trial_trace(self, job_id: str, trial_id: str) -> dict[str, object]:
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             trial = job.trials.get(trial_id)
@@ -597,7 +719,7 @@ class RuntimeJobStore:
 
     def results(self, job_id: str) -> dict[str, object]:
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             return self._results_locked(job)
@@ -613,7 +735,7 @@ class RuntimeJobStore:
         instead of whatever the runtime reported — the runtime no longer grades
         its own homework on the UI."""
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 return
             for unit, metrics in by_unit.items():
@@ -630,7 +752,7 @@ class RuntimeJobStore:
         """The assignment a run was created with, plus its runtime_ref — enough
         to rebuild a SuiteAssignment and collect the run."""
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 return None
             return {**job.assignment, "_runtime_ref": job.runtime_ref}
@@ -641,7 +763,7 @@ class RuntimeJobStore:
         the client sends only {run_id}, so it is defaulted from here — the run
         already carries the suite it executed."""
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             suite: dict[str, object] = job.assignment.get("suite") or {}  # type: ignore[assignment]
@@ -661,15 +783,43 @@ class RuntimeJobStore:
         (or a stuck partial one pushed past the cap) silently vanished from the
         only screen named Runs."""
         with self._lock:
-            rows = [
+            stored = self._summaries_locked()
+            seen = {row["run_id"] for row in stored}
+            live = [
                 {"run_id": j.job_id, "state": j.state,
                  "planned": len(j.planned),
                  "completed": sum(1 for t in j.trials.values()
                                   if t.status == "completed"),
                  "created_at": j.created_at, "updated_at": j.updated_at}
-                for j in self._jobs.values()
+                for j in self._jobs.values() if j.job_id not in seen
             ]
-        return list(reversed(rows))
+        return stored + list(reversed(live))
+
+    def _summaries_locked(self) -> list[dict[str, object]]:
+        """The Runs screen's rows, computed INSIDE Postgres.
+
+        The alternative is loading every stored run into Python to count its
+        completed trials — which would pull every trace through the driver to
+        render a list that shows none of them. This is the query a directory of
+        JSON files could not answer, and the reason the runs live in a database.
+        """
+        if self._dsn is None:
+            return []
+        from lab_server.db import pool
+
+        with pool(self._dsn).connection() as conn:
+            rows = conn.execute(
+                "select job_id, job->>'state', "
+                "       jsonb_array_length(job->'planned'), "
+                "       (select count(*) from jsonb_each(job->'trials') as t "
+                "          where t.value->>'status' = 'completed'), "
+                "       (job->>'created_at')::float8, "
+                "       (job->>'updated_at')::float8 "
+                "  from lab_runs where workspace_id=%s "
+                " order by updated_at desc", (self._ws,)).fetchall()
+        return [{"run_id": r[0], "state": r[1], "planned": r[2],
+                 "completed": r[3], "created_at": r[4], "updated_at": r[5]}
+                for r in rows]
 
     # -- runtime-facing surface ------------------------------------------
     def list_jobs(self, runtime_ref: str) -> list[dict[str, object]]:
@@ -771,7 +921,7 @@ class RuntimeJobStore:
         assigned. Cancelling is the operator's way to close it; already-terminal
         runs are left as they are (idempotent)."""
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 raise RuntimeJobsError(404, f"unknown run {job_id!r}")
             if job.state not in TERMINAL_STATES:
@@ -781,7 +931,7 @@ class RuntimeJobStore:
 
     # -- internals --------------------------------------------------------
     def _require_owned(self, job_id: str, runtime_ref: str) -> _Job:
-        job = self._jobs.get(job_id)
+        job = self._job_locked(job_id)
         if job is None:
             raise RuntimeJobsError(404, f"unknown run {job_id!r}")
         if job.runtime_ref != runtime_ref:
@@ -827,7 +977,7 @@ class RuntimeJobStore:
         `done`. Called by finalize AFTER persistence, so a subscriber that
         reloads on `done` sees the finished report. Idempotent."""
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._job_locked(job_id)
             if job is None:
                 return {"run_id": job_id, "state": "unknown"}
             if job.state not in TERMINAL_STATES:
@@ -887,6 +1037,7 @@ def make_runtime_server(
     screens: "ScreenStore | None" = None,
     web_root: "pathlib.Path | None" = None,
     data_dir: "str | pathlib.Path | None" = None,
+    dsn: str | None = None,
     workspaces: "Workspaces | None" = None,
     billing_webhook_secret: str | None = None,
     plan_catalog: "dict[str, dict[str, object]] | None" = None,
@@ -917,11 +1068,21 @@ def make_runtime_server(
     from lab_server.workspaces import _JobsRouter, _ShelfRouter, single_workspace
 
     if workspaces is None:
-        workspaces = single_workspace(control_token, data_dir, plan_catalog)
+        workspaces = single_workspace(control_token, data_dir, plan_catalog, dsn=dsn)
         # honour an explicitly-passed store/screens by seeding the default
         # workspace's stores with them (the in-process test path)
-        default_jobs = store or RuntimeJobStore()
-        default_shelf = screens if screens is not None else ScreenStore(persist_dir=data_dir)
+        if store is not None:
+            default_jobs = store
+        elif dsn is not None:
+            default_jobs = RuntimeJobStore(dsn=dsn, workspace_id="default")
+        else:
+            default_jobs = RuntimeJobStore()
+        if screens is not None:
+            default_shelf = screens
+        elif dsn is not None:
+            default_shelf = ScreenStore(dsn=dsn, workspace_id="default")
+        else:
+            default_shelf = ScreenStore(persist_dir=data_dir)
         workspaces._stores["default"] = (default_jobs, default_shelf)  # noqa: SLF001
     # the handler's `jobs`/`shelf` become routers to the CURRENT request's
     # workspace, set by _require_control / _runtime_ref after authentication

@@ -50,7 +50,7 @@ from .axor_backend import (
 from .evidence import build_evidence_case, evidence_condition, validate_twin
 from .experiment_file import ResolvedExperiment, load_axl, resolve
 from .gate import KernelGate, gate_for_condition
-from .regression import RegressionPin, check_pins, pin
+from .regression import RegressionPin, check_pins, difference_reason, pin
 from .replay import (
     REPLAY_MALFORMED_TRACE,
     REPLAY_MATCH,
@@ -94,6 +94,7 @@ __all__ = [
     "connected_runtime_condition",
     "connected_runtime_kernel",
     "default_registry",
+    "difference_reason",
     "evidence_condition",
     "gate_for_condition",
     "gate_with_governor",

@@ -18,6 +18,8 @@ from lab_runner.errors import UnknownKernelError
 from .replay import (
     REPLAY_MALFORMED_TRACE,
     REPLAY_MATCH,
+    REPLAY_MISMATCH,
+    REPLAY_REDACTED_INPUT_UNAVAILABLE,
     REPLAY_UNSUPPORTED_KERNEL,
     replay_trace_status,
 )
@@ -137,10 +139,17 @@ def check_pins(
         # would silently bless a structurally broken trace (review r13). The
         # malformed/unsupported-kernel detection lives in replay; honor it here.
         if replay_status == REPLAY_MALFORMED_TRACE:
-            results.append(_result(pinned, "MALFORMED", version, STATUS_MALFORMED))
+            results.append(
+                _result(pinned, "MALFORMED", version, STATUS_MALFORMED, replay_status)
+            )
             continue
         if replay_status == REPLAY_UNSUPPORTED_KERNEL:
-            results.append(_result(pinned, "UNSUPPORTED_KERNEL", version, STATUS_UNSUPPORTED_KERNEL))
+            results.append(
+                _result(
+                    pinned, "UNSUPPORTED_KERNEL", version,
+                    STATUS_UNSUPPORTED_KERNEL, replay_status,
+                )
+            )
             continue
         actual_sequence = tuple(str(d["verdict"]) for d in recomputed)
         expected = pinned.expected_sequence or (pinned.expected_verdict,)
@@ -148,7 +157,8 @@ def check_pins(
         matches = replay_status == REPLAY_MATCH and actual_sequence == expected
         actual = actual_sequence[-1] if actual_sequence else "NO_DECISION"
         result = _result(
-            pinned, actual, version, STATUS_MATCHES if matches else STATUS_DIFFERS
+            pinned, actual, version,
+            STATUS_MATCHES if matches else STATUS_DIFFERS, replay_status,
         )
         result["actual_sequence"] = list(actual_sequence)
         result["expected_sequence"] = list(expected)
@@ -156,12 +166,87 @@ def check_pins(
     return results
 
 
-def _result(pinned: RegressionPin, actual: str, version: str, status: str) -> dict[str, object]:
+def _result(
+    pinned: RegressionPin,
+    actual: str,
+    version: str,
+    status: str,
+    replay_status: str | None = None,
+) -> dict[str, object]:
+    # `replay_status` is carried because a pin can fail to match for two
+    # INDEPENDENT reasons — the verdict sequence changed, or the replay was not
+    # an exact reproduction — and `status` collapses both into one word. A
+    # consumer that has only `status` cannot tell a caller which happened; see
+    # `difference_reason`. None where no replay ran (a missing or tampered pin).
     return {
         "trace_id": pinned.trace_id,
         "expected": pinned.expected_verdict,
         "actual": actual,
         "kernel": version,
         "status": status,
+        "replay_status": replay_status,
         "resolution": None if status == STATUS_MATCHES else "user_labels_required",
     }
+
+
+# Why a non-exact replay is not a reproduction, in the terms the pin is about.
+_REPLAY_REASON = {
+    REPLAY_MISMATCH: "the recomputed verdict-core differs from the recorded one",
+    REPLAY_REDACTED_INPUT_UNAVAILABLE: (
+        "a redacted value the decision turned on is unavailable, so this replay "
+        "is not an exact reproduction"
+    ),
+    REPLAY_MALFORMED_TRACE: "the trace cannot be replayed (structurally malformed)",
+    REPLAY_UNSUPPORTED_KERNEL: "the kernel this trace ran under is unavailable",
+}
+
+_STATUS_REASON = {
+    STATUS_MISSING: "the pinned trace is not in this bundle",
+    STATUS_TAMPERED: (
+        "the trace under this id no longer matches the content hash it was "
+        "pinned at"
+    ),
+}
+
+
+def difference_reason(result: dict[str, object]) -> str | None:
+    """Why this pin is not a clean match — or None when it is one.
+
+    A pin matches only when the replay was exact AND the whole ordered verdict
+    sequence equals the pin, so it can fail on either count. `status` says only
+    that it failed. The headline `expected`/`actual` are single verdicts, so a
+    pin whose SEQUENCE changed, or whose replay was not exact, can report
+    "expected DENY, got DENY -> differs_from_pinned_expected" — which reads as
+    the tool contradicting itself rather than as the finding it is. Both causes
+    are already known here; this states them, and states both when both apply.
+    """
+    status = result.get("status")
+    if status == STATUS_MATCHES:
+        return None
+    if status in _STATUS_REASON:
+        return _STATUS_REASON[str(status)]
+
+    causes: list[str] = []
+    expected = result.get("expected_sequence")
+    actual = result.get("actual_sequence")
+    if expected is not None and actual is not None and expected != actual:
+        causes.append(
+            f"the verdict sequence changed: expected {_seq(expected)}, got {_seq(actual)}"
+        )
+    replay_status = result.get("replay_status")
+    if replay_status is not None and replay_status != REPLAY_MATCH:
+        causes.append(
+            _REPLAY_REASON.get(
+                str(replay_status), f"the replay reported {replay_status}"
+            )
+        )
+    if not causes:
+        # Defensive: a non-match with neither cause would mean the match rule
+        # and this explanation have drifted apart. Say so rather than print an
+        # empty reason that reads as "no reason".
+        return f"unexplained {status} — the match rule and this report disagree"
+    return "; ".join(causes)
+
+
+def _seq(verdicts: object) -> str:
+    return "[" + ", ".join(str(v) for v in (verdicts or [])) + "]"

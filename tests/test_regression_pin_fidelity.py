@@ -17,7 +17,12 @@ import unittest
 
 from tests import support
 from lab_runner import ScriptedAgent
-from lab_capabilities.governance import check_pins, pin, run_trial
+from lab_capabilities.governance import (
+    check_pins,
+    difference_reason,
+    pin,
+    run_trial,
+)
 
 ATTACK = ScriptedAgent(attack_rate=1.0)
 
@@ -142,7 +147,125 @@ class TestRegressionHonorsReplayStatus(unittest.TestCase):
                          inputs_for=lambda t: scen["inputs"])
         self.assertEqual(res[0]["status"], "pinned_trace_malformed")
         self.assertNotEqual(res[0]["status"], "matches_pinned_expected")
+        # …and it says WHY, rather than leaving the caller to infer it from a
+        # status word whose headline verdicts look unremarkable
+        self.assertEqual(res[0]["replay_status"], "malformed_trace")
+        self.assertIn("cannot be replayed", str(difference_reason(res[0])))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDifferenceReasonIsStated(unittest.TestCase):
+    """`status` said a pin differs; nothing said WHAT differs.
+
+    A pin matches only when the replay was exact AND the whole ordered verdict
+    sequence equals the pin. So it can fail on either count, while `expected`
+    and `actual` — single headline verdicts — stay identical. `axor-lab regress`
+    printed exactly that on a real bundle:
+
+        ...: expected DENY, got DENY under axor-core@0.10.2
+             -> differs_from_pinned_expected
+
+    which reads as the tool contradicting itself. Both causes were already
+    computed; neither reached the result dict (`replay_status` was dropped) or
+    the CLI (which printed only the headline verdicts).
+    """
+
+    def _pinned_bundle(self):
+        from lab_capabilities.governance import governor_config
+        from lab_capabilities.governance.axor_backend import AxorKernel
+
+        manifests = support.manifests()
+        policy = {"profile": "strict", "trust_model": "content-ledger",
+                  "allowlist": ["$inputs.known_ibans"]}
+        cond = {**support.conditions()[1], "policy": policy}
+        scenario = copy.deepcopy(support.banking_scenario())
+        scenario["inputs"]["known_ibans"] = [support.LANDLORD_IBAN]  # type: ignore[index]
+        kernel = AxorKernel(
+            version=support.KERNEL_PINNED,
+            config=governor_config(manifests, policy, scenario["inputs"]),
+        )
+        trace = run_trial(scenario, manifests, cond, kernel, run_id="r",
+                          seed="s000", repeat_index=0, agent=ATTACK).trace
+        return {str(trace["trace_id"]): trace}, pin(trace, "DENY"), cond, kernel, manifests
+
+    def test_a_clean_match_has_no_reason(self) -> None:
+        traces, p, cond, kernel, manifests = self._pinned_bundle()
+        result = check_pins((p,), traces, cond, kernel, manifests,
+                            kernel_for=lambda t: kernel)[0]
+        self.assertEqual(result["status"], "matches_pinned_expected")
+        self.assertEqual(result["replay_status"], "match")
+        self.assertIsNone(difference_reason(result))
+
+    def test_a_missing_pin_says_it_is_missing(self) -> None:
+        _, p, cond, kernel, manifests = self._pinned_bundle()
+        result = check_pins((p,), {}, cond, kernel, manifests)[0]
+        self.assertEqual(result["status"], "pinned_trace_missing")
+        self.assertIn("not in this bundle", str(difference_reason(result)))
+
+    def test_a_tampered_pin_says_the_hash_moved(self) -> None:
+        traces, p, cond, kernel, manifests = self._pinned_bundle()
+        edited = copy.deepcopy(next(iter(traces.values())))
+        edited["producer"] = {"tampered": True}
+        result = check_pins((p,), {str(edited["trace_id"]): edited}, cond,
+                            kernel, manifests)[0]
+        self.assertEqual(result["status"], "pinned_trace_tampered")
+        self.assertIn("content hash", str(difference_reason(result)))
+
+    def test_identical_headline_verdicts_still_state_a_cause(self) -> None:
+        """The reported bug: same headline verdict, real difference underneath."""
+        for result in (
+            {  # the sequence moved; only its LAST verdict is the headline one
+                "status": "differs_from_pinned_expected",
+                "expected": "DENY", "actual": "DENY",
+                "expected_sequence": ["ALLOW", "DENY"],
+                "actual_sequence": ["DENY", "DENY"],
+                "replay_status": "match",
+            },
+            {  # the sequence is equal; the replay was not a reproduction
+                "status": "differs_from_pinned_expected",
+                "expected": "DENY", "actual": "DENY",
+                "expected_sequence": ["ALLOW", "DENY"],
+                "actual_sequence": ["ALLOW", "DENY"],
+                "replay_status": "mismatch",
+            },
+        ):
+            with self.subTest(replay_status=result["replay_status"]):
+                reason = difference_reason(result)
+                self.assertIsNotNone(reason)
+                self.assertTrue(str(reason).strip())
+                # it must not be the empty-shaped fallback
+                self.assertNotIn("unexplained", str(reason))
+
+    def test_the_sequence_cause_names_both_sequences(self) -> None:
+        reason = str(difference_reason({
+            "status": "differs_from_pinned_expected",
+            "expected": "DENY", "actual": "DENY",
+            "expected_sequence": ["ALLOW", "DENY"],
+            "actual_sequence": ["DENY", "DENY"],
+            "replay_status": "match",
+        }))
+        self.assertIn("[ALLOW, DENY]", reason)
+        self.assertIn("[DENY, DENY]", reason)
+
+    def test_an_inexact_replay_is_named_even_when_the_sequence_is_equal(self) -> None:
+        reason = str(difference_reason({
+            "status": "differs_from_pinned_expected",
+            "expected": "DENY", "actual": "DENY",
+            "expected_sequence": ["DENY"], "actual_sequence": ["DENY"],
+            "replay_status": "redacted_input_unavailable",
+        }))
+        self.assertIn("redacted", reason)
+        self.assertIn("not an exact reproduction", reason)
+
+    def test_both_causes_are_stated_when_both_apply(self) -> None:
+        reason = str(difference_reason({
+            "status": "differs_from_pinned_expected",
+            "expected": "DENY", "actual": "ALLOW",
+            "expected_sequence": ["DENY"], "actual_sequence": ["ALLOW"],
+            "replay_status": "redacted_input_unavailable",
+        }))
+        self.assertIn("verdict sequence changed", reason)
+        self.assertIn("redacted", reason)

@@ -1,0 +1,193 @@
+# Deploying Axor Lab (self-hosted, single node)
+
+What this gets you: the screen API and the web app behind a proxy that
+terminates TLS and rate-limits, with durable storage. What it is not: a
+horizontally-scalable service. Read **Limits** before you commit to it.
+
+```
+cp .env.example .env                       # set AXOR_LAB_CONTROL_TOKEN
+docker compose up --build                  # → http://localhost:8443
+```
+
+## Limits — decide against these first
+
+- **One node.** Live run state (in-flight assignments and their events) is held
+  in memory by a single process. Two replicas would each answer for runs the
+  other is executing, so do not scale `lab`. Everything finished — suites,
+  artifacts, evidence, regressions, workspaces — is on disk and shared by
+  nothing.
+- **A restart drops runs in flight.** Finished runs — including their traces —
+  survive on Postgres (verified below); a run mid-execution does not: the
+  runtime executing it has to be told again. Deploy when nothing is running, or
+  accept it.
+- **Rate limiting lives at the proxy, not in the app.** The app has none. If you
+  put something other than `deploy/nginx.conf` in front of it, carry the limits
+  over — especially the one on `/guest-session`.
+- **Checkout is not wired to a payment provider.** `/billing/checkout` returns a
+  placeholder URL. The webhook, activation and lapse-to-free paths are real, so
+  a plan is granted by an admin today. See the maturity table in `README.md`.
+- **No TLS until you provide certificates.** The shipped config listens on plain
+  HTTP and says so. Three lines in `deploy/nginx.conf` switch it.
+- **With a DSN, the whole server is on Postgres.** Documents (suites,
+  EvidenceCases, regressions, artifacts) and runs are `jsonb` rows scoped by
+  workspace — durable, searchable inside, and not preloaded into RAM; the Runs
+  screen is a query rather than every run loaded into memory. The tenant
+  registry and its audit log are rows, with credentials stored hashed. The
+  publication catalog's bytes are objects keyed by the path each record already
+  had. A backup is one `pg_dump`. Without `AXOR_LAB_DATABASE_URL` the server
+  keeps the old file behaviour byte for byte, and the CLI never needs a
+  database at all.
+- **Workspace membership survives on Postgres, and only there.** The registry —
+  workspaces, member tokens, roles, plans and the audit log — is durable with a
+  DSN and in-memory without one. Verified both ways: without a database a
+  workspace showing owner 1 / member 2 came back with only its owner and the
+  member tokens 401'd; with one, the same member token still authenticates
+  after a restart. A guest session is the deliberate exception — ephemeral by
+  design, never written.
+- **Tokens are stored hashed.** A member token is shown once at creation and
+  thereafter only compared, so the registry keeps a SHA-256 and never the token.
+  A `pg_dump` therefore carries no usable credential.
+
+## First boot
+
+1. `openssl rand -hex 24` → `AXOR_LAB_CONTROL_TOKEN` in `.env`. There is no
+   default; the stack refuses to start without one, because a Lab with no token
+   is an open write surface.
+2. Put your price list where `AXOR_LAB_PLANS_FILE` points. The image ships
+   `docs/pricing/axor-plans.json`; tier names and prices are the product's,
+   numeric limits are yours to set for your capacity.
+3. Optional — human login: point `AXOR_LAB_IDENTITY_JWKS_URL` at an
+   axor-identity deployment. A token's `org` + `tier` provision a workspace on
+   the matching plan, failing **closed** to free on an unknown tier. Without it,
+   only the control token authenticates.
+4. Leave `AXOR_LAB_GUEST_SESSIONS` empty until you have watched the rate limits
+   under real traffic. It is the one route an anonymous stranger can spend
+   resources on.
+
+Check it came up the way you meant:
+
+```
+docker compose logs lab | head -5
+#   storage:  durable → /data          ← "in-memory (lost on restart)" means
+#   web app:  /app/web/dist               you forgot the volume
+#   auth:     token-gated
+```
+
+## TLS
+
+Put `fullchain.pem` and `privkey.pem` in `deploy/certs/`, then in
+`deploy/nginx.conf` replace `listen 8080;` with the three commented lines above
+it and map the port in `docker-compose.yml`. Renew by replacing the files and
+`docker compose restart proxy` — nginx reads them at start.
+
+## Authentication, in one place
+
+Three kinds of credential reach the server, all as `Authorization: Bearer …`:
+
+| Credential | Where it comes from | Survives restart |
+|---|---|---|
+| control token | `AXOR_LAB_CONTROL_TOKEN`, the environment | yes |
+| member token | minted by the server on `POST /workspaces/current/members`, returned **once** | no |
+| identity access token | an axor-identity deployment, verified against its JWKS | yes (re-provisions) |
+| runtime ingest key | minted on `POST /runtimes/connect`, for a connected runtime only | no |
+
+RBAC is a four-rung ladder — `owner` > `admin` > `member` > `viewer`. Any
+POST/PUT/DELETE needs at least `member`, so a viewer is read-only; managing
+members needs `admin`. Every mutation is appended to the workspace audit log by
+ROLE, not by token — an audit log is not a place to leak credentials. With no
+control token set at all the server runs OPEN, as a single owner, and says so
+at startup; that is a local-development mode.
+
+An identity token's `org` selects or provisions the workspace, its `role` drives
+RBAC and its `tier` selects the plan, failing **closed** to free on a tier the
+catalog does not name. An action the plan does not cover is `402`, not `403`:
+authorised and well-formed, just not in the plan.
+
+## Backup and restore
+
+Two things now: the Postgres database (suites, evidence, regressions,
+artifacts) and the `labdata` volume (the publication catalog, traces).
+
+```
+docker compose exec postgres pg_dump -U axor axor_lab | gzip > axor-lab-$(date +%F).sql.gz
+```
+
+On a DSN deployment the `labdata` volume holds nothing; it is still where a
+file-backed deployment keeps its catalog and its traces.
+
+```
+# backup
+docker run --rm -v axor-lab_labdata:/d -v "$PWD":/out alpine \
+  tar czf /out/axor-lab-$(date +%F).tgz -C /d .
+
+# restore into a fresh stack
+docker compose down
+docker volume rm axor-lab_labdata
+docker volume create axor-lab_labdata
+docker run --rm -v axor-lab_labdata:/d -v "$PWD":/in alpine \
+  tar xzf /in/axor-lab-YYYY-MM-DD.tgz -C /d
+docker compose up -d
+```
+
+There is no schema migration to run: the store is JSON files under `/data`,
+content-addressed where immutability matters. A backup taken while a run is
+executing is consistent for everything finished, which is everything a backup is
+for here.
+
+## Upgrade
+
+1. Back up (above).
+2. `git pull && docker compose up -d --build`.
+
+Rollback is the previous image plus the pre-upgrade archive. Watch the first
+`docker compose logs lab` for the storage line — an upgrade that silently lost
+its volume reports `in-memory` and will look fine until the first restart.
+
+## When something is wrong
+
+- **The UI loads but every action 401s.** The browser is not sending the control
+  token. Check `auth: token-gated` in the logs and that your client carries
+  `Authorization: Bearer …`, or wire identity login so humans get their own.
+- **A live run appears frozen in the browser while the server logs progress.**
+  Something between the browser and the app is buffering the SSE stream.
+  `deploy/nginx.conf` disables buffering on `/runs/{id}/events` specifically;
+  a different proxy in front needs the same.
+- **429s under normal use.** The `api` bucket is 20r/s with a burst of 40 per
+  address. A NAT'd office can exceed that legitimately — raise the rate rather
+  than remove the limit, and keep `/guest-session` tight regardless.
+- **`storage: in-memory (lost on restart)`.** `AXOR_LAB_DATA_DIR` is unset or
+  the volume did not mount. Stop before anyone puts work in.
+- **The API answers but `GET /` is 404, and the log says `web app: NOT
+  BUILT`.** The server was not told where the UI is. The image sets
+  `AXOR_LAB_WEB_ROOT=/srv/axor-lab/web`; outside the image, pass `--web-root`
+  at the directory holding `index.html`. The implicit default is `web/dist`
+  beside the source tree, which an installed package does not have. A root you
+  name explicitly and that holds no `index.html` is a startup error (exit 2),
+  not a silent API-only server.
+
+## What was verified, and how
+
+Against a real `axor-lab serve` with `deploy/nginx.conf` in front of it, not
+inside Docker (no daemon was available where this was written — the image build
+itself is unverified):
+
+- the SPA, `/home` 401 without a token and 200 with one, `/suites` returning the
+  built-in catalog;
+- `POST /guest-session` returning 404 while guest sessions are off;
+- the rate limit: 4 requests through (1 + burst 3) then `429`, while 20
+  consecutive API reads all returned 200;
+- the security headers nginx adds, and `server_tokens off`;
+- durability: a suite created through the proxy landed at
+  `/data/suite/<id>.json` and was still listed after the process was stopped and
+  started again — while the same restart dropped the workspace's member tokens,
+  which is how the membership limit above was established rather than inferred;
+- the RBAC ladder: a viewer's `POST /suites` refused with 403, a member's
+  attempt to add a member refused with 403, both roles reading fine;
+- the image's install shape, simulated without Docker: a NON-editable
+  `pip install .` into a clean venv, the built `dist/` copied to a separate
+  path, and `axor-lab serve` run from outside the source tree. Without
+  `AXOR_LAB_WEB_ROOT` it reported `web app: NOT BUILT` and `GET /` was 404 —
+  the failure the editable install had been hiding; with it, `/`, the hashed
+  assets and `/home` all answered 200;
+- `nginx -t` on the shipped configuration, and `docker compose config`,
+  including that it refuses to render without `AXOR_LAB_CONTROL_TOKEN`.

@@ -153,10 +153,11 @@ def make_server(
     server_id: str = "lab.local",
     server_key_id: str | None = None,
     server_signing_key: str | None = None,
+    dsn: str | None = None,
 ) -> ThreadingHTTPServer:
     """Build (do not start) an HTTP server bound to host:port."""
     store = PublicationStore(
-        root=store_root, known_keys=known_keys or {},
+        root=store_root, dsn=dsn, known_keys=known_keys or {},
         server_id=server_id, server_key_id=server_key_id,
         server_signing_key=server_signing_key,
     )

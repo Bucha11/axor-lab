@@ -11,3 +11,14 @@ build/
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
+
+# local virtualenv — the README's quickstart makes one, and `pip install -e .`
+# fills it with the git-pinned ecosystem deps. It is a build artifact, not source.
+.venv/
+venv/
+
+# TLS material for the self-hosted stack — the directory is tracked, its
+# contents never are. A private key in git history is not revocable by deleting
+# the file.
+deploy/certs/*
+!deploy/certs/.gitkeep
