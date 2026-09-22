@@ -30,6 +30,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
+# The extras are the hosted server's: postgres (AXOR_LAB_DATABASE_URL — without
+# it the server refuses to start when compose sets a DSN), identity (login via
+# axor-identity), yaml (the Builder's YAML mode), crypto (signed bundles).
+#
 # One install, reading pyproject — deliberately not split into a cached
 # dependency layer. Splitting means naming axor-core's range and the two git
 # refs a second time here, and a Dockerfile pin that drifts from pyproject is
@@ -50,7 +54,7 @@ RUN --mount=type=secret,id=github_token sh -eu -c '\
     if [ -s /run/secrets/github_token ]; then \
       git config --global url."https://x-access-token:$(cat /run/secrets/github_token)@github.com/".insteadOf "https://github.com/"; \
     fi; \
-    pip install --no-cache-dir . ; \
+    pip install --no-cache-dir ".[postgres,identity,yaml,crypto]" ; \
     rm -f /root/.gitconfig'
 
 # The UI, built in stage 1, at a path the server is told about explicitly.
