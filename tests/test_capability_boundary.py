@@ -64,11 +64,21 @@ GOVERNANCE_MODULES = frozenset({"lab_capabilities"})
 #   lab_suite/dispatch.py       constructs the arms a REMOTE run executes under
 #   lab_suite/builtin/agentdojo.py  a built-in that declares the capability and
 #                               must name the kernel its condition pins
+#   lab_suite/builtin/ingest.py     the same, for the same reason: its arms
+#                               compare governed against ungoverned, and a
+#                               condition that does not name a kernel plans a
+#                               run a connected runtime cannot execute
 #   lab_runner/cli.py           the CLI is a composition root, not spine: its
 #                               `.axl` commands ARE the capability's surface
+#
+# Note what this list does NOT contain: any built-in that merely RUNS under
+# governance. Blank and Budget declare no conditions and never reach the
+# capability. A suite lands here only by naming a kernel, which is the one
+# thing a manifest cannot state without knowing which one is installed.
 WIRING_POINTS = (
     "lab_runner/cli.py",
     "lab_suite/builtin/agentdojo.py",
+    "lab_suite/builtin/ingest.py",
     "lab_suite/dispatch.py",
     "lab_suite/execute.py",
 )

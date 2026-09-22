@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
-import { Button, Empty, Failed, Json, Link, Loading, Stat } from "../components/ui";
+import { Button, Empty, Failed, Json, Link, Loading, Stat, Tag } from "../components/ui";
 import { StatusTag, Timeline } from "../components/Timeline";
 import { useRunEvents } from "../lib/useRunEvents";
 
@@ -24,9 +24,9 @@ function ago(epochSeconds?: number): string {
 export function Runs() {
   // every run, from the dedicated endpoint — the Runs screen used to read
   // home.recent_runs (capped at 5), so a sixth run silently vanished
-  const { data, error, loading, reload } = useAsync(() => api.runs());
+  const { data, error, status, loading, reload } = useAsync(() => api.runs());
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   const runs = data?.runs ?? [];
   return (
     <div className="screen">
@@ -72,6 +72,8 @@ export function RunReport({ runId }: { runId: string }) {
   if (report.error) return <Failed error={report.error} onRetry={report.reload} />;
   if (!report.data) return null;
   const { coverage, trials_by_status, metric_coverage, aggregates, estimate } = report.data;
+  const arms = report.data.conditions ?? [];
+  const observeOnly = arms.length > 0 && !arms.some((arm) => arm.enforcement === "on");
   const state = progress?.state ?? report.data.state;
   const preStart = PRE_START.has(state);
   const terminal = progress?.terminal ?? ["completed", "failed", "cancelled"].includes(state);
@@ -178,6 +180,17 @@ export function RunReport({ runId }: { runId: string }) {
 
       <section>
         <h2>Aggregates</h2>
+        {/* the likeliest first run anyone does: wrap the agent, watch, gate
+            nothing. Its ASR is a measurement of an UNPROTECTED agent and looks
+            exactly like a governed contrast in a table of rates. */}
+        {observeOnly && (
+          <p className="muted small">
+            <Tag tone="warning">observe only</Tag> No arm enforced — the kernel
+            watched every trial and gated nothing. These are baseline numbers
+            for an ungoverned agent; nothing here shows what governance would
+            change. That needs a second arm with enforcement on.
+          </p>
+        )}
         {aggregates.length === 0 ? (
           <Empty>
             The backend stored no aggregate for this run. Nothing is computed here —
@@ -215,7 +228,7 @@ function AggregatesTable({ rows }: { rows: Record<string, unknown>[] }) {
         <thead>
           <tr>
             <th>metric</th><th>arm</th><th>estimate</th><th>interval</th>
-            <th>n</th><th>test</th>
+            <th>n</th><th>evidence</th><th>test</th>
           </tr>
         </thead>
         <tbody>
@@ -228,11 +241,22 @@ function AggregatesTable({ rows }: { rows: Record<string, unknown>[] }) {
                 <td>{String(row.condition_id ?? "")}</td>
                 <td>{num(row.estimate)}</td>
                 <td className="muted small">
-                  {interval.method && interval.method !== "none"
-                    ? `${interval.method} [${num(interval.low)}, ${num(interval.high)}]`
-                    : "—"}
+                  {/* a range is not a CI, and blanking it hid the only spread a
+                      self-reported metric has */}
+                  {interval.low === undefined
+                    ? "—"
+                    : interval.method && interval.method !== "none"
+                      ? `${interval.method} [${num(interval.low)}, ${num(interval.high)}]`
+                      : `range [${num(interval.low)}, ${num(interval.high)}]`}
                 </td>
                 <td>{String(row.n ?? "")}</td>
+                <td className="muted small">
+                  {/* the tier the number sits in, decided by the server from
+                      the one shared registry. A rate the evidence can
+                      re-derive and a latency only the runner ever saw look
+                      identical in a table and are not the same claim. */}
+                  {row.evidence === "self_reported" ? "self-reported" : "derived"}
+                </td>
                 <td className="muted small">
                   {test
                     ? `${test.name} vs ${test.vs}: p=${num(test.p)} (${test.status})`
@@ -248,12 +272,12 @@ function AggregatesTable({ rows }: { rows: Record<string, unknown>[] }) {
 }
 
 export function TrialScreen({ runId, trialId }: { runId: string; trialId: string }) {
-  const { data, error, loading, reload } = useAsync(
+  const { data, error, status, loading, reload } = useAsync(
     () => api.trial(runId, trialId),
     [runId, trialId],
   );
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   if (!data) return null;
 
   return (

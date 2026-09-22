@@ -38,7 +38,7 @@ from lab_contracts.publication import add_reproduction, rebuild_reproduction_log
 from lab_capabilities.governance import default_registry, replay_bundle
 
 from .errors import NotFound, PublishRejected
-from .recompute import check_aggregates
+from .recompute import check_aggregates, derived_metrics
 
 _ATTESTATION_ID_MAX = 128
 
@@ -638,7 +638,15 @@ class PublicationStore:
         "statistics_recomputed" would attest a check that did not happen."""
         has_aggregates = bool(bundle.get("aggregates"))
         verified = ["bundle_schema", "trace_schema", "content_hashes", "replay_bit_identical"]
-        verified.append("statistics_recomputed" if has_aggregates else "statistics_not_applicable")
+        if not has_aggregates:
+            verified.append("statistics_not_applicable")
+        elif derived_metrics(bundle):
+            verified.append("statistics_recomputed")
+        else:
+            # every aggregate was self-reported: the estimator was re-applied to
+            # the uploaded per-trial values and matched. Saying "recomputed" here
+            # would attest a derivation from the traces that never happened.
+            verified.append("statistics_estimator_reapplied")
         return {
             "replay": "bit_identical",
             "statistics": str(pub.get("statistics_integrity") or "none"),
@@ -742,7 +750,16 @@ class PublicationStore:
             if trial.get("status") == "completed":
                 completed_by_cond[cid] = completed_by_cond.get(cid, 0) + 1
         miss = _missingness(trials_all) if trials_all else None
+        # ONLY the aggregates the server DERIVED from the traces may back a
+        # statistical claim. The rest passed the weaker check — their own
+        # estimator re-applied to their own reported values — which says the
+        # arithmetic follows and nothing about the observations. They stay in the
+        # bundle and are readable; they simply carry no claim, which is what
+        # publication/v1 already means by `self_reported`.
+        derived = derived_metrics(bundle)
         for aggregate in aggregates:
+            if (str(aggregate["metric"]), str(aggregate["condition_id"])) not in derived:
+                continue
             interval: dict[str, object] = aggregate["interval"]  # type: ignore[assignment]
             # an independent-samples comparison is exploratory — never present it
             # as a paired significance result (review r4)
@@ -791,8 +808,17 @@ class PublicationStore:
                 )
             )
         # the server only reaches here after check_aggregates matched, so every
-        # statistical claim is backed by a server recomputation, not the upload
-        statistics_integrity = "recomputed_from_traces" if aggregates else None
+        # statistical claim is backed by a server recomputation, not the upload.
+        # A bundle whose aggregates are ALL self-reported gets the axis that says
+        # so — never `recomputed_from_traces`, which would attest a derivation
+        # the server could not perform, and never a silent None, which would hide
+        # that statistics were published at all.
+        if derived:
+            statistics_integrity = "recomputed_from_traces"
+        elif aggregates:
+            statistics_integrity = "self_reported"
+        else:
+            statistics_integrity = None
         # build the body with a placeholder id, then content-address it: the id
         # commits to every field, so the publication is immutable by construction
         publication = build_publication(

@@ -121,8 +121,13 @@ async function stubReport(page: Page): Promise<void> {
           estimate: 123.456,
           n: 4,
           interval: { method: "bootstrap", low: 100.1, high: 150.2 },
+          evidence: "self_reported",
           test: { name: "welch", vs: "baseline", p: 0.032, status: "significant" },
         },
+      ],
+      conditions: [
+        { id: "control", enforcement: "off" },
+        { id: "governed", enforcement: "on" },
       ],
       estimate: {},
     }),
@@ -141,6 +146,40 @@ async function stubReport(page: Page): Promise<void> {
     }),
   );
 }
+
+test.describe("an observe-only run", () => {
+  test("says no arm enforced, so a rate is not read as a governance result", async ({
+    page,
+  }) => {
+    // the likeliest first run anyone does: wrap the agent, watch, gate nothing.
+    // Its ASR is a measurement of an UNPROTECTED agent and looks exactly like a
+    // governed contrast in a table of rates.
+    await openMode(page);
+    await page.route(`**/runs/${RUN_ID}/report`, json(200, {
+      run_id: RUN_ID, state: "completed", planned_trials: 8,
+      trials_by_status: { completed: 8 },
+      coverage: { completed: 8, planned: 8 },
+      metric_coverage: { ASR: 8 },
+      aggregates: [{
+        metric: "ASR", condition_id: "ungoverned", estimate: 0.75, n: 8,
+        interval: { method: "wilson", low: 0.409, high: 0.929 },
+        evidence: "derived",
+      }],
+      conditions: [{ id: "ungoverned", enforcement: "off" }],
+      estimate: {},
+    }));
+    await page.route(`**/runs/${RUN_ID}/results`, json(200, {
+      run_id: RUN_ID, state: "completed", planned_trials: [], trials: [], aggregates: [],
+    }));
+    await page.goto(`/#/runs/${RUN_ID}`);
+
+    await expect(page.locator(".tag", { hasText: /^observe only$/ })).toBeVisible();
+    await expect(page.getByText(/nothing here shows what governance would change/i))
+      .toBeVisible();
+    // the number is still shown — a baseline IS a result
+    await expect(page.getByRole("cell", { name: "0.750" })).toBeVisible();
+  });
+});
 
 test.describe("run report", () => {
   test("renders coverage, metrics, aggregates and trials", async ({ page }) => {
@@ -177,6 +216,11 @@ test.describe("run report", () => {
     await expect(
       page.getByRole("cell", { name: "welch vs baseline: p=0.032 (significant)" }),
     ).toBeVisible();
+    // the tier the number sits in — a latency the runner alone measured is not
+    // the same claim as a rate the evidence can re-derive
+    await expect(page.getByRole("cell", { name: "self-reported" })).toBeVisible();
+    // and this run HAS an enforcing arm, so no observe-only warning
+    await expect(page.locator(".tag", { hasText: /^observe only$/ })).toHaveCount(0);
 
     // trials list from GET /runs/:id/results
     await expect(page.getByRole("heading", { name: "Trials", exact: true })).toBeVisible();

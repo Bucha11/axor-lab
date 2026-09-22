@@ -23,11 +23,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # `validate_slice.py` used to run with no install at all, against a
+      # standalone `validate.py` next door. That script was a third copy of an
+      # engine `lab_contracts` already had — and the weaker one: it implemented
+      # no `if`/`then`, so it passed a slice bundle missing the very fields a
+      # completed trial is required to record. It is gone, and this job installs
+      # the package and validates through the same code path everything else
+      # uses. Three of the thirteen schemas come from axor-core, which a
+      # directory glob could never have found.
       - name: Validate slice examples against schemas
-        working-directory: contracts
         run: |
-          python validate.py
-          python validate_slice.py
+          pip install -e .
+          cd contracts && python validate_slice.py
 
   acceptance:
     name: Acceptance suite (${{ matrix.python }})
@@ -83,7 +90,12 @@ jobs:
       - name: ruff (pyflakes + bugbear; no style noise)
         run: |
           pip install ruff
-          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_suite lab_capabilities
+          # every package the wheel ships. `lab_service` was in neither this list
+          # nor `[tool.setuptools] packages`, so the product's verb layer was
+          # unlinted AND unshipped.
+          # `tools/` is not shipped in the wheel, but the release gate runs from it
+          # on every tag — an unlinted gate is one that can fail the release itself.
+          ruff check lab_contracts lab_runner lab_analysis lab_adapters lab_server lab_service lab_suite lab_capabilities tools
 
   determinism:
     name: Replay determinism matrix (${{ matrix.os }})
@@ -151,19 +163,28 @@ jobs:
           # kernel nobody in the ecosystem actually runs. Full suite re-run green.
           # Bumped 0.10.0 -> 0.10.2: the governance extraction (gate_of) and the
           # wrap trace (ToolCallGovernor.trace_events) need the 0.10.2 kernel.
-          pip install "axor-core==0.10.2"
-          # Lab's runner now imports axor-wrap (the shared wrapping engine), so it
-          # must be present for discovery to import at all. Install it AFTER the
-          # exact axor-core pin, from the same public branch the wrap-integration
-          # job uses; its own axor-core>=0.10.2,<0.11 is already satisfied by the
-          # pinned 0.10.2, so pip leaves the pinned kernel untouched.
-          pip install "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m"
-          # axor-eval too: the tool-fabrication experiment (and its test, picked up
-          # by discovery here) imports it. Same public-repo git pin as everywhere
-          # else; its axor-core>=0.8,<0.11 is satisfied by the pinned 0.10.2.
-          pip install "axor-eval @ git+https://github.com/Bucha11/axor-eval@claude/axor-lab-spec-integration-wygy8m"
+          # Bumped 0.10.2 -> 0.11.0: pyproject moved to `axor-core>=0.11,<0.12`
+          # and this pin did not follow, so the one job whose whole purpose is to
+          # measure against the REAL kernel was measuring against a version the
+          # package itself declares incompatible — the exact failure the 0.9.2
+          # bump above was written to prevent, repeated.
+          pip install "axor-core==0.11.0"
+          # Lab's runner imports axor-wrap (the shared wrapping engine), so it
+          # must be present for discovery to import at all, and axor-eval for the
+          # tool-fabrication experiment. Both are EXACT pins for the same reason
+          # the kernel above is: this job's whole purpose is to measure against a
+          # known build, and a floating range would let a future release drift in
+          # and make a green run stop proving what it proved. Install them AFTER
+          # the axor-core pin — wrap's axor-core>=0.10.2,<0.12 and eval's
+          # >=0.8,<0.12 are both satisfied by 0.11.0, so pip leaves it untouched.
+          #
+          # These were git pins to an integration branch until wrap and eval cut
+          # releases carrying the API Lab imports. Now that they are on PyPI, the
+          # package itself depends on version ranges instead — which is what makes
+          # `axor-lab` publishable at all (see docs/RELEASING.md).
+          pip install "axor-wrap==0.2.0" "axor-eval==0.2.0"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
-          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.10.2' else 'axor-core version drift: expected 0.10.2, got ' + axor_core.__version__)"
+          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.11.0' else 'axor-core version drift: expected 0.11.0, got ' + axor_core.__version__)"
           python -c "from lab_capabilities.governance import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.
@@ -263,15 +284,14 @@ jobs:
       # path that matters — bring your own agent.
       - name: Install Lab + axor-wrap
         # The cross-repo trace test needs the CURRENT wrap surface
-        # (`toolset_for_arm`, `trial_of`), which the published axor-wrap 0.1.0 on
-        # PyPI predates — installing `axor-wrap>=0.1` there imports a wrap without
-        # it and every test in the suite errors at setUp. Pin the integration
-        # branch (axor-wrap is public, so this clones tokenless); its own
-        # `axor-core>=0.10.2,<0.11` resolves to the same 0.10.2 Lab pins.
-        # Switch back to a PyPI pin once axor-wrap cuts a release carrying it.
+        # (`toolset_for_arm`, `trial_of`), which the published axor-wrap 0.1.0
+        # predated — this step used to clone an integration branch because of it.
+        # axor-wrap 0.2.0 carries that surface, so it comes from PyPI now, pinned
+        # exactly: a cross-repo seam test that floats tells you a seam held for
+        # SOME wrap, not for the one Lab's evidence was measured against.
         run: |
           pip install -e .
-          pip install "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@claude/axor-lab-spec-integration-wygy8m"
+          pip install "axor-wrap==0.2.0"
           python -c "import axor_wrap, axor_core; print('axor-wrap', axor_wrap.__version__, '| axor-core', axor_core.__version__)"
       - name: The cross-repo acceptance test must RUN, not skip
         run: |

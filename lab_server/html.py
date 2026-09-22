@@ -23,12 +23,32 @@ body{font:15px/1.5 system-ui,sans-serif;max-width:820px;margin:2rem auto;padding
 h1{font-size:1.5rem} h2{font-size:1.1rem;margin-top:2rem;border-bottom:1px solid #ddd;padding-bottom:.3rem}
 .badge{display:inline-block;padding:.15rem .5rem;border-radius:.4rem;font-size:.8rem;margin-right:.3rem;background:#eef}
 .axis{background:#f6f6f6;padding:.5rem .8rem;border-radius:.5rem;margin:.3rem 0;display:inline-block}
-.claim{border-left:3px solid #58a;padding:.4rem .8rem;margin:.5rem 0;background:#f8fbff}
+.claim{border-left:3px solid #58a;padding:.4rem .8rem;margin:.5rem 0;background:#f8fbff;
+       overflow-wrap:anywhere}  /* a claim quotes a trace_id: one 70-char word */
 .claim.stat{border-left-color:#a85}
 code,pre{background:#f4f4f4;padding:.1rem .3rem;border-radius:.3rem;font-size:.85em}
 pre{padding:.6rem;overflow-x:auto} table{border-collapse:collapse;width:100%} td,th{border:1px solid #ddd;padding:.3rem .5rem;text-align:left}
 .deny{color:#b00;font-weight:600} .allow{color:#494} a{color:#36c}
 .note{color:#666;font-size:.9em}
+/* A publication page is read on phones, and its widest content — a config_hash
+   is 71 characters — is exactly what must not push the page sideways. Let the
+   TABLE scroll inside its own box (the same treatment <pre> already gets) so the
+   page itself never does: at 390px this document scrolled to 1244px, so a reader
+   on a phone had to drag the whole article horizontally to read any of it. */
+.scroll{overflow-x:auto;max-width:100%}
+/* an inline <code> holding a publication id or a route is one unbreakable word
+   wider than a phone; <pre> has its own scroller, inline code has nowhere to go */
+code{overflow-wrap:anywhere}
+.btn{display:inline-block;background:#36c;color:#fff;padding:.45rem .9rem;border-radius:.4rem;
+     text-decoration:none;font-weight:600;border:0;font-size:.95rem;cursor:pointer}
+.btn:hover{background:#25a}
+.chk{display:flex;gap:.6rem;align-items:baseline;padding:.35rem .6rem;border-radius:.4rem;margin:.25rem 0;background:#f6f6f6}
+.chk b{min-width:9.5rem}
+.ok{color:#176117} .invalid{color:#b00;font-weight:600} .unverified{color:#84600a}
+.verdict{padding:.6rem .9rem;border-radius:.5rem;margin:.6rem 0;font-weight:600}
+.verdict.ok{background:#eaf6ea;border-left:4px solid #2a2}
+.verdict.failure,.verdict.validation{background:#fdeaea;border-left:4px solid #b00;color:#b00}
+.verdict.unverified{background:#fdf6e3;border-left:4px solid #c90;color:#84600a}
 """
 
 
@@ -60,9 +80,9 @@ def render_catalog(publications: list[StoredPublication]) -> str:
             f" / {esc(reproductions['count'])} total</span></td></tr>"
         )
     table = (
-        "<table><tr><th>Question</th><th>Provenance</th></tr>"
+        "<div class='scroll'><table><tr><th>Question</th><th>Provenance</th></tr>"
         + ("".join(rows) or "<tr><td colspan='2'>No published experiments yet.</td></tr>")
-        + "</table>"
+        + "</table></div>"
     )
     intro = (
         "<p class='note'>Published experiments are re-runnable, forkable, citable "
@@ -81,6 +101,39 @@ def render_publication(stored: StoredPublication) -> str:
 
     body = [f"<h1>{esc(pub['question'])}</h1>"]
     body.append("<p>" + _provenance_badges(axes) + "</p>")
+
+    pid_txt = esc(pub["publication_id"])
+
+    # VERIFY sits ABOVE the claims, not under the trial table.
+    #
+    # It is the first thing a reader should be able to do and the last thing
+    # they will scroll to: below the per-trial table this button is a thousand
+    # pixels past the numbers it vouches for. "Check this before you believe the
+    # rest" is also the honest reading order for a page whose whole argument is
+    # that its numbers are checkable. A verification is a read — it changes
+    # nothing — so it is a plain link: no JavaScript (the CSP on these pages
+    # forbids inline script, and rightly, since every string here is untrusted
+    # upload), no account, no token.
+    # The page used to open this part with `pip install`, so checking a claim
+    # cost a reader a Python environment — and the realistic outcome was that a
+    # published number went unchecked by everyone who read it.
+    body.append("<h2>Verify</h2>")
+    body.append(
+        "<p>Check this evidence yourself — no install, no account. Content hashes "
+        "are recomputed, every frozen trace is replayed through the pinned kernel, "
+        "and each proof is checked against what it binds to.</p>"
+    )
+    body.append(
+        f"<p><a class='btn' href='/e/{pid_txt}/verify'>Verify this publication</a></p>"
+    )
+    body.append(
+        "<p class='note'>This server checking its own copy catches corruption and a "
+        "doctored file; it cannot prove itself honest. To take this server out of the "
+        f"equation, <a href='/api/publications/{pid_txt}/bundle'>download the package</a> "
+        "and verify it elsewhere — any other Lab instance accepts it at "
+        "<code>POST /api/verify</code>, or check it offline with the commands below.</p>"
+    )
+
 
     body.append("<h2>Exactly replayable</h2>")
     body.append(
@@ -118,7 +171,7 @@ def render_publication(stored: StoredPublication) -> str:
     # allowlists, profiles, kernels and several enforcing conditions, so
     # "differ only in enforcement" was only true for the simplest slice
     body.append(_conditions_diff(stored.bundle))
-    body.append("<table><tr><th>Trial</th><th>Condition</th><th>Verdict (replayed)</th></tr>")
+    body.append("<div class='scroll'><table><tr><th>Trial</th><th>Condition</th><th>Verdict (replayed)</th></tr>")
     for trace in sorted(stored.traces.values(), key=lambda t: str(t["trace_id"]))[:12]:
         verdict = _final_verdict(trace)
         cls = "deny" if verdict == "DENY" else "allow"
@@ -128,9 +181,8 @@ def render_publication(stored: StoredPublication) -> str:
             f"<td>{esc(trace['trial']['condition_id'])}</td>"  # type: ignore[index]
             f"<td class='{cls}'>{esc(verdict)}</td></tr>"
         )
-    body.append("</table>")
+    body.append("</table></div>")
 
-    pid_txt = esc(pub["publication_id"])
     body.append("<h2>Reproduce</h2>")
     body.append(
         "<pre># set your Lab server's origin (a root-relative path is not a runnable URL)\n"
@@ -209,14 +261,14 @@ def render_evidence(stored: StoredPublication, trace_id: str, policy_id: str | N
         )
         body.append(f"<p class='note'>Replay under another policy: {links}</p>")
 
-    body.append("<h2>Provenance chain</h2><table><tr><th>value</th><th>labels</th><th>sources</th></tr>")
+    body.append("<h2>Provenance chain</h2><div class='scroll'><table><tr><th>value</th><th>labels</th><th>sources</th></tr>")
     for value in chain["provenance"]:  # type: ignore[union-attr]
         sources = ", ".join(esc(s.get("origin_ref", s.get("kind"))) for s in value["sources"])
         body.append(
             f"<tr><td>{esc(value.get('preview', value['value_id']))}</td>"
             f"<td>{esc(', '.join(value['labels']))}</td><td>{sources}</td></tr>"
         )
-    body.append("</table>")
+    body.append("</table></div>")
 
     verdict: dict[str, object] = chain["verdict"]  # type: ignore[assignment]
     vcls = "deny" if verdict["verdict"] == "DENY" else "allow"
@@ -331,7 +383,7 @@ def _conditions_diff(bundle: dict[str, object]) -> str:
     policy, kernel, config hash — instead of asserting 'differ only in
     enforcement' (which only held for the simplest slice)."""
     rows = [
-        "<table><tr><th>Condition</th><th>Enforcement</th><th>Policy</th>"
+        "<div class='scroll'><table><tr><th>Condition</th><th>Enforcement</th><th>Policy</th>"
         "<th>Kernel</th><th>config_hash</th></tr>"
     ]
     import json as _json
@@ -346,5 +398,79 @@ def _conditions_diff(bundle: dict[str, object]) -> str:
             f"<td><code>{esc(condition['kernel'])}</code></td>"
             f"<td><code>{esc(condition.get('config_hash', 'n/a'))}</code></td></tr>"
         )
-    rows.append("</table>")
+    rows.append("</table></div>")
     return "".join(rows)
+
+
+#: What each outcome means to a reader, in the reader's terms. The verifier's
+#: vocabulary is precise but not self-explaining: "unverified" is not a failure,
+#: and a reader who takes it for one draws the wrong conclusion from an honest
+#: result.
+_VERDICT = {
+    "ok": ("Verified.", "Every check passed: the bytes are intact, the verdicts "
+                        "recompute exactly, and the proofs bind."),
+    "unverified": ("Intact, partly unproven.",
+                   "The evidence itself holds up — hashes and replay passed. One or "
+                   "more SIGNATURES could not be checked here, because this server "
+                   "does not hold the key. That is not a failure; it is the limit of "
+                   "what can be checked without the signer's public key."),
+    "failure": ("Does NOT hold up.",
+                "A check FAILED. This package is not the evidence it claims to be — "
+                "the bytes were altered, the verdicts do not recompute, or a proof "
+                "that must be present is missing."),
+    "validation": ("Not a valid package.",
+                   "The file is not shaped like a reproduction package, so there was "
+                   "nothing to verify."),
+}
+
+
+def render_verification(report: dict[str, object], *, back: str | None = None) -> str:
+    """The result of a verification, rendered for a person rather than a parser.
+
+    The point of a publication page is that a stranger can check it. Until this
+    existed the page told them to install a Python package first, so in practice
+    nobody checked anything — the claim on the page was load-bearing and unaudited.
+    """
+    outcome = str(report.get("outcome", "validation"))
+    headline, gloss = _VERDICT.get(outcome, _VERDICT["validation"])
+    body = ["<h1>Verification result</h1>"]
+    body.append(f"<div class='verdict {esc(outcome)}'>{esc(headline)}</div>")
+    body.append(f"<p>{esc(gloss)}</p>")
+
+    checks: list[dict[str, object]] = report.get("checks", [])  # type: ignore[assignment]
+    body.append("<h2>Checks</h2>")
+    for check in checks:
+        status = esc(check.get("status", ""))
+        body.append(
+            f"<div class='chk'><b>{esc(check.get('name', ''))}</b>"
+            f"<span class='{status}'>{status}</span>"
+            f"<span class='note'>{esc(check.get('message', ''))}</span></div>"
+        )
+    if not checks:
+        body.append("<p class='note'>No check ran.</p>")
+
+    traces = report.get("traces")
+    if traces:
+        body.append(
+            f"<p class='note'>{esc(traces)} frozen trace(s); replay "
+            f"{'was' if report.get('bit_identical') else 'was NOT'} bit-identical.</p>"
+        )
+
+    # The caveat is part of the result, not a footnote to it. A server checking
+    # a package it served can catch corruption and a doctored file; it cannot
+    # prove itself honest, because a dishonest server would simply report a pass.
+    body.append("<h2>What this result is worth</h2>")
+    body.append(
+        f"<p class='note'>Checked by <b>{esc(report.get('verified_by', 'this server'))}</b>. "
+        "That catches a corrupted download and a doctored file. It cannot prove this "
+        "server honest — a server that lies would report a pass. To remove this server "
+        "from the equation, download the package and verify it somewhere else: on any "
+        "other Lab instance, or offline with the command below.</p>"
+    )
+    body.append(
+        "<pre>pip install axor-lab\n"
+        "axor-lab verify &lt;package&gt;.json</pre>"
+    )
+    if back:
+        body.append(f"<p><a href='{esc(back)}'>&larr; back to the publication</a></p>")
+    return _page(headline, "".join(body))

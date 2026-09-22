@@ -12,7 +12,7 @@ import random
 from dataclasses import dataclass
 from typing import Sequence
 
-from .errors import InsufficientDataError, UnitOfAnalysisError
+from .errors import AnalysisError, InsufficientDataError, UnitOfAnalysisError
 
 WILSON_Z_95 = 1.959963984540054
 INCONCLUSIVE_MIN_N = 10
@@ -124,6 +124,91 @@ def paired_bootstrap_ci(
     return means[low_idx], means[high_idx]
 
 
+#: Which metric names the evidence can DERIVE — each maps to the recorded
+#: outcome a verifier re-evaluates against every trace. A metric outside this
+#: table is the runner's own measurement (latency, tokens, spend), present in no
+#: trace, and can only ever be self-reported.
+#:
+#: CLOSED on purpose. The registry is what stops an arbitrary label
+#: ("zero_production_incidents") from resolving to the task-success rate and
+#: riding out as a server-recomputed claim. It lives HERE, beside the estimators,
+#: because three layers need the same answer — the publish handshake, the paper
+#: report and the Run Report screen — and three copies of a security-relevant
+#: list is three chances for one of them to drift open.
+DERIVED_METRIC_OUTCOMES: "dict[str, str]" = {
+    "ASR": "violation",
+    "task_success": "task_success",
+    "task_success_rate": "task_success",
+    "utility": "task_success",
+}
+
+
+def metric_is_derived(metric: str) -> bool:
+    """Whether a verifier can re-derive this metric from the traces."""
+    return metric in DERIVED_METRIC_OUTCOMES
+
+
+#: The estimators a numeric aggregation may use, and the only ones a server can
+#: re-apply. `rate` is `binary_aggregate`'s and lives outside this table because
+#: it is derived from the evidence rather than from a reported number.
+NUMERIC_ESTIMATORS: "dict[str, object]" = {
+    "mean": lambda values: sum(values) / len(values),
+    "sum": lambda values: float(sum(values)),
+    "min": min,
+    "max": max,
+}
+
+
+def numeric_aggregate(
+    metric: str,
+    condition_id: str,
+    values: "Sequence[float]",
+    estimator: str,
+    unit_of_analysis: str = UNIT_TRIAL,
+) -> dict[str, object]:
+    """A bundle/v1 aggregate for a CONTINUOUS per-trial metric (latency, tokens).
+
+    Shared by the runner that produces it and the server that re-applies it, so
+    the two cannot compute the same summary two ways. That mattered the moment
+    the server was asked to check one: it could only recompute binary outcomes
+    from traces, so `mean(duration_ms)` came back "unknown metric" and any suite
+    carrying a latency figure was unpublishable.
+
+    The recorded `estimator` is what makes re-application possible at all —
+    without it the estimate is a number with no stated derivation, and trying
+    every function until one matches would accept whichever the uploader meant
+    it to be.
+
+    No confidence interval: a point summary of a continuous metric carries none,
+    and naming the method `none` (with the observed range) is honest where
+    inventing a CI is not. Note what this does NOT establish — the VALUES are
+    the runner's own measurements, unverifiable from a trace, so re-applying the
+    estimator proves the arithmetic and nothing about the observations.
+    """
+    if unit_of_analysis not in _VALID_UNITS:
+        raise UnitOfAnalysisError(
+            f"unit_of_analysis must be one of {sorted(_VALID_UNITS)}, got {unit_of_analysis!r}"
+        )
+    if estimator not in NUMERIC_ESTIMATORS:
+        raise AnalysisError(
+            f"unknown estimator {estimator!r}; known: {sorted(NUMERIC_ESTIMATORS)}"
+        )
+    numbers = [float(v) for v in values]
+    if not numbers:
+        raise InsufficientDataError(
+            f"{metric!r} under {condition_id!r} has no measured values to aggregate"
+        )
+    return {
+        "metric": metric,
+        "condition_id": condition_id,
+        "estimator": estimator,
+        "estimate": float(NUMERIC_ESTIMATORS[estimator](numbers)),  # type: ignore[operator]
+        "interval": {"method": "none", "low": min(numbers), "high": max(numbers)},
+        "n": len(numbers),
+        "unit_of_analysis": unit_of_analysis,
+    }
+
+
 def binary_aggregate(
     metric: str,
     condition_id: str,
@@ -153,6 +238,9 @@ def binary_aggregate(
     aggregate: dict[str, object] = {
         "metric": metric,
         "condition_id": condition_id,
+        # named for the same reason a numeric aggregate names its own: an
+        # estimate whose derivation is not stated cannot be re-applied
+        "estimator": "rate",
         "estimate": successes / n,
         "interval": {"method": "wilson", "low": low, "high": high},
         "n": n,

@@ -72,6 +72,27 @@ async function call<T>(method: string, path: string, body?: unknown, retried = f
   return payload as T;
 }
 
+/** A gated GET whose body is a FILE, returned verbatim. `call` parses JSON and
+ * hands back an object; a download must keep the server's own bytes, because
+ * what the reader verifies is what the server sent. */
+async function fetchText(path: string): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(path, { headers });
+  const text = await response.text();
+  if (!response.ok) {
+    let message = `GET ${path} failed`;
+    try {
+      const payload = JSON.parse(text);
+      if (typeof payload?.error === "string") message = payload.error;
+    } catch {
+      /* a non-JSON error body is not more informative than the default */
+    }
+    throw new ApiError(response.status, message);
+  }
+  return text;
+}
+
 // ── payload shapes ───────────────────────────────────────────────────────────
 // Mirrors of what the endpoints return. Where a field is a Lab-owned schema the
 // type stays deliberately open (`Json`): the SCHEMA is the contract, and
@@ -115,6 +136,10 @@ export interface RunReport {
   coverage: { completed: number; planned: number };
   metric_coverage: Record<string, number>;
   aggregates: Json[];
+  /** The arms and what each enforced. A run where NONE enforced measures an
+   * unprotected agent, and its attack-success rate must not be read as a
+   * result about governance. */
+  conditions?: { id: string; enforcement: string }[];
   estimate?: Record<string, number>;
 }
 
@@ -166,6 +191,38 @@ export interface ArtifactRow {
   suite_id?: string;
 }
 
+/** Markdown to read, LaTeX to compile, BibTeX to cite. */
+export type ReportFormat = "md" | "tex" | "bib";
+
+export interface PublicationRow {
+  publication_id: string;
+  question?: string;
+  created?: string;
+  visibility?: string;
+  origin?: string;
+  /** publication/v1 AXIS 4 — how the statistics were established, not whether
+   * they exist. `recomputed_from_traces` means at least one aggregate was
+   * re-derived from the evidence; `self_reported` means every one of them was
+   * taken from the upload with only its own estimator re-applied. */
+  statistics_integrity?: string | null;
+  claims: number;
+}
+
+/** What a publish minted. A LOCAL mint proves replay and deliberately does not
+ * assert the aggregates — `aggregates_not_claimed` counts what it left alone,
+ * because a hand-edited bundle could carry a fabricated figure and only a
+ * server that recomputes from the traces may claim one. */
+export interface PublishResult {
+  publication_id: string;
+  origin: "local" | "server";
+  url?: string;
+  aggregates_not_claimed?: number;
+  statistics_integrity?: string | null;
+  publication?: Json;
+  acceptance?: Json;
+  acceptance_is_signed?: boolean;
+}
+
 export interface InvariantOutcome {
   regression_id: string;
   run_id: string;
@@ -203,6 +260,115 @@ export interface ValidationResult {
   suite?: Json;
 }
 
+export type CheckRow = {
+  name: string;
+  status: "ok" | "invalid" | "unverified";
+  message: string;
+};
+
+export type CheckReport = {
+  outcome: "ok" | "failure" | "validation" | "unverified" | "regression_differs";
+  checks: CheckRow[];
+  failed: string[];
+  traces?: number;
+  earned_bridge?: boolean;
+};
+
+export type HandoffPackage = {
+  files: Record<string, string>;
+  manifest: Json;
+  config: Json;
+  signed: boolean;
+  condition_id: string;
+  baseline_condition_id: string;
+  regressions_carried: number;
+  earned_bridge: boolean;
+};
+
+export interface Plan {
+  /** what /billing/checkout and /workspaces/current/plan take, and what
+   * `subscription.plan_id` is compared against. DISTINCT from `name`, which is
+   * the operator's display label — sending the label instead answered
+   * "unknown plan 'Team'" against every catalog that has real names. */
+  plan_id: string;
+  name: string;
+  price_usd?: number;
+  max_suites: number | null;
+  max_artifacts: number | null;
+  max_hosted_runtimes: number | null;
+  capabilities: string[];
+}
+
+export interface Subscription {
+  plan_id: string;
+  status: string;
+}
+
+/** A tenant. `is_admin` is the workspace's own standing on this server; `role`
+ * is the CALLER's standing inside it, and only /workspaces/current carries it. */
+export interface Workspace {
+  id: string;
+  name: string;
+  plan: Plan;
+  is_admin: boolean;
+  org: string | null;
+  subscription: Subscription;
+  created_at: number;
+  role?: string;
+}
+
+export interface MemberCount {
+  role: string;
+  count: number;
+}
+
+/** Who changed what. The compliance surface — admin only. */
+export interface AuditEntry {
+  at: number;
+  actor_role: string;
+  action: string;
+  detail: string;
+}
+
+export interface RuntimeConnection {
+  runtime_ref: string;
+  ingest_key: string;
+}
+
+export interface Checkout {
+  session_id: string;
+  checkout_url: string;
+  plan_id: string;
+}
+
+export interface ValidationOk {
+  ok: boolean;
+  errors: string[];
+}
+
+export interface ExperimentPlan {
+  trials: string[];
+  estimate: Json;
+}
+
+export interface SuitePlan {
+  trials: string[];
+  /** whether a registered implementation decides what this suite's agent DOES.
+   * False means a LOCAL run finishes every trial immediately: empty traces,
+   * every metric false, and an artifact of zeros written anyway. A DISPATCH is
+   * unaffected — the connected runtime drives the loop with a real model, which
+   * is what the manifest was written for. */
+  drives_itself: boolean;
+  /** the arm ids actually planned, INCLUDING a synthesized ungoverned one for
+   * a suite that declares no conditions. Naming them is the point: a preview
+   * that guessed the arm produced trial ids no run would ever use. */
+  conditions: string[];
+  /** why a dispatch would be refused. A preview reports them rather than
+   * failing — seeing the plan is how you find out the suite cannot run. */
+  blockers: string[];
+  estimate: Json;
+}
+
 // ── endpoints ────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -219,6 +385,21 @@ export const api = {
   home: () => call<HomePayload>("GET", "/home"),
 
   suites: () => call<{ suites: SuiteCard[] }>("GET", "/suites"),
+  /** The registry a suite's `scenario_refs` resolve against — this workspace's
+   * saved scenarios with the org's shared ones underneath. The Builder offers
+   * these as the ref options: the field used to be free text against a registry
+   * nothing filled, so any value typed there made the suite permanently
+   * invalid ("scenario_ref 'x' resolves to nothing"). */
+  registryScenarios: () =>
+    call<{ scenarios: { name: string; task: string }[] }>("GET", "/scenarios"),
+  registryScenario: (name: string) =>
+    call<Json>("GET", `/scenarios/${encodeURIComponent(name)}`),
+  saveScenario: (scenario: Json, manifests: Record<string, Json>) =>
+    call<{ name: string }>("POST", "/scenarios", { scenario, manifests }),
+  deleteScenario: (name: string) =>
+    call<{ name: string; deleted: boolean }>(
+      "DELETE", `/scenarios/${encodeURIComponent(name)}`,
+    ),
   suite: (id: string) => call<Json>("GET", `/suites/${encodeURIComponent(id)}`),
   suiteYaml: async (id: string): Promise<string> => {
     const headers: Record<string, string> = {};
@@ -243,6 +424,105 @@ export const api = {
     if (!response.ok) throw new ApiError(response.status, text || "yaml unavailable");
     return text;
   },
+  /** Build a Control Plane handoff from a completed run. The DIRECTORY the CLI
+   * writes and the file map returned here are the same bytes under the same
+   * manifest — there is one implementation (`lab_service.handoff`). */
+  exportHandoff: (runId: string) =>
+    call<HandoffPackage>("POST", "/handoff/export", { run_id: runId }),
+  /** Verify a handoff's file map. INTEGRITY, AUTHENTICITY and DERIVABILITY come
+   * back as separate checks because they are separate claims. */
+  verifyHandoff: (files: Record<string, string>, allowUnsigned: boolean) =>
+    call<CheckReport>("POST", "/handoff/verify", {
+      files,
+      allow_unsigned: allowUnsigned,
+    }),
+  /** Verify a downloaded reproduction package offline — no server trusted. */
+  verifyPackage: (pkg: Json, allowBare: boolean) =>
+    call<CheckReport>("POST", "/verify/package", {
+      package: pkg,
+      allow_bare: allowBare,
+    }),
+
+  // ── workspace, plan, compliance (RFC §16 commercial half) ──────────────────
+  /** The caller's own tenant, and the ROLE they hold inside it. */
+  currentWorkspace: () => call<Workspace>("GET", "/workspaces/current"),
+  /** Every tenant on this server. Admin only — a tenant must not enumerate others. */
+  workspaces: () => call<{ workspaces: Workspace[] }>("GET", "/workspaces"),
+  createWorkspace: (name: string, planId?: string) =>
+    call<Workspace>("POST", "/workspaces", { name, plan: planId }),
+  members: () => call<{ members: MemberCount[] }>("GET", "/workspaces/current/members"),
+  /** Mint a member token at a role. The token is shown ONCE. */
+  addMember: (role: string) =>
+    call<{ role: string; token: string }>("POST", "/workspaces/current/members", { role }),
+  audit: () => call<{ audit: AuditEntry[] }>("GET", "/workspaces/current/audit"),
+  /** Grant a plan directly — the admin path, distinct from paying for one. */
+  grantPlan: (planId: string, workspaceId?: string) =>
+    call<{ workspace_id: string; subscription: Subscription }>(
+      "POST", "/workspaces/current/plan", { plan_id: planId, workspace_id: workspaceId }),
+  plans: () => call<{ plans: Plan[] }>("GET", "/billing/plans"),
+  checkout: (planId: string) =>
+    call<Checkout>("POST", "/billing/checkout", { plan_id: planId }),
+
+  // ── hosted execution + org registry ────────────────────────────────────────
+  /** Runtimes the PLATFORM provisions, as opposed to ones a customer connects. */
+  hostedRuntimes: () =>
+    call<{ hosted_runtimes: RuntimeRow[] }>("GET", "/hosted-runtimes"),
+  provisionHostedRuntime: (label: string) =>
+    call<RuntimeConnection>("POST", "/hosted-runtimes", { runtime_label: label }),
+  /** The org's shared catalog — suites every workspace in the org can see. */
+  registrySuites: () => call<{ suites: SuiteCard[] }>("GET", "/registry/suites"),
+  registrySuite: (id: string) =>
+    call<Json>("GET", `/registry/suites/${encodeURIComponent(id)}`),
+  publishSuiteToOrg: (id: string) =>
+    call<{ id: string; org: string }>("POST", `/suites/${encodeURIComponent(id)}/publish`, {}),
+
+  // ── authoring aids ─────────────────────────────────────────────────────────
+  /** Validate ONE scenario against the tool manifests it will run with.
+   *
+   * `manifests` is not optional in practice even though the endpoint defaults
+   * it to `{}`: scenario semantics are largely ABOUT the tools — a declared
+   * tool with no manifest, an injection with no untrusted field to land in, a
+   * breach predicate with no WRITE/EXPORT/EXEC sink. Calling this without them
+   * reported every one of those against every scenario, so the check was
+   * pure false positives. Required here so a caller cannot omit them by
+   * accident again; pass `{}` deliberately for a scenario that declares no
+   * tools. */
+  validateScenario: (scenario: Json, manifests: Record<string, Json>) =>
+    call<ValidationOk>("POST", "/scenarios/validate", { scenario, manifests }),
+  /** Expand an experiment into its planned trial units. A PLAN, not execution. */
+  planExperiment: (experiment: Json) =>
+    call<ExperimentPlan>("POST", "/experiments/plan", { experiment }),
+  /** Expand a SUITE into the trial units a run would execute — through the
+   * same planner a dispatch runs, so the preview and the run cannot disagree.
+   *
+   * Not `planExperiment`: that one plans an `experiment/v1`, and the Builder
+   * was hand-building one from the manifest. It substituted the literal arm id
+   * `"condition"` for a suite declaring none and ignored `scenario_refs`, so
+   * the trial count was right and every trial id was wrong. */
+  planSuite: (suite: Json) => call<SuitePlan>("POST", "/suites/plan", { suite }),
+
+  // Three server endpoints deliberately have no client method:
+  //
+  //   GET  /workspaces/current/subscription — `currentWorkspace()` already
+  //        carries both the subscription and the plan; a second call for the
+  //        same two fields is a second place for them to disagree.
+  //   GET  /runs/{id}/trials/{id}/trace — `trial()` embeds the trace already,
+  //        and the Trial screen renders it from there.
+  //   POST /runs/{id}/aggregates — the runner posts aggregates; Lab RENDERS
+  //        them and does not compute them (ui-backend-contract §3). A button
+  //        that overwrote a published figure would give the UI a second opinion
+  //        about a number someone has already cited.
+
+  /** The second funnel: a production trace becomes a bundle a policy can be
+   * tested against. Nothing comes back until the incident REPLAYS under its own
+   * recorded condition. */
+  importIncident: (body: {
+    trace: Json; scenario: Json; manifests: Json; condition: Json;
+  }) => call<{
+    bundle_id: string; trace_id: string; replay_status: string;
+    bundle: Json; traces: Json[]; files: Record<string, string>;
+  }>("POST", "/incidents/import", body),
+
   validateSuite: (suite: Json) =>
     call<ValidationResult>("POST", "/suites/validate", { suite }),
   validateSuiteYaml: (yaml: string) =>
@@ -304,5 +584,60 @@ export const api = {
     }),
 
   artifacts: () => call<{ artifacts: ArtifactRow[] }>("GET", "/artifacts"),
+  /** The artifact document, as text to save. The same `artifact/v1` the screen
+   * renders — what a reader receives is what the screen showed.
+   *
+   * Fetched rather than linked: the control token lives in memory, not in a
+   * cookie, so a plain `<a href>` to a gated route downloads a 401. */
+  artifactDownload: (id: string) =>
+    fetchText(`/artifacts/${encodeURIComponent(id)}/download`),
+  /** `{bundle, traces}` — what `axor-lab verify --allow-bare` reads. Bare on
+   * purpose: `axor-reproduction-package/v1` is the server-issued shape whose
+   * proof objects are mandatory, and an unpublished artifact has none. */
+  artifactPackage: (id: string) =>
+    fetchText(`/artifacts/${encodeURIComponent(id)}/package`),
+  /** The run as a manuscript holds it: a results table, the comparison
+   * sentences, a Methods paragraph and a citation. Every other door here hands
+   * over JSON, and nobody pastes a bundle into a results section — so the
+   * numbers were being retyped by hand out of a viewer. */
+  artifactReport: (id: string, format: ReportFormat) =>
+    fetchText(`/artifacts/${encodeURIComponent(id)}/report?format=${format}`),
+  /** The handoff as the DIRECTORY it is, zipped. The CLI writes a tree and
+   * `verify-cp-export` checks a tree; a nested JSON of 160 files is the same
+   * bytes in a shape only one of the two faces can verify. */
+  exportHandoffZip: async (runId: string, condition?: string): Promise<Blob> => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const response = await fetch("/handoff/export", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        run_id: runId, format: "zip", ...(condition ? { condition } : {}),
+      }),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      let message = "handoff export failed";
+      try {
+        const payload = JSON.parse(text);
+        if (typeof payload?.error === "string") message = payload.error;
+      } catch {
+        /* a non-JSON error body is not more informative than the default */
+      }
+      throw new ApiError(response.status, message);
+    }
+    return response.blob();
+  },
+  /** Mint a publication/v1 from this artifact — locally, or through a server's
+   * publish handshake when `server` is given. Only the server path recomputes
+   * the statistics, so only it may assert them. */
+  publishArtifact: (
+    id: string,
+    body: { question: string; license?: string; visibility?: string; server?: string },
+  ) => call<PublishResult>("POST", `/artifacts/${encodeURIComponent(id)}/publish`, body),
+  publications: () =>
+    call<{ publications: PublicationRow[] }>("GET", "/publications"),
+  publication: (id: string) =>
+    call<Json>("GET", `/publications/${encodeURIComponent(id)}`),
   artifact: (id: string) => call<Json>("GET", `/artifacts/${encodeURIComponent(id)}`),
 };

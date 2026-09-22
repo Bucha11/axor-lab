@@ -12,6 +12,8 @@ import { RegressionList, RegressionScreen } from "./screens/Regressions";
 import { ArtifactList, ArtifactScreen } from "./screens/Artifacts";
 import { Builder } from "./screens/Builder";
 import { Integrations } from "./screens/Integrations";
+import { Handoff } from "./screens/Handoff";
+import { Workspace } from "./screens/Workspace";
 
 const NAV: [string, string][] = [
   ["/", "Home"],
@@ -20,8 +22,10 @@ const NAV: [string, string][] = [
   ["/evidence", "Evidence"],
   ["/regressions", "Regressions"],
   ["/artifacts", "Artifacts"],
+  ["/handoff", "Handoff"],
   ["/playground", "Playground"],
   ["/integrations", "Integrations"],
+  ["/workspace", "Workspace"],
 ];
 
 /** Every screen endpoint is gated by the control token. It lives in
@@ -67,8 +71,12 @@ function Screen({ route }: { route: string }) {
       return first ? <RegressionScreen id={first} /> : <RegressionList />;
     case "artifacts":
       return first ? <ArtifactScreen id={first} /> : <ArtifactList />;
+    case "handoff":
+      return <Handoff />;
     case "integrations":
       return <Integrations />;
+    case "workspace":
+      return <Workspace />;
     default:
       return (
         <div className="screen">

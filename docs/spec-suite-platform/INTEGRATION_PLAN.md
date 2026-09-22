@@ -106,14 +106,14 @@ rewriting them.
 
 | Package | Role | Verdict against the new spec |
 |---|---|---|
-| `lab_contracts/` | 9 JSON Schemas, subset validator, JCS canonical hashing, bundle assembly/verify, typed publication claims | **keep, extend.** Hashing + bundle verification are platform-grade. Schemas need the suite/evidence/regression/metrics layer. |
+| `lab_contracts/` | 10 JSON Schemas, subset validator, JCS canonical hashing, bundle assembly/verify, typed publication claims | **keep, extend.** Hashing + bundle verification are platform-grade. Schemas need the suite/evidence/regression/metrics layer. |
 | `lab_runner/` | value ledger, untrusted-field minting, general loop, simulated tools, predicate evaluator, invariants, trial identity, bundle I/O, CLI | **split done.** The kernel, replay, EvidenceCase, verdict pinning, CP export and the `.axl` runner moved to `lab_capabilities/governance/`. |
 | `lab_capabilities/governance/` | reference + axor-core kernels, gate, replay, EvidenceCase, verdict pins, CP bridge, paired `.axl` runner | **the capability.** Reachable only from four declared composition roots. |
 | `lab_analysis/` | Wilson, exact McNemar, paired bootstrap, missingness, unit-of-analysis | **keep, demote.** McNemar is a *comparison-suite* aggregation, not a platform default. |
 | `lab_adapters/` | curated AgentDojo banking subset → `scenario/v1` | **becomes the first Suite SDK implementation.** |
 | `lab_server/` | publish handshake, catalog/publication/EvidenceCase HTML, recompute, `runtime_jobs.py` (runtime pull API + UI control endpoints) | **keep the store, replace the surface.** `runtime_jobs.py` is the right shape and the right place to grow the screen API. |
 | `contracts/` | 11 contract docs + 9 schemas + validators + slice examples | **the migration lives here first** (repo is contract-first). |
-| `tests/` (78 files) | 10 acceptance criteria + hardening suites | **keep green.** They are the governance capability's acceptance suite. |
+| `tests/` (112 files today; 78 when this was written) | 10 acceptance criteria + hardening suites | **keep green.** They are the governance capability's acceptance suite. |
 
 Deleted in the v0.3 re-scope and relevant again: `lab_endpoint`, `lab_sandbox`,
 `lab_games`, `lab_entitlement` (see §4, conflicts 6/7/8).
@@ -439,7 +439,7 @@ a v1 bundle still loads.
 **Implemented:** `lab_suite/` with `sdk.py` (the `Suite` protocol + `BaseSuite`
 + `SuiteRegistry`), `manifest.py`, `execute.py` (`run_suite`), `dispatch.py`;
 the three built-in suites (Blank, AgentDojo, Budget); per-trial metrics in
-`lab_runner/runner.py` and `loop.py`; `artifact/v1` assembly in
+`lab_capabilities/governance/runner.py` (then `lab_runner/runner.py`) and `loop.py`; `artifact/v1` assembly in
 `lab_contracts/artifact.py`; `metric_threshold` and `predicate` invariants in
 `lab_runner/invariants.py`.
 

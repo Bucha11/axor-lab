@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from lab_contracts import validate_artifact, validate_scenario
+from lab_contracts.canonical import canonical_json
 from lab_contracts.errors import ScenarioValidationError
 
 from .errors import SuiteValidationError
@@ -175,7 +176,186 @@ def validate_manifest(
             "topology relates them"
         )
     errors.extend(_scripted_agent_errors(agents))
+    errors.extend(_suite_config_errors(manifest))
+    errors.extend(_invariant_metric_errors(manifest))
+    errors.extend(_blank_identifier_errors(manifest))
+    errors.extend(_condition_config_hash_errors(conditions))
     return errors
+
+
+def _condition_config_hash_errors(
+    conditions: list[dict[str, object]],
+) -> list[str]:
+    """A declared `config_hash` must be the one its kernel and policy produce.
+
+    The field is the reproducibility anchor a Control-Plane export carries into
+    production. A hand-written one that disagrees with the arm beside it names a
+    config that did not run — and every consumer downstream would trust it,
+    because the whole point of the anchor is that nobody re-derives it.
+    """
+    from lab_contracts import condition_config_hash
+
+    errors: list[str] = []
+    for condition in conditions:
+        declared = condition.get("config_hash")
+        if not declared:
+            continue
+        kernel = condition.get("kernel")
+        if not kernel:
+            errors.append(
+                f"[suite] condition {condition.get('id')!r} declares a config_hash but "
+                "names no kernel — there is no governor config to fingerprint"
+            )
+            continue
+        expected = condition_config_hash(str(kernel), condition.get("policy"))  # type: ignore[arg-type]
+        if str(declared) != expected:
+            errors.append(
+                f"[suite] condition {condition.get('id')!r} declares config_hash "
+                f"{str(declared)!r} but its kernel and policy compile to {expected!r} — "
+                "the anchor would name a config that did not run"
+            )
+    return errors
+
+
+#: `check_invariant` reads a threshold metric as a NUMBER and counts a bool as
+#: unmeasured, so a threshold over one of these can only ever come back
+#: "was not measured on N/N". Every other declared kind is numeric.
+_NON_NUMERIC_METRIC_KINDS = frozenset({"boolean"})
+
+
+def _blank_identifier_errors(manifest: dict[str, object]) -> list[str]:
+    """An identifier that names something must actually name it.
+
+    The Builder's "+ Add" starts every item with its id empty — a metric named
+    "", an evaluator with no id, an invariant over metric "" — and each of those
+    validated CLEAN. So the form's most ordinary action produced a document the
+    product called valid and nothing downstream could use: an aggregation
+    resolves metrics BY NAME, an invariant reads its metric by name, a condition
+    is addressed by id in every trial and aggregate.
+
+    Empty is the case worth naming separately from missing. The schema requires
+    the key and the key is there, so schema validation passes and the failure
+    surfaces a run later as "metric '' was not measured".
+    """
+    errors: list[str] = []
+
+    def check(items: object, key: str, where: str) -> None:
+        for index, item in enumerate(items or []):  # type: ignore[union-attr]
+            if not isinstance(item, dict):
+                continue
+            if key in item and not str(item.get(key, "")).strip():
+                errors.append(
+                    f"[suite] {where}[{index}].{key} is empty — it is the name the "
+                    "rest of the manifest refers to this by"
+                )
+
+    evaluation: dict[str, object] = manifest.get("evaluation") or {}  # type: ignore[assignment]
+    execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
+    check(manifest.get("scenarios"), "name", "scenarios")
+    check(manifest.get("agents"), "ref", "agents")
+    check(manifest.get("regressions"), "id", "regressions")
+    check(execution.get("conditions"), "id", "execution.conditions")
+    check(evaluation.get("metrics"), "name", "evaluation.metrics")
+    check(evaluation.get("evaluators"), "id", "evaluation.evaluators")
+    for index, regression in enumerate(manifest.get("regressions") or []):  # type: ignore[union-attr]
+        if not isinstance(regression, dict):
+            continue
+        rule: dict[str, object] = regression.get("rule") or {}  # type: ignore[assignment]
+        if str(rule.get("kind")) == "metric_threshold" and not str(rule.get("metric", "")).strip():
+            errors.append(
+                f"[suite] regressions[{index}].rule.metric is empty — a threshold "
+                "over no metric can never be checked"
+            )
+    return errors
+
+
+def _invariant_metric_errors(manifest: dict[str, object]) -> list[str]:
+    """A `metric_threshold` invariant must name a metric a threshold can read.
+
+    The failure this prevents is a green-looking suite that can never be
+    checked: `lte 0.0` over a boolean ASR reads as "the attack never succeeded"
+    and reports `error — metric 'ASR' was not measured on N/N completed
+    trial(s)` on every run, on every execution path. The Builder offers the
+    metric name and the threshold side by side and says nothing about the kind,
+    so this is a trap to author and silent until a run finishes.
+    """
+    evaluation: dict[str, object] = manifest.get("evaluation") or {}  # type: ignore[assignment]
+    kinds = {
+        str(metric.get("name")): str(metric.get("kind", ""))
+        for metric in evaluation.get("metrics") or []  # type: ignore[union-attr]
+        if isinstance(metric, dict)
+    }
+    errors: list[str] = []
+    for regression in manifest.get("regressions") or []:  # type: ignore[union-attr]
+        if not isinstance(regression, dict):
+            continue
+        rule: dict[str, object] = regression.get("rule") or {}  # type: ignore[assignment]
+        if str(rule.get("kind")) != "metric_threshold":
+            continue
+        name = str(rule.get("metric", ""))
+        # a metric the suite does not declare is a raw `trial.metrics` key
+        # (duration_ms, tokens); its type is the runtime's to know, not ours
+        if kinds.get(name) in _NON_NUMERIC_METRIC_KINDS:
+            errors.append(
+                f"[suite] invariant {regression.get('id')!r} thresholds metric "
+                f"{name!r}, which the suite declares as {kinds[name]!r} — a threshold "
+                "reads its metric as a number and treats a boolean as UNMEASURED, so "
+                "this rule can never pass. Use a `predicate` rule over the trace, or "
+                "aggregate the boolean into a rate metric first"
+            )
+    return errors
+
+
+def _suite_config_errors(manifest: dict[str, object]) -> list[str]:
+    """The Suite SDK's own knobs: `config` against `config_schema` (RFC §12).
+
+    Both keys existed in the schema and nothing read either — `config_schema`
+    is described there as "the Builder renders it; a value that fails it is
+    rejected at author time, not at run time", and neither half was true. A
+    third-party suite could declare knobs the Builder never showed and the
+    validator never checked, which makes the Suite protocol a protocol with no
+    author-time surface.
+
+    `ui_schema` is presentation only, and the schema says it "can never
+    introduce a field config_schema does not define" — enforced here, because a
+    layout naming a field nothing defines renders an input that writes a value
+    nothing validates.
+    """
+    from lab_contracts.subset_validator import validate_against
+
+    errors: list[str] = []
+    config_schema: dict[str, object] = manifest.get("config_schema") or {}  # type: ignore[assignment]
+    config: dict[str, object] = manifest.get("config") or {}  # type: ignore[assignment]
+    declared = set(_config_properties(config_schema))
+
+    if config and not config_schema:
+        errors.append(
+            "[suite] `config` is set but the suite declares no `config_schema` — "
+            "values nothing describes cannot be validated or rendered"
+        )
+    elif config_schema:
+        # the platform's own subset validator, on a one-entry schema map: a
+        # suite's knobs get exactly the checks every other contract gets, and
+        # `jsonschema` stays out of the dependency list
+        for problem in validate_against(config, "config", {"config": config_schema}):
+            errors.append(f"[suite] {problem}")
+
+    ui_schema: dict[str, object] = manifest.get("ui_schema") or {}  # type: ignore[assignment]
+    for section in ui_schema.get("sections") or []:  # type: ignore[union-attr]
+        for name in section.get("fields") or []:  # type: ignore[union-attr]
+            if str(name) not in declared:
+                errors.append(
+                    f"[suite] ui_schema section {section.get('id')!r} lays out field "
+                    f"{str(name)!r}, which config_schema does not define — a layout "
+                    "cannot introduce a field"
+                )
+    return errors
+
+
+def _config_properties(config_schema: dict[str, object]) -> list[str]:
+    """The knob names a `config_schema` defines, in declaration order."""
+    properties = config_schema.get("properties")
+    return [str(k) for k in properties] if isinstance(properties, dict) else []
 
 
 # The agent identity fields `suite.schema.json` allows. They describe the model
@@ -230,20 +410,64 @@ def resolve_suite(
     scenarios.extend(dict(registry[str(ref)]) for ref in manifest.get("scenario_refs") or [])
 
     environment: dict[str, object] = manifest.get("environment") or {}  # type: ignore[assignment]
-    manifests: dict[str, dict[str, object]] = dict(tool_manifests or {})
+    bundle: dict[str, dict[str, object]] = dict(tool_manifests or {})
     for tool in environment.get("tools") or []:  # type: ignore[union-attr]
-        manifests[str(tool["id"])] = tool  # type: ignore[index]
+        bundle[str(tool["id"])] = tool  # type: ignore[index]
+
+    # A scenario may carry a tool's FULL manifest inline instead of `$ref`-ing
+    # a shared one — scenario.schema.json says so ("each is a full manifest (or
+    # a $ref to a shared one)") and the Builder's own scenario list writes
+    # either. The resolver used to build the bundle from `environment.tools`
+    # alone, so an inline manifest was schema-valid and then resolved to "tool
+    # 'x' has no manifest in the bundle": the contract said one thing and the
+    # code another. It matters most for a REGISTRY scenario, which travels
+    # between suites and cannot assume the borrowing suite declares its tools.
+    inline: dict[str, dict[str, object]] = {}
+    conflicts: list[str] = []
+    for scenario in scenarios:
+        for tool in scenario.get("tools") or []:  # type: ignore[union-attr]
+            if not isinstance(tool, dict) or "$ref" in tool:
+                continue
+            tool_id = str(tool.get("id", ""))
+            # Two different contracts for one tool id inside one run is not a
+            # precedence question, it is an ambiguity: the run governs against
+            # one of them and the trace's runtime_config_hash names that one,
+            # while the manifest reads as if both applied.
+            prior = bundle.get(tool_id) or inline.get(tool_id)
+            if prior is not None and canonical_json(prior) != canonical_json(tool):
+                conflicts.append(
+                    f"[{scenario.get('name')}] tool {tool_id!r} is declared inline with a "
+                    "different manifest than the one already in the bundle — one tool id "
+                    "cannot mean two contracts in one run"
+                )
+                continue
+            inline[tool_id] = tool
+    if conflicts:
+        raise SuiteValidationError(tuple(conflicts))
 
     # scenario-level semantics need the tool manifests, so they run here rather
-    # than in validate_manifest
+    # than in validate_manifest. Each scenario is checked against the bundle
+    # plus ITS OWN inline manifests, not the union: a scenario that `$ref`s a
+    # tool only some sibling declared inline would break the moment that
+    # sibling is edited out, and it should not validate today.
     scenario_errors: list[str] = []
     for scenario in scenarios:
+        own = {
+            str(t.get("id", "")): t
+            for t in scenario.get("tools") or []  # type: ignore[union-attr]
+            if isinstance(t, dict) and "$ref" not in t
+        }
         try:
-            validate_scenario(scenario, manifests)
+            validate_scenario(scenario, {**bundle, **own})
         except ScenarioValidationError as exc:
             scenario_errors.extend(f"[{scenario.get('name')}] {e}" for e in exc.errors)
     if scenario_errors:
         raise SuiteValidationError(tuple(scenario_errors))
+
+    # ...but the RESOLVED bundle carries every manifest the run will use. It is
+    # what a dispatch ships to a runtime, which has no other way to learn what
+    # an inline tool's contract is.
+    manifests = {**bundle, **inline}
 
     execution: dict[str, object] = manifest.get("execution") or {}  # type: ignore[assignment]
     evaluation: dict[str, object] = manifest.get("evaluation") or {}  # type: ignore[assignment]
@@ -251,13 +475,50 @@ def resolve_suite(
         manifest=manifest,
         scenarios=tuple(scenarios),
         manifests=manifests,
-        conditions=tuple(execution.get("conditions") or []),  # type: ignore[arg-type]
+        conditions=stamp_config_hashes(execution.get("conditions") or []),  # type: ignore[arg-type]
         repeats=int(execution.get("repeats", 1)),  # type: ignore[arg-type]
         metrics=tuple(evaluation.get("metrics") or []),  # type: ignore[arg-type]
         aggregations=tuple(evaluation.get("aggregations") or []),  # type: ignore[arg-type]
         evaluators=tuple(evaluation.get("evaluators") or []),  # type: ignore[arg-type]
         regressions=tuple(manifest.get("regressions") or []),  # type: ignore[arg-type]
     )
+
+
+def stamp_config_hashes(
+    conditions: list[dict[str, object]],
+) -> tuple[dict[str, object], ...]:
+    """Each arm with its `config_hash` — the reproducibility anchor for the run.
+
+    `condition/v1` describes it as "sha256 over the normalized (kernel +
+    policy)", and a Control-Plane export REFUSES an arm without one: it would
+    have to synthesize the carry-over key and present it as the measured config.
+    Only the `.axl` path ever set it (`repin_to_real_kernel`), so the entire
+    Suite Platform — every built-in and everything the Builder authors — could
+    run, publish locally and dispatch, and then could not be handed to
+    production at all.
+
+    Derived, never taken on trust: an author who writes one is checked against
+    it by `validate_manifest`, because a declared hash that disagrees with the
+    kernel and policy beside it names a config that did not run.
+
+    An arm with no kernel gets none — there is no governor config to
+    fingerprint, which is the same rule `dispatch._config_fingerprint` applies.
+    """
+    from lab_contracts import condition_config_hash
+
+    stamped: list[dict[str, object]] = []
+    for condition in conditions:
+        kernel = condition.get("kernel")
+        if not kernel:
+            stamped.append(dict(condition))
+            continue
+        # a COPY: these dicts come from the caller's manifest, and resolving a
+        # suite must not edit the document it was handed
+        stamped.append({
+            **condition,
+            "config_hash": condition_config_hash(str(kernel), condition.get("policy")),  # type: ignore[arg-type]
+        })
+    return tuple(stamped)
 
 
 def declared_evaluators(manifest: dict[str, object]) -> dict[str, dict[str, object]]:

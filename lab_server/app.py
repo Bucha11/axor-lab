@@ -3,11 +3,14 @@
 Routes:
   GET  /                                  catalog (HTML, public only)
   GET  /e/{id}                            publication page (HTML; private → 404)
+  GET  /e/{id}/verify                     verify this publication (HTML)
   GET  /e/{id}/evidence/{trace_id}        EvidenceCase (HTML)
   GET  /api/publications/{id}             publication (JSON) + provenance axes
   POST /api/publications                  publish handshake        [write token]
   POST /api/publications/{id}/reproductions   append an attestation [write token]
   POST /api/publications/{id}/takedown    remove from catalog       [admin token]
+  POST /api/publications/{id}/verify      verify this publication         [open]
+  POST /api/verify                        verify an uploaded package      [open]
 
 Auth: pass `write_token` / `admin_token` to gate mutations with a bearer token.
 When a token is set, a mutation without a matching `Authorization: Bearer …`
@@ -28,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .errors import NotFound, PublishRejected, ServerError
-from .html import render_catalog, render_evidence, render_publication
+from .html import render_catalog, render_evidence, render_publication, render_verification
 from .store import PublicationStore
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # uploaded bundles are bounded (threat-model §4)
@@ -37,10 +40,12 @@ MAX_BODY_BYTES = 32 * 1024 * 1024  # uploaded bundles are bounded (threat-model 
 # safe character class (no '/', '.', or path-traversal metacharacters)
 _EVIDENCE_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)/evidence/([A-Za-z0-9_-]+)$")
 _PUB_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)$")
+_PAGE_VERIFY_RE = re.compile(r"^/e/([A-Za-z0-9_-]+)/verify$")
 _API_PUB_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)$")
 _API_BUNDLE_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/bundle$")
 _API_REPRO_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/reproductions$")
 _API_TAKEDOWN_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/takedown$")
+_API_PUB_VERIFY_RE = re.compile(r"^/api/publications/([A-Za-z0-9_]+)/verify$")
 
 
 class Unauthorized(ServerError):
@@ -54,6 +59,88 @@ def _opaque_500() -> ServerError:
     exc = ServerError("internal server error")
     exc.status = 500  # type: ignore[attr-defined]
     return exc
+
+
+def _package_of(stored: object, store: PublicationStore) -> dict[str, object]:
+    """The reproduction package for a stored publication.
+
+    One shape, built once: the download route serves exactly what the verify
+    route checks, so "verified on the page" and "verified from the file you
+    downloaded" can never be answers about two different documents.
+    """
+    return {
+        # a VERSIONED reproduction package — the verifier treats a package
+        # bearing this schema as server-issued, so every proof object
+        # (receipt/publication/acceptance) is MANDATORY and stripping one is a
+        # verification failure (review r16)
+        "schema_version": "axor-reproduction-package/v1",
+        # the PUBLICATION body travels too, so an offline reader can verify the
+        # author/server actually asserted THESE claims — not just that the
+        # bundle bytes are intact (review r15)
+        "publication": stored.publication,  # type: ignore[attr-defined]
+        "bundle": stored.bundle,            # type: ignore[attr-defined]
+        "traces": list(stored.traces.values()),  # type: ignore[attr-defined]
+        # a PORTABLE verification receipt so a reader can verify the download
+        # offline (author/key_id/signature/signed_ref) without trusting this
+        # server (review r14)
+        "receipt": stored.receipt(),        # type: ignore[attr-defined]
+        # the server's signed ACCEPTANCE receipt (review r15). v0.3 keeps
+        # publication + bundle hash + optional signature + reproduction records;
+        # the reacceptance/history chains are deferred, so there is no
+        # acceptance_history to carry.
+        "acceptance": store.acceptance(stored),  # type: ignore[arg-type]
+    }
+
+
+def _traces_of(envelope: dict[str, object]) -> dict[str, dict[str, object]]:
+    """A package's traces as a map, from either shape, as a 400 on junk."""
+    from lab_service.packages import PackageMalformed, normalise_traces
+
+    try:
+        return normalise_traces(envelope.get("traces"))
+    except PackageMalformed as exc:
+        raise PublishRejected(str(exc), status=400) from exc
+
+
+def _verified(
+    envelope: dict[str, object],
+    *,
+    pubkey: object = None,
+    author: object = None,
+    verified_by: str,
+) -> dict[str, object]:
+    """Run the SAME verification the CLI runs, and report it check by check.
+
+    `lab_service.verify_package_document` is the one implementation — the CLI,
+    the authoring UI and this public route cannot drift into three opinions
+    about whether a package holds up.
+    """
+    from lab_service import verify_package_document
+
+    bundle = envelope.get("bundle")
+    if not isinstance(bundle, dict):
+        raise PublishRejected("package must carry a bundle", status=400)
+    traces = _traces_of(envelope)
+    result = verify_package_document(
+        bundle, traces, envelope,
+        pubkey=pubkey if isinstance(pubkey, str) else None,
+        author=author if isinstance(author, str) else None,
+        allow_bare=bool(envelope.get("allow_bare")),
+    )
+    return {
+        "outcome": result.outcome.value,
+        "bit_identical": result.bit_identical,
+        "traces": result.trace_count,
+        # a report claims only the checks that actually RAN
+        "checks": [
+            {"name": c.name, "status": c.status.value, "message": c.message}
+            for c in result.checks
+        ],
+        # what this result is worth. A server verifying a package it served is
+        # still the server talking: it catches corruption and a doctored file,
+        # not a server that lies. The caveat travels with the answer.
+        "verified_by": verified_by,
+    }
 
 
 def make_server(
@@ -100,6 +187,21 @@ def make_server(
                     policy = parse_qs(split.query).get("policy", [None])[0]
                     self._html(render_evidence(stored, evidence.group(2), policy))
                     return
+                page_verify = _PAGE_VERIFY_RE.match(path)
+                if page_verify:
+                    # a verification is a READ — it changes nothing and retains
+                    # nothing — so it is a GET a reader can click, bookmark and
+                    # send to a colleague, with no JavaScript in the page (the
+                    # CSP here forbids inline script, and rightly: every string
+                    # rendered on these pages is untrusted upload).
+                    stored = self._readable(store.get(page_verify.group(1)))
+                    report = _verified(
+                        _package_of(stored, store),
+                        verified_by="this server, over its own stored copy",
+                    )
+                    self._html(render_verification(
+                        report, back=f"/e/{page_verify.group(1)}"))
+                    return
                 api_bundle = _API_BUNDLE_RE.match(path)
                 if api_bundle:
                     # the reproduction PACKAGE — the bundle + every trace body, so
@@ -107,28 +209,7 @@ def make_server(
                     # `axor-lab replay`. Without this the page's reproduce command
                     # named a directory the reader never received (review r13).
                     stored = self._readable(store.get(api_bundle.group(1)))
-                    self._json(200, {
-                        # a VERSIONED reproduction package — the verifier treats a
-                        # package bearing this schema as server-issued, so every
-                        # proof object (receipt/publication/acceptance) is MANDATORY
-                        # and stripping one is a verification failure (review r16)
-                        "schema_version": "axor-reproduction-package/v1",
-                        # the PUBLICATION body travels too, so an offline reader can
-                        # verify the author/server actually asserted THESE claims —
-                        # not just that the bundle bytes are intact (review r15)
-                        "publication": stored.publication,
-                        "bundle": stored.bundle,
-                        "traces": list(stored.traces.values()),
-                        # a PORTABLE verification receipt so a reader can verify
-                        # the download offline (author/key_id/signature/signed_ref)
-                        # without trusting this server (review r14)
-                        "receipt": stored.receipt(),
-                        # the server's signed ACCEPTANCE receipt (review r15). v0.3
-                        # keeps publication + bundle hash + optional signature +
-                        # reproduction records; the reacceptance/history chains are
-                        # deferred, so there is no acceptance_history to carry.
-                        "acceptance": store.acceptance(stored),
-                    })
+                    self._json(200, _package_of(stored, store))
                     return
                 api_pub = _API_PUB_RE.match(path)
                 if api_pub:
@@ -159,7 +240,11 @@ def make_server(
                     self._require(write_token)
                     stored = store.publish(
                         bundle=payload["bundle"],
-                        traces=payload["traces"],
+                        # either shape: the download route emits a LIST, so a
+                        # package taken off one server could not be handed to
+                        # another one's publish — the two halves of "portable"
+                        # disagreed about what a package looks like.
+                        traces=_traces_of(payload),
                         question=str(payload.get("question", "")),
                         license_id=str(payload.get("license", "CC-BY-4.0")),
                         # safe default: an upload is NOT public unless it says so
@@ -196,6 +281,45 @@ def make_server(
                     self._require(write_token)
                     stored = store.add_attestation(repro.group(1), payload["attestation"])
                     self._json(201, {"reproductions": stored.axes()["reproductions"]})
+                    return
+
+                # -- verification, OPEN by design ------------------------
+                #
+                # Every other POST here is a write and carries a token. These two
+                # are reads that happen to compute: they change nothing, and the
+                # ONE person who most needs them — a reviewer holding a link to a
+                # publication — has no token and never will. Gating them left
+                # `axor-lab verify` (install Python, install the package) as the
+                # only way for an outsider to check a claim, which for almost
+                # every reader means the claim simply goes unchecked.
+                #
+                # The cost is bounded: MAX_BODY_BYTES caps the input, the work is
+                # linear in the package, and nothing is written or retained.
+                pub_verify = _API_PUB_VERIFY_RE.match(self.path)
+                if pub_verify:
+                    stored = self._readable(store.get(pub_verify.group(1)))
+                    self._json(200, _verified(
+                        _package_of(stored, store),
+                        # this server checking its own bytes cannot prove the
+                        # server honest — say so in the payload, not only on the
+                        # page, so an API caller gets the caveat too
+                        verified_by="this server, over its own stored copy",
+                    ))
+                    return
+                if self.path == "/api/verify":
+                    # a reader drops in the file they downloaded — from here or
+                    # from anywhere else. Accept the envelope bare (the download
+                    # IS the envelope) or wrapped in {package: ...}.
+                    envelope = payload.get("package") if "package" in payload else payload
+                    if not isinstance(envelope, dict):
+                        raise PublishRejected(
+                            "verify requires a reproduction package", status=400)
+                    self._json(200, _verified(
+                        envelope,
+                        pubkey=payload.get("pubkey"),
+                        author=payload.get("author"),
+                        verified_by="this server, over the package you supplied",
+                    ))
                     return
                 raise NotFound("no such route")
             except ServerError as exc:

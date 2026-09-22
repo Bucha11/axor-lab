@@ -59,7 +59,7 @@ The plan is grounded in code that already ships; Lab is assembled around
 
 | Need (contract) | Existing asset | Reuse plan |
 |---|---|---|
-| Governance verdicts, gates, policy profiles | `axor-core` (`governor.py` `ToolCallGovernor`, `policy/`, `taint/`) | **Integrated.** `lab_runner/axor_backend.py` drives the real production `ToolCallGovernor` (its per-value taint engine + 9-gate sequence) when axor-core is installed and a condition pins the installed version; the reference `taint_floor` kernel is the fallback. One decision path (`gate_with_governor`) serves live runs AND replay. The version is matched EXACTLY (a condition pinning a different version gets the reference kernel, never a silently-different build). |
+| Governance verdicts, gates, policy profiles | `axor-core` (`governor.py` `ToolCallGovernor`, `policy/`, `taint/`) | **Integrated.** `lab_capabilities/governance/axor_backend.py` (it moved there when governance became a capability rather than the spine) drives the real production `ToolCallGovernor` (its per-value taint engine + 9-gate sequence) when axor-core is installed and a condition pins the installed version; the reference `taint_floor` kernel is the fallback. One decision path (`gate_with_governor`) serves live runs AND replay. The version is matched EXACTLY (a condition pinning a different version gets the reference kernel, never a silently-different build). |
 | Deterministic replay | `axor_core.kernel.replay` (pure-gate re-evaluation, first-divergence rule, adjudicator exception) | `axor lab replay` is a thin driver over it, folding `trace/v1` events |
 | Per-value taint / provenance | `axor_core.taint` (ledger, causal_root, engine) | Extend with the Lab `model_extraction` constructor (conservative join, `provenance-semantics.md` §2); over-taint never under-taint |
 | Trace collection | `axor_core.trace` (collector, events, guard) | Adapter emits `trace/v1` (schema in contracts) from kernel events + value ledger |
@@ -67,7 +67,7 @@ The plan is grounded in code that already ships; Lab is assembled around
 | AgentDojo integration | `axor-eval/experiments/agentdojo/*` (bridge, claims, protocol) | Source for the curated AgentDojo → `scenario/v1` adapter |
 | Out-of-process tool execution (later, real side effects) | `axor-daemon` | Post-MVP: opt-in real execution path behind daemon isolation |
 | Backend/proxy/frontend platform patterns | `axor-control-plane` (`packages/axor-backend`, `axor-proxy`, `frontend`) | Server + web app follow the same stack/conventions; CP-handoff export targets its config format |
-| Contract schemas + validator | archive `lab/contracts/` (9 schemas, `validate.py`, slice examples, 8/8 green) | Imported verbatim into this repo as the `lab-contracts` package (Phase 0) |
+| Contract schemas + validator | archive `lab/contracts/` (9 schemas, `validate.py`, slice examples, 8/8 green — today 10 schemas and `validate_slice.py` alone, 14 examples green) | Imported verbatim into this repo as the `lab-contracts` package (Phase 0) |
 
 ## 3. Repository layout (this repo)
 

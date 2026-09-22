@@ -128,6 +128,12 @@ def observe_only_condition(kernel: str | None = None) -> dict[str, object]:
     }
     if resolved:
         condition["kernel"] = resolved
+        # the reproducibility anchor, on the synthesized arm too: a run whose
+        # baseline carries no config_hash cannot be exported to production,
+        # because the export names both arms
+        from lab_contracts import condition_config_hash
+
+        condition["config_hash"] = condition_config_hash(resolved, None)
     return condition
 
 

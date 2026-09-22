@@ -177,6 +177,93 @@ class TestTheCliRunsASuite(unittest.TestCase):
             self.assertEqual(code, 2, err)
             self.assertFalse(out_dir.exists(), "a refused suite wrote output anyway")
 
+    # -- scenario_refs, locally ------------------------------------------
+    #
+    # The hosted server resolves `scenario_refs` from the workspace store. A
+    # manifest run from a FILE has no workspace, and nothing passed a registry
+    # at all — so a ref died on "resolves to nothing" on the one path where a
+    # user is most likely to be assembling suites out of shared scenarios.
+    # The filesystem beside the manifest is the registry there.
+
+    def _ref_suite(self, root: Path, scenarios_dir: str = "scenarios") -> Path:
+        import copy
+
+        blank = copy.deepcopy(builtin_registry().get("blank").manifest())
+        shared = copy.deepcopy(blank["scenarios"][0])
+        shared["name"] = "shared-note"
+        (root / scenarios_dir).mkdir(parents=True, exist_ok=True)
+        (root / scenarios_dir / "shared-note.json").write_text(json.dumps(shared))
+
+        manifest = {**blank, "id": "local-refs", "name": "Local refs",
+                    "origin": "workspace", "scenario_refs": ["shared-note"]}
+        path = root / "suite.json"
+        path.write_text(json.dumps(manifest))
+        return path
+
+    def test_a_ref_resolves_from_scenarios_beside_the_manifest(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = self._ref_suite(Path(tmp))
+            out_dir = Path(tmp) / "artifact"
+            code, out, err = _run_cli("run-suite", str(path), "--out", str(out_dir), "--yes")
+            self.assertEqual(code, 0, err)
+            # the inline scenario AND the ref, both planned and both run
+            self.assertIn("scenarios=2", out)
+            artifact = json.loads((out_dir / "artifact.json").read_text())
+            self.assertEqual(validate_artifact(artifact, "artifact"), [])
+
+    def test_scenarios_dir_points_the_registry_elsewhere(self) -> None:
+        """A library shared across suites in other directories."""
+        with TemporaryDirectory() as tmp:
+            path = self._ref_suite(Path(tmp), scenarios_dir="lib")
+            out_dir = Path(tmp) / "artifact"
+            code, out, err = _run_cli(
+                "run-suite", str(path), "--out", str(out_dir), "--yes",
+                "--scenarios", str(Path(tmp) / "lib"),
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("scenarios=2", out)
+
+    def test_an_unresolved_ref_is_refused_before_anything_runs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = self._ref_suite(Path(tmp), scenarios_dir="lib")  # not the default dir
+            out_dir = Path(tmp) / "artifact"
+            code, _, err = _run_cli("run-suite", str(path), "--out", str(out_dir), "--yes")
+            self.assertEqual(code, 2, err)
+            self.assertIn("scenario_ref 'shared-note' resolves to nothing", err)
+            self.assertFalse(out_dir.exists())
+
+    def test_an_unreadable_scenario_file_names_itself(self) -> None:
+        """Skipping it would report "resolves to nothing" against a suite that
+        names the ref correctly — the error would point at the innocent
+        document."""
+        with TemporaryDirectory() as tmp:
+            path = self._ref_suite(Path(tmp))
+            (Path(tmp) / "scenarios" / "broken.json").write_text("{not json")
+            code, _, err = _run_cli(
+                "run-suite", str(path), "--out", str(Path(tmp) / "artifact"), "--yes")
+            self.assertEqual(code, 2)
+            self.assertIn("[scenarios] broken.json", err)
+
+    def test_a_json_file_that_is_not_a_scenario_says_so(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = self._ref_suite(Path(tmp))
+            (Path(tmp) / "scenarios" / "notes.json").write_text('{"hello": 1}')
+            code, _, err = _run_cli(
+                "run-suite", str(path), "--out", str(Path(tmp) / "artifact"), "--yes")
+            self.assertEqual(code, 2)
+            self.assertIn("not a scenario document", err)
+
+    def test_a_builtin_id_has_no_registry_and_needs_none(self) -> None:
+        """Nothing shipped names a ref, and a suite id has no directory to look
+        beside — an absent registry is correct there, not a gap."""
+        from lab_service import default_scenario_dir
+
+        self.assertIsNone(default_scenario_dir("blank"))
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "artifact"
+            self.assertEqual(
+                _run_cli("run-suite", "blank", "--out", str(out_dir), "--yes")[0], 0)
+
     def test_it_does_not_run_without_confirmation(self) -> None:
         with TemporaryDirectory() as tmp:
             out_dir = Path(tmp) / "artifact"

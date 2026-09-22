@@ -164,9 +164,6 @@ its volume reports `in-memory` and will look fine until the first restart.
   beside the source tree, which an installed package does not have. A root you
   name explicitly and that holds no `index.html` is a startup error (exit 2),
   not a silent API-only server.
-- **A build fails cloning axor-wrap / axor-eval.** They are pinned to git refs
-  because the API Lab needs is not on PyPI. Both repositories are public; set
-  `GITHUB_TOKEN` only if your build network needs one to reach GitHub.
 
 ## What was verified, and how
 

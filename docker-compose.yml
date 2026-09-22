@@ -27,7 +27,6 @@ services:
   lab:
     build:
       context: .
-      secrets: [github_token]
     # Not published: the proxy is the only way in. Publish 8871 only to debug,
     # and never on a host that is reachable from outside.
     expose: ["8871"]
@@ -80,9 +79,3 @@ volumes:
   labdata: {}
   pgdata: {}
 
-# Optional token for the build, which clones axor-wrap and axor-eval from git.
-# Both are public, so an empty value builds fine on a network that reaches
-# GitHub.
-secrets:
-  github_token:
-    environment: GITHUB_TOKEN

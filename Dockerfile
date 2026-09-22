@@ -22,11 +22,6 @@ RUN npm run build
 # ── stage 2: the platform ────────────────────────────────────────────────────
 FROM python:3.12-slim
 
-# git: axor-wrap and axor-eval are pinned to git refs in pyproject (they are not
-# on PyPI with the API Lab needs). ca-certificates: to reach them over HTTPS.
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
@@ -35,8 +30,8 @@ ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 # axor-identity), yaml (the Builder's YAML mode), crypto (signed bundles).
 #
 # One install, reading pyproject — deliberately not split into a cached
-# dependency layer. Splitting means naming axor-core's range and the two git
-# refs a second time here, and a Dockerfile pin that drifts from pyproject is
+# dependency layer. Splitting means naming the axor-core/-wrap/-eval ranges a
+# second time here, and a Dockerfile pin that drifts from pyproject is
 # an image built against a version nothing tested. A slower rebuild is the
 # cheaper mistake.
 COPY pyproject.toml README.md ./
@@ -45,17 +40,14 @@ COPY lab_runner/ ./lab_runner/
 COPY lab_analysis/ ./lab_analysis/
 COPY lab_adapters/ ./lab_adapters/
 COPY lab_server/ ./lab_server/
+COPY lab_service/ ./lab_service/
 COPY lab_suite/ ./lab_suite/
 COPY lab_capabilities/ ./lab_capabilities/
 COPY contracts/ ./contracts/
 COPY examples/ ./examples/
 COPY docs/pricing/ ./docs/pricing/
-RUN --mount=type=secret,id=github_token sh -eu -c '\
-    if [ -s /run/secrets/github_token ]; then \
-      git config --global url."https://x-access-token:$(cat /run/secrets/github_token)@github.com/".insteadOf "https://github.com/"; \
-    fi; \
-    pip install --no-cache-dir ".[postgres,identity,yaml,crypto]" ; \
-    rm -f /root/.gitconfig'
+# Every dependency is a PyPI release, so no git, no token, no apt layer.
+RUN pip install --no-cache-dir ".[postgres,identity,yaml,crypto]"
 
 # The UI, built in stage 1, at a path the server is told about explicitly.
 COPY --from=web /web/dist /srv/axor-lab/web

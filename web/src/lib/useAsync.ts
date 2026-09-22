@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
+import { ApiError } from "./api";
 
 export interface Async<T> {
   data: T | null;
   error: string | null;
+  /** the HTTP status behind `error`, when there was one.
+   *
+   * 402 is the status this exists for: "your plan does not include this" is the
+   * one failure a user can FIX, and flattening it to a red sentence like any
+   * other left the whole billing system with nowhere to act on it. */
+  status: number | null;
   loading: boolean;
   reload: () => void;
 }
@@ -17,6 +24,7 @@ export interface Async<T> {
 export function useAsync<T>(load: () => Promise<T>, deps: unknown[] = []): Async<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
 
@@ -26,12 +34,15 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[] = []): Async
     let live = true;
     setLoading(true);
     setError(null);
+    setStatus(null);
     load()
       .then((value) => {
         if (live) setData(value);
       })
       .catch((exc: unknown) => {
-        if (live) setError(exc instanceof Error ? exc.message : String(exc));
+        if (!live) return;
+        setError(exc instanceof Error ? exc.message : String(exc));
+        setStatus(exc instanceof ApiError ? exc.status : null);
       })
       .finally(() => {
         if (live) setLoading(false);
@@ -42,5 +53,5 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[] = []): Async
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, nonce]);
 
-  return { data, error, loading, reload };
+  return { data, error, status, loading, reload };
 }
