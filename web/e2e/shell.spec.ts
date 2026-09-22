@@ -10,8 +10,10 @@ const SCREENS: { link: string; heading: string }[] = [
   { link: "Evidence", heading: "Evidence" },
   { link: "Regressions", heading: "Regressions" },
   { link: "Artifacts", heading: "Artifacts" },
+  { link: "Handoff", heading: "Control Plane handoff" },
   { link: "Playground", heading: "Playground" },
   { link: "Integrations", heading: "Integrations" },
+  { link: "Workspace", heading: "Workspace" },
 ];
 
 test.describe("app shell in open mode", () => {

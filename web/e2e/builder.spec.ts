@@ -23,7 +23,20 @@ const MANIFEST = {
   description: "An example suite for tests.",
   tags: ["demo"],
   capabilities: ["governance"],
-  environment: { simulation: { enabled: true } },
+  environment: {
+    simulation: { enabled: true },
+    // a real manifest: per-scenario validation is largely ABOUT the tools, so a
+    // fixture with none cannot show whether the client sends them
+    tools: [
+      {
+        schema_version: "tool-manifest/v1",
+        id: "note",
+        args_schema: { type: "object" },
+        effect: { default_class: "READ", driving_args: [] },
+        side_effecting: false,
+      },
+    ],
+  },
   scenarios: [
     {
       schema_version: "scenario/v1",
@@ -62,11 +75,22 @@ const YAML_TEXT = "id: suite-alpha\nname: Alpha Suite\ndescription: An example s
 
 interface Opts {
   suites?: unknown[];
+  /** the ORG's shared catalog — a different list from `suites`. */
+  orgSuites?: unknown[];
   manifest?: Record<string, unknown>;
   runtimes?: unknown[];
+  registryScenarios?: { name: string; task: string }[];
+  trial?: Record<string, unknown>;
   validate?: { ok: boolean; errors: string[]; suite?: unknown };
   yaml?: string;
   createdId?: string;
+  plan?: {
+    trials: string[];
+    conditions: string[];
+    blockers: string[];
+    drives_itself?: boolean;
+    estimate?: Record<string, number>;
+  };
 }
 
 /** Register every endpoint the two screens touch. The generic `**​/suites/*`
@@ -77,6 +101,11 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
   await stubShell(page, OPEN);
 
   await page.route("**/runtimes", json(200, { runtimes: opts.runtimes ?? [] }));
+  // the registry `scenario_refs` resolve against
+  await page.route("**/scenarios", json(200, {
+    scenarios: opts.registryScenarios ?? [],
+  }));
+
 
   // dispatch is two-segment — no overlap with the generic single-segment handler
   await page.route("**/suites/*/dispatch", json(200, {
@@ -107,6 +136,45 @@ async function routes(page: Page, opts: Opts = {}): Promise<void> {
     }
     return json(200, { suites: opts.suites ?? [] })(route);
   });
+
+  await page.route("**/playground/trial", json(200, opts.trial ?? {
+    mode: "simulated",
+    trial: { trial_id: "scn-1:ungoverned:0", status: "completed",
+             scenario_id: "scn-1", metrics: { task_success: true } },
+    trace: null,
+    counted_in_a_run: false,
+    evidence_cases: [],
+  }));
+
+  // authoring aids. `scenarios/validate` echoes back WHICH tool manifests it
+  // was given, so a test can assert the client sent them rather than trusting
+  // an ok:true that a manifest-less call would also produce.
+  await page.route("**/scenarios/validate", async (route: Route) => {
+    const body = route.request().postDataJSON() as {
+      scenario?: Record<string, unknown>;
+      manifests?: Record<string, unknown>;
+    };
+    const manifests = Object.keys(body.manifests ?? {});
+    return json(200, manifests.length > 0
+      ? { ok: true, errors: [] }
+      : {
+          ok: false,
+          errors: [`[validating] tool 'note' has no manifest in the bundle`],
+        })(route);
+  });
+  await page.route("**/suites/plan", json(200, opts.plan ?? {
+    trials: ["scn-1:ungoverned:0", "scn-1:ungoverned:1"],
+    conditions: ["ungoverned"],
+    blockers: [],
+    drives_itself: true,
+    estimate: { trials: 2, scenarios: 1, conditions: 1, repeats: 2 },
+  }));
+
+  // LAST, so it wins: `**/suites` matches `/registry/suites` too, and without
+  // this the workspace's own cards render again under the org catalog — every
+  // by-name assertion then hits two elements. Playwright gives precedence to the
+  // most recently registered route.
+  await page.route("**/registry/suites", json(200, { suites: opts.orgSuites ?? [] }));
 }
 
 /** Fail loud on an uncaught render error — a wrong mock shape throws
@@ -202,19 +270,47 @@ test.describe("Suite Builder", () => {
     await expect(desc).toHaveValue("A rewritten description.");
   });
 
+  test("an added scenario references a tool the suite declares", async ({ page }) => {
+    // The old blank seeded `tools: []` and an unevaluable `task_success`, so
+    // "+ Add" reliably invalidated the suite — and the item form (name, task)
+    // gave no way to fix either. What the button writes is asserted through
+    // what Save posts, because that is the document the server sees.
+    const saved: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/suites/suite-alpha", async (route: Route) => {
+      if (route.request().method() !== "PUT") return json(200, MANIFEST)(route);
+      saved.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, { id: "suite-alpha" })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    const scenarios = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Scenarios" }),
+    });
+    await scenarios.getByRole("button", { name: "Add Scenarios" }).click();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator(".tag", { hasText: /^saved$/ })).toBeVisible();
+
+    const posted = (saved[0].suite as Record<string, unknown>);
+    const added = (posted.scenarios as Record<string, unknown>[])[1];
+    expect(added.tools).toEqual([{ $ref: "note" }]);
+    expect(added.task_success).toEqual({ event: "tool_call", tool: "note" });
+  });
+
   test("adding and removing a scenario updates the list", async ({ page }) => {
     await routes(page);
     await page.goto("/#/suites/suite-alpha");
     const scenarios = page.locator(".card", {
       has: page.getByRole("heading", { name: "Scenarios", exact: true }),
     });
-    await expect(scenarios.getByRole("button", { name: "Remove" })).toHaveCount(1);
+    await expect(scenarios.getByRole("button", { name: /^Remove Scenarios/ })).toHaveCount(1);
 
-    await scenarios.getByRole("button", { name: "+ Add" }).click();
-    await expect(scenarios.getByRole("button", { name: "Remove" })).toHaveCount(2);
+    await scenarios.getByRole("button", { name: "Add Scenarios" }).click();
+    await expect(scenarios.getByRole("button", { name: /^Remove Scenarios/ })).toHaveCount(2);
 
-    await scenarios.getByRole("button", { name: "Remove" }).first().click();
-    await expect(scenarios.getByRole("button", { name: "Remove" })).toHaveCount(1);
+    await scenarios.getByRole("button", { name: /^Remove Scenarios/ }).first().click();
+    await expect(scenarios.getByRole("button", { name: /^Remove Scenarios/ })).toHaveCount(1);
   });
 
   test("toggling the simulated-tools checkbox updates state", async ({ page }) => {
@@ -278,6 +374,307 @@ test.describe("Suite Builder", () => {
     await expect(page.locator("textarea.yaml")).toHaveValue(YAML_TEXT);
   });
 
+  test("Check scenarios sends the suite's tool manifests", async ({ page }) => {
+    // Per-scenario validation is largely about the tools. Sending the scenario
+    // alone reported "tool X has no manifest in the bundle" for every tool of
+    // every scenario — the button was pure false positives on suites that
+    // validate perfectly. The stub answers ok only when the manifests arrive.
+    const posted: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/scenarios/validate", async (route: Route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      posted.push(body);
+      return json(200, { ok: true, errors: [] })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Check scenarios" }).click();
+    await expect(page.getByText("Every scenario validates on its own.")).toBeVisible();
+    expect(posted).toHaveLength(1);
+    expect(Object.keys(posted[0].manifests as Record<string, unknown>)).toEqual(["note"]);
+  });
+
+  test("Check scenarios reports a real per-scenario failure", async ({ page }) => {
+    await routes(page);
+    await page.route("**/scenarios/validate", json(200, {
+      ok: false,
+      errors: ["[validating] no fixture places $injection into an untrusted field"],
+    }));
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Check scenarios" }).click();
+    // named by SCENARIO — the whole reason this exists next to whole-suite
+    // validation, which cannot say which one broke
+    await expect(page.locator(".errors")).toContainText("scn-1");
+    await expect(page.locator(".errors")).toContainText("untrusted field");
+  });
+
+  test("Preview plan names the arms the run will name", async ({ page }) => {
+    // It used to hand-build an experiment/v1 from the manifest and plan THAT,
+    // which invented the arm id "condition" for a suite declaring none. The
+    // preview now goes to /suites/plan — the same planner a dispatch runs.
+    const posted: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/suites/plan", async (route: Route) => {
+      posted.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, {
+        trials: ["scn-1:ungoverned:0", "scn-1:ungoverned:1"],
+        conditions: ["ungoverned"],
+        blockers: [],
+        drives_itself: true,
+        estimate: { trials: 2 },
+      })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    await expect(page.getByText(/2 trial unit\(s\)/)).toBeVisible();
+    await expect(page.getByText(/1 arm\(s\)/)).toBeVisible();
+    await expect(page.locator("code", { hasText: "ungoverned" })).toBeVisible();
+    // the whole manifest goes over, not a hand-assembled experiment
+    expect((posted[0].suite as Record<string, unknown>).id).toBe("suite-alpha");
+  });
+
+  test("Preview plan surfaces why a dispatch would be refused", async ({ page }) => {
+    // seeing the plan is exactly how you find out the run is impossible — the
+    // preview reports the blocker instead of failing
+    await routes(page, {
+      plan: {
+        trials: ["scn-1:ungoverned:0"],
+        conditions: ["ungoverned"],
+        blockers: ["topology 'swarm' is accepted and validated but not yet executable"],
+        drives_itself: true,
+      },
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    await expect(page.getByText(/1 trial unit\(s\)/)).toBeVisible();
+    await expect(page.locator(".errors")).toContainText("not yet executable");
+  });
+
+  test("Scenario refs offer the registry's names, not a blank text box", async ({ page }) => {
+    // As free text the field could only break a suite: nothing filled the
+    // registry, so any value validated as "scenario_ref 'x' resolves to
+    // nothing". The chips are the names that actually resolve.
+    await routes(page, {
+      registryScenarios: [
+        { name: "shared-note", task: "Record a note." },
+        { name: "shared-transfer", task: "Move money." },
+      ],
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await page.getByRole("button", { name: "Advanced" }).click();
+
+    const scenarios = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Scenarios" }),
+    });
+    await expect(scenarios.locator("button.chip", { hasText: /^shared-note$/ })).toBeVisible();
+    const chip = scenarios.locator("button.chip", { hasText: /^shared-transfer$/ });
+    await expect(chip).not.toHaveClass(/chip-on/);
+    await chip.click();
+    await expect(chip).toHaveClass(/chip-on/);
+  });
+
+  test("an empty registry leaves the field usable rather than blocking", async ({ page }) => {
+    await routes(page, { registryScenarios: [] });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await page.getByRole("button", { name: "Advanced" }).click();
+    // no options, but the typed-extra input is still there — and a name nothing
+    // answers to is refused by the validator, which is the honest place
+    const scenarios = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Scenarios" }),
+    });
+    await expect(scenarios.locator("input.chip-input")).toBeVisible();
+  });
+
+  test("editing clears results that describe the old document", async ({ page }) => {
+    // Every result on screen describes the document that produced it. Only the
+    // validation verdict was cleared on an edit, so a plan preview and a
+    // per-scenario report outlived the document they were about — change
+    // `repeats` and the old trial count kept its place.
+    await routes(page, { validate: { ok: true, errors: [] } });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Validate" }).click();
+    // the tag, not the word wherever it appears (the Scenarios help text says
+    // "validates" too)
+    await expect(page.locator(".tag", { hasText: /^valid$/ })).toBeVisible();
+    await page.getByRole("button", { name: "Check scenarios" }).click();
+    await expect(page.getByText("Every scenario validates on its own.")).toBeVisible();
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    await expect(page.getByText(/2 trial unit\(s\)/)).toBeVisible();
+
+    const execution = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Execution" }),
+    });
+    await execution.getByLabel("Repeats").fill("7");
+
+    await expect(page.getByText(/trial unit\(s\)/)).toHaveCount(0);
+    await expect(page.getByText("Every scenario validates on its own.")).toHaveCount(0);
+    await expect(page.locator(".tag", { hasText: /^valid$/ })).toHaveCount(0);
+  });
+
+  test("Try one trial runs the document on screen, unsaved", async ({ page }) => {
+    // RFC §13 asks for a single-trial debugger before full execution. The
+    // Playground already was one, but it ran a SAVED suite by id — so the one
+    // document it could not try was the one being edited.
+    const posted: Record<string, unknown>[] = [];
+    let saves = 0;
+    await routes(page);
+    await page.route("**/suites/suite-alpha", (route: Route) => {
+      if (route.request().method() === "PUT") saves += 1;
+      return json(200, route.request().method() === "PUT"
+        ? { id: "suite-alpha" } : MANIFEST)(route);
+    });
+    await page.route("**/playground/trial", async (route: Route) => {
+      posted.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, {
+        mode: "simulated",
+        trial: { trial_id: "scn-1:ungoverned:0", status: "completed" },
+        trace: null,
+        counted_in_a_run: false,
+        evidence_cases: [],
+      })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    const suiteCard = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Suite", exact: true }),
+    });
+    await suiteCard.getByLabel("Description").fill("An unsaved edit.");
+    await page.getByRole("button", { name: "Try one trial" }).click();
+
+    await expect(page.getByRole("heading", { name: "Trial", exact: true })).toBeVisible();
+    await expect(page.getByText("not counted in a run")).toBeVisible();
+    // the EDITED document went over, and nothing was written
+    expect((posted[0].suite as Record<string, unknown>).description)
+      .toBe("An unsaved edit.");
+    expect(saves).toBe(0);
+  });
+
+  test("a trial result does not outlive the document it describes", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await page.getByRole("button", { name: "Try one trial" }).click();
+    await expect(page.getByRole("heading", { name: "Trial", exact: true })).toBeVisible();
+
+    const execution = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Execution" }),
+    });
+    await execution.getByLabel("Repeats").fill("9");
+    await expect(page.getByRole("heading", { name: "Trial", exact: true })).toHaveCount(0);
+  });
+
+  test("a suite's own config_schema renders into its ui_schema section", async ({ page }) => {
+    // RFC §12/§13: "Every suite contributes declarative schemas."
+    // suite.schema.json said "The Builder renders it" about `config_schema`;
+    // nothing did, so a third-party suite could declare knobs no screen showed.
+    const saved: Record<string, unknown>[] = [];
+    const manifest = {
+      ...MANIFEST,
+      config_schema: {
+        type: "object",
+        properties: {
+          depth: { type: "integer", title: "Search depth" },
+          style: { enum: ["terse", "verbose"] },
+          orphan: { type: "string", title: "Unplaced knob" },
+        },
+      },
+      ui_schema: { sections: [{ id: "execution", fields: ["depth", "style"] }] },
+      config: { depth: 2 },
+    };
+    await routes(page, { manifest });
+    await page.route("**/suites/suite-alpha", (route: Route) => {
+      if (route.request().method() !== "PUT") return json(200, manifest)(route);
+      saved.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, { id: "suite-alpha" })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+
+    const execution = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Execution" }),
+    });
+    const depth = execution.getByLabel("Search depth");
+    await expect(depth).toHaveValue("2");
+    // the enum is a dropdown of exactly what the schema allows
+    const style = execution.getByLabel("style");
+    await expect(style.locator("option")).toHaveText(["—", "terse", "verbose"]);
+
+    // a field the layout placed nowhere is shown, not dropped
+    const options = page.locator(".card", {
+      has: page.getByRole("heading", { name: "Suite options" }),
+    });
+    await expect(options.getByLabel("Unplaced knob")).toBeVisible();
+
+    await depth.fill("7");
+    await style.selectOption("verbose");
+    await options.getByLabel("Unplaced knob").fill("hi");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator(".tag", { hasText: /^saved$/ })).toBeVisible();
+
+    // the values land under `config`, which is what config_schema describes
+    expect((saved[0].suite as Record<string, unknown>).config).toEqual({
+      depth: 7, style: "verbose", orphan: "hi",
+    });
+  });
+
+  test("a suite with no config_schema renders no extra fields", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Suite options" })).toHaveCount(0);
+  });
+
+  test("a suite nothing implements says so before the click", async ({ page }) => {
+    // Such a suite RUNS: every trial finishes immediately, every metric comes
+    // back false, and an artifact of zeros is written — at scale it looks
+    // exactly like a result. The screen has to say it beforehand.
+    await routes(page, {
+      plan: {
+        trials: ["scn-1:ungoverned:0"],
+        conditions: ["ungoverned"],
+        blockers: [],
+        drives_itself: false,
+      },
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    // nothing is claimed before the plan is known
+    await expect(page.getByText("no implementation")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    await expect(page.getByText("no implementation")).toBeVisible();
+    await expect(page.getByText(/a LOCAL run of them would measure nothing/)).toBeVisible();
+  });
+
+  test("an inert trial result is labelled, not left to look like a result", async ({ page }) => {
+    await routes(page, {
+      trial: {
+        mode: "simulated",
+        trial: { trial_id: "scn-1:ungoverned:0", status: "completed" },
+        trace: { events: [] },
+        counted_in_a_run: false,
+        evidence_cases: [],
+      },
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("heading", { name: "Suite Builder" })).toBeVisible();
+    await page.getByRole("button", { name: "Try one trial" }).click();
+    await expect(page.getByText("nothing ran")).toBeVisible();
+    await expect(page.getByText(/no tool was called/)).toBeVisible();
+  });
+
   test("Run panel lists runtimes and dispatching starts a run", async ({ page }) => {
     const errs = watchErrors(page);
     await routes(page, { runtimes: RUNTIMES, validate: { ok: true, errors: [] } });
@@ -311,5 +708,177 @@ test.describe("Suite Builder", () => {
     // dispatch → navigate(/runs/run-7) → the Run Report renders
     await expect(page.getByRole("heading", { name: "Run run-7" })).toBeVisible();
     expect(errs).toEqual([]);
+  });
+});
+
+
+/**
+ * The forms, driven the way a person drives them.
+ *
+ * Every widget lived inside a `<label className="field">`. A <label> owns
+ * exactly ONE control and <button> is labelable, so a chips/list/yaml-link
+ * field handed its whole text to whichever button came first: the field's
+ * words became click targets for it, and its accessible name became a
+ * paragraph. Reading the hint under Conditions ADDED a condition.
+ */
+test.describe("the form is not a minefield", () => {
+  test("reading a field's help does not edit the document", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    const help = page.getByText(/adding one declares the 'governance' capability/);
+    await help.click();
+    // no arm was added by reading about arms
+    await expect(
+      page.locator(".field", { hasText: "Conditions (governance)" }).locator(".item-card"),
+    ).toHaveCount(0);
+  });
+
+  test("clicking a field's LABEL does not toggle a chip", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    const chip = page.locator(".chip", { hasText: /^governance$/ });
+    const before = await chip.getAttribute("class");
+    await page.locator(".field-label", { hasText: /^Capabilities$/ }).click();
+    // the word "Capabilities" used to be a click target for the first chip
+    await expect(chip).toHaveAttribute("class", before ?? "");
+  });
+
+  test("each control is addressable by its own label", async ({ page }) => {
+    // three "Edit in YAML →" buttons sit side by side under Environment; before
+    // the fix they were one button repeated three times, and afterwards they
+    // briefly had no field context at all
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    for (const name of ["Edit Tool manifests in YAML", "Edit Fixtures in YAML",
+                        "Edit Variables in YAML"]) {
+      await expect(page.getByRole("button", { name })).toHaveCount(1);
+    }
+    // and a help sentence is a DESCRIPTION, not part of the control's name
+    await expect(page.getByRole("combobox", { name: "Topology", exact: true })).toHaveCount(1);
+  });
+});
+
+test.describe("adding an item", () => {
+  test("an arm declares the capability the schema requires with it", async ({ page }) => {
+    // the most common authoring action in this product used to land on
+    // "execution.conditions is set but 'governance' is not in capabilities"
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByRole("button", { name: "Add Conditions (governance)" }).click();
+    await expect(page.locator(".chip.chip-on", { hasText: /^governance$/ })).toHaveCount(1);
+  });
+
+  test("a new item names itself rather than starting empty", async ({ page }) => {
+    // an empty id is refused — an aggregation resolves its metric BY NAME, a
+    // condition is addressed by id in every trial — so + Add used to turn the
+    // screen red before anything was typed
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByRole("button", { name: "Add Conditions (governance)" }).click();
+    const id = page.locator(".field", { hasText: "Conditions (governance)" })
+      .locator(".item-card").first().locator("input").first();
+    await expect(id).not.toHaveValue("");
+  });
+
+  test("an aggregation picks from the metrics the suite declares", async ({ page }) => {
+    await routes(page, {
+      manifest: {
+        ...MANIFEST,
+        evaluation: {
+          metrics: [{ name: "duration_ms", kind: "duration_ms", source: "trial_metric" }],
+          aggregations: [{ metric: "duration_ms", fn: "mean", unit_of_analysis: "trial" }],
+        },
+      },
+    });
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    const metric = page.locator(".field", { hasText: "Aggregations" })
+      .locator(".item-card").first().locator("select").first();
+    // a select, not free text: a typo is not a new metric, it is an
+    // aggregation over nothing
+    await expect(metric).toHaveValue("duration_ms");
+    await expect(metric.locator("option")).toHaveText(["—", "duration_ms"]);
+  });
+});
+
+/**
+ * Can the forms author a REAL suite? The ingest built-in, from the Blank
+ * starter, touching YAML for nothing the forms claim to cover.
+ *
+ * Not a coverage stunt: this is where the form/YAML boundary is DECIDED. The
+ * three arms with their policies, the metrics, the aggregation with its
+ * comparison test, the invariant scoped to the governed arms — all of that is
+ * the subject of the experiment, and every one of them was reachable only in
+ * YAML at some point. What stays in YAML (tool manifests, scenario fixtures,
+ * predicates) is tree-shaped and stays there on purpose.
+ */
+test.describe("authoring a real suite in the forms", () => {
+  test("the ingest suite's skeleton is formable, policies and all", async ({ page }) => {
+    const saved: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/suites/suite-alpha", async (route: Route) => {
+      if (route.request().method() !== "PUT") return json(200, MANIFEST)(route);
+      saved.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, { id: "suite-alpha" })(route);
+    });
+    await page.goto("/#/suites/suite-alpha");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    // three arms, the treated two carrying the policy under test
+    const arms = page.locator(".field", { hasText: "Conditions (governance)" });
+    for (const [id, enforcement, profile] of [
+      ["ungoverned", "off", ""],
+      ["governed", "on", "strict"],
+      ["governed_allowlist", "on", "strict"],
+    ]) {
+      await page.getByRole("button", { name: "Add Conditions (governance)" }).click();
+      const card = arms.locator(".item-card").last();
+      await card.getByLabel("Id", { exact: true }).fill(id);
+      await card.getByLabel("Enforcement", { exact: true }).selectOption(enforcement);
+      if (profile) {
+        await card.getByLabel("Policy profile", { exact: true }).fill(profile);
+        await card.getByLabel("Trust model", { exact: true }).fill("content-ledger");
+      }
+      if (id === "governed_allowlist") {
+        await card.getByLabel("Allowlist", { exact: true })
+          .fill("$inputs.approved_recipients");
+      }
+    }
+
+    // an invariant that is a claim about SOME arms, not all of them
+    await page.getByRole("button", { name: "Add Invariants" }).click();
+    const rg = page.locator(".field", { hasText: "Invariants" }).locator(".item-card").last();
+    await rg.getByLabel("Id", { exact: true }).fill("RG-ingest-no-exfil");
+    await rg.getByLabel("Arms in scope", { exact: true })
+      .fill("governed, governed_allowlist");
+
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator(".tag", { hasText: /^saved$/ })).toBeVisible();
+
+    const suite = saved[0].suite as Record<string, unknown>;
+    const execution = suite.execution as Record<string, unknown>;
+    const conditions = execution.conditions as Record<string, unknown>[];
+    expect(conditions.map((c) => c.id)).toEqual([
+      "ungoverned", "governed", "governed_allowlist",
+    ]);
+    // the policy is the TREATMENT — a form that edits an arm and hides it is
+    // editing everything about the experiment except its subject
+    expect(conditions[1].policy).toEqual({
+      profile: "strict", trust_model: "content-ledger",
+    });
+    expect(conditions[2].policy).toMatchObject({
+      allowlist: ["$inputs.approved_recipients"],
+    });
+    const regressions = suite.regressions as Record<string, unknown>[];
+    expect(regressions[0].scope).toMatchObject({
+      condition_ids: ["governed", "governed_allowlist"],
+    });
+    // adding arms declared the capability they require
+    expect(suite.capabilities).toContain("governance");
   });
 });

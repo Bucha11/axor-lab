@@ -4,6 +4,8 @@ The single source of truth for how every number is computed. The mocks earlier u
 
 **Governing rule:** a metric declares its *unit of analysis, estimator, interval method, and hypothesis test*. Nothing is inferred at render time. The stored aggregate carries all four (see `bundle.schema.json` → aggregates).
 
+`estimator` is the newest of the four and the one a verifier needs most: it is what makes a reported number RE-APPLIABLE. `rate` is the derived tier's (a proportion over a predicate the evidence can re-evaluate); `mean`, `sum`, `min` and `max` are applied to the runner's own per-trial measurements. One implementation computes them for the runner and the server both (`lab_analysis.numeric_aggregate` / `binary_aggregate`), because a check that compares two implementations of the same arithmetic is a check that will eventually reject an honest run over a rounding difference. Which tier an aggregate is in decides whether it may back a claim — see `claims.md`.
+
 ---
 
 ## 1. Unit of analysis — the error that invalidates multi-agent games

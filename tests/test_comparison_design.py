@@ -22,7 +22,7 @@ from lab_analysis import (
 from lab_analysis.errors import InsufficientDataError
 from lab_runner import ScriptedAgent
 from lab_capabilities.governance import run_experiment_suite
-from lab_runner.cli import _aggregates, _effective_design
+from lab_service import compute_aggregates, effective_design
 from lab_runner.errors import RunnerError
 from lab_capabilities.governance.experiment_file import load_axl, resolve
 
@@ -73,16 +73,16 @@ class TestEffectiveDesign(unittest.TestCase):
         return resolve(load_axl(EXAMPLE))
 
     def test_scripted_is_matched_pairs(self) -> None:
-        self.assertEqual(_effective_design(self._resolved(), ScriptedAgent()), "matched_pairs")
+        self.assertEqual(effective_design(self._resolved(), ScriptedAgent()), "matched_pairs")
 
     def test_live_agent_is_independent_samples(self) -> None:
-        self.assertEqual(_effective_design(self._resolved(), _LiveAgent()), "independent_samples")
+        self.assertEqual(effective_design(self._resolved(), _LiveAgent()), "independent_samples")
 
     def test_declared_matched_pairs_with_live_agent_is_rejected(self) -> None:
         resolved = self._resolved()
         resolved.experiment["comparison_design"] = {"kind": "matched_pairs"}
         with self.assertRaises(RunnerError):
-            _effective_design(resolved, _LiveAgent())
+            effective_design(resolved, _LiveAgent())
 
 
 class TestAggregatesPickTheRightTest(unittest.TestCase):
@@ -102,14 +102,14 @@ class TestAggregatesPickTheRightTest(unittest.TestCase):
 
     def test_scripted_uses_mcnemar(self) -> None:
         resolved, result = self._run(ScriptedAgent())
-        agg = self._asr_treated(_aggregates(resolved, result, ScriptedAgent()))
+        agg = self._asr_treated(compute_aggregates(resolved, result, ScriptedAgent()))
         self.assertEqual(agg["comparison_design"], "matched_pairs")
         if "test" in agg:  # present unless n<10
             self.assertEqual(agg["test"]["name"], "mcnemar")
 
     def test_live_uses_two_proportion_not_mcnemar(self) -> None:
         resolved, result = self._run(_LiveAgent())
-        agg = self._asr_treated(_aggregates(resolved, result, _LiveAgent()))
+        agg = self._asr_treated(compute_aggregates(resolved, result, _LiveAgent()))
         self.assertEqual(agg["comparison_design"], "independent_samples")
         if "test" in agg:
             self.assertEqual(agg["test"]["name"], "two_proportion")

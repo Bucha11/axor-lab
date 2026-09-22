@@ -343,6 +343,16 @@
           "condition_id": {
             "type": "string"
           },
+          "estimator": {
+            "enum": [
+              "rate",
+              "mean",
+              "sum",
+              "min",
+              "max"
+            ],
+            "description": "the function that produced `estimate`. Stated so a verifier can RE-APPLY it: an estimate whose derivation is unnamed can only be checked by trying every function until one matches, which accepts whichever the uploader meant it to be. `rate` is derived from the evidence (a predicate over each trace); the rest are re-applied to the runner's own per-trial measurements, which proves the arithmetic and nothing about the observations."
+          },
           "estimate": {
             "type": "number"
           },

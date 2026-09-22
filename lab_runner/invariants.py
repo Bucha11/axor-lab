@@ -323,6 +323,22 @@ def _check_predicate(
                        "which is not in the run — the invariant cannot be evaluated",
                 trials_checked=len(scoped),
             )
+        if not trace.get("events"):
+            # The same rule this module already applies to metrics — "an
+            # unmeasured value cannot satisfy a threshold" — stated for
+            # predicates. A trial that emitted no events never acted, and a
+            # NEGATIVE predicate over it is vacuously true: a run where the
+            # agent did nothing also never mailed anyone, so a suite with no
+            # implementation "passed" its containment invariant. That is the
+            # most dangerous shape a green result can have, so an empty trace
+            # is unevaluable rather than satisfied.
+            return InvariantResult(
+                rid, STATUS_ERROR,
+                detail=f"trial {trial_id} produced no events — a predicate over an "
+                       "empty trace is vacuous, and a trial that never acted cannot "
+                       "be evidence about what it did not do",
+                trials_checked=len(scoped),
+            )
         # each trial is evaluated under ITS OWN scenario's inputs, so an
         # $inputs-referencing predicate is never resolved against the wrong
         # scenario in a multi-scenario run

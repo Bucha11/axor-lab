@@ -25,8 +25,13 @@ def _budget() -> dict[str, object]:
 
 
 class TestRegistry(unittest.TestCase):
-    def test_the_launch_set_is_three(self) -> None:
-        self.assertEqual(builtin_registry().ids(), ("agentdojo", "blank", "budget"))
+    def test_the_launch_set_is_four(self) -> None:
+        """Each exercises a different SDK surface once: Blank proves a suite is
+        authorable from nothing, AgentDojo the import path, Budget the metrics
+        layer, Ingest a suite derived from a shipped agent's documented tool
+        chain. A fifth needs a surface none of these covers."""
+        self.assertEqual(builtin_registry().ids(),
+                         ("agentdojo", "blank", "budget", "ingest"))
 
     def test_every_builtin_manifest_is_valid(self) -> None:
         registry = builtin_registry()
@@ -36,7 +41,7 @@ class TestRegistry(unittest.TestCase):
 
     def test_the_catalog_renders_one_card_per_suite(self) -> None:
         cards = builtin_registry().catalog()
-        self.assertEqual(len(cards), 3)
+        self.assertEqual(len(cards), len(builtin_registry().ids()))
         for card in cards:
             self.assertTrue(card["name"])
             self.assertTrue(card["description"])

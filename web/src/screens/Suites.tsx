@@ -5,9 +5,14 @@ import { Button, Card, Failed, Loading, Tag } from "../components/ui";
 import { navigate } from "../lib/router";
 
 export function Suites() {
-  const { data, error, loading, reload } = useAsync(() => api.suites());
+  const { data, error, status, loading, reload } = useAsync(() => api.suites());
+  // the org's SHARED catalog, distinct from this workspace's own suites. It
+  // fails for a workspace whose plan does not grant `private_registry`, and that
+  // is not an error worth a red screen — the section simply does not appear.
+  const registry = useAsync(() => api.registrySuites());
   const [busy, setBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [published, setPublished] = useState<string | null>(null);
 
   async function createSuite() {
     // derive from the `blank` built-in — a guaranteed-valid starter — rather
@@ -33,8 +38,22 @@ export function Suites() {
     reload();
   }
 
+  async function publishToOrg(id: string) {
+    setBusy(true);
+    setCreateError(null);
+    try {
+      const result = await api.publishSuiteToOrg(id);
+      setPublished(result.id);
+      registry.reload();
+    } catch (exc) {
+      setCreateError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (loading) return <Loading />;
-  if (error) return <Failed error={error} onRetry={reload} />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
 
   return (
     <div className="screen">
@@ -77,20 +96,60 @@ export function Suites() {
               </Tag>
             ))}
             {suite.origin === "workspace" && (
-              <button
-                type="button"
-                className="item-remove"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  remove(suite.id);
-                }}
-              >
-                Delete
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="item-remove"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    remove(suite.id);
+                  }}
+                >
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  className="item-remove"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    publishToOrg(suite.id);
+                  }}
+                >
+                  Publish to org
+                </button>
+              </>
             )}
           </Card>
         ))}
       </div>
+      {published && (
+        <p className="muted small">
+          Published <code>{published}</code> to the org registry — every workspace
+          in the org can see it now. The copy is the org's; editing yours does not
+          change theirs.
+        </p>
+      )}
+      {(registry.data?.suites ?? []).length > 0 && (
+        <section>
+          <h3>Org registry</h3>
+          <p className="muted small">
+            Suites your organization shares. Visible to every workspace in the
+            org; owned by none of them individually.
+          </p>
+          <div className="grid">
+            {(registry.data?.suites ?? []).map((suite) => (
+              <Card key={`org-${suite.id}`}>
+                <h4>{suite.name}</h4>
+                <p className="muted small">
+                  <code>{suite.id}</code>
+                  {suite.origin && ` · ${suite.origin}`}
+                </p>
+                <p className="muted">{suite.description}</p>
+              </Card>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

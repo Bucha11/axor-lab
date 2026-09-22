@@ -35,13 +35,17 @@ Navigation (Web UX RFC): **Home · Suites · Runs · Evidence · Regressions · 
 | Suite Builder (YAML mode) | `GET /suites/{id}/yaml` | the same `suite/v1`, serialized |
 | Playground — one trial | `POST /playground/trial` | one `trial` record + its `trace/v1` |
 | Run (live) | `POST /runs`, `GET /runs/{id}`, `SSE /runs/{id}/events` | a lifecycle state + trial progress |
-| Run Report | `GET /runs/{id}/report` | `bundle/v1.aggregates` + per-metric summaries |
+| Run Report | `GET /runs/{id}/report`, `GET /runs/{id}/results` | `bundle/v1.aggregates` + per-metric coverage, the ARMS (so a screen can say when none of them enforced), and each aggregate's evidence tier — `derived` from the traces or `self_reported` by the runner. Nothing is computed in the browser: a rate derived there would be a second opinion about a published number |
 | Trial detail | `GET /runs/{id}/trials/{tid}` | trial record + `trace/v1` (**shared**) |
 | EvidenceCase | `GET /evidence`, `GET /evidence/{id}`, `POST /evidence` | `evidence-case/v1` |
 | Regression | `GET /regressions`, `GET /regressions/{id}`, `POST /regressions`, `POST /regressions/{id}/run` | `regression/v1` + an `InvariantResult` |
 | Artifacts | `GET /artifacts`, `GET /artifacts/{id}` | `artifact/v1` |
-| Integrations | `GET /runtimes`, `POST /runtimes/connect`, `GET /runtimes/{id}/manifests` | runtime list; `tool-manifest/v1[]` (**shared**) |
-| Published record | `GET /e/{id}`, `GET /api/publications` | `publication/v1` + reproduction records |
+| Artifacts — getting it OUT | `GET /artifacts/{id}/download`, `GET /artifacts/{id}/package`, `GET /artifacts/{id}/report`, `POST /artifacts/{id}/publish`, `GET /publications`, `GET /publications/{id}` | the artifact as a file; `{bundle, traces}` for `verify --allow-bare`; the run as a paste-ready md/tex/bib report; a minted `publication/v1` (locally, or through a server's handshake when `{server}` is given) |
+| Integrations | `GET /runtimes`, `POST /runtimes/connect`, `GET /hosted-runtimes`, `POST /hosted-runtimes` | runtime list; a connection issues an `ingest_key`; hosted provisioning is gated by the plan's `hosted_execution` capability (402). There is no per-runtime manifest route (`/runtimes/{id}/manifests`): a runtime does not publish a manifest list — the SUITE declares its tools, and the assignment carries them to whichever runtime claims it |
+| Published record | `GET /e/{id}`, `GET /api/publications` | `publication/v1` + reproduction records (the PUBLICATION server, `lab_server/app.py` — a different HTTP surface from the screen API above) |
+| Control-Plane handoff | `POST /handoff/export`, `POST /handoff/verify`, `POST /verify/package`, `POST /incidents/import` | the handoff as a file map or a `.zip` of the same directory `verify-cp-export` checks; a verification report per guarantee (integrity / authenticity / derivability, never merged); an incident trace replayed into a bundle under its RECORDED condition |
+| Workspace | `GET /workspaces/current`, `GET /workspaces/current/members`, `POST /workspaces/current/members`, `GET /workspaces/current/audit`, `GET /workspaces/current/subscription`, `GET /billing/plans`, `POST /billing/checkout`, `POST /workspaces/current/plan`, `GET /workspaces`, `POST /workspaces` | the tenant, its role, its plan and its audit log; the plan catalog, each entry carrying the `plan_id` checkout takes (NOT its display name); listing or provisioning tenants is admin-only |
+| Login | `GET /auth/status`, `POST /guest-session` | whether this deployment needs a credential and whether it offers anonymous trials — the only two routes served with no credential at all. The login itself is the axor-identity service (`POST /identity/v1/login`), a separate service whose access token every request above then carries |
 
 **The Suite Catalog shows an explicit unavailable state.** The design boards show six suite cards and three suites exist (Blank, AgentDojo, Budget). The catalog renders the other three as unavailable — never as a card that runs nothing.
 

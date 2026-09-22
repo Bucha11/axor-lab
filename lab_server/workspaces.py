@@ -37,11 +37,25 @@ if TYPE_CHECKING:
 # capabilities, so tenancy alone changes nothing until a restricted plan is set.
 # A restricted plan sets a numeric limit (e.g. max_suites: 2) or drops a
 # capability.
+#: Every capability a plan may grant, and — stated, because it was not — which
+#: ones LAB ITSELF enforces. A capability a plan advertises and no route reads is
+#: a chip on the Workspace screen that means nothing, and there is no way to tell
+#: the two apart by looking at the list.
 ALL_CAPABILITIES = (
-    "hosted_execution",   # the platform provisions/runs managed runtimes (feature 4)
-    "private_registry",   # an org-private shared suite registry (feature 6)
-    "governance",         # may RUN suites that declare a governance capability
-    "control_plane",      # the Control Plane add-on: governed-node operation
+    # ENFORCED here (`require_capability`, answering 402):
+    "hosted_execution",   # POST /hosted-runtimes — the platform runs managed runtimes
+    "private_registry",   # POST /scenarios|suites/{id}/publish — the org's shared catalog
+    "governance",         # dispatching a suite that DECLARES governance (the open
+                          # format still validates and stores anywhere: the gate is
+                          # on execution, not on authorship)
+    # CARRIED, NOT GATED by Lab: the Production Governance add-on is governed-NODE
+    # operation, which happens in the Control Plane, and `architecture-boundary.md`
+    # puts entitlement at platform level. Lab grants it so an identity tier and the
+    # plan catalog can express it end to end; no Lab route consults it today.
+    # Whether the HOSTED Control-Plane handoff belongs behind it is an open
+    # pricing question, recorded in `docs/POST_MVP_PLAN.md` §B10 rather than
+    # decided here.
+    "control_plane",
 )
 
 # RBAC roles, most-privileged first. A member's token carries a role within its
@@ -105,6 +119,17 @@ EXAMPLE_PLAN_CATALOG: dict[str, dict[str, object]] = {
         "capabilities": ["hosted_execution", "private_registry"],
     },
 }
+
+
+class GuestCapacityError(Exception):
+    """Every anonymous trial slot is taken. 429 — a real, temporary condition,
+    not a rejection of the caller."""
+
+    status = 429
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
 class EntitlementError(Exception):
@@ -286,6 +311,36 @@ class Workspaces:
             workspace = self._by_id.get(ws_id)
         return (workspace, role) if workspace is not None else None
 
+    #: How many guest sessions may be ALIVE at once. `/guest-session` is the one
+    #: route a deployment exposes with no credential at all, and each call held a
+    #: Workspace plus two in-memory stores for half an hour with nothing to stop
+    #: a caller from repeating it. Refusing past a ceiling is the difference
+    #: between an anonymous trial and free unbounded memory.
+    MAX_LIVE_GUESTS = 200
+
+    def sweep_guests(self, now: float | None = None) -> int:
+        """Drop every EXPIRED guest session; return how many went.
+
+        Eviction used to happen only in `_resolve`, when that guest's own token
+        came back — so a session nobody returned to was never reaped at all. The
+        common case for an abandoned trial is exactly that: the tab is closed,
+        the token is never presented again, and its stores are held forever.
+        """
+        moment = time.time() if now is None else now
+        with self._lock:
+            expired = [ws_id for ws_id, at in self._guest_expiry.items() if moment > at]
+            for ws_id in expired:
+                for token, (bound, _role) in list(self._by_token.items()):
+                    if bound == ws_id:
+                        self._evict_guest(ws_id, token)
+                # a guest with no token binding left still has to lose its stores
+                self._evict_guest(ws_id, "")
+        return len(expired)
+
+    def live_guests(self) -> int:
+        with self._lock:
+            return len(self._guest_expiry)
+
     def create_guest(self, ttl_seconds: int = 1800) -> dict[str, object]:
         """Mint an anonymous, EPHEMERAL hosted session — no user, no
         registration. Its workspace is on the fixed TRIAL_PLAN and its stores are
@@ -294,6 +349,14 @@ class Workspaces:
         carries as its bearer."""
         from lab_server.runtime_jobs import RuntimeJobStore  # lazy: import cycle
 
+        # reclaim before allocating, so a steady trickle of abandoned trials
+        # cannot fill the ceiling with sessions that already ended
+        self.sweep_guests()
+        if self.live_guests() >= self.MAX_LIVE_GUESTS:
+            raise GuestCapacityError(
+                f"all {self.MAX_LIVE_GUESTS} guest sessions are in use; "
+                "try again shortly, or sign in"
+            )
         with self._lock:
             ws_id = "guest_" + secrets.token_hex(6)
             token = secrets.token_hex(24)

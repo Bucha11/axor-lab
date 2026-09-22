@@ -1,5 +1,14 @@
 # Response to the static code review
 
+> **A HISTORICAL RECORD.** Each row answers one review round at the time it
+> was answered, and the repo has moved since: `lab_endpoint`, `lab_sandbox`,
+> `lab_games` and `lab_entitlement` were deleted in the v0.3 re-scope, the
+> governance code moved into `lab_capabilities/governance/`, and the test
+> files named in rows about those subsystems no longer exist. A row is
+> evidence that a finding was addressed, not a claim that the named file is
+> still at that path. `docs/POST_MVP_PLAN.md` and the README carry the
+> current state.
+
 This tracks the static review section-by-section: what was fixed (with the
 test that proves it) and what remains genuinely large. The whole suite is
 stdlib-only and green (`python -m unittest discover -s tests -t .`); optional
@@ -11,7 +20,7 @@ absent.
 | Review item | Fix | Proof |
 |---|---|---|
 | **P0.1** replay from truncated preview | ledger stores typed `decision_value` + `canonical_value_hash` apart from the UI `preview`; replay + predicates read `decision_value` | `test_replay_value_fidelity.py` (long strings, structured/list/None args) |
-| **P0.2** Lab reimplements the kernel | `lab_runner/axor_backend.py` drives the real `axor_core.governor.ToolCallGovernor`; selected when a condition pins the installed version exactly | `test_real_kernel.py` (real DENY/ALLOW, bit-identical replay) |
+| **P0.2** Lab reimplements the kernel | `lab_capabilities/governance/axor_backend.py` (then `lab_runner/axor_backend.py`) drives the real `axor_core.governor.ToolCallGovernor`; selected when a condition pins the installed version exactly | `test_real_kernel.py` (real DENY/ALLOW, bit-identical replay) |
 | **P0.3** signature covers only content_hashes | `content_hashes` spans every field; signature covers the whole canonical bundle minus `signature` | `test_hardening.py::TestFullBundleIntegrity` |
 | **P0.4** path traversal via `trace_id` | trace files named by server content hash; atomic writes; verify-on-load | `test_server_security.py::TestPathTraversal` |
 | **P0.5** unauthenticated writes / unlisted leak | bearer-token write/admin auth; `catalog()` public-only; private never served | `test_server_security.py` |

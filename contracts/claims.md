@@ -34,6 +34,36 @@ What makes it statistical: the model is sampled anew each run. `axor lab run --r
 
 Because a DENY changes the trajectory, and what the agent does *after* the DENY (retry? abandon? succeed honestly?) is not in the frozen ungoverned trace. Recovering it requires a fresh live run. Replay gives you the **verdict on the recorded events**, not the **counterfactual continuation**.
 
+## Which aggregates may back a statistical claim
+
+The two kinds above say what a claim IS. This says which numbers are allowed to
+make one, and it is a second line inside the statistical kind.
+
+- **Derived** — the metric is a predicate the evidence can re-evaluate: a
+  verifier reads each frozen trace, applies the scenario's own predicate, and
+  gets the number back. `ASR` and `task_success` are these. Only a derived
+  aggregate may back a `statistically_reproducible` claim, and the publication
+  records `statistics_integrity: recomputed_from_traces`.
+- **Self-reported** — the metric is the runner's own measurement and appears in
+  no trace: latency, tokens, spend. A verifier can re-apply the declared
+  `estimator` to the reported per-trial values and check the ARITHMETIC; it
+  cannot check the observations. Such an aggregate is published, carries NO
+  claim, and the publication records `statistics_integrity: self_reported` —
+  which is what `publication.schema.json` already meant by the word.
+
+Refusing the second kind is not the safe choice: a suite declaring
+`mean(duration_ms)` was once unpublishable, which made an honest figure
+unpublishable while teaching nobody anything about attestation. Publishing it
+UNMARKED is the unsafe one — a latency mean and an attack-success rate look
+identical in a results table and are not the same kind of claim.
+
+Consequences: the publish handshake refuses a `rate` over a metric outside the
+derived registry (an arbitrary label must not launder into a server-recomputed
+claim) and refuses a comparison TEST on a self-reported metric; the Run Report
+and `axor-lab report` both print the tier per row; and an aggregate over a
+metric no trial measured is refused outright — weaker than self-reported, since
+it is not reported at all.
+
 ## Consequence for each surface
 
 - **Published page** separates a *Exactly replayable* block (verdict-on-trace claims) from a *Statistically reproducible* block (aggregate claims). Never one merged "reproducible" badge.
