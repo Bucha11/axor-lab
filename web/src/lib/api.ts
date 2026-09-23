@@ -43,54 +43,121 @@ let onUnauthorized: (() => Promise<string | null>) | null = null;
 
 export function setUnauthorizedHandler(handler: (() => Promise<string | null>) | null): void {
   onUnauthorized = handler;
+  refreshing = null;
 }
 
-async function call<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const response = await fetch(path, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+/** The ONE refresh in flight, shared by every request that 401'd meanwhile.
+ *
+ * The identity service ROTATES the refresh token: each one is single-use. A
+ * screen fires several requests at once, so an expired access token came back
+ * as several parallel 401s — and each ran its own refresh with the same stored
+ * token. The first rotated it; every other one presented a revoked token, got
+ * a 401 from identity, cleared the session, and logged the user out in the
+ * middle of a successful refresh. */
+let refreshing: Promise<string | null> | null = null;
+
+function refreshOnce(handler: () => Promise<string | null>): Promise<string | null> {
+  if (!refreshing) {
+    refreshing = handler().finally(() => {
+      refreshing = null;
+    });
+  }
+  return refreshing;
+}
+
+/** Send a gated request, refreshing ONCE on a 401 and retrying with the new
+ * token. Every door out of this module goes through here — `call`, and the
+ * text/blob downloads beside it — so a file fetch after an access token expired
+ * refreshes like a JSON read does, instead of surfacing a 401 the user can do
+ * nothing about. */
+async function send(
+  method: string,
+  path: string,
+  body?: unknown,
+  json = true,
+): Promise<Response> {
+  const attempt = (bearer: string | null) => {
+    const headers: Record<string, string> = {};
+    if (json) headers["Content-Type"] = "application/json";
+    if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
+    return fetch(path, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  };
+  const sent = token;
+  const response = await attempt(sent);
+  if (response.status !== 401 || !onUnauthorized) return response;
+  // another request already refreshed while this one was on the wire: the
+  // token it holds now is the fresh one, and refreshing AGAIN would spend the
+  // rotated refresh token for nothing
+  const next = token && token !== sent ? token : await refreshOnce(onUnauthorized);
+  if (!next) return response;
+  setToken(next);
+  return attempt(next);
+}
+
+/** The `error` string a failed response carries, or `fallback`. A body that is
+ * not JSON — a proxy's 502 page, an HTML 404 — is not more informative than the
+ * default, and must not surface as a JSON SyntaxError instead of the status. */
+async function failure(response: Response, fallback: string): Promise<ApiError> {
+  let text = "";
+  try {
+    text = await response.text();
+  } catch {
+    /* an unreadable body still has a status */
+  }
+  let message = `${fallback} (${response.status})`;
+  try {
+    const payload = JSON.parse(text);
+    if (typeof payload?.error === "string") message = payload.error;
+  } catch {
+    /* non-JSON: keep the status-bearing default */
+  }
+  return new ApiError(response.status, message);
+}
+
+async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const response = await send(method, path, body);
+  // status FIRST: parsing before checking turned every non-JSON error body
+  // (a gateway's HTML 502) into "Unexpected token '<'", with no status at all
+  if (!response.ok) throw await failure(response, `${method} ${path} failed`);
+  const text = await response.text();
+  if (!text) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // a 200 that is not JSON is almost always the SPA's index.html served for
+    // a path nothing proxies — say so rather than returning garbage
+    throw new ApiError(response.status, `${method} ${path} returned a non-JSON response`);
+  }
+}
+
+/** Check a PASTED control token before it becomes the session's credential.
+ *
+ * It was accepted blind: a mistyped token became the session, the first screen
+ * 401'd, the refresh hook had nothing to refresh, and the user landed back on
+ * Login with no word about why. Deliberately NOT through `send` — a wrong token
+ * is an answer about the token, not an expired session to refresh. Only a
+ * 401/403 is a rejection; any other failure is not evidence about the token. */
+export async function probeToken(candidate: string): Promise<void> {
+  const response = await fetch("/workspaces/current", {
+    headers: { Authorization: `Bearer ${candidate}` },
   });
-  // an expired access token: refresh once, transparently, then retry
-  if (response.status === 401 && !retried && onUnauthorized) {
-    const refreshed = await onUnauthorized();
-    if (refreshed) {
-      setToken(refreshed);
-      return call<T>(method, path, body, true);
-    }
-  }
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
-  if (!response.ok) {
+  if (response.status === 401 || response.status === 403) {
     throw new ApiError(
-      response.status,
-      typeof payload?.error === "string" ? payload.error : `${method} ${path} failed`,
-    );
+      response.status, `this server did not accept that token (${response.status})`);
   }
-  return payload as T;
 }
 
-/** A gated GET whose body is a FILE, returned verbatim. `call` parses JSON and
- * hands back an object; a download must keep the server's own bytes, because
- * what the reader verifies is what the server sent. */
-async function fetchText(path: string): Promise<string> {
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const response = await fetch(path, { headers });
-  const text = await response.text();
-  if (!response.ok) {
-    let message = `GET ${path} failed`;
-    try {
-      const payload = JSON.parse(text);
-      if (typeof payload?.error === "string") message = payload.error;
-    } catch {
-      /* a non-JSON error body is not more informative than the default */
-    }
-    throw new ApiError(response.status, message);
-  }
-  return text;
+/** A gated request whose body is a FILE, returned verbatim. `call` parses JSON
+ * and hands back an object; a download must keep the server's own bytes,
+ * because what the reader verifies is what the server sent. */
+async function fetchText(path: string, method = "GET", body?: unknown): Promise<string> {
+  const response = await send(method, path, body, body !== undefined);
+  if (!response.ok) throw await failure(response, `${method} ${path} failed`);
+  return response.text();
 }
 
 // ── payload shapes ───────────────────────────────────────────────────────────
@@ -109,6 +176,14 @@ export interface SuiteCard {
   capabilities?: string[];
   available: boolean;
   reason?: string;
+}
+
+export interface AuthStatus {
+  auth_required: boolean;
+  guest: boolean;
+  /** whether this server trusts an identity service. Absent from an older
+   * server, which is read as "unknown" and keeps the email/password form. */
+  identity?: boolean;
 }
 
 export interface HomePayload {
@@ -240,6 +315,10 @@ export interface RuntimeRow {
    * calls. The connected agent runs its own inference; this only labels it. */
   runtime_label?: string;
   status?: string;
+  /** provisioned by the PLATFORM (/hosted-runtimes) rather than connected.
+   * /runtimes lists both kinds, so a screen that also lists the hosted pool
+   * must tell them apart or show a hosted runtime twice. */
+  hosted?: boolean;
 }
 
 export interface RunResults {
@@ -373,8 +452,9 @@ export interface SuitePlan {
 
 export const api = {
   /** Unauthenticated: whether the server requires a login at all (open/local
-   * mode does not) and whether it offers anonymous guest sessions. */
-  authStatus: () => call<{ auth_required: boolean; guest: boolean }>("GET", "/auth/status"),
+   * mode does not), whether it offers anonymous guest sessions, and whether it
+   * trusts an identity service for email/password login. */
+  authStatus: () => call<AuthStatus>("GET", "/auth/status"),
   /** Start an anonymous, ephemeral hosted session — no registration. */
   guestSession: () =>
     call<{ token: string; workspace_id: string; expires_at: number }>(
@@ -400,30 +480,24 @@ export const api = {
     call<{ name: string; deleted: boolean }>(
       "DELETE", `/scenarios/${encodeURIComponent(name)}`,
     ),
+  /** Share a saved scenario with the org (the `private_registry` capability),
+   * so a sibling workspace's suites can `scenario_ref` it. */
+  publishScenario: (name: string) =>
+    call<{ name: string; org: string }>(
+      "POST", `/scenarios/${encodeURIComponent(name)}/publish`, {},
+    ),
   suite: (id: string) => call<Json>("GET", `/suites/${encodeURIComponent(id)}`),
-  suiteYaml: async (id: string): Promise<string> => {
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const response = await fetch(`/suites/${encodeURIComponent(id)}/yaml`, { headers });
-    const text = await response.text();
-    if (!response.ok) throw new ApiError(response.status, text || "yaml unavailable");
-    return text;
-  },
+  suiteYaml: (id: string): Promise<string> =>
+    fetchText(`/suites/${encodeURIComponent(id)}/yaml`),
   /** Serialize the manifest the Builder is holding — the edited one, not the
    * stored one. There is exactly one YAML implementation and it is the
-   * server's. */
-  suiteYamlOf: async (suite: Json): Promise<string> => {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const response = await fetch("/suites/to-yaml", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ suite }),
-    });
-    const text = await response.text();
-    if (!response.ok) throw new ApiError(response.status, text || "yaml unavailable");
-    return text;
-  },
+   * server's.
+   *
+   * A refusal surfaces the server's `error` string. It used to throw the raw
+   * response text, so a 422 read `{"error": "..."}` — JSON quoting and all —
+   * where a sentence belonged. */
+  suiteYamlOf: (suite: Json): Promise<string> =>
+    fetchText("/suites/to-yaml", "POST", { suite }),
   /** Build a Control Plane handoff from a completed run. The DIRECTORY the CLI
    * writes and the file map returned here are the same bytes under the same
    * manifest — there is one implementation (`lab_service.handoff`). */
@@ -448,8 +522,13 @@ export const api = {
   currentWorkspace: () => call<Workspace>("GET", "/workspaces/current"),
   /** Every tenant on this server. Admin only — a tenant must not enumerate others. */
   workspaces: () => call<{ workspaces: Workspace[] }>("GET", "/workspaces"),
+  /** Provision a tenant (server admin only). The response carries the new
+   * workspace's TOKEN, shown once — it is the tenant's only credential, and
+   * nothing can read it back. `planId` is a catalog id from /billing/plans;
+   * omitted, the tenant starts on free. */
   createWorkspace: (name: string, planId?: string) =>
-    call<Workspace>("POST", "/workspaces", { name, plan: planId }),
+    call<Workspace & { token: string }>(
+      "POST", "/workspaces", { name, ...(planId ? { plan: planId } : {}) }),
   members: () => call<{ members: MemberCount[] }>("GET", "/workspaces/current/members"),
   /** Mint a member token at a role. The token is shown ONCE. */
   addMember: (role: string) =>
@@ -606,26 +685,10 @@ export const api = {
    * `verify-cp-export` checks a tree; a nested JSON of 160 files is the same
    * bytes in a shape only one of the two faces can verify. */
   exportHandoffZip: async (runId: string, condition?: string): Promise<Blob> => {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const response = await fetch("/handoff/export", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        run_id: runId, format: "zip", ...(condition ? { condition } : {}),
-      }),
+    const response = await send("POST", "/handoff/export", {
+      run_id: runId, format: "zip", ...(condition ? { condition } : {}),
     });
-    if (!response.ok) {
-      const text = await response.text();
-      let message = "handoff export failed";
-      try {
-        const payload = JSON.parse(text);
-        if (typeof payload?.error === "string") message = payload.error;
-      } catch {
-        /* a non-JSON error body is not more informative than the default */
-      }
-      throw new ApiError(response.status, message);
-    }
+    if (!response.ok) throw await failure(response, "handoff export failed");
     return response.blob();
   },
   /** Mint a publication/v1 from this artifact — locally, or through a server's
@@ -633,7 +696,12 @@ export const api = {
    * the statistics, so only it may assert them. */
   publishArtifact: (
     id: string,
-    body: { question: string; license?: string; visibility?: string; server?: string },
+    body: {
+      question: string; license?: string; visibility?: string; server?: string;
+      /** the PUBLISH SERVER's write token, forwarded on the handshake. Not this
+       * session's credential — the two are for different servers. */
+      token?: string;
+    },
   ) => call<PublishResult>("POST", `/artifacts/${encodeURIComponent(id)}/publish`, body),
   publications: () =>
     call<{ publications: PublicationRow[] }>("GET", "/publications"),

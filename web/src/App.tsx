@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { api, currentToken, setToken, setUnauthorizedHandler } from "./lib/api";
-import { rememberRefresh, refreshAccess } from "./lib/identity";
+import {
+  api, currentToken, setToken, setUnauthorizedHandler, type AuthStatus,
+} from "./lib/api";
+import { logout as identityLogout, rememberRefresh, refreshAccess } from "./lib/identity";
 import { navigate, segments, useRoute } from "./lib/router";
 import { Login } from "./screens/Login";
 import { Home } from "./screens/Home";
@@ -9,15 +11,18 @@ import { Playground } from "./screens/Playground";
 import { RunReport, Runs, TrialScreen } from "./screens/Runs";
 import { EvidenceList, EvidenceScreen } from "./screens/Evidence";
 import { RegressionList, RegressionScreen } from "./screens/Regressions";
-import { ArtifactList, ArtifactScreen } from "./screens/Artifacts";
+import { ArtifactList, ArtifactScreen, PublicationScreen } from "./screens/Artifacts";
 import { Builder } from "./screens/Builder";
 import { Integrations } from "./screens/Integrations";
 import { Handoff } from "./screens/Handoff";
 import { Workspace } from "./screens/Workspace";
+import { ScenarioList, ScenarioScreen } from "./screens/Scenarios";
+import { RegistrySuiteScreen } from "./screens/Registry";
 
 const NAV: [string, string][] = [
   ["/", "Home"],
   ["/suites", "Suites"],
+  ["/scenarios", "Scenarios"],
   ["/runs", "Runs"],
   ["/evidence", "Evidence"],
   ["/regressions", "Regressions"],
@@ -38,6 +43,22 @@ const NAV: [string, string][] = [
  * before the parent had restored the token. The screen then showed a
  * permission error to a user who had already entered one. */
 const TOKEN_KEY = "axor-lab-control-token";
+
+/** The nav entry a route belongs to. Only an EXACT match was highlighted, so
+ * every detail page (a run, a trial, an artifact) left the nav with nothing
+ * lit — the user lost where they were the moment they clicked into anything.
+ * A route that is not under any entry (`/publications/…`, `/registry/…`)
+ * borrows the section its content lives in. */
+const PARENT: Record<string, string> = {
+  publications: "/artifacts",
+  registry: "/suites",
+};
+
+export function navSection(route: string): string {
+  const [head] = segments(route);
+  if (!head) return "/";
+  return PARENT[head] ?? `/${head}`;
+}
 
 export function restoreToken(): string {
   const stored = sessionStorage.getItem(TOKEN_KEY) ?? "";
@@ -71,6 +92,17 @@ function Screen({ route }: { route: string }) {
       return first ? <RegressionScreen id={first} /> : <RegressionList />;
     case "artifacts":
       return first ? <ArtifactScreen id={first} /> : <ArtifactList />;
+    case "publications":
+      // the list lives on the Artifacts screen; this is one entry of it
+      return first ? <PublicationScreen key={first} id={first} /> : <ArtifactList />;
+    case "scenarios":
+      return first ? <ScenarioScreen key={first} name={first} /> : <ScenarioList />;
+    case "registry":
+      // `#/registry/suites/{id}`: one org-shared suite, read-only
+      if (first === "suites" && second) {
+        return <RegistrySuiteScreen key={second} id={second} />;
+      }
+      return <Suites />;
     case "handoff":
       return <Handoff />;
     case "integrations":
@@ -92,9 +124,17 @@ export function App() {
   const [token, setLocal] = useState(restoreToken);
   // null = still asking the server. Told once, before the login gate, so a local
   // (open) server never shows a login screen and a hosted one can offer a guest.
-  const [authInfo, setAuthInfo] = useState<{ auth_required: boolean; guest: boolean } | null>(
-    null,
-  );
+  const [authInfo, setAuthInfo] = useState<AuthStatus | null>(null);
+  // Bumped when the CREDENTIAL changes identity — a login, a logout, a pasted
+  // token — and NOT when a refresh swaps the access token for a fresher copy of
+  // the same session. The screen tree used to be keyed by the token itself, so
+  // every silent refresh remounted every screen: a half-filled form, an open
+  // trial, a Builder draft all vanished at the moment the refresh was supposed
+  // to make the expiry invisible.
+  const [session, setSession] = useState(0);
+  // why the user is looking at the login screen again, when it was not their
+  // choice — an expired session used to bounce them there without a word
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -125,6 +165,8 @@ export function App() {
       setToken(null);
       setLocal("");
       rememberRefresh(null);
+      setNotice("Your session expired — sign in again.");
+      setSession((n) => n + 1);
       return null;
     });
     return () => setUnauthorizedHandler(null);
@@ -133,12 +175,20 @@ export function App() {
   function authenticate(accessToken: string): void {
     setToken(accessToken);
     setLocal(accessToken);
+    setNotice(null);
+    setSession((n) => n + 1);
   }
 
   function logout(): void {
+    // revoke the identity refresh token server-side (best-effort, and a no-op
+    // for a pasted control token or a guest, which hold none). A guest session
+    // has no release endpoint on the server; it lapses at its own expiry.
+    void identityLogout();
     setToken(null);
     setLocal("");
     rememberRefresh(null);
+    setNotice(null);
+    setSession((n) => n + 1);
   }
 
   if (authInfo === null) {
@@ -152,7 +202,13 @@ export function App() {
     return (
       <div className="app">
         <main>
-          <Login onAuthenticated={authenticate} guestAvailable={authInfo.guest} />
+          <Login
+            onAuthenticated={authenticate}
+            guestAvailable={authInfo.guest}
+            // absent (an older server) is "unknown", which keeps the form
+            identityAvailable={authInfo.identity !== false}
+            notice={notice}
+          />
         </main>
       </div>
     );
@@ -168,7 +224,7 @@ export function App() {
           <a
             key={to}
             href={`#${to}`}
-            className={route === to ? "active" : ""}
+            className={navSection(route) === to ? "active" : ""}
             onClick={(event) => {
               event.preventDefault();
               navigate(to);
@@ -185,9 +241,10 @@ export function App() {
         )}
       </nav>
       <main>
-        {/* Keyed by the token: a new credential REMOUNTS the screen tree, so
-            every `useAsync` re-runs against it. */}
-        <Screen key={token} route={route} />
+        {/* Keyed by the SESSION, not the token: a new credential remounts the
+            screen tree so every `useAsync` re-runs against it, while a refresh
+            (same session, fresher token) leaves what is on screen alone. */}
+        <Screen key={session} route={route} />
       </main>
     </div>
   );

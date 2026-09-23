@@ -172,3 +172,32 @@ test.describe("Regressions", () => {
     await expect(page.getByText("trial_b")).toBeVisible();
   });
 });
+
+test.describe("Regression check failures", () => {
+  test("a failed check is an inline error, not a failed screen", async ({ page }) => {
+    await stubShell(page, OPEN);
+    await page.route(
+      "**/regressions/reg_1",
+      json(200, {
+        id: "reg_1",
+        name: "p95 latency under 5s",
+        rule: { metric: "latency_ms", op: "lt", value: 5000 },
+      }),
+    );
+    await page.route("**/regressions/reg_1/run", (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      return json(404, { error: "unknown run 'run_nope'" })(route);
+    });
+    await page.goto("/#/regressions/reg_1");
+
+    await page.getByLabel("Run id").fill("run_nope");
+    await page.getByRole("button", { name: "Run the invariant" }).click();
+
+    await expect(page.getByRole("alert")).toContainText("unknown run 'run_nope'");
+    // the regression itself loaded fine — the screen must not say otherwise
+    await expect(page.getByText("Could not load this screen.")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Rule" })).toBeVisible();
+    // and the button is usable again for a corrected run id
+    await expect(page.getByRole("button", { name: "Run the invariant" })).toBeEnabled();
+  });
+});

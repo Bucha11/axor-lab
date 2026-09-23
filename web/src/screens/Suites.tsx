@@ -34,11 +34,26 @@ export function Suites() {
   }
 
   async function remove(id: string) {
-    await api.deleteSuite(id);
-    reload();
+    // a delete cannot be undone and the button sits on a clickable card, one
+    // stray click from gone — ask first
+    if (busy) return;
+    if (!window.confirm(`Delete suite ${id}? This cannot be undone.`)) return;
+    setBusy(true);
+    setCreateError(null);
+    try {
+      await api.deleteSuite(id);
+      reload();
+    } catch (exc) {
+      // a refusal (403 role, 404 already gone) used to be an unhandled
+      // rejection — the button looked like it did nothing
+      setCreateError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function publishToOrg(id: string) {
+    if (busy) return;
     setBusy(true);
     setCreateError(null);
     try {
@@ -100,6 +115,7 @@ export function Suites() {
                 <button
                   type="button"
                   className="item-remove"
+                  disabled={busy}
                   onClick={(event) => {
                     event.stopPropagation();
                     remove(suite.id);
@@ -107,9 +123,12 @@ export function Suites() {
                 >
                   Delete
                 </button>
+                {/* item-add, not item-remove: publishing shares a copy, it
+                    destroys nothing, and red-on-hover styled it as a delete */}
                 <button
                   type="button"
-                  className="item-remove"
+                  className="item-add"
+                  disabled={busy}
                   onClick={(event) => {
                     event.stopPropagation();
                     publishToOrg(suite.id);
@@ -138,7 +157,10 @@ export function Suites() {
           </p>
           <div className="grid">
             {(registry.data?.suites ?? []).map((suite) => (
-              <Card key={`org-${suite.id}`}>
+              <Card
+                key={`org-${suite.id}`}
+                onClick={() => navigate(`/registry/suites/${encodeURIComponent(suite.id)}`)}
+              >
                 <h4>{suite.name}</h4>
                 <p className="muted small">
                   <code>{suite.id}</code>

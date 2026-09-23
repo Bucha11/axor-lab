@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, type AuditEntry, type Plan } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
 import { Button, Card, Empty, Failed, Field, Loading, Stat, Tag } from "../components/ui";
+import { ShownOnce } from "../components/ShownOnce";
 
 /** A capability a plan grants. Shown as the plan's own word, never translated —
  * the server gates on these exact strings, so a prettier label here would be a
@@ -40,14 +41,21 @@ function PlanCard({
   onBuy,
   onGrant,
   busy,
-  canAdmin,
+  canBuy,
+  canGrant,
 }: {
   plan: Plan;
   current: boolean;
   onBuy: (id: string) => void;
   onGrant: (id: string) => void;
   busy: boolean;
-  canAdmin: boolean;
+  /** the caller is admin/owner INSIDE the workspace — /billing/checkout
+   * requires it, so offering Subscribe to anyone else was a button that 403s */
+  canBuy: boolean;
+  /** the workspace is a SERVER admin — /workspaces/current/plan checks
+   * `is_admin`, not the caller's role, so a tenant owner saw a comp button
+   * that always 403'd */
+  canGrant: boolean;
 }) {
   return (
     <Card>
@@ -67,10 +75,12 @@ function PlanCard({
       </p>
       {!current && (
         <>
-          <Button onClick={() => onBuy(plan.plan_id)} disabled={busy}>
-            Subscribe
-          </Button>{" "}
-          {canAdmin && (
+          {canBuy && (
+            <Button onClick={() => onBuy(plan.plan_id)} disabled={busy}>
+              Subscribe
+            </Button>
+          )}{" "}
+          {canGrant && (
             <Button variant="secondary" onClick={() => onGrant(plan.plan_id)} disabled={busy}>
               Grant without paying
             </Button>
@@ -89,6 +99,11 @@ export function Workspace() {
   // others — so this 403s for anyone else and the section stays hidden.
   const tenants = useAsync(() => api.workspaces());
   const [newName, setNewName] = useState("");
+  const [newPlan, setNewPlan] = useState("");
+  // the new tenant's token — its ONLY credential, returned once by the create
+  const [created, setCreated] = useState<{ id: string; name: string; token: string } | null>(
+    null,
+  );
   const [issued, setIssued] = useState<{ role: string; token: string } | null>(null);
   const [role, setRole] = useState("member");
   const [audit, setAudit] = useState<AuditEntry[] | null>(null);
@@ -124,7 +139,10 @@ export function Workspace() {
   const loadAudit = () => guard(async () => setAudit((await api.audit()).audit));
   const createTenant = () =>
     guard(async () => {
-      await api.createWorkspace(newName);
+      const tenant = await api.createWorkspace(newName, newPlan || undefined);
+      // the response was discarded, and with it the token — so every tenant
+      // made here was unreachable: nothing else can ever read it back
+      setCreated({ id: tenant.id, name: tenant.name, token: tenant.token });
       setNewName("");
       tenants.reload();
     });
@@ -194,10 +212,11 @@ export function Workspace() {
               Mint a member token
             </Button>
             {issued && (
-              <p className="muted small">
-                <code>{issued.token}</code> — role {issued.role}. Copy it now; it is
-                not stored anywhere you can read it back.
-              </p>
+              <ShownOnce
+                value={issued.token}
+                label={`Member token — role ${issued.role}.`}
+                testId="member-token"
+              />
             )}
           </Card>
         )}
@@ -215,10 +234,16 @@ export function Workspace() {
               onBuy={buy}
               onGrant={grant}
               busy={busy}
-              canAdmin={Boolean(isAdmin)}
+              canBuy={Boolean(isAdmin)}
+              canGrant={current.is_admin}
             />
           ))}
         </div>
+        {!isAdmin && (
+          <p className="muted small">
+            Changing the plan is a workspace admin&apos;s call — ask an owner or admin.
+          </p>
+        )}
         {checkout && (
           <p className="muted small">
             Checkout opened:{" "}
@@ -239,7 +264,7 @@ export function Workspace() {
             data; nothing here reads across the boundary except this listing.
           </p>
           <Card>
-            <Field label="Name" hint="A new tenant starts on the default plan.">
+            <Field label="Name">
               <input
                 id="tenant-name"
                 value={newName}
@@ -247,9 +272,29 @@ export function Workspace() {
                 placeholder="acme-research"
               />
             </Field>
+            <Field
+              label="Plan"
+              hint="Omitted, a new tenant starts on the catalog's free plan — not on this server's own unlimited default."
+            >
+              <select id="tenant-plan" value={newPlan} onChange={(e) => setNewPlan(e.target.value)}>
+                <option value="">free (default)</option>
+                {(plans.data?.plans ?? []).map((plan) => (
+                  <option key={plan.plan_id} value={plan.plan_id}>
+                    {plan.name} ({plan.plan_id})
+                  </option>
+                ))}
+              </select>
+            </Field>
             <Button onClick={createTenant} disabled={busy || !newName}>
               Create workspace
             </Button>
+            {created && (
+              <ShownOnce
+                value={created.token}
+                label={`Token for ${created.name} (${created.id}) — hand it to the tenant.`}
+                testId="tenant-token"
+              />
+            )}
           </Card>
           <ul className="rows">
             {(tenants.data?.workspaces ?? []).map((tenant) => (

@@ -35,7 +35,7 @@ export const SESSION = {
  * auth posture the server should report. */
 export async function stubShell(
   page: Page,
-  auth: { auth_required: boolean; guest: boolean },
+  auth: { auth_required: boolean; guest: boolean; identity?: boolean },
 ): Promise<void> {
   await page.route("**/auth/status", json(200, auth));
   await page.route("**/home", json(200, EMPTY_HOME));
@@ -50,6 +50,7 @@ export async function stubScreens(page: Page): Promise<void> {
   await page.route("**/evidence", json(200, { evidence_cases: [] }));
   await page.route("**/regressions", json(200, { regressions: [] }));
   await page.route("**/artifacts", json(200, { artifacts: [] }));
+  await page.route("**/scenarios", json(200, { scenarios: [] }));
   // the commercial half: a workspace, its plan catalog and its members. Empty
   // but VALID, so navigation can reach the screen without a live backend.
   await page.route("**/workspaces/current", json(200, {

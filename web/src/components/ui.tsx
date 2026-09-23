@@ -133,3 +133,33 @@ export function Stat({ label, value }: { label: string; value: ReactNode }) {
 export function Json({ value }: { value: unknown }) {
   return <pre className="json">{JSON.stringify(value, null, 2)}</pre>;
 }
+
+/** A failed ACTION (a button's request), or a failed SECTION of a screen that
+ * otherwise loaded. Distinct from `Failed`, which speaks for the whole screen:
+ * a refused confirm or an unreachable results list is not "Could not load this
+ * screen", and replacing everything the user was looking at with that sentence
+ * hid the context they needed to act on the error.
+ *
+ * `role="alert"` so the message is announced — it appears in response to a
+ * click, somewhere the user may not be looking. */
+export function InlineError(
+  { error, status, onRetry }: { error: string; status?: number | null; onRetry?: () => void },
+) {
+  return (
+    <div className="inline-error" role="alert">
+      <p className="error-text">{error}</p>
+      {/* the same 402 hint Failed gives — the one refusal a user can fix */}
+      {status === 402 && (
+        <p className="muted small">
+          Your plan does not include this. <a href="#/workspace">Workspace</a> lists
+          the plans and what each one grants.
+        </p>
+      )}
+      {onRetry && (
+        <Button variant="secondary" onClick={onRetry}>
+          Retry
+        </Button>
+      )}
+    </div>
+  );
+}

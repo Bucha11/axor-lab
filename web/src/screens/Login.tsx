@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, Card, Field } from "../components/ui";
-import { api } from "../lib/api";
+import { api, probeToken } from "../lib/api";
 import { IdentityError, login, rememberRefresh, signup } from "../lib/identity";
 
 /** The login gate. A human signs in (or signs up) against the axor-identity
@@ -10,9 +10,18 @@ import { IdentityError, login, rememberRefresh, signup } from "../lib/identity";
 export function Login({
   onAuthenticated,
   guestAvailable = false,
+  identityAvailable = true,
+  notice = null,
 }: {
   onAuthenticated: (accessToken: string) => void;
   guestAvailable?: boolean;
+  /** whether the server trusts an identity service (/auth/status `identity`).
+   * Without one, an email/password form is a dead end — the sign-in succeeds
+   * at identity and every request then 401s here — so only the control token
+   * (and guest, if offered) is shown. */
+  identityAvailable?: boolean;
+  /** why the user is back here when they did not choose to be */
+  notice?: string | null;
 }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
@@ -21,8 +30,9 @@ export function Login({
   const [orgId, setOrgId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [showToken, setShowToken] = useState(false);
+  const [showToken, setShowToken] = useState(!identityAvailable);
   const [pasted, setPasted] = useState("");
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   async function submit() {
     setBusy(true);
@@ -55,6 +65,22 @@ export function Login({
     }
   }
 
+  async function submitToken() {
+    setBusy(true);
+    setTokenError(null);
+    try {
+      // checked BEFORE it becomes the session: accepted blind, a wrong token
+      // bounced the user straight back here with nothing said
+      await probeToken(pasted);
+      rememberRefresh(null); // a control token has no refresh token
+      onAuthenticated(pasted);
+    } catch (err) {
+      setTokenError(err instanceof Error ? err.message : "the token was not accepted");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const canSubmit =
     email.length > 0 && password.length > 0 && (mode === "login" || orgName.length > 0);
 
@@ -68,6 +94,15 @@ export function Login({
             : "Sign in to your Axor workspace."}
         </p>
       </header>
+      {notice && (
+        <p className="error-text" role="status">
+          {notice}
+        </p>
+      )}
+      {/* the form's own errors render inside it; without the form, a guest
+          failure still needs somewhere to say so */}
+      {error && !identityAvailable && <p className="error-text">{error}</p>}
+      {identityAvailable && (
       <Card>
         <form
           onSubmit={(event) => {
@@ -123,6 +158,7 @@ export function Login({
           </a>
         </p>
       </Card>
+      )}
 
       {guestAvailable && (
         <Card>
@@ -136,17 +172,19 @@ export function Login({
         </Card>
       )}
 
-      <p className="muted small">
-        <a
-          href="#"
-          onClick={(event) => {
-            event.preventDefault();
-            setShowToken((v) => !v);
-          }}
-        >
-          {showToken ? "Hide" : "Use a control token instead"}
-        </a>
-      </p>
+      {identityAvailable && (
+        <p className="muted small">
+          <a
+            href="#"
+            onClick={(event) => {
+              event.preventDefault();
+              setShowToken((v) => !v);
+            }}
+          >
+            {showToken ? "Hide" : "Use a control token instead"}
+          </a>
+        </p>
+      )}
       {showToken && (
         <Card>
           <Field
@@ -159,9 +197,10 @@ export function Login({
               onChange={(event) => setPasted(event.target.value)}
             />
           </Field>
-          <Button onClick={() => pasted && onAuthenticated(pasted)} disabled={!pasted}>
+          <Button onClick={submitToken} disabled={!pasted || busy}>
             Use token
           </Button>
+          {tokenError && <p className="error-text">{tokenError}</p>}
         </Card>
       )}
     </div>

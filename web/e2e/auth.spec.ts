@@ -70,19 +70,75 @@ test.describe("the login gate", () => {
 
   test("an operator can paste a control token", async ({ page }) => {
     await gotoSecured(page);
+    await page.route("**/workspaces/current", json(200, { id: "default" }));
     await page.getByRole("link", { name: "Use a control token instead" }).click();
     await page.getByLabel("Control token").fill("static-op-token");
     await page.getByRole("button", { name: "Use token" }).click();
     await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
   });
 
-  test("logging out returns to the login screen", async ({ page }) => {
+  test("a rejected control token says so and stays on login", async ({ page }) => {
+    // accepted blind, a wrong token became the session, the first screen 401'd
+    // and the user was bounced back here with nothing said
+    await gotoSecured(page);
+    await page.route("**/workspaces/current", json(401, { error: "control token required" }));
+    await page.getByRole("link", { name: "Use a control token instead" }).click();
+    await page.getByLabel("Control token").fill("typo");
+    await page.getByRole("button", { name: "Use token" }).click();
+    await expect(page.getByText(/did not accept that token/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Log out" })).toHaveCount(0);
+  });
+
+  test("without identity, only the control token is offered", async ({ page }) => {
+    await stubShell(page, { auth_required: true, guest: false, identity: false });
+    await page.goto("/");
+    await expect(page.getByLabel("Email")).toHaveCount(0);
+    await expect(page.getByLabel("Control token")).toBeVisible();
+  });
+
+  test("logging out returns to the login screen and revokes the refresh token", async ({
+    page,
+  }) => {
     await gotoSecured(page);
     await page.route("**/identity/v1/login", json(200, SESSION));
+    const revoked: unknown[] = [];
+    await page.route("**/identity/v1/logout", async (route) => {
+      revoked.push(route.request().postDataJSON());
+      return route.fulfill({ status: 204, body: "" });
+    });
     await fillLogin(page);
     await page.getByRole("button", { name: "Log in" }).click();
     await page.getByRole("button", { name: "Log out" }).click();
     await expect(page.getByRole("heading", { name: "Log in" })).toBeVisible();
+    await expect.poll(() => revoked).toEqual([{ refresh_token: SESSION.refresh_token }]);
+  });
+
+  test("a refresh keeps what is on screen; it does not remount it", async ({ page }) => {
+    // the screen tree was keyed by the token, so a silent refresh wiped every
+    // half-filled form at the moment it was meant to be invisible
+    await gotoSecured(page);
+    await page.route("**/identity/v1/login", json(200, SESSION));
+    await page.route("**/identity/v1/refresh", json(200, {
+      ...SESSION, access_token: "acc-2", refresh_token: "ref-2",
+    }));
+    await page.route("**/scenarios", json(200, { scenarios: [] }));
+    let validations = 0;
+    await page.route("**/scenarios/validate", async (route) => {
+      validations += 1;
+      const auth = route.request().headers()["authorization"];
+      return auth === "Bearer acc-2"
+        ? json(200, { ok: true, errors: [] })(route)
+        : json(401, { error: "expired" })(route);
+    });
+    await fillLogin(page);
+    await page.getByRole("button", { name: "Log in" }).click();
+    await page.getByRole("link", { name: "Scenarios", exact: true }).click();
+    await page.getByRole("button", { name: "Start from a template" }).click();
+    await page.getByRole("button", { name: "Validate" }).click();
+    // the request 401'd, refreshed, retried — and the draft is still there
+    await expect(page.locator(".tag", { hasText: "valid" })).toBeVisible();
+    await expect(page.getByLabel("Scenario JSON")).toHaveValue(/my-scenario/);
+    expect(validations).toBe(2);
   });
 
   test("an expired guest session drops back to login", async ({ page }) => {
@@ -98,6 +154,8 @@ test.describe("the login gate", () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Try without an account" }).click();
     await expect(page.getByRole("heading", { name: "Log in" })).toBeVisible();
+    // and it says why, rather than bouncing silently
+    await expect(page.getByText(/session expired/)).toBeVisible();
   });
 });
 
@@ -179,5 +237,71 @@ test.describe("choosing a plan", () => {
     await expect(free.locator(".tag", { hasText: "current" })).toBeVisible();
     // and the plan you are on offers no Subscribe button
     await expect(free.getByRole("button", { name: "Subscribe" })).toHaveCount(0);
+  });
+});
+
+/**
+ * Tenants and plans, as the server actually gates them: creating a tenant and
+ * comping a plan check the WORKSPACE's server-admin flag; Subscribe checks the
+ * CALLER's role inside it.
+ */
+test.describe("tenants and plan buttons", () => {
+  const PLANS = [
+    { plan_id: "free", name: "Free", price_usd: 0, max_suites: 3,
+      max_artifacts: 10, max_hosted_runtimes: 0, capabilities: [] },
+    { plan_id: "team_2026", name: "Team", price_usd: 99, max_suites: 25,
+      max_artifacts: 200, max_hosted_runtimes: 2, capabilities: ["private_registry"] },
+  ];
+
+  async function open(page: Page, who: { role: string; is_admin: boolean }) {
+    await stubShell(page, { auth_required: false, guest: false });
+    await page.route("**/workspaces/current", json(200, {
+      id: "ws1", name: "Acme", org: null, plan: PLANS[0],
+      subscription: { plan_id: "free", status: "active" }, created_at: 1_780_000_000,
+      ...who,
+    }));
+    await page.route("**/billing/plans", json(200, { plans: PLANS }));
+    await page.route("**/workspaces/current/members", json(200, { members: [] }));
+  }
+
+  test("a new tenant's token is shown once, and the plan is sent by id", async ({ page }) => {
+    await open(page, { role: "owner", is_admin: true });
+    const posted: Record<string, unknown>[] = [];
+    await page.route("**/workspaces", async (route) => {
+      if (route.request().method() === "POST") {
+        posted.push(route.request().postDataJSON() as Record<string, unknown>);
+        return json(201, { id: "ws_2", name: "acme-research", token: "tok_tenant_42",
+                           plan: PLANS[1], is_admin: false, org: null,
+                           subscription: { plan_id: "team_2026", status: "active" },
+                           created_at: 0 })(route);
+      }
+      return json(200, { workspaces: [] })(route);
+    });
+    await page.goto("/#/workspace");
+    await page.locator("#tenant-name").fill("acme-research");
+    await page.locator("#tenant-plan").selectOption("team_2026");
+    await page.getByRole("button", { name: "Create workspace" }).click();
+    const token = page.getByTestId("tenant-token");
+    await expect(token.getByText("tok_tenant_42", { exact: true })).toBeVisible();
+    await expect(token.getByText(/Shown once/)).toBeVisible();
+    expect(posted[0]).toEqual({ name: "acme-research", plan: "team_2026" });
+  });
+
+  test("a tenant owner may subscribe but not comp a plan", async ({ page }) => {
+    await open(page, { role: "owner", is_admin: false });
+    await page.route("**/workspaces", json(403, { error: "admin only" }));
+    await page.goto("/#/workspace");
+    await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Subscribe" })).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Grant without paying" })).toHaveCount(0);
+  });
+
+  test("a member sees no plan buttons at all", async ({ page }) => {
+    await open(page, { role: "member", is_admin: false });
+    await page.route("**/workspaces", json(403, { error: "admin only" }));
+    await page.goto("/#/workspace");
+    await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Subscribe" })).toHaveCount(0);
+    await expect(page.getByText(/workspace admin's call/)).toBeVisible();
   });
 });

@@ -14,10 +14,28 @@ import {
  * out of the hosted face was a shell. The three doors here are the same verbs
  * the CLI has, through the same service, so both faces mint the same claims.
  */
+/** Where a SERVER publication can be opened. The publish server answers with a
+ * path on ITSELF (`/e/{id}`), and the link used it as-is — relative to the Lab's
+ * origin, which has no such page, so "open" was a 404 on every server publish.
+ * Null when the base is not a URL, rather than a link that goes nowhere. */
+export function publicationHref(url: string, server: string): string | null {
+  try {
+    return new URL(url, server || undefined).toString();
+  } catch {
+    return null;
+  }
+}
+
 function Export({ id }: { id: string }) {
   const [question, setQuestion] = useState("");
   const [visibility, setVisibility] = useState("unlisted");
   const [server, setServer] = useState("");
+  // the PUBLISH server's write token — a credential for a different server than
+  // this one, so it is never this session's token and is not remembered
+  const [serverToken, setServerToken] = useState("");
+  // the server the last publish went to, captured AT publish time: the input
+  // can be edited afterwards, and the link must point where the mint happened
+  const [mintedAt, setMintedAt] = useState("");
   const [busy, setBusy] = useState("");
   const [failure, setFailure] = useState("");
   const [minted, setMinted] = useState<PublishResult | null>(null);
@@ -121,15 +139,33 @@ function Export({ id }: { id: string }) {
               onChange={(event) => setServer(event.target.value)}
             />
           </Field>
+          {server.trim() && (
+            <Field
+              label="Server write token (optional)"
+              hint="Only if that publish server gates uploads. Sent to it for this upload; not stored."
+            >
+              <input
+                id="publish-server-token"
+                type="password"
+                autoComplete="off"
+                value={serverToken}
+                onChange={(event) => setServerToken(event.target.value)}
+              />
+            </Field>
+          )}
         </div>
         <Button
           disabled={busy !== "" || question.trim() === ""}
-          onClick={() => run("publish", async () =>
+          onClick={() => run("publish", async () => {
+            const target = server.trim();
             setMinted(await api.publishArtifact(id, {
               question,
               visibility,
-              ...(server.trim() ? { server: server.trim() } : {}),
-            })))}
+              ...(target ? { server: target } : {}),
+              ...(target && serverToken ? { token: serverToken } : {}),
+            }));
+            setMintedAt(target);
+          })}
         >
           {busy === "publish" ? "Publishing…" : "Publish"}
         </Button>
@@ -173,12 +209,22 @@ function Export({ id }: { id: string }) {
                   </Tag>
                 </>
               )}
-              {minted.url && (
+              {minted.url && publicationHref(minted.url, mintedAt) && (
                 <>
                   {" · "}
-                  <a href={minted.url} rel="noreferrer noopener" target="_blank">
+                  <a
+                    href={publicationHref(minted.url, mintedAt)!}
+                    rel="noreferrer noopener"
+                    target="_blank"
+                  >
                     open
                   </a>
+                </>
+              )}
+              {minted.origin === "local" && (
+                <>
+                  {" · "}
+                  <Link to={`/publications/${minted.publication_id}`}>view</Link>
                 </>
               )}
             </span>
@@ -219,7 +265,11 @@ function Publications() {
       <div className="grid">
         {rows.map((row) => (
           <Card key={row.publication_id}>
-            <h4><code>{row.publication_id}</code></h4>
+            <h4>
+              <Link to={`/publications/${row.publication_id}`}>
+                <code>{row.publication_id}</code>
+              </Link>
+            </h4>
             {row.question && <p className="small">{row.question}</p>}
             <p className="muted small">
               <Tag tone={row.origin === "server" ? "success" : "info"}>
@@ -350,6 +400,77 @@ export function ArtifactScreen({ id }: { id: string }) {
           <Json value={data.regressions} />
         </section>
       )}
+    </div>
+  );
+}
+
+/** One publication, as this workspace holds it. The list could show a card and
+ * not open it — the document behind it (its claims, what supports each, and its
+ * stated limitations) was reachable only by API. */
+export function PublicationScreen({ id }: { id: string }) {
+  const { data, error, status, loading, reload } = useAsync(() => api.publication(id), [id]);
+  if (loading) return <Loading />;
+  if (error) return <Failed error={error} status={status} onRetry={reload} />;
+  if (!data) return null;
+  const claims = (Array.isArray(data.claims) ? data.claims : []) as Record<string, unknown>[];
+  const limitations = (Array.isArray(data.limitations) ? data.limitations : []) as unknown[];
+  const origin = typeof data.origin === "string" ? data.origin : "local";
+  return (
+    <div className="screen">
+      <header className="screen-head">
+        <h1>Publication {id}</h1>
+        {typeof data.question === "string" && <p>{data.question}</p>}
+        <p className="muted small">
+          <Tag tone={origin === "server" ? "success" : "info"}>{origin}</Tag>{" "}
+          {String(data.visibility ?? "unlisted")}
+          {typeof data.statistics_integrity === "string"
+            ? ` · ${data.statistics_integrity}`
+            : ""}
+          {typeof data.created === "string" ? ` · ${data.created}` : ""}
+          {typeof data.license === "string" ? ` · ${data.license}` : ""}
+        </p>
+        <p className="small">
+          <Link to="/artifacts">← Artifacts</Link>
+        </p>
+      </header>
+
+      <section>
+        <h2>Claims</h2>
+        {/* each claim keeps its KIND: an exactly-replayable verdict and a
+            statistical aggregate are different promises (claims.md), and a
+            flat list of sentences would read them as one */}
+        {claims.length === 0 ? (
+          <Empty>No claims — nothing here was asserted.</Empty>
+        ) : (
+          <ul className="rows">
+            {claims.map((claim, index) => (
+              <li key={index}>
+                <Tag>{String(claim.kind ?? "")}</Tag>
+                <span>{String(claim.text ?? "")}</span>
+                <code className="muted small">{String(claim.support_ref ?? "")}</code>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {limitations.length > 0 && (
+        <section>
+          <h2>Limitations</h2>
+          <ul>
+            {limitations.map((item, index) => (
+              <li key={index} className="small">
+                {typeof item === "string" ? item : JSON.stringify(item)}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section>
+        <h2>Document</h2>
+        <Json value={data} />
+      </section>
     </div>
   );
 }

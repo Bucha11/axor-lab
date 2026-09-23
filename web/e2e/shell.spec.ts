@@ -6,6 +6,7 @@ import { stubScreens, stubShell } from "./helpers";
 // valid — payloads. It doubles as the open-mode-needs-no-registration story.
 const SCREENS: { link: string; heading: string }[] = [
   { link: "Suites", heading: "Suites" },
+  { link: "Scenarios", heading: "Scenarios" },
   { link: "Runs", heading: "Runs" },
   { link: "Evidence", heading: "Evidence" },
   { link: "Regressions", heading: "Regressions" },

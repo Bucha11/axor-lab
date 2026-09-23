@@ -43,6 +43,8 @@ test.describe("Home", () => {
     page,
   }) => {
     await page.route("**/home", json(200, HOME));
+    // the launch list reads /suites (saved suites layered over the built-ins)
+    await page.route("**/suites", json(200, { suites: HOME.suites }));
     await page.goto("/#/");
 
     // heading + onboarding step (STEP_COPY["run_a_suite"].title)
@@ -251,6 +253,27 @@ test.describe("Artifacts", () => {
       "href", "https://lab.example/e/e_srv");
   });
 
+  test("a server's relative link opens on THAT server, with its write token sent", async ({
+    page,
+  }) => {
+    // the publish server answers `/e/{id}` — a path on itself. Taken as-is it
+    // resolved against the Lab's origin and 404'd.
+    const posted: Record<string, unknown>[] = [];
+    await page.route("**/artifacts/art_1", json(200, ARTIFACT));
+    await page.route("**/artifacts/art_1/publish", async (route) => {
+      posted.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(201, { publication_id: "e_rel", origin: "server", url: "/e/e_rel" })(route);
+    });
+    await page.goto("/#/artifacts/art_1");
+    await page.getByLabel("Question it answers").fill("q");
+    await page.getByLabel("Server (optional)").fill("https://pub.example:8443");
+    await page.getByLabel("Server write token (optional)").fill("w-token");
+    await page.getByRole("button", { name: "Publish" }).click();
+    await expect(page.getByRole("link", { name: "open" })).toHaveAttribute(
+      "href", "https://pub.example:8443/e/e_rel");
+    expect(posted[0]).toMatchObject({ server: "https://pub.example:8443", token: "w-token" });
+  });
+
   test("a publication says WHICH tier its statistics landed in", async ({ page }) => {
     // A server recomputes what it can derive from the traces and re-applies the
     // estimator to the rest. A latency mean is published and claims nothing —
@@ -404,7 +427,159 @@ test.describe("Integrations", () => {
     await connect.click();
     await request;
 
-    // the one-time ingest-key note appears
-    await expect(page.getByText(/Ingest key issued/)).toBeVisible();
+    // the key ITSELF is shown — once — with a way to copy it. The screen used
+    // to say "issued, shown once" and never render the value
+    const key = page.getByTestId("ingest-key");
+    await expect(key.getByText("ik_secret_123", { exact: true })).toBeVisible();
+    await expect(key.getByRole("button", { name: "Copy" })).toBeVisible();
+    await expect(key.getByText(/Shown once/)).toBeVisible();
+  });
+
+  test("a failed connect says why, and the button cannot double-mint", async ({ page }) => {
+    await page.route("**/runtimes", json(200, { runtimes: [] }));
+    let posts = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route("**/runtimes/connect", async (route) => {
+      posts += 1;
+      await gate;
+      return json(402, { error: "max_runtimes reached" })(route);
+    });
+    await page.goto("/#/integrations");
+    await page.getByLabel("Runtime label").fill("bot");
+    await page.getByRole("button", { name: "Connect a runtime" }).click();
+    // in flight: disabled, so a second click cannot mint a second key
+    await expect(page.getByRole("button", { name: "Connecting…" })).toBeDisabled();
+    release();
+    await expect(page.getByText("max_runtimes reached")).toBeVisible();
+    expect(posts).toBe(1);
+  });
+
+  test("a hosted runtime is listed once, in the hosted section", async ({ page }) => {
+    await page.route("**/runtimes", json(200, {
+      runtimes: [
+        { runtime_ref: "rt_mine", runtime_label: "mine" },
+        { runtime_ref: "rt_pool", runtime_label: "pool", hosted: true },
+      ],
+    }));
+    await page.route("**/hosted-runtimes", json(200, {
+      hosted_runtimes: [{ runtime_ref: "rt_pool", runtime_label: "pool", hosted: true }],
+    }));
+    await page.goto("/#/integrations");
+    await expect(page.getByText("rt_mine")).toHaveCount(1);
+    await expect(page.getByText("rt_pool")).toHaveCount(1);
+  });
+
+  test("a provisioned hosted runtime shows its key", async ({ page }) => {
+    await page.route("**/runtimes", json(200, { runtimes: [] }));
+    await page.route("**/hosted-runtimes", async (route) =>
+      route.request().method() === "POST"
+        ? json(201, { runtime_ref: "rt_h", ingest_key: "ik_hosted_9" })(route)
+        : json(200, { hosted_runtimes: [] })(route));
+    await page.goto("/#/integrations");
+    await page.getByLabel("Pool label").fill("eu-pool-1");
+    await page.getByRole("button", { name: "Provision a hosted runtime" }).click();
+    await expect(
+      page.getByTestId("hosted-ingest-key").getByText("ik_hosted_9", { exact: true }),
+    ).toBeVisible();
+  });
+});
+
+// ── SCENARIOS ────────────────────────────────────────────────────────────────
+
+test.describe("Scenarios", () => {
+  test("list, save, open, share and delete", async ({ page }) => {
+    const saved: Record<string, unknown>[] = [];
+    let names = [{ name: "existing", task: "Old task." }];
+    await page.route("**/scenarios", async (route) => {
+      if (route.request().method() === "POST") {
+        const body = route.request().postDataJSON() as { scenario: { name: string } };
+        saved.push(body);
+        names = [...names, { name: body.scenario.name, task: "Record a note." }];
+        return json(201, { name: body.scenario.name })(route);
+      }
+      return json(200, { scenarios: names })(route);
+    });
+    await page.route("**/scenarios/validate", json(200, { ok: true, errors: [] }));
+    await page.route("**/scenarios/my-scenario", async (route) => {
+      if (route.request().method() === "DELETE") {
+        names = names.filter((n) => n.name !== "my-scenario");
+        return json(200, { name: "my-scenario", deleted: true })(route);
+      }
+      return json(200, { name: "my-scenario", task: "Record a note." })(route);
+    });
+    await page.route("**/scenarios/my-scenario/publish", json(201, {
+      name: "my-scenario", org: "acme",
+    }));
+
+    await page.goto("/");
+    await page.getByRole("link", { name: "Scenarios", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Scenarios" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "existing" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Start from a template" }).click();
+    await page.getByRole("button", { name: "Validate" }).click();
+    await expect(page.locator(".tag", { hasText: "valid" })).toBeVisible();
+    await page.getByRole("button", { name: "Save scenario" }).click();
+
+    // saved WITH its manifests, and opened
+    await expect(page.getByRole("heading", { name: "Scenario my-scenario" })).toBeVisible();
+    expect(saved[0]).toHaveProperty("manifests.note");
+    // the nav keeps the section lit on a detail page
+    await expect(page.getByRole("link", { name: "Scenarios", exact: true })).toHaveClass(
+      /active/);
+
+    await page.getByRole("button", { name: "Share with the org" }).click();
+    await expect(page.getByText(/with org/)).toContainText("acme");
+
+    await page.getByRole("button", { name: "Delete this workspace's copy" }).click();
+    await expect(page.getByRole("heading", { name: "Scenarios" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "my-scenario" })).toHaveCount(0);
+  });
+
+  test("a save the server refuses says why and stays on the form", async ({ page }) => {
+    await page.route("**/scenarios", async (route) =>
+      route.request().method() === "POST"
+        ? json(422, { error: "tool 'note' has no manifest" })(route)
+        : json(200, { scenarios: [] })(route));
+    await page.goto("/#/scenarios");
+    await page.getByLabel("Scenario JSON").fill('{"scenario": {"name": "x"}}');
+    await page.getByRole("button", { name: "Save scenario" }).click();
+    await expect(page.getByText("tool 'note' has no manifest")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Scenarios" })).toBeVisible();
+  });
+});
+
+// ── ORG REGISTRY + PUBLICATIONS ──────────────────────────────────────────────
+
+test.describe("read-only detail routes", () => {
+  test("an org-registry suite opens read-only", async ({ page }) => {
+    await page.route("**/registry/suites/shared", json(200, {
+      id: "shared", name: "Shared Suite", description: "From a colleague",
+      scenarios: [{ name: "s1" }],
+    }));
+    await page.goto("/#/registry/suites/shared");
+    await expect(page.getByRole("heading", { name: "Shared Suite" })).toBeVisible();
+    await expect(page.getByText("org registry")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Suites", exact: true })).toHaveClass(/active/);
+  });
+
+  test("a publication card opens its document", async ({ page }) => {
+    await page.route("**/artifacts", json(200, { artifacts: [] }));
+    await page.route("**/publications", json(200, {
+      publications: [{ publication_id: "e_one", question: "Does it hold?", claims: 1 }],
+    }));
+    await page.route("**/publications/e_one", json(200, {
+      publication_id: "e_one", question: "Does it hold?", origin: "local",
+      claims: [{ kind: "exactly_replayable", text: "DENY on trace t1", support_ref: "t1" }],
+      limitations: ["one seed"],
+    }));
+    await page.goto("/#/artifacts");
+    await page.getByRole("link", { name: "e_one" }).click();
+    await expect(page.getByRole("heading", { name: "Publication e_one" })).toBeVisible();
+    await expect(page.getByText("DENY on trace t1", { exact: true })).toBeVisible();
+    await expect(page.getByText("one seed", { exact: true })).toBeVisible();
   });
 });

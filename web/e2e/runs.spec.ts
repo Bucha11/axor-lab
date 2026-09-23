@@ -375,3 +375,221 @@ test.describe("trial screen", () => {
     expect(errors).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Run actions, the live stream, and a partial failure. These stub the SSE
+// stream too: an unstubbed stream now reports itself as disconnected (the dev
+// proxy answers with an error status), which is correct but not what these
+// tests read.
+
+const LIVE_ID = "run_live";
+
+/** An SSE body of `[event, payload]` frames. `retry` is set huge so that when
+ * the fulfilled body ends the browser schedules its reconnect minutes away —
+ * the stream stays "connecting", not closed, for the life of the test, the
+ * same as a real stream that is merely quiet. */
+function sse(frames: [string, unknown][]): string {
+  return (
+    "retry: 600000\n\n" +
+    frames.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("")
+  );
+}
+
+async function stubStream(page: Page, runId: string, frames: [string, unknown][]) {
+  await page.route(`**/runs/${runId}/events*`, (route) =>
+    route.fulfill({ status: 200, contentType: "text/event-stream", body: sse(frames) }),
+  );
+}
+
+function liveReport(state: string, completed = 0) {
+  return {
+    run_id: LIVE_ID,
+    state,
+    planned_trials: 4,
+    trials_by_status: completed ? { completed } : {},
+    coverage: { completed, planned: 4 },
+    metric_coverage: {},
+    aggregates: [],
+    estimate: { trials: 4 },
+  };
+}
+
+async function stubLiveRun(page: Page, state: string, completed = 0) {
+  await page.route(`**/runs/${LIVE_ID}/report`, json(200, liveReport(state, completed)));
+  await page.route(`**/runs/${LIVE_ID}/results`, json(200, {
+    run_id: LIVE_ID, state, planned_trials: [], trials: [], aggregates: [],
+  }));
+}
+
+test.describe("run actions", () => {
+  test("a run waiting for a runtime can be cancelled", async ({ page }) => {
+    // cancel_run accepts every non-terminal state; a run whose runtime never
+    // connects had no way to be closed when the button was hidden pre-start
+    const errors = trap(page);
+    await openMode(page);
+    await stubLiveRun(page, "waiting_for_runtime");
+    await stubStream(page, LIVE_ID, [
+      ["state", { run_id: LIVE_ID, state: "waiting_for_runtime", terminal: false }],
+    ]);
+    const cancels: string[] = [];
+    await page.route(`**/runs/${LIVE_ID}/cancel`, (route) => {
+      cancels.push(route.request().method());
+      return json(200, { run_id: LIVE_ID, state: "cancelled" })(route);
+    });
+    await page.goto(`/#/runs/${LIVE_ID}`);
+
+    const cancel = page.getByRole("button", { name: "Cancel run" });
+    await expect(cancel).toBeVisible();
+    // pre-start: no "live" progress bar
+    await expect(page.getByText(/— live/)).toHaveCount(0);
+    await cancel.click();
+    await expect.poll(() => cancels).toEqual(["POST"]);
+    expect(errors).toEqual([]);
+  });
+
+  test("a refused confirm is shown, not swallowed", async ({ page }) => {
+    const errors = trap(page);
+    await openMode(page);
+    await stubLiveRun(page, "awaiting_confirmation");
+    await stubStream(page, LIVE_ID, [
+      ["state", { run_id: LIVE_ID, state: "awaiting_confirmation", terminal: false }],
+    ]);
+    await page.route(`**/runs/${LIVE_ID}/confirm`,
+      json(409, { error: "run is not awaiting confirmation (state running)" }));
+    await page.goto(`/#/runs/${LIVE_ID}`);
+
+    await page.getByRole("button", { name: "Confirm & start" }).click();
+    await expect(page.getByRole("alert")).toContainText(
+      "run is not awaiting confirmation (state running)");
+    // the report is still on screen — an action error does not replace it
+    await expect(page.getByRole("heading", { name: "Coverage" })).toBeVisible();
+    // pre-start runs can be cancelled too
+    await expect(page.getByRole("button", { name: "Cancel run" })).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test("a failed results request is an error with a retry, not an empty trial list", async ({
+    page,
+  }) => {
+    const errors = trap(page);
+    await openMode(page);
+    await page.route(`**/runs/${LIVE_ID}/report`, json(200, liveReport("running", 1)));
+    // flipped by the test, not by a call count: dev StrictMode loads twice
+    let healthy = false;
+    await page.route(`**/runs/${LIVE_ID}/results`, (route) =>
+      healthy
+        ? json(200, {
+            run_id: LIVE_ID, state: "running", planned_trials: [],
+            trials: [{ trial_id: "t9", status: "completed" }], aggregates: [],
+          })(route)
+        : json(500, { error: "results store unavailable" })(route),
+    );
+    // a quiet, non-terminal stream: nothing triggers a refetch on its own
+    await stubStream(page, LIVE_ID, [
+      ["state", { run_id: LIVE_ID, state: "running", terminal: false }],
+    ]);
+    await page.goto(`/#/runs/${LIVE_ID}`);
+
+    const alert = page.getByRole("alert");
+    await expect(alert).toContainText("results store unavailable");
+    // the rest of the report still rendered
+    await expect(page.getByRole("heading", { name: "Coverage" })).toBeVisible();
+    healthy = true;
+    await alert.getByRole("button", { name: "Retry" }).click();
+    await expect(page.getByRole("link", { name: "t9", exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test("a report refused with 402 keeps its plan hint", async ({ page }) => {
+    await openMode(page);
+    await page.route(`**/runs/${LIVE_ID}/report`, json(402, { error: "reports not in plan" }));
+    await page.route(`**/runs/${LIVE_ID}/results`, json(200, {
+      run_id: LIVE_ID, state: "completed", planned_trials: [], trials: [], aggregates: [],
+    }));
+    await stubStream(page, LIVE_ID, []);
+    await page.goto(`/#/runs/${LIVE_ID}`);
+    await expect(page.getByText("Your plan does not include this.")).toBeVisible();
+  });
+});
+
+test.describe("live progress", () => {
+  test("the live count is labelled finished, not completed", async ({ page }) => {
+    // the stream counts completed + failed; Coverage counts completed only.
+    // Both under the word "completed" read as a contradiction.
+    const errors = trap(page);
+    await openMode(page);
+    await stubLiveRun(page, "running", 1);
+    await stubStream(page, LIVE_ID, [
+      ["trials", { run_id: LIVE_ID, completed: 2, planned: 4, trials: [] }],
+      ["state", { run_id: LIVE_ID, state: "running", terminal: false }],
+    ]);
+    await page.goto(`/#/runs/${LIVE_ID}`);
+    await expect(page.getByText("2/4 trial(s) finished — live")).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test("a stream that times out stops claiming to be live", async ({ page }) => {
+    const errors = trap(page);
+    await openMode(page);
+    let reports = 0;
+    await page.route(`**/runs/${LIVE_ID}/report`, (route) => {
+      reports += 1;
+      return json(200, liveReport("running", 1))(route);
+    });
+    await page.route(`**/runs/${LIVE_ID}/results`, json(200, {
+      run_id: LIVE_ID, state: "running", planned_trials: [], trials: [], aggregates: [],
+    }));
+    let streams = 0;
+    await page.route(`**/runs/${LIVE_ID}/events*`, (route) => {
+      streams += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: sse([
+          ["trials", { run_id: LIVE_ID, completed: 1, planned: 4, trials: [] }],
+          ["state", { run_id: LIVE_ID, state: "running", terminal: false }],
+          ["timeout", { run_id: LIVE_ID }],
+        ]),
+      });
+    });
+    await page.goto(`/#/runs/${LIVE_ID}`);
+
+    await expect(page.getByText(/live stream ended before the run did/)).toBeVisible();
+    await expect(page.getByText(/— live/)).toHaveCount(0);
+    // the report was refetched when the stream ended
+    await expect.poll(() => reports).toBeGreaterThanOrEqual(2);
+    // a stuck run is still cancellable
+    await expect(page.getByRole("button", { name: "Cancel run" })).toBeVisible();
+    await page.getByRole("button", { name: "Reconnect" }).click();
+    await expect.poll(() => streams).toBeGreaterThanOrEqual(2);
+    expect(errors).toEqual([]);
+  });
+});
+
+test.describe("runs list refresh", () => {
+  test("re-reads GET /runs while a listed run is still moving", async ({ page }) => {
+    await openMode(page);
+    // flipped by the test, not by a call count: dev StrictMode loads twice
+    let finished = false;
+    let calls = 0;
+    await page.route("**/runs", (route) => {
+      calls += 1;
+      return json(200, {
+        runs: [{
+          run_id: "run_beta", state: finished ? "completed" : "running",
+          planned: 2, completed: finished ? 2 : 1, updated_at: NOW,
+        }],
+      })(route);
+    });
+    await page.goto("/#/runs");
+    await expect(page.getByText("1/2")).toBeVisible();
+    finished = true;
+    // the poll picks up the finished run without a page reload
+    await expect(page.getByText("2/2")).toBeVisible({ timeout: 12_000 });
+    await expect(page.getByText("completed", { exact: true })).toBeVisible();
+    // and, with nothing left non-terminal, stops polling
+    const settled = calls;
+    await page.waitForTimeout(6_000);
+    expect(calls).toBe(settled);
+  });
+});

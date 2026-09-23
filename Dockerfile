@@ -17,6 +17,12 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
+# Where the app reaches axor-identity. Empty (the default) means `/identity` on
+# the Lab's own origin, which deploy/nginx.conf routes; set it only when the
+# identity service lives on another origin (and allows this one via CORS). A
+# Vite variable is baked in at BUILD time, so it is a build arg, not an env var.
+ARG VITE_IDENTITY_URL=""
+ENV VITE_IDENTITY_URL=${VITE_IDENTITY_URL}
 RUN npm run build
 
 # ── stage 2: the platform ────────────────────────────────────────────────────

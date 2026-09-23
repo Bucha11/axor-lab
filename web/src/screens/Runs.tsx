@@ -1,13 +1,19 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { useAsync } from "../lib/useAsync";
-import { Button, Empty, Failed, Json, Link, Loading, Stat, Tag } from "../components/ui";
+import { describeError, useAsync } from "../lib/useAsync";
+import { Button, Empty, Failed, InlineError, Json, Link, Loading, Stat, Tag } from "../components/ui";
 import { StatusTag, Timeline } from "../components/Timeline";
 import { useRunEvents } from "../lib/useRunEvents";
 
 // pre-start / dead states the progress bar must NOT paint as "live" — a run
 // awaiting confirmation or waiting for a runtime has not started
 const PRE_START = new Set(["awaiting_confirmation", "waiting_for_runtime"]);
+// mirrors runtime_jobs.TERMINAL_STATES — the states cancel_run leaves alone
+const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+// how often the runs list re-reads GET /runs while something in it can still
+// move. There is no list-level stream; a list that never refreshed showed a
+// run `running` long after it finished.
+const LIST_POLL_MS = 5000;
 
 /** "3m ago" from an epoch-seconds timestamp — so a run's age is visible and a
  * stuck run (running, but idle for a long time) is distinguishable from a fresh
@@ -25,13 +31,27 @@ export function Runs() {
   // every run, from the dedicated endpoint — the Runs screen used to read
   // home.recent_runs (capped at 5), so a sixth run silently vanished
   const { data, error, status, loading, reload } = useAsync(() => api.runs());
-  if (loading) return <Loading />;
-  if (error) return <Failed error={error} status={status} onRetry={reload} />;
   const runs = data?.runs ?? [];
+  // poll only while a listed run is non-terminal: a list of finished runs has
+  // nothing left to change, and polling it forever is load for no answer
+  const live = runs.some((run) => !TERMINAL.has(run.state));
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(reload, LIST_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [live, reload]);
+
+  // Loading/Failed replace the list only on the FIRST load. A poll that is in
+  // flight, or one that failed, keeps the rows already on screen — blanking
+  // them every five seconds, or on one dropped request, is worse than a list
+  // that is a few seconds old.
+  if (loading && !data) return <Loading />;
+  if (error && !data) return <Failed error={error} status={status} onRetry={reload} />;
   return (
     <div className="screen">
       <header className="screen-head">
         <h1>Runs</h1>
+        {error && <InlineError error={`Refresh failed: ${error}`} status={status} onRetry={reload} />}
       </header>
       {runs.length === 0 ? (
         <Empty>No runs yet. A connected runtime claims an assignment and pushes traces back.</Empty>
@@ -58,35 +78,57 @@ export function RunReport({ runId }: { runId: string }) {
   // terminal state rather than being patched from the stream: the stream
   // carries progress, and coverage/aggregates are the backend's to compute.
   // Deriving them here would be the second opinion the contract forbids.
-  const progress = useRunEvents(runId);
+  const { progress, ended, reconnect } = useRunEvents(runId);
   const finished = progress?.terminal ?? false;
+  // a stream that ENDED without a terminal state (server timeout, HTTP error)
+  // leaves `progress` frozen at its last frame. Refetch the report then too —
+  // the loaded report is the only current answer left.
   useEffect(() => {
-    if (finished) {
+    if (finished || ended) {
       report.reload();
       results.reload();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [finished]);
+  }, [finished, ended]);
+
+  // confirm/cancel: one request in flight at a time (a double click sent two),
+  // and a refusal (409 wrong state, 403 role) is SHOWN, not an unhandled
+  // rejection that left the button looking like it did nothing
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<{ message: string; status: number | null } | null>(null);
+  useEffect(() => setActionError(null), [runId]);
 
   if (report.loading || results.loading) return <Loading />;
-  if (report.error) return <Failed error={report.error} onRetry={report.reload} />;
+  if (report.error) {
+    return <Failed error={report.error} status={report.status} onRetry={report.reload} />;
+  }
   if (!report.data) return null;
   const { coverage, trials_by_status, metric_coverage, aggregates, estimate } = report.data;
   const arms = report.data.conditions ?? [];
   const observeOnly = arms.length > 0 && !arms.some((arm) => arm.enforcement === "on");
-  const state = progress?.state ?? report.data.state;
+  // once the stream has ended its last frame is stale; the (refetched) report
+  // is the current answer
+  const liveProgress = ended ? null : progress;
+  const state = liveProgress?.state || report.data.state;
   const preStart = PRE_START.has(state);
-  const terminal = progress?.terminal ?? ["completed", "failed", "cancelled"].includes(state);
+  const terminal = liveProgress?.terminal ?? TERMINAL.has(state);
 
-  async function confirm() {
-    await api.confirmRun(runId);
-    report.reload();
-    results.reload();
+  async function act(request: () => Promise<unknown>) {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await request();
+      report.reload();
+      results.reload();
+    } catch (exc) {
+      setActionError(describeError(exc));
+    } finally {
+      setBusy(false);
+    }
   }
-  async function cancel() {
-    await api.cancelRun(runId);
-    report.reload();
-  }
+  const confirm = () => act(() => api.confirmRun(runId));
+  const cancel = () => act(() => api.cancelRun(runId));
 
   return (
     <div className="screen">
@@ -97,20 +139,23 @@ export function RunReport({ runId }: { runId: string }) {
         <StatusTag status={state} />
         {/* the progress bar means "in flight" — only for a run that has actually
             started, never for one awaiting confirmation or a runtime */}
-        {progress && !progress.terminal && !preStart && (
+        {liveProgress && !liveProgress.terminal && !preStart && (
           <div className="progress">
             <div
               className="progress-bar"
               style={{
                 width: `${
-                  progress.planned > 0
-                    ? Math.round((progress.completed / progress.planned) * 100)
+                  liveProgress.planned > 0
+                    ? Math.round((liveProgress.completed / liveProgress.planned) * 100)
                     : 0
                 }%`,
               }}
             />
+            {/* FINISHED, not completed: the stream's count is completed +
+                failed, while Coverage below counts completed only. Calling
+                both "completed" put two different numbers under one word. */}
             <span className="muted small">
-              {progress.completed}/{progress.planned} trial(s) — live
+              {liveProgress.completed}/{liveProgress.planned} trial(s) finished — live
             </span>
           </div>
         )}
@@ -122,13 +167,30 @@ export function RunReport({ runId }: { runId: string }) {
                 ? Object.entries(estimate).map(([k, v]) => `${k} ${v}`).join(" · ")
                 : "not provided"}
             </span>
-            <Button onClick={confirm}>Confirm &amp; start</Button>
+            <Button onClick={confirm} disabled={busy}>Confirm &amp; start</Button>
           </div>
         )}
-        {!terminal && !preStart && (
-          <Button variant="secondary" onClick={cancel}>
+        {/* every non-terminal state, pre-start included: cancel_run accepts
+            them all, and a run waiting for a runtime that never connects has
+            no other way to be closed */}
+        {!terminal && (
+          <Button variant="secondary" onClick={cancel} disabled={busy}>
             Cancel run
           </Button>
+        )}
+        {actionError && <InlineError error={actionError.message} status={actionError.status} />}
+        {ended && !terminal && (
+          <div className="row">
+            <span className="muted small">
+              {ended === "timeout"
+                ? "The live stream ended before the run did — progress is no longer updating."
+                : "The live stream disconnected — progress is no longer updating."}{" "}
+              The report below was reloaded.
+            </span>
+            <Button variant="secondary" onClick={reconnect}>
+              Reconnect
+            </Button>
+          </div>
         )}
       </header>
 
@@ -203,14 +265,20 @@ export function RunReport({ runId }: { runId: string }) {
 
       <section>
         <h2>Trials</h2>
-        <ul className="rows">
-          {(results.data?.trials ?? []).map((trial) => (
-            <li key={trial.trial_id}>
-              <Link to={`/runs/${runId}/trials/${trial.trial_id}`}>{trial.trial_id}</Link>
-              <StatusTag status={trial.status} />
-            </li>
-          ))}
-        </ul>
+        {/* a failed /results is not an empty run: an empty list here read as
+            "this run has no trials" */}
+        {results.error ? (
+          <InlineError error={results.error} status={results.status} onRetry={results.reload} />
+        ) : (
+          <ul className="rows">
+            {(results.data?.trials ?? []).map((trial) => (
+              <li key={trial.trial_id}>
+                <Link to={`/runs/${runId}/trials/${trial.trial_id}`}>{trial.trial_id}</Link>
+                <StatusTag status={trial.status} />
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </div>
   );

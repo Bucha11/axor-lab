@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, type InvariantOutcome } from "../lib/api";
-import { useAsync } from "../lib/useAsync";
-import { Button, Card, Empty, Failed, Field, Json, Link, Loading, Tag, outcomeTone } from "../components/ui";
+import { describeError, useAsync } from "../lib/useAsync";
+import { Button, Card, Empty, Failed, Field, InlineError, Json, Link, Loading, Tag, outcomeTone } from "../components/ui";
 
 export function RegressionList() {
   const [draft, setDraft] = useState("");
@@ -74,15 +74,20 @@ export function RegressionScreen({ id }: { id: string }) {
   const { data, error, status, loading, reload } = useAsync(() => api.regression(id), [id]);
   const [runId, setRunId] = useState("");
   const [outcome, setOutcome] = useState<InvariantOutcome | null>(null);
-  const [runError, setRunError] = useState<string | null>(null);
+  const [runError, setRunError] = useState<{ message: string; status: number | null } | null>(null);
+  const [checking, setChecking] = useState(false);
 
   async function check() {
+    if (checking) return;
+    setChecking(true);
     setRunError(null);
     setOutcome(null);
     try {
       setOutcome(await api.runRegression(id, runId));
     } catch (exc) {
-      setRunError(exc instanceof Error ? exc.message : String(exc));
+      setRunError(describeError(exc));
+    } finally {
+      setChecking(false);
     }
   }
 
@@ -113,10 +118,13 @@ export function RegressionScreen({ id }: { id: string }) {
         <Field label="Run id">
           <input value={runId} onChange={(e) => setRunId(e.target.value)} />
         </Field>
-        <Button onClick={check} disabled={!runId}>
-          Run the invariant
+        <Button onClick={check} disabled={!runId || checking}>
+          {checking ? "Checking…" : "Run the invariant"}
         </Button>
-        {runError && <Failed error={runError} />}
+        {/* a failed CHECK is an action error, not a failed screen: the
+            regression loaded fine, and "Could not load this screen" under a
+            button said otherwise */}
+        {runError && <InlineError error={runError.message} status={runError.status} />}
         {outcome && (
           <div className="outcome">
             <Tag tone={outcomeTone(outcome.status)}>{outcome.status}</Tag>

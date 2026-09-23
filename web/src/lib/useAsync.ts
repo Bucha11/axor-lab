@@ -14,6 +14,17 @@ export interface Async<T> {
   reload: () => void;
 }
 
+/** A caught exception as the message + HTTP status a screen renders — the same
+ * split `useAsync` makes, for a button's request (confirm, cancel, delete)
+ * that is not a load. Keeping the status is what lets a 402 still say "your
+ * plan", and a 409 read as a refusal rather than a crash. */
+export function describeError(exc: unknown): { message: string; status: number | null } {
+  return {
+    message: exc instanceof Error ? exc.message : String(exc),
+    status: exc instanceof ApiError ? exc.status : null,
+  };
+}
+
 /**
  * Load once, expose the three states a screen has to render.
  *
@@ -41,8 +52,9 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[] = []): Async
       })
       .catch((exc: unknown) => {
         if (!live) return;
-        setError(exc instanceof Error ? exc.message : String(exc));
-        setStatus(exc instanceof ApiError ? exc.status : null);
+        const { message, status: code } = describeError(exc);
+        setError(message);
+        setStatus(code);
       })
       .finally(() => {
         if (live) setLoading(false);
