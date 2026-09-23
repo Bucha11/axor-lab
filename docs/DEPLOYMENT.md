@@ -23,9 +23,17 @@ docker compose up --build                  # → http://localhost:8443
 - **Rate limiting lives at the proxy, not in the app.** The app has none. If you
   put something other than `deploy/nginx.conf` in front of it, carry the limits
   over — especially the one on `/guest-session`.
-- **Checkout is not wired to a payment provider.** `/billing/checkout` returns a
+- **Payment runs through axor-identity, not the Lab.** On the hosted service an
+  org's plan is its identity tier. That tier is bought once, with Paddle, for
+  the Lab and the Control Plane together. The Workspace screen's Billing card
+  and "Subscribe" buttons call `/identity/v1/billing/*`. The Lab reads the new
+  tier from the next token. For an identity org the Lab's own
+  `/billing/checkout` answers 409. Paddle setup lives in axor-control-plane
+  `deploy/prod/README.md` → "Billing".
+- **The Lab's own checkout is not wired to a payment provider.** For a
+  token-only workspace (no identity), `/billing/checkout` still returns a
   placeholder URL. The webhook, activation and lapse-to-free paths are real, so
-  a plan is granted by an admin today. See the maturity table in `README.md`.
+  a plan there is granted by an admin. See the maturity table in `README.md`.
 - **No TLS until you provide certificates.** The shipped config listens on plain
   HTTP and says so. Three lines in `deploy/nginx.conf` switch it.
 - **With a DSN, the whole server is on Postgres.** Documents (suites,

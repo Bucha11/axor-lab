@@ -36,8 +36,15 @@ catalog must always define it.
 
 An axor-identity access token carries the org's `tier`; on first login the Lab
 provisions a workspace for the org and puts it on the catalog plan whose id
-equals the tier (`team` → the `team` plan). An unknown tier fails **closed** to
-`free`. Machine/static tokens are unaffected.
+equals the tier (`team` → the `team` plan). Identity's free rung is called
+`community` and maps to `free`. An unknown tier fails **closed** to `free`.
+Machine/static tokens are unaffected.
+
+The tier itself is set by billing in axor-identity. Paddle's webhook moves it
+when a subscription starts, lapses or is cancelled, and an operator grants it
+by hand for contracted Enterprise. One subscription therefore covers the Lab
+and the Control Plane, and the Lab picks the new plan up at the next token
+refresh.
 
 ## Capabilities
 

@@ -209,3 +209,23 @@ class TestManualGrant(BillingTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIdentityOrgsAreBilledByIdentity(BillingTestCase):
+    """An axor-identity org's plan IS its identity tier (ensure_org_workspace),
+    bought once through identity for the Lab and the Control Plane together. A
+    Lab-local checkout for such an org would take money for a plan the next
+    login's tier overwrites — so it is refused, and says where to go."""
+
+    def test_checkout_for_an_identity_org_points_to_identity(self) -> None:
+        self.workspaces.add(Workspace(id="org_acme", name="Acme", token="org-tok",
+                                      org="org_acme"))
+        status, body = self.call("POST", "/billing/checkout", {"plan_id": "pro"},
+                                 token="org-tok")
+        self.assertEqual(status, 409, body)
+        self.assertIn("axor-identity", json.dumps(body))
+
+    def test_a_token_workspace_keeps_its_own_checkout(self) -> None:
+        status, _ = self.call("POST", "/billing/checkout", {"plan_id": "pro"},
+                              token=self._free_tenant())
+        self.assertEqual(status, 201)

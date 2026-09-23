@@ -1,8 +1,89 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type AuditEntry, type Plan } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
 import { Button, Card, Empty, Failed, Field, Loading, Stat, Tag } from "../components/ui";
 import { ShownOnce } from "../components/ShownOnce";
+import {
+  BUYABLE_TIERS, billing, openPortal, pendingPlan, startCheckout, takeOutcome,
+} from "../lib/billing";
+
+const OUTCOME: Record<string, string> = {
+  success: "Payment received — your plan is active.",
+  canceled: "Checkout closed. Nothing was charged.",
+  unavailable: "Checkout is unavailable right now. Try again shortly.",
+};
+
+/** The org's plan when it is billed through axor-identity (the hosted
+ * service): one subscription for the Lab and the Control Plane, managed in the
+ * payment provider's customer portal. */
+function IdentityBilling({ onBuy }: { onBuy: (tier: string) => void }) {
+  const status = useAsync(() => billing.status());
+  const [outcome] = useState(takeOutcome);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const data = status.data;
+  const sub = data?.subscription;
+  return (
+    <Card>
+      <h4>Billing</h4>
+      {outcome && OUTCOME[outcome] && (
+        <p className={outcome === "success" ? "small" : "muted small"}>{OUTCOME[outcome]}</p>
+      )}
+      {status.error && <Failed error={status.error} status={status.status} onRetry={status.reload} />}
+      {data && (
+        <>
+          <p className="muted small">
+            One plan covers the Lab and the Control Plane.{" "}
+            {sub
+              ? `Subscription ${sub.status}${
+                  sub.current_period_end
+                    ? ` · ${sub.scheduled_change === "cancel" ? "ends" : "renews"} ${sub.current_period_end.slice(0, 10)}`
+                    : ""
+                }.`
+              : data.tier === "enterprise"
+                ? "Enterprise is contracted — contact us to change it."
+                : "No subscription — you are on the free plan."}
+          </p>
+          {data.can_manage && (
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                setFailure("");
+                openPortal().catch((caught) => {
+                  setFailure(caught instanceof Error ? caught.message : String(caught));
+                  setBusy(false);
+                });
+              }}
+            >
+              Manage billing — change plan, card, cancel
+            </Button>
+          )}
+          {!data.is_admin && (
+            <p className="muted small">Changing the plan is an owner or admin&apos;s call.</p>
+          )}
+          <PendingCheckout canBuy={data.is_admin && !sub && data.tier === "community"} onBuy={onBuy} />
+        </>
+      )}
+      {failure && <Failed error={failure} />}
+    </Card>
+  );
+}
+
+/** A plan picked on a landing page before signing up: buy it as soon as the
+ * org is known to be free and the caller may buy. */
+function PendingCheckout({ canBuy, onBuy }: { canBuy: boolean; onBuy: (tier: string) => void }) {
+  const [plan] = useState(pendingPlan);
+  const started = useRef(false);
+  useEffect(() => {
+    if (plan && canBuy && !started.current) {
+      started.current = true;
+      onBuy(plan);
+    }
+  }, [plan, canBuy, onBuy]);
+  return null;
+}
 
 /** A capability a plan grants. Shown as the plan's own word, never translated —
  * the server gates on these exact strings, so a prettier label here would be a
@@ -94,6 +175,8 @@ function PlanCard({
 export function Workspace() {
   const workspace = useAsync(() => api.currentWorkspace());
   const plans = useAsync(() => api.plans());
+  // on for the hosted service; off (or unreachable) everywhere else
+  const billingConfig = useAsync(() => billing.config().catch(() => ({ enabled: false })));
   const members = useAsync(() => api.members());
   // Listing every tenant is an ADMIN act — a tenant must not enumerate the
   // others — so this 403s for anyone else and the section stays hidden.
@@ -113,6 +196,8 @@ export function Workspace() {
 
   const current = workspace.data;
   const isAdmin = current?.role === "owner" || current?.role === "admin";
+  // an identity org's plan is its identity tier: bought through identity
+  const identityBilled = Boolean(billingConfig.data?.enabled && current?.org);
 
   async function guard(work: () => Promise<void>) {
     setBusy(true);
@@ -127,7 +212,10 @@ export function Workspace() {
   }
 
   const buy = (planId: string) =>
-    guard(async () => setCheckout((await api.checkout(planId)).checkout_url));
+    guard(async () => {
+      if (identityBilled) await startCheckout(planId);
+      else setCheckout((await api.checkout(planId)).checkout_url);
+    });
   const grant = (planId: string) =>
     guard(async () => {
       await api.grantPlan(planId);
@@ -222,6 +310,8 @@ export function Workspace() {
         )}
       </section>
 
+      {identityBilled && <IdentityBilling onBuy={buy} />}
+
       <section>
         <h3>Plans</h3>
         {plans.error && <Failed error={plans.error} status={plans.status} onRetry={plans.reload} />}
@@ -234,7 +324,14 @@ export function Workspace() {
               onBuy={buy}
               onGrant={grant}
               busy={busy}
-              canBuy={Boolean(isAdmin)}
+              canBuy={
+                Boolean(isAdmin) &&
+                // billed through identity: only the self-serve rungs, and only
+                // from free — a subscribed org changes plan in the portal
+                (!identityBilled ||
+                  (BUYABLE_TIERS.includes(plan.plan_id) &&
+                    current.subscription.plan_id === "free"))
+              }
               canGrant={current.is_admin}
             />
           ))}

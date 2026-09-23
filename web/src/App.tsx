@@ -3,6 +3,7 @@ import {
   api, currentToken, setToken, setUnauthorizedHandler, type AuthStatus,
 } from "./lib/api";
 import { logout as identityLogout, rememberRefresh, refreshAccess } from "./lib/identity";
+import { consumeBillingParams, pendingPlan } from "./lib/billing";
 import { navigate, segments, useRoute } from "./lib/router";
 import { Login } from "./screens/Login";
 import { Home } from "./screens/Home";
@@ -145,6 +146,17 @@ export function App() {
       .catch(() => setAuthInfo({ auth_required: true, guest: false }));
   }, []);
 
+  // Back from checkout (?billing=) or arriving from a landing page's ?plan=
+  // link: both are finished on the Workspace screen, where the plan lives.
+  // Remount once done, so the screens read the session the refresh produced.
+  useEffect(() => {
+    void consumeBillingParams().then((present) => {
+      if (!present) return;
+      navigate("/workspace");
+      setSession((n) => n + 1);
+    });
+  }, []);
+
   useEffect(() => {
     if (token) sessionStorage.setItem(TOKEN_KEY, token);
     else sessionStorage.removeItem(TOKEN_KEY);
@@ -177,6 +189,8 @@ export function App() {
     setLocal(accessToken);
     setNotice(null);
     setSession((n) => n + 1);
+    // a plan picked on the landing page before signing up: buy it now
+    if (pendingPlan()) navigate("/workspace");
   }
 
   function logout(): void {

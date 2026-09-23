@@ -64,6 +64,21 @@ class TestTierMapsToPlan(unittest.TestCase):
         ws = self.ws.ensure_org_workspace("org_c", tier="community")
         self.assertEqual(ws.plan["capabilities"], [])
 
+    def test_a_steady_tier_does_not_rewrite_the_plan(self) -> None:
+        # identity's free rung is "community"; resolving it to "free" once must
+        # not re-apply (and re-save) the plan on every later request
+        self.ws.ensure_org_workspace("org_c", tier="community")
+        calls: list[str] = []
+        original = self.ws.apply_plan
+        self.ws.apply_plan = lambda ws_id, plan_id, *a, **k: (  # type: ignore[method-assign]
+            calls.append(plan_id), original(ws_id, plan_id, *a, **k))[1]
+        self.ws.ensure_org_workspace("org_c", tier="community")
+        self.ws.ensure_org_workspace("org_c", tier="platinum")  # unknown → free
+        self.assertEqual(calls, [])
+        # a real change still applies — billing moved the org to Team
+        self.ws.ensure_org_workspace("org_c", tier="team")
+        self.assertEqual(calls, ["team"])
+
     def test_require_capability_gate(self) -> None:
         team = self.ws.ensure_org_workspace("org_t", tier="team")
         with self.assertRaises(EntitlementError):

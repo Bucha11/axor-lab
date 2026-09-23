@@ -2171,6 +2171,15 @@ def make_runtime_server(
 
                     self._require_control()
                     self._require_role("admin")
+                    if self._current_workspace().org:
+                        # an axor-identity org's plan IS its identity tier (see
+                        # ensure_org_workspace): one plan, bought once, covers
+                        # the Lab and the Control Plane. A Lab-local checkout
+                        # would be overwritten by the next login's tier.
+                        raise RuntimeJobsError(
+                            409, "this organization's plan is billed through "
+                            "axor-identity (/identity/v1/billing) — one plan "
+                            "covers the Lab and the Control Plane")
                     body = self._read_json()
                     plan_id = str(body.get("plan_id", ""))
                     if plan_id not in workspaces.plan_catalog:

@@ -85,6 +85,10 @@ DEFAULT_PLAN: dict[str, object] = {
 # contain a plan with this id.
 FREE_PLAN = "free"
 
+# axor-identity names the free rung "community"; the plan catalog calls it
+# "free". Every other identity tier is a catalog key as-is.
+IDENTITY_TIER_ALIASES = {"community": FREE_PLAN}
+
 # The plan a GUEST (anonymous, unregistered) hosted session runs on. It is a
 # product mechanism, not a priced tier, so it is fixed in code rather than the
 # operator catalog: enough to TRY hosted execution once, nothing that persists
@@ -384,9 +388,15 @@ class Workspaces:
                 # its audit history has nothing to attach to
                 self._save_workspace_locked(workspace)
             current_plan = str(workspace.subscription.get("plan_id", FREE_PLAN))
-        if tier is not None and (created or current_plan != tier):
-            plan_id = tier if tier in self.plan_catalog else FREE_PLAN
-            self.apply_plan(org_id, plan_id)
+        if tier is not None:
+            # compare the RESOLVED plan, not the raw tier: "community" (and any
+            # unknown tier) resolves to free, and comparing the raw name
+            # re-applied — and re-saved — the plan on every single request
+            plan_id = IDENTITY_TIER_ALIASES.get(tier, tier)
+            if plan_id not in self.plan_catalog:
+                plan_id = FREE_PLAN
+            if created or current_plan != plan_id:
+                self.apply_plan(org_id, plan_id)
         return workspace
 
     def resolve_token(self, token: str | None) -> Workspace | None:

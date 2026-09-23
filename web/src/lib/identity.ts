@@ -14,7 +14,7 @@
 // `||`, not `??`: a Docker build passes the build arg through as an EMPTY
 // string when it is unset, and `??` kept "" — every identity call then went to
 // `/v1/login` on the Lab's own origin, which has no such route.
-const IDENTITY_BASE = (import.meta.env.VITE_IDENTITY_URL || "/identity").replace(/\/$/, "");
+export const IDENTITY_BASE = (import.meta.env.VITE_IDENTITY_URL || "/identity").replace(/\/$/, "");
 const REFRESH_KEY = "axor-lab-refresh-token";
 
 export interface Session {
