@@ -235,14 +235,39 @@ describe("a field whose write requires a second one", () => {
     expect((again.capabilities as string[]).filter((c) => c === "governance")).toHaveLength(1);
   });
 
-  it("removing every arm leaves the capability alone", () => {
-    // dropping it silently would be the same overreach in the other direction:
-    // the validator says what is wrong, and the author decides
+  it("removing the last arm drops the governance capability", () => {
+    // leaving it on was the same schema error in the other direction —
+    // "'governance' requires execution.conditions" — and one Basic mode cannot
+    // fix, because Conditions is Advanced-only there
     const spec = SECTIONS.flatMap((s) => s.fields).find(
       (f) => f.path === "execution.conditions",
     )!;
-    const governed = { ...MANIFEST, capabilities: ["governance"] };
-    expect(spec.couples!(governed, undefined).capabilities).toEqual(["governance"]);
+    const governed = { ...MANIFEST, capabilities: ["governance", "provenance"] };
+    expect(spec.couples!(governed, undefined).capabilities).toEqual(["provenance"]);
+    // and when governance was the only one, the key goes rather than `[]`
+    const only = { ...MANIFEST, capabilities: ["governance"] };
+    expect("capabilities" in spec.couples!(only, undefined)).toBe(false);
+  });
+
+  it("locks the governance chip in Basic, where its partner field is hidden", () => {
+    const spec = IDENTITY.find((f) => f.path === "capabilities")!;
+    const conditions = SECTIONS.flatMap((s) => s.fields).find(
+      (f) => f.path === "execution.conditions",
+    )!;
+    // the lock exists BECAUSE conditions is Advanced-only; if that ever
+    // changes, the lock should go with it
+    expect(conditions.advanced).toBe(true);
+    expect(spec.basicLocked?.options).toEqual(["governance"]);
+    expect(spec.basicLocked?.hint).toMatch(/Advanced/);
+  });
+
+  it("help text names only UI that exists", () => {
+    // there is no "Details" area — per-item extras are listed under "also:"
+    // with an "Edit in YAML →" link
+    const help = [...IDENTITY, ...SECTIONS.flatMap((s) => s.fields)]
+      .map((f) => f.help ?? "")
+      .join(" ");
+    expect(help).not.toMatch(/Details/);
   });
 });
 

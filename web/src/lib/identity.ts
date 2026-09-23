@@ -11,7 +11,10 @@
  * sessionStorage) is exchanged for a new one when a request comes back 401.
  */
 
-const IDENTITY_BASE = (import.meta.env.VITE_IDENTITY_URL ?? "/identity").replace(/\/$/, "");
+// `||`, not `??`: a Docker build passes the build arg through as an EMPTY
+// string when it is unset, and `??` kept "" — every identity call then went to
+// `/v1/login` on the Lab's own origin, which has no such route.
+const IDENTITY_BASE = (import.meta.env.VITE_IDENTITY_URL || "/identity").replace(/\/$/, "");
 const REFRESH_KEY = "axor-lab-refresh-token";
 
 export interface Session {
@@ -42,11 +45,30 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     throw new IdentityError(0, "cannot reach the identity service");
   }
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
+  // A body that is not JSON — a proxy's 502 page, or the SPA's index.html when
+  // nothing routes /identity — used to throw a bare SyntaxError, which Login
+  // flattened to "login failed" with no hint that the SERVICE was missing.
+  let payload: unknown = {};
+  let parsed = true;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      parsed = false;
+    }
+  }
   if (!response.ok) {
-    const detail =
-      typeof payload?.detail === "string" ? payload.detail : `login failed (${response.status})`;
-    throw new IdentityError(response.status, detail);
+    const detail = (payload as { detail?: unknown })?.detail;
+    throw new IdentityError(
+      response.status,
+      typeof detail === "string" ? detail : `login failed (${response.status})`,
+    );
+  }
+  if (!parsed) {
+    throw new IdentityError(
+      response.status,
+      "the identity service answered with something that is not JSON — is it deployed at this address?",
+    );
   }
   return payload as T;
 }
@@ -83,5 +105,23 @@ export async function refreshAccess(): Promise<string | null> {
   } catch {
     rememberRefresh(null);
     return null;
+  }
+}
+
+/** Revoke the stored refresh token at the identity service, best-effort.
+ *
+ * Logging out only forgot it locally, so the refresh token stayed valid for its
+ * whole lifetime — anyone who had copied it out of sessionStorage could keep
+ * minting access tokens after the user believed they had signed out. A failure
+ * here must not keep the user logged in, so it is swallowed; the local copy is
+ * dropped either way. */
+export async function logout(): Promise<void> {
+  const refresh = storedRefresh();
+  rememberRefresh(null);
+  if (!refresh) return;
+  try {
+    await post<unknown>("/v1/logout", { refresh_token: refresh });
+  } catch {
+    /* best-effort: the session is over locally regardless */
   }
 }

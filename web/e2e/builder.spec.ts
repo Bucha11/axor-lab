@@ -882,3 +882,117 @@ test.describe("authoring a real suite in the forms", () => {
     expect(suite.capabilities).toContain("governance");
   });
 });
+
+test.describe("saving under a changed id", () => {
+  test("an id another saved suite already has is refused, not overwritten", async ({ page }) => {
+    // POST /suites used to upsert: renaming this suite onto another's id
+    // silently replaced that other suite. The server now answers 409, and the
+    // Builder says what to do about it.
+    const errs = watchErrors(page);
+    await routes(page);
+    await page.route("**/suites", (route: Route) => {
+      if (route.request().method() === "POST") {
+        return json(409, { error: "a suite with id 'suite-beta' already exists" })(route);
+      }
+      return json(200, { suites: [] })(route);
+    });
+    await page.route("**/registry/suites", json(200, { suites: [] }));
+    await page.goto("/#/suites/suite-alpha");
+    await page.getByLabel("Suite id", { exact: true }).fill("suite-beta");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(
+      page.getByText('A suite with id "suite-beta" already exists — pick another id.'),
+    ).toBeVisible();
+    await expect(page.locator(".tag", { hasText: /^saved$/ })).toHaveCount(0);
+    // and it stayed on the suite it was editing
+    await expect(page).toHaveURL(/#\/suites\/suite-alpha/);
+    expect(errs).toEqual([]);
+  });
+});
+
+test.describe("list-of-strings inputs", () => {
+  test("a second tag can be typed, comma and space included", async ({ page }) => {
+    // the input was rendered from the parsed array, so the comma (an empty
+    // trailing item) and the space after it vanished on the keystroke that
+    // typed them
+    const saved: Record<string, unknown>[] = [];
+    await routes(page);
+    await page.route("**/suites/suite-alpha", (route: Route) => {
+      if (route.request().method() === "PUT") {
+        saved.push(route.request().postDataJSON() as Record<string, unknown>);
+        return json(200, { id: "suite-alpha" })(route);
+      }
+      return json(200, MANIFEST)(route);
+    });
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    const tags = page.getByLabel("Tags", { exact: true });
+    await expect(tags).toHaveValue("demo");
+    await tags.click();
+    await tags.press("End");
+    await tags.pressSequentially(", second tag");
+    await expect(tags).toHaveValue("demo, second tag");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator(".tag", { hasText: /^saved$/ })).toBeVisible();
+    expect((saved[0].suite as Record<string, unknown>).tags).toEqual(["demo", "second tag"]);
+  });
+});
+
+test.describe("errors land beside what caused them", () => {
+  test("a failed runtimes load is an error, not 'no agent connected'", async ({ page }) => {
+    await routes(page);
+    await page.route("**/runtimes", json(500, { error: "runtimes exploded" }));
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByText(/Could not load the connected agents/)).toBeVisible();
+    await expect(page.getByText(/No agent connected yet/)).toHaveCount(0);
+  });
+
+  test("a failed Validate request says so", async ({ page }) => {
+    await routes(page);
+    await page.route("**/suites/validate", json(500, { error: "validator down" }));
+    await page.goto("/#/suites/suite-alpha");
+    await page.getByRole("button", { name: "Validate" }).click();
+    await expect(page.getByText(/validator down/)).toBeVisible();
+  });
+
+  test("a failed plan preview shows next to its button, not under Run", async ({ page }) => {
+    await routes(page);
+    await page.route("**/suites/plan", json(500, { error: "planner down" }));
+    await page.goto("/#/suites/suite-alpha");
+    await page.getByRole("button", { name: "Preview plan" }).click();
+    const actions = page.locator(".card", { has: page.getByRole("button", { name: "Preview plan" }) });
+    await expect(actions.getByText(/planner down/)).toBeVisible();
+    const runCard = page.locator(".card", { has: page.getByRole("heading", { name: "Run" }) });
+    await expect(runCard.getByText(/planner down/)).toHaveCount(0);
+  });
+
+  test("the trial scenario input has a name", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha");
+    await expect(page.getByRole("textbox", { name: "Scenario to try" })).toBeVisible();
+  });
+});
+
+test.describe("governance in Basic mode", () => {
+  test("the governance chip is shown but locked, with the way to change it", async ({ page }) => {
+    // its partner field (Conditions) is Advanced-only, so toggling it in Basic
+    // could only produce a document Basic cannot make valid again
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha");
+    const chip = page.locator("button.chip", { hasText: /^governance$/ });
+    await expect(chip).toBeDisabled();
+    await expect(page.getByText(/add or remove an arm in Advanced/)).toBeVisible();
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await expect(chip).toBeEnabled();
+  });
+
+  test("removing the last arm drops the capability it required", async ({ page }) => {
+    await routes(page);
+    await page.goto("/#/suites/suite-alpha/build");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByRole("button", { name: "Add Conditions (governance)" }).click();
+    await expect(page.locator(".chip.chip-on", { hasText: /^governance$/ })).toHaveCount(1);
+    await page.getByRole("button", { name: "Remove Conditions (governance) 1" }).click();
+    await expect(page.locator(".chip.chip-on", { hasText: /^governance$/ })).toHaveCount(0);
+  });
+});

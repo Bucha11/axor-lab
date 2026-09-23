@@ -72,6 +72,11 @@ export interface FieldSpec {
    * form that knowingly produces an invalid document. Applied after the write,
    * over the already-updated document. */
   couples?: (document: Json, value: unknown) => Json;
+  /** `chips` only: options that are shown but NOT toggleable in Basic mode,
+   * with the sentence that says why. For an option that is only valid together
+   * with an Advanced-only field — toggling it in Basic would produce a
+   * document the author has no control on screen to make valid again. */
+  basicLocked?: { options: string[]; hint: string };
   advanced?: boolean;
   help?: string;
 }
@@ -139,6 +144,16 @@ export function withCapability(manifest: Json, capability: string): string[] {
     ? manifest.capabilities.map(String)
     : [];
   return declared.includes(capability) ? declared : [...declared, capability];
+}
+
+/** The declared capabilities minus `capability`, or undefined when that leaves
+ * none — `writePath` then drops the key rather than writing `capabilities: []`. */
+export function withoutCapability(manifest: Json, capability: string): string[] | undefined {
+  const declared = Array.isArray(manifest.capabilities)
+    ? manifest.capabilities.map(String)
+    : [];
+  const rest = declared.filter((existing) => existing !== capability);
+  return rest.length === 0 ? undefined : rest;
 }
 
 /** Options an ITEM field inside a `list` can only get from the document being
@@ -227,6 +242,15 @@ export const IDENTITY: FieldSpec[] = [
     widget: "chips",
     options: KNOWN_CAPABILITIES,
     help: "declaring 'governance' requires execution.conditions, and vice versa",
+    // Conditions are Advanced-only, so in Basic the governance chip could only
+    // ever be switched into an invalid state (on with no arm) or out of one
+    // the author cannot see (off with arms still declared). It stays VISIBLE —
+    // hiding it would hide that the suite is governed — but it is toggled by
+    // adding or removing an arm, which lives in Advanced.
+    basicLocked: {
+      options: ["governance"],
+      hint: "'governance' follows the suite's conditions — add or remove an arm in Advanced to change it",
+    },
   },
 ];
 
@@ -303,8 +327,8 @@ export const SECTIONS: SectionSpec[] = [
         blank: blankScenario,
         help:
           "a new scenario starts on the suite's first tool; inputs, fixtures and " +
-          "the success predicate live on each scenario — edit them per item under " +
-          "Details, or in Advanced / YAML",
+          "the success predicate live on each scenario — listed under \"also:\" on " +
+          "each item and edited with its \"Edit in YAML →\" link, or in the YAML mode",
       },
       {
         // chips, not free text: the options are the registry's own names
@@ -426,14 +450,18 @@ export const SECTIONS: SectionSpec[] = [
         // first arm used to leave you on "execution.conditions is set but
         // 'governance' is not in capabilities" — the most common authoring
         // action in this product, landing in an error you fix in another
-        // section.
+        // section. And symmetrically: removing the LAST arm drops the
+        // capability, because 'governance' with no conditions is the same
+        // schema error in the other direction — and one the author could not
+        // fix from Basic, where Conditions is not shown.
         couples: (document, value) =>
           Array.isArray(value) && value.length > 0
             ? writePath(document, "capabilities", withCapability(document, "governance"))
-            : document,
+            : writePath(document, "capabilities", withoutCapability(document, "governance")),
         help:
           "an arm is a governed variant of the same run; adding one declares the " +
-          "'governance' capability, which the schema requires alongside it",
+          "'governance' capability, which the schema requires alongside it; " +
+          "removing the last one drops it again",
       },
     ],
   },
@@ -593,7 +621,7 @@ export const SECTIONS: SectionSpec[] = [
               : { kind: "metric_threshold", metric: numeric ?? "", op: "lt", value: 0 },
           };
         },
-        help: "the executable rule lives under each item's Details, in YAML",
+        help: "the executable rule is edited in YAML — use \"Edit in YAML →\" on the item",
       },
     ],
   },

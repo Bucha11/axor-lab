@@ -39,6 +39,12 @@ const QUICK_ROUTES: Record<string, string> = {
 
 export function Home() {
   const { data, error, status, loading, reload } = useAsync(() => api.home());
+  // /home's `suites` is the BUILT-IN catalog only, so a suite this workspace
+  // saved — or its edit of a built-in — never appeared on the launch surface.
+  // /suites is the same catalog with saved suites layered over it; when it
+  // loads it is the list, filtered by the same `available` flag /home applies.
+  // When it does not, Home still has /home's list rather than nothing.
+  const catalog = useAsync(() => api.suites());
   if (loading) return <Loading />;
   if (error) return <Failed error={error} status={status} onRetry={reload} />;
   if (!data) return null;
@@ -48,6 +54,9 @@ export function Home() {
     body: "",
   };
   const quickActions = (data.quick_actions ?? []).filter((a) => QUICK_ROUTES[a.id]);
+  const suites = catalog.data
+    ? catalog.data.suites.filter((suite) => suite.available)
+    : data.suites;
 
   return (
     <div className="screen">
@@ -85,9 +94,12 @@ export function Home() {
             not showing it. The full catalog, unavailable entries included,
             is the Suites screen. */}
         <div className="grid">
-          {data.suites.map((suite) => (
+          {suites.map((suite) => (
             <Card key={suite.id} onClick={() => navigate(`/suites/${suite.id}`)}>
-              <h4>{suite.name}</h4>
+              <h4>
+                {suite.name}{" "}
+                {suite.origin && suite.origin !== "built_in" && <Tag>{suite.origin}</Tag>}
+              </h4>
               <p className="muted">{suite.description}</p>
               {(suite.capabilities ?? []).map((c) => (
                 <Tag key={c} tone="info">

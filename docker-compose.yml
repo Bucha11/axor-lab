@@ -27,6 +27,10 @@ services:
   lab:
     build:
       context: .
+      args:
+        # Where the browser reaches axor-identity. Empty = `/identity` on this
+        # origin, which the proxy below routes to an `identity` host.
+        VITE_IDENTITY_URL: ${AXOR_LAB_IDENTITY_URL:-}
     # Not published: the proxy is the only way in. Publish 8871 only to debug,
     # and never on a host that is reachable from outside.
     expose: ["8871"]

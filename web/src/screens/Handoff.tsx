@@ -32,8 +32,66 @@ function Checks({ report }: { report: CheckReport }) {
   );
 }
 
+type Imported = Awaited<ReturnType<typeof api.importIncident>>;
+
+/** What an incident import RETURNED. Nothing is stored server-side — the
+ * bundle, its traces and the file map come back in the response and nowhere
+ * else — so showing only the bundle id threw the result away: the user saw an
+ * id that no other screen could open. */
+function ImportedIncident({ result }: { result: Imported }) {
+  const trials = Array.isArray(result.bundle?.trials) ? (result.bundle.trials as unknown[]) : [];
+  const files = Object.keys(result.files ?? {});
+  return (
+    <div data-testid="incident-result">
+      <p className="muted small">
+        Imported <code>{result.bundle_id}</code> from trace{" "}
+        <code>{result.trace_id}</code> — replay status{" "}
+        <Tag tone={result.replay_status === "match" ? "success" : "warning"}>
+          {result.replay_status}
+        </Tag>
+      </p>
+      <div className="grid">
+        <Stat label="Trials" value={trials.length} />
+        <Stat label="Traces" value={(result.traces ?? []).length} />
+        <Stat label="Files" value={files.length} />
+      </div>
+      {files.length > 0 && (
+        <ul className="rows">
+          {files.map((name) => (
+            <li key={name}>
+              <code>{name}</code>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="muted small">
+        Not stored anywhere — save it now to keep it.
+      </p>
+      <Button
+        variant="secondary"
+        onClick={() =>
+          saveFile(
+            `${result.bundle_id}-incident.json`,
+            JSON.stringify({ bundle: result.bundle, traces: result.traces }, null, 2),
+          )}
+      >
+        Download bundle + traces (JSON)
+      </Button>{" "}
+      <Button
+        variant="secondary"
+        onClick={() =>
+          saveFile(`${result.bundle_id}-files.json`, JSON.stringify(result.files, null, 2))}
+      >
+        Download file map (JSON)
+      </Button>
+    </div>
+  );
+}
+
 export function Handoff() {
-  const { data, error, status, loading, reload } = useAsync(() => api.home());
+  // EVERY run, not Home's `recent_runs`: that is the launchpad's last five, so
+  // a run older than that could not be handed off from the screen at all
+  const { data, error, status, loading, reload } = useAsync(() => api.runs());
   const [pkg, setPkg] = useState<HandoffPackage | null>(null);
   const [runId, setRunId] = useState("");
   const [report, setReport] = useState<CheckReport | null>(null);
@@ -43,8 +101,12 @@ export function Handoff() {
   // the second funnel and the offline package check both take a document the
   // user already holds, so they are pasted rather than picked from a list.
   const [incident, setIncident] = useState("");
-  const [imported, setImported] = useState<{ bundle_id: string; replay_status: string } | null>(null);
+  const [imported, setImported] = useState<Imported | null>(null);
   const [pkgText, setPkgText] = useState("");
+  // OFF by default, like the CLI's `--allow-bare`: a bare package carries no
+  // proof objects, and accepting one is a decision the reader makes, not one
+  // the screen made for them on every click
+  const [allowBare, setAllowBare] = useState(false);
   const [pkgReport, setPkgReport] = useState<CheckReport | null>(null);
 
   async function guard(label: string, work: () => Promise<void>) {
@@ -78,18 +140,17 @@ export function Handoff() {
       const parsed = JSON.parse(incident) as {
         trace: Json; scenario: Json; manifests: Json; condition: Json;
       };
-      const result = await api.importIncident(parsed);
-      setImported({ bundle_id: result.bundle_id, replay_status: result.replay_status });
+      setImported(await api.importIncident(parsed));
     });
 
   const verifyPackage = () =>
     guard("package", async () => {
-      setPkgReport(await api.verifyPackage(JSON.parse(pkgText) as Json, true));
+      setPkgReport(await api.verifyPackage(JSON.parse(pkgText) as Json, allowBare));
     });
 
   if (loading) return <Loading />;
   if (error) return <Failed error={error} status={status} onRetry={reload} />;
-  const runs = data?.recent_runs ?? [];
+  const runs = data?.runs ?? [];
 
   return (
     <div className="screen">
@@ -188,16 +249,32 @@ export function Handoff() {
         <h4>Verify a reproduction package</h4>
         <p className="muted small">
           A downloaded package, checked without trusting the server that served
-          it: content hashes, bit-identical replay, and every proof object bound.
+          it. A published package is checked for content hashes, bit-identical
+          replay, and every proof object bound; a bare one carries no proof
+          objects, so only the first two — and only if you accept bare below.
           Paste the package JSON.
         </p>
-        <Field label="Package JSON" hint="The file a publication page serves under Download.">
+        <Field
+          label="Package JSON"
+          hint="A publication page's Download (published), or an artifact's Download reproduction package (bare)."
+        >
           <textarea
             id="package-json"
             rows={4}
             value={pkgText}
             onChange={(e) => setPkgText(e.target.value)}
             placeholder='{"schema_version": "axor-reproduction-package/v1", …}'
+          />
+        </Field>
+        <Field
+          label="Accept a bare package"
+          hint="A bare package ({bundle, traces}, what an artifact's Download reproduction package gives) has no proof objects, so only integrity and replay can be checked — the same as axor-lab verify --allow-bare. Off, a bare package is refused."
+        >
+          <input
+            id="package-allow-bare"
+            type="checkbox"
+            checked={allowBare}
+            onChange={(e) => setAllowBare(e.target.checked)}
           />
         </Field>
         <Button onClick={verifyPackage} disabled={busy !== "" || !pkgText}>
@@ -247,14 +324,7 @@ export function Handoff() {
         <Button onClick={importIncident} disabled={busy !== "" || !incident}>
           {busy === "incident" ? "Importing…" : "Import incident"}
         </Button>
-        {imported && (
-          <p className="muted small">
-            Imported <code>{imported.bundle_id}</code> — replay status{" "}
-            <Tag tone={imported.replay_status === "match" ? "success" : "warning"}>
-              {imported.replay_status}
-            </Tag>
-          </p>
-        )}
+        {imported && <ImportedIncident result={imported} />}
       </Card>
 
       {report && (

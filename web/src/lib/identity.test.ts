@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { IdentityError, login, refreshAccess, signup, storedRefresh } from "./identity";
+import { IdentityError, login, logout, refreshAccess, signup, storedRefresh } from "./identity";
 
 /**
  * The identity client: it talks to the login service (not lab_server), it
@@ -87,5 +87,50 @@ describe("refresh rotation", () => {
     vi.stubGlobal("fetch", respond(401, { detail: "invalid refresh token" }));
     expect(await refreshAccess()).toBeNull();
     expect(storedRefresh()).toBeNull();
+  });
+});
+
+describe("the identity client tolerates what is not the identity service", () => {
+  it("a non-JSON success is an IdentityError, not a SyntaxError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, status: 200, text: async () => "<!doctype html>" })),
+    );
+    await expect(login("a@acme.io", "pw")).rejects.toBeInstanceOf(IdentityError);
+  });
+
+  it("a non-JSON failure keeps its status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false, status: 502, text: async () => "<html>502</html>" })),
+    );
+    await expect(login("a@acme.io", "pw")).rejects.toMatchObject({ status: 502 });
+  });
+});
+
+describe("logout revokes the refresh token", () => {
+  it("posts the stored refresh token to /v1/logout and forgets it", async () => {
+    vi.stubGlobal("fetch", respond(204, ""));
+    sessionStorage.setItem("axor-lab-refresh-token", "ref1");
+    await logout();
+    expect(calls[0]!.url).toBe("/identity/v1/logout");
+    expect(calls[0]!.body).toEqual({ refresh_token: "ref1" });
+    expect(storedRefresh()).toBeNull();
+  });
+
+  it("a failed revoke still logs out locally", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("offline");
+    }));
+    sessionStorage.setItem("axor-lab-refresh-token", "ref1");
+    await expect(logout()).resolves.toBeUndefined();
+    expect(storedRefresh()).toBeNull();
+  });
+
+  it("no refresh token, no request", async () => {
+    const fetchMock = respond(204, "");
+    vi.stubGlobal("fetch", fetchMock);
+    await logout();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

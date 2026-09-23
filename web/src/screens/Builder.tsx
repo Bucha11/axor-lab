@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  ApiError,
   api,
   type Json,
   type PlaygroundResult,
@@ -63,8 +64,11 @@ function Widget({
   onJump,
   control,
   itemChoices,
+  locked,
 }: {
   spec: FieldSpec;
+  /** `chips` only: the spec's basicLocked, passed only while in Basic mode */
+  locked?: { options: string[]; hint: string };
   itemChoices: Record<string, string[]>;
   value: unknown;
   /** id + aria-describedby for the ONE control a simple widget renders, so its
@@ -115,20 +119,7 @@ function Widget({
         </select>
       );
     case "tags":
-      return (
-        <input
-          {...control}
-          value={Array.isArray(value) ? value.join(", ") : ""}
-          placeholder="comma separated"
-          onChange={(e) => {
-            const items = e.target.value
-              .split(",")
-              .map((item) => item.trim())
-              .filter(Boolean);
-            onChange(items.length === 0 ? undefined : items);
-          }}
-        />
-      );
+      return <TagsInput {...control} value={value} onChange={onChange} />;
     case "textarea":
       return (
         <textarea
@@ -157,6 +148,7 @@ function Widget({
           options={spec.options ?? []}
           onChange={onChange}
           describedBy={control["aria-describedby"]}
+          locked={locked}
         />
       );
     case "list":
@@ -200,6 +192,55 @@ function Widget({
   }
 }
 
+const parseTags = (text: string) =>
+  text
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+/**
+ * A list of strings as one comma-separated text input.
+ *
+ * The text the person is TYPING is kept as typed; only the parsed array goes
+ * into the manifest. Rendering the input from the array instead re-joined it on
+ * every keystroke, so the comma you had just typed (an empty trailing item) and
+ * the space after it were normalised away before the next key landed — a
+ * second tag could not be typed at all. The text is re-derived from the
+ * document only when the document changed from ELSEWHERE (a mode switch, a
+ * YAML edit, a removed list item), and tidied on blur.
+ */
+function TagsInput({
+  value,
+  onChange,
+  placeholder,
+  ...control
+}: {
+  value: unknown;
+  onChange: (next: unknown) => void;
+  placeholder?: string;
+  id: string;
+  "aria-describedby"?: string;
+}) {
+  const joined = Array.isArray(value) ? value.map(String).join(", ") : "";
+  const [raw, setRaw] = useState(joined);
+  // adjusting state during render (not in an effect) so a foreign change never
+  // paints one frame of the stale text
+  if (parseTags(raw).join(", ") !== joined) setRaw(joined);
+  return (
+    <input
+      {...control}
+      value={raw}
+      placeholder={placeholder ?? "comma separated"}
+      onChange={(e) => {
+        setRaw(e.target.value);
+        const items = parseTags(e.target.value);
+        onChange(items.length === 0 ? undefined : items);
+      }}
+      onBlur={() => setRaw(joined)}
+    />
+  );
+}
+
 /**
  * A set-of-strings field as toggle chips.
  *
@@ -213,11 +254,15 @@ function ChipsField({
   options,
   onChange,
   describedBy,
+  locked,
 }: {
   value: unknown;
   options: string[];
   onChange: (next: unknown) => void;
   describedBy?: string;
+  /** options shown with their state but not toggleable here — see
+   * FieldSpec.basicLocked */
+  locked?: { options: string[]; hint: string };
 }) {
   const [draft, setDraft] = useState("");
   const selected = Array.isArray(value) ? value.map(String) : [];
@@ -232,17 +277,22 @@ function ChipsField({
 
   return (
     <div className="chips" aria-describedby={describedBy}>
-      {options.map((option) => (
-        <button
-          key={option}
-          type="button"
-          aria-pressed={selected.includes(option)}
-          className={`chip${selected.includes(option) ? " chip-on" : ""}`}
-          onClick={() => toggle(option)}
-        >
-          {option}
-        </button>
-      ))}
+      {options.map((option) => {
+        const isLocked = locked?.options.includes(option) ?? false;
+        return (
+          <button
+            key={option}
+            type="button"
+            aria-pressed={selected.includes(option)}
+            className={`chip${selected.includes(option) ? " chip-on" : ""}`}
+            disabled={isLocked}
+            title={isLocked ? locked?.hint : undefined}
+            onClick={() => toggle(option)}
+          >
+            {option}
+          </button>
+        );
+      })}
       {custom.map((item) => (
         <button
           key={item}
@@ -274,8 +324,9 @@ function ChipsField({
 /**
  * A list of objects as a list of small forms — one card per item, each field a
  * real input, add and remove as buttons. The named fields cover what a person
- * edits routinely; everything else the item carries stays under Details as
- * JSON, preserved untouched — the same carry-through rule as the manifest.
+ * edits routinely; everything else the item carries is listed under "also:"
+ * with an "Edit in YAML →" link, preserved untouched — the same carry-through
+ * rule as the manifest.
  */
 function ListField({
   value,
@@ -424,18 +475,7 @@ function ItemInput({
       );
     case "tags":
       return (
-        <input
-          id={id}
-          value={Array.isArray(value) ? value.join(", ") : ""}
-          placeholder={field.placeholder ?? "comma separated"}
-          onChange={(e) => {
-            const items = e.target.value
-              .split(",")
-              .map((item) => item.trim())
-              .filter(Boolean);
-            onChange(items.length === 0 ? undefined : items);
-          }}
-        />
+        <TagsInput id={id} value={value} placeholder={field.placeholder} onChange={onChange} />
       );
     default:
       return (
@@ -513,6 +553,7 @@ function Fields({
               blank={blankFor(spec, manifest)}
               control={{ id, ...(helpId ? { "aria-describedby": helpId } : {}) }}
               itemChoices={itemChoices}
+              locked={advanced ? undefined : spec.basicLocked}
               onChange={(next) => {
                 const written = writePath(manifest, spec.path, next);
                 // a coupled field finishes its own edit — see FieldSpec.couples
@@ -525,6 +566,9 @@ function Fields({
             )}
             {spec.help && (
               <span id={helpId} className="muted small">{spec.help}</span>
+            )}
+            {!advanced && spec.basicLocked && (
+              <span className="muted small">{spec.basicLocked.hint}</span>
             )}
           </div>
         );
@@ -560,6 +604,15 @@ export function Builder({ suiteId }: { suiteId: string }) {
   const [trialScenario, setTrialScenario] = useState("");
   const [runtimeRef, setRuntimeRef] = useState("");
   const [runError, setRunError] = useState<string | null>(null);
+  // Each action reports its failure BESIDE its own button. Check scenarios,
+  // Preview plan and Try one trial all used to write into `runError`, which
+  // renders under Run at the bottom of the page — the click did nothing
+  // visible and the reason sat a screen away, under an unrelated heading.
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [trialError, setTrialError] = useState<string | null>(null);
+  // a failed runtimes load is NOT "no agent connected": a 401/403/500 said
+  // "go connect one" to someone whose agent was connected all along
+  const [runtimesError, setRuntimesError] = useState<string | null>(null);
   const [jumpTarget, setJumpTarget] = useState<string | null>(null);
 
   // runs AFTER the YAML textarea is committed — the whole reason the cursor
@@ -589,7 +642,11 @@ export function Builder({ suiteId }: { suiteId: string }) {
         const only = rows.length === 1 ? rows[0] : undefined;
         if (only) setRuntimeRef(only.runtime_ref);
       })
-      .catch(() => live && setRuntimes([]));
+      .catch((exc: unknown) => {
+        if (!live) return;
+        setRuntimes([]);
+        setRuntimesError(exc instanceof Error ? exc.message : String(exc));
+      });
     return () => {
       live = false;
     };
@@ -634,6 +691,8 @@ export function Builder({ suiteId }: { suiteId: string }) {
     setScenarioErrors(null);
     setPlan(null);
     setRunError(null);
+    setCheckError(null);
+    setTrialError(null);
     setTrial(null);
   }
 
@@ -691,6 +750,11 @@ export function Builder({ suiteId }: { suiteId: string }) {
       const result = await api.validateSuite(document);
       setOk(result.ok);
       setErrors(result.errors);
+    } catch (exc) {
+      // without a catch a failed request (network, 401, 500) was swallowed by
+      // the finally: the button re-enabled and nothing said it had failed
+      setOk(false);
+      setErrors([exc instanceof Error ? exc.message : String(exc)]);
     } finally {
       setBusy(false);
     }
@@ -707,12 +771,25 @@ export function Builder({ suiteId }: { suiteId: string }) {
       setErrors(result.errors);
       if (!result.ok) return;
       const id = String(document.id ?? suiteId);
-      // an id change is a NEW suite (the server upserts by path id). Create it,
-      // then navigate to its route — otherwise the URL kept saying the old id
-      // while the form edited the new one, and reloading showed the pristine
-      // original, so the edits looked lost.
+      // an id change is a NEW suite. Create it, then navigate to its route —
+      // otherwise the URL kept saying the old id while the form edited the new
+      // one, and reloading showed the pristine original, so the edits looked
+      // lost. Create (POST) refuses an id that is already saved with a 409:
+      // it used to upsert, so renaming this suite onto another's id silently
+      // replaced that other suite.
       if (id !== suiteId) {
-        await api.createSuite(document);
+        try {
+          await api.createSuite(document);
+        } catch (exc) {
+          if (exc instanceof ApiError && exc.status === 409) {
+            setOk(false);
+            setErrors([
+              `A suite with id "${id}" already exists — pick another id.`,
+            ]);
+            return;
+          }
+          throw exc;
+        }
         setManifest(document);
         setSaved(true);
         navigate(`/suites/${id}`);
@@ -792,7 +869,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
    * own `counted_in_a_run: false` is rendered beside the result. */
   async function tryOneTrial() {
     setBusy(true);
-    setRunError(null);
+    setTrialError(null);
     setTrial(null);
     try {
       const document = await current();
@@ -802,7 +879,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
         ...(trialScenario ? { scenario: trialScenario } : {}),
       }));
     } catch (exc) {
-      setRunError(exc instanceof Error ? exc.message : String(exc));
+      setTrialError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setBusy(false);
     }
@@ -810,7 +887,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
 
   async function checkScenarios() {
     setBusy(true);
-    setRunError(null);
+    setCheckError(null);
     try {
       const document = await current();
       if (document === null) return;
@@ -823,7 +900,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
       }
       setScenarioErrors(found);
     } catch (exc) {
-      setRunError(exc instanceof Error ? exc.message : String(exc));
+      setCheckError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setBusy(false);
     }
@@ -840,14 +917,14 @@ export function Builder({ suiteId }: { suiteId: string }) {
    * and the caption promised the ids were deterministic. */
   async function previewPlan() {
     setBusy(true);
-    setRunError(null);
+    setCheckError(null);
     try {
       const document = await current();
       if (document === null) return;
       setPlan(await api.planSuite(document));
     } catch (exc) {
       setPlan(null);
-      setRunError(exc instanceof Error ? exc.message : String(exc));
+      setCheckError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setBusy(false);
     }
@@ -1010,6 +1087,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
           {ok === false && <Tag tone="danger">{errors?.length ?? 0} error(s)</Tag>}
           {saved && <Tag tone="success">saved</Tag>}
         </div>
+        {checkError && <p className="errors" role="alert">{checkError}</p>}
         {scenarioErrors !== null && (
           scenarioErrors.length === 0 ? (
             <p className="muted small">Every scenario validates on its own.</p>
@@ -1086,6 +1164,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
         <div className="row">
           <input
             value={trialScenario}
+            aria-label="Scenario to try"
             placeholder="scenario (first declared)"
             onChange={(event) => setTrialScenario(event.target.value)}
           />
@@ -1093,6 +1172,7 @@ export function Builder({ suiteId }: { suiteId: string }) {
             Try one trial
           </Button>
         </div>
+        {trialError && <p className="errors" role="alert">{trialError}</p>}
       </Card>
 
       {trial && <TrialResult result={trial} />}
@@ -1101,6 +1181,10 @@ export function Builder({ suiteId }: { suiteId: string }) {
         <h3>Run</h3>
         {runtimes === null ? (
           <Loading />
+        ) : runtimesError !== null ? (
+          <p className="errors" role="alert">
+            Could not load the connected agents: {runtimesError}
+          </p>
         ) : runtimes.length === 0 ? (
           <p className="muted">
             No agent connected yet. Bring your agent on{" "}

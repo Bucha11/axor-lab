@@ -26,9 +26,8 @@ const PACKAGE = {
 async function openHandoff(page: import("@playwright/test").Page) {
   await stubShell(page, { auth_required: false, guest: false });
   await stubScreens(page);
-  await page.route("**/home", json(200, { ...{
-    onboarding_step: "", quick_actions: [], suites: [], counts: {},
-  }, recent_runs: [RUN] }));
+  // EVERY run, from /runs — not Home's recent_runs, which is the last five
+  await page.route("**/runs", json(200, { runs: [{ ...RUN, planned: 1, completed: 1 }] }));
   await page.goto("/");
   await page.getByRole("link", { name: "Handoff", exact: true }).click();
 }
@@ -104,5 +103,55 @@ test.describe("Control Plane handoff", () => {
     await page.route("**/handoff/export", json(409, { error: "no enforcing condition" }));
     await page.getByRole("button", { name: "Export handoff" }).click();
     await expect(page.getByText(/no enforcing condition/)).toBeVisible();
+  });
+
+  test("an old run can be handed off: the list is every run, not the last five", async ({
+    page,
+  }) => {
+    await stubShell(page, { auth_required: false, guest: false });
+    await stubScreens(page);
+    const runs = Array.from({ length: 7 }, (_, i) => ({
+      run_id: `r_${i}`, state: "completed", planned: 1, completed: 1,
+    }));
+    await page.route("**/runs", json(200, { runs }));
+    await page.goto("/#/handoff");
+    await expect(page.getByText("r_6", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Export handoff" })).toHaveCount(7);
+  });
+
+  test("an incident import shows what came back, since nothing is stored", async ({ page }) => {
+    await openHandoff(page);
+    await page.route("**/incidents/import", json(201, {
+      bundle_id: "b_inc", trace_id: "t_inc", replay_status: "match",
+      bundle: { trials: [{}, {}] },
+      traces: [{}],
+      files: { "bundle.json": "{}", "traces/t_inc.json": "{}" },
+    }));
+    await page.getByLabel("Incident JSON").fill(
+      '{"trace": {}, "scenario": {}, "manifests": {}, "condition": {}}');
+    await page.getByRole("button", { name: "Import incident" }).click();
+    const result = page.getByTestId("incident-result");
+    await expect(result.getByText("b_inc")).toBeVisible();
+    await expect(result.getByText("t_inc", { exact: true })).toBeVisible();
+    await expect(result.getByText("traces/t_inc.json")).toBeVisible();
+    await expect(result.getByRole("button", { name: /Download bundle/ })).toBeVisible();
+  });
+
+  test("a bare package is accepted only when the reader says so", async ({ page }) => {
+    await openHandoff(page);
+    const posted: Record<string, unknown>[] = [];
+    await page.route("**/verify/package", async (route) => {
+      posted.push(route.request().postDataJSON() as Record<string, unknown>);
+      return json(200, { outcome: "ok", checks: [], failed: [] })(route);
+    });
+    await page.getByLabel("Package JSON").fill('{"bundle": {}, "traces": {}}');
+    await page.getByRole("button", { name: "Verify package" }).click();
+    await expect.poll(() => posted.length).toBe(1);
+    // OFF by default — it used to be sent as true on every click
+    expect(posted[0]).toMatchObject({ allow_bare: false });
+    await page.getByLabel("Accept a bare package").check();
+    await page.getByRole("button", { name: "Verify package" }).click();
+    await expect.poll(() => posted.length).toBe(2);
+    expect(posted[1]).toMatchObject({ allow_bare: true });
   });
 });

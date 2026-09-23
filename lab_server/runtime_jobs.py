@@ -112,10 +112,20 @@ _RUN_TRACE_RE = re.compile(r"^/runs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/tr
 # upsert keyed by the path segment. The hyphenated ones matched the id pattern
 # too, so the list is every single-segment POST path under /suites.
 _SUITE_ACTIONS = "validate|validate-yaml|to-yaml|plan"
-_SUITE_RE = re.compile(rf"^/suites/(?!(?:{_SUITE_ACTIONS})$)([A-Za-z0-9_-]+)$")
-_SUITE_YAML_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/yaml$")
-_SUITE_DISPATCH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/dispatch$")
-_SUITE_PUBLISH_RE = re.compile(r"^/suites/([A-Za-z0-9_-]+)/publish$")
+# A suite id as a path segment. The schema's own example is `acme.refund-policy`,
+# and the old `[A-Za-z0-9_-]+` saved such a suite and then 404'd every route that
+# names it — a suite you could create but never open again. Dots are allowed;
+# a segment made ONLY of dots is not: `.` / `..` are relative-path spellings a
+# proxy or client may normalise away, so the id would reach a different route
+# than the one the user saved to. The store itself is not at risk either way —
+# it percent-quotes the id into a single filename (screens._FileBackend) — but an
+# id the router cannot address must not be saveable (see `_ADDRESSABLE_SUITE_ID`).
+_SUITE_ID = r"(?!\.+(?:/|$))[A-Za-z0-9_.-]+"
+_ADDRESSABLE_SUITE_ID = re.compile(rf"^{_SUITE_ID}$")
+_SUITE_RE = re.compile(rf"^/suites/(?!(?:{_SUITE_ACTIONS})$)({_SUITE_ID})$")
+_SUITE_YAML_RE = re.compile(rf"^/suites/({_SUITE_ID})/yaml$")
+_SUITE_DISPATCH_RE = re.compile(rf"^/suites/({_SUITE_ID})/dispatch$")
+_SUITE_PUBLISH_RE = re.compile(rf"^/suites/({_SUITE_ID})/publish$")
 _VERIFY_PACKAGE_RE = re.compile(r"^/verify/package$")
 def _bundle_and_traces(
     body: dict[str, object]
@@ -142,7 +152,7 @@ def _bundle_and_traces(
 _HANDOFF_EXPORT_RE = re.compile(r"^/handoff/export$")
 _HANDOFF_VERIFY_RE = re.compile(r"^/handoff/verify$")
 _INCIDENT_IMPORT_RE = re.compile(r"^/incidents/import$")
-_REGISTRY_SUITE_RE = re.compile(r"^/registry/suites/([A-Za-z0-9_-]+)$")
+_REGISTRY_SUITE_RE = re.compile(rf"^/registry/suites/({_SUITE_ID})$")
 # a scenario is addressed by its `name`, which the schema leaves free-form; the
 # pattern is the same conservative id shape every other path segment uses, so a
 # scenario whose name needs more than this is reachable by listing, not by URL
@@ -285,6 +295,32 @@ def _verify_artifact_integrity(artifact: dict[str, object]) -> None:
             if inner[field_name] != content_hash(bundle[field_name]):
                 raise RuntimeJobsError(
                     422, f"artifact bundle.{field_name} does not match its content hash")
+
+
+def _remote_publish_failure(status: int | None, error: str) -> tuple[int, str]:
+    """The status + message a REMOTE publish rejection becomes on this server.
+
+    The remote server's status was passed straight through, so a publish server
+    that refused the upload's write token answered this request with a 401 —
+    and the web client, which reads 401 as ITS OWN session expiring, spent its
+    refresh token and logged the user out over a credential for somebody else's
+    server. An auth refusal upstream is a bad gateway here, said as such; any
+    other rejection keeps its status, because a 422 from the remote verifier is
+    an answer about the evidence and means the same thing on either hop.
+
+    The remote body is JSON (`{"error": ...}`) and was shown raw; its `error`
+    string is what a person reads."""
+    message = error or "the publish handshake was rejected"
+    try:
+        parsed = json.loads(error) if error else None
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+        message = str(parsed["error"])
+    if status in (401, 403):
+        return 502, (f"the publish server refused this upload ({status}): {message} "
+                     "— check the server write token")
+    return status or 502, message
 
 
 def _run_environment(manifest: dict[str, object]) -> dict[str, object]:
@@ -1459,7 +1495,9 @@ def make_runtime_server(
                     return str(card.get("reason", "not yet available"))
             return None
 
-        def _save_suite(self, document: dict[str, object]) -> str:
+        def _save_suite(
+            self, document: dict[str, object], *, create: bool = False,
+        ) -> str:
             """Store a suite after the SAME semantic check the Builder runs.
 
             The store validated only the JSON Schema, so a direct API client
@@ -1467,7 +1505,15 @@ def make_runtime_server(
             broken (no scenarios, governance without arms) that the Builder would
             then refuse to run. And a suite this workspace authored is stamped
             `workspace`: a fork of a built-in kept `origin: built_in`, so the
-            catalog could not tell a user's suite from the shipped one."""
+            catalog could not tell a user's suite from the shipped one.
+
+            `create=True` is POST /suites: a NEW suite. The Builder calls it when
+            the id field was changed, and it used to upsert — so renaming a
+            suite to an id another saved suite already had silently replaced
+            that suite. Create refuses an id that is already saved (409); PUT
+            /suites/{id} is the edit route and stays an upsert. A built-in id
+            is not refused: saving over it layers a workspace copy that DELETE
+            removes again, so the shipped suite is shadowed, never lost."""
             from lab_suite import builtin_registry, validate_manifest
             from lab_suite.errors import SuiteNotFound
             from lab_server.workspaces import require_within
@@ -1476,6 +1522,21 @@ def make_runtime_server(
             if errors:
                 raise RuntimeJobsError(422, "; ".join(errors[:5]))
             suite_id = str(document.get("id", ""))
+            # every saved suite must be reachable at /suites/{id}; an id the
+            # router cannot match (a slash, a space, `..`) would save with a
+            # green tick and then 404 on every open, run and delete
+            if not _ADDRESSABLE_SUITE_ID.match(suite_id):
+                raise RuntimeJobsError(
+                    400,
+                    f"suite id {suite_id!r} is not usable in a URL — use letters, "
+                    "digits, '-', '_' and '.', and not only dots",
+                )
+            if create and suite_id in shelf.ids("suite"):
+                raise RuntimeJobsError(
+                    409,
+                    f"a suite with id {suite_id!r} already exists — pick another "
+                    "id, or open that suite to edit it",
+                )
             # a NEW workspace suite counts against the plan's max_suites; an edit
             # of an existing one does not (the count is unchanged). Built-in ids
             # are not workspace suites and are never gated.
@@ -1505,8 +1566,13 @@ def make_runtime_server(
         def _playground_suite(
             self, body: dict[str, object],
         ) -> tuple[dict[str, object], object]:
-            """The suite a Playground preview runs: a posted manifest, or a
-            registered id."""
+            """The suite a Playground preview runs: a posted manifest, or an id.
+
+            An id resolves exactly as GET /suites/{id} does (`_resolve_suite`:
+            the workspace's saved copy first, then the built-in). Looking only
+            in the built-in registry meant a suite the user had saved could not
+            be tried at all, and an edited built-in ran the SHIPPED document —
+            the Playground answered for a suite nobody was looking at."""
             from lab_suite import builtin_registry
             from lab_suite.errors import SuiteNotFound
             from lab_suite.sdk import BaseSuite
@@ -1520,10 +1586,11 @@ def make_runtime_server(
                         400, "a playground trial requires {suite} or {suite_id}",
                     )
                 try:
-                    suite = registry.get(suite_id)
+                    manifest = self._resolve_suite(suite_id)
                 except SuiteNotFound as exc:
                     raise RuntimeJobsError(404, str(exc)) from None
-                return suite.manifest(), suite
+            # the manifest is what runs; the registered class (if the id has
+            # one) only supplies the environment behind it
             try:
                 return manifest, registry.get(str(manifest.get("id", "")))
             except SuiteNotFound:
@@ -1562,8 +1629,16 @@ def make_runtime_server(
                     # UNAUTHENTICATED: the web app asks this before gating, so it
                     # can skip the login screen when the server is open (local dev)
                     # and offer a guest session only when one is available.
+                    #
+                    # `identity` says whether email/password login can work at
+                    # all. Without it the login screen offered a form against
+                    # an identity service this server does not trust — every
+                    # sign-in "succeeded" at identity and then 401'd here, and
+                    # the operator who only has a control token read that as a
+                    # broken login.
                     self._send(200, {"auth_required": control_token is not None,
-                                     "guest": bool(guest_sessions)})
+                                     "guest": bool(guest_sessions),
+                                     "identity": identity_jwks is not None})
                     return
                 if path == "/home":
                     # the Launchpad: the NEXT action, not the past. A catalog of
@@ -1751,6 +1826,19 @@ def make_runtime_server(
                          "description": s.get("description", ""),
                          "origin": s.get("origin", "workspace")}
                         for s in suites]})
+                    return
+                m = _REGISTRY_SUITE_RE.match(path)
+                if m:
+                    # ONE org-registry suite. The route was declared and the
+                    # client had a method for it, but nothing answered: the
+                    # registry could be listed and no entry could be opened.
+                    # Same isolation as the list — no org, nothing to read.
+                    self._require_control()
+                    org = self._current_workspace().org
+                    if not org:
+                        raise RuntimeJobsError(
+                            404, "this workspace belongs to no org — no registry to read")
+                    self._send(200, workspaces.org_registry(org).get("suite", m.group(1)))
                     return
                 m = _SUITE_YAML_RE.match(path)
                 if m:
@@ -2000,6 +2088,16 @@ def make_runtime_server(
                     body = self._read_json()
                     ws_id = new_id("ws", {w.id for w in workspaces.list()})
                     plan = body.get("plan")
+                    # A plan may be named by its catalog ID — what /billing/plans
+                    # lists and what the web client holds. Only a dict was read,
+                    # so a named plan was silently dropped and the tenant landed
+                    # on free while the operator believed they had picked one.
+                    plan_id = FREE_PLAN
+                    if isinstance(plan, str) and plan:
+                        if plan not in workspaces.plan_catalog:
+                            raise RuntimeJobsError(400, f"unknown plan {plan!r}")
+                        plan_id = plan
+                        plan = dict(workspaces.plan_catalog[plan])
                     # a new TENANT starts on the catalog's free tier, not on
                     # DEFAULT_PLAN. DEFAULT_PLAN is unlimited with every
                     # capability — right for the single "default" workspace an
@@ -2013,6 +2111,10 @@ def make_runtime_server(
                         token=secrets.token_hex(24),
                         plan=plan if isinstance(plan, dict)
                         else dict(workspaces.plan_catalog.get(FREE_PLAN, {})),
+                        # the subscription names the plan it DRIVES; a tenant
+                        # created on "team" that read `subscription: free` would
+                        # show the wrong current plan and offer to sell it back
+                        subscription={"plan_id": plan_id, "status": "active"},
                     ))
                     self._send(201, {**created.public(), "token": created.token})
                     return
@@ -2213,7 +2315,8 @@ def make_runtime_server(
                     return
                 if path == "/suites":
                     self._require_control()
-                    self._send(201, {"id": self._save_suite(self._document("suite"))})
+                    self._send(201, {"id": self._save_suite(
+                        self._document("suite"), create=True)})
                     return
                 if path == "/scenarios":
                     # Save a scenario so other suites can `scenario_ref` it.
@@ -2331,8 +2434,7 @@ def make_runtime_server(
                         )
                         if result.outcome is not Outcome.OK:
                             raise RuntimeJobsError(
-                                result.status or 502,
-                                result.error or "the publish handshake was rejected")
+                                *_remote_publish_failure(result.status, result.error))
                         self._send(201, {
                             "publication_id": result.publication_id,
                             "url": result.url,
