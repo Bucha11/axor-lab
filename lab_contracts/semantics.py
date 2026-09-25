@@ -17,7 +17,11 @@ from .subset_validator import validate_against
 
 # contract vocabulary (tool-manifest.schema effect classes, predicate matchers)
 EGRESS_CLASSES = frozenset({"EXPORT", "EXEC"})
-SINK_CLASSES = EGRESS_CLASSES | {"WRITE"}
+# A WRITE that never resolves to EXPORT/EXEC and declares driving_args compiles to
+# an axor-core integrity sink: a state change whose driving args the attacker must
+# not choose (integrity check only, no confidentiality floor).
+INTEGRITY_CLASS = "WRITE"
+SINK_CLASSES = EGRESS_CLASSES | {INTEGRITY_CLASS}
 # the confidentiality label whose value is redacted in the trace — the ONLY case
 # in which a value may omit its decision_value (mirrors the wrap engine's ledger)
 LABEL_SENSITIVE = "sensitive"

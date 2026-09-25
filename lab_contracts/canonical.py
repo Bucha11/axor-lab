@@ -184,13 +184,17 @@ def compiled_governor_config(
     ``args_schema`` but NOT ``untrusted_fields`` — so two manifests that taint
     different result fields (and therefore govern differently) hashed identically.
     This binds them: a changed egress sink, driving arg, OR untrusted-field
-    pattern yields a different canonical config. ``$inputs.x`` allowlist refs are
+    pattern yields a different canonical config. A WRITE tool with driving args
+    that never resolves to EXPORT/EXEC is an ``integrity_sinks`` member; the key
+    appears only when some tool is one, so a manifest set without one keeps its
+    hash. ``$inputs.x`` allowlist refs are
     expanded when ``inputs`` is supplied (runtime), left symbolic otherwise (the
     scenario-independent carry-over identity)."""
     from .inputs import expand_list
-    from .semantics import EGRESS_CLASSES
+    from .semantics import EGRESS_CLASSES, INTEGRITY_CLASS
 
     egress: list[str] = []
+    integrity: list[str] = []
     untrusted_sources: list[str] = []
     sensitive_sources: list[str] = []
     driving: dict[str, list[str]] = {}
@@ -200,8 +204,11 @@ def compiled_governor_config(
         effect: dict[str, object] = manifest.get("effect", {}) or {}  # type: ignore[assignment]
         classes = {str(effect.get("default_class"))}
         classes.update(str(rule["class"]) for rule in effect.get("resolve", []))  # type: ignore[union-attr]
+        args = [str(a) for a in effect.get("driving_args", [])]  # type: ignore[union-attr]
         if classes & EGRESS_CLASSES:
             egress.append(tool_id)
+        elif INTEGRITY_CLASS in classes and args:
+            integrity.append(tool_id)
         fields = [str(p) for p in manifest.get("untrusted_fields", [])]  # type: ignore[union-attr]
         if fields:
             untrusted_sources.append(tool_id)
@@ -213,10 +220,10 @@ def compiled_governor_config(
         # govern differently — hash identically.
         if manifest.get("sensitive_fields"):
             sensitive_sources.append(tool_id)
-        args = [str(a) for a in effect.get("driving_args", [])]  # type: ignore[union-attr]
         if args:
             driving[tool_id] = args
     egress.sort()
+    integrity.sort()
     untrusted_sources.sort()
     sensitive_sources.sort()
     # per-sink consequence-class overrides. condition/v1 declares these and they
@@ -237,7 +244,7 @@ def compiled_governor_config(
         for sink in egress:
             arg = (driving.get(sink) or ["recipient"])[0]
             value_policies[sink] = {arg: {"enum": resolved}}
-    return {
+    compiled: dict[str, object] = {
         "kernel": kernel,
         "egress_sinks": egress,
         "untrusted_sources": untrusted_sources,
@@ -247,6 +254,9 @@ def compiled_governor_config(
         "value_policies": value_policies,
         "consequence_overrides": dict(sorted(overrides.items())),
     }
+    if integrity:
+        compiled["integrity_sinks"] = integrity
+    return compiled
 
 
 def parametric_policy_hash(

@@ -254,6 +254,7 @@ def check_regression(
         # pinned build (review r4).
         cfg = governor_config(manifests, condition.get("policy"), None)  # type: ignore[arg-type]
         cfg.pop("egress_sinks", None)
+        cfg.pop("integrity_sinks", None)
         cfg.pop("value_policies", None)
         kernel: object = AxorKernel(version=version, config=cfg, taint_floor_enabled=False)
     else:

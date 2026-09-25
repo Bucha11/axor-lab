@@ -215,6 +215,8 @@ def governor_config(
     """Map Lab tool manifests + condition policy → ToolCallGovernor kwargs.
 
     - egress_sinks: tools whose effect can resolve to EXPORT/EXEC;
+    - integrity_sinks: WRITE tools with driving args that never resolve to
+      EXPORT/EXEC (a state change the attacker must not steer);
     - untrusted_sources: tools declaring untrusted result fields;
     - driving_args: each sink's effect.driving_args;
     - value_policies: an allowlist becomes an enum destination policy
@@ -240,6 +242,9 @@ def governor_config(
         "sensitive_sources": set(canon["sensitive_sources"]),  # type: ignore[arg-type]
         "driving_args": canon["driving_args"],
     }
+    if canon.get("integrity_sinks"):
+        _require_integrity_sinks_support()
+        config["integrity_sinks"] = set(canon["integrity_sinks"])  # type: ignore[arg-type]
     if canon["value_policies"]:
         config["value_policies"] = _value_predicates(canon["value_policies"])  # type: ignore[arg-type]
     if canon["consequence_overrides"]:
@@ -247,6 +252,21 @@ def governor_config(
             canon["consequence_overrides"],  # type: ignore[arg-type]
         )
     return config
+
+
+def _require_integrity_sinks_support() -> None:
+    """Refuse an axor-core that predates ``integrity_sinks`` rather than run the
+    condition with its integrity sinks silently ungated."""
+    import inspect
+
+    from axor_core.governor import ToolCallGovernor
+
+    if "integrity_sinks" not in inspect.signature(ToolCallGovernor).parameters:
+        raise UnknownKernelError(
+            "the manifests declare an integrity sink (a WRITE tool with driving_args), "
+            "and the installed axor-core's ToolCallGovernor has no integrity_sinks — "
+            "refusing to govern with that control silently dropped"
+        )
 
 
 def _value_predicates(compiled: dict[str, dict[str, dict[str, object]]]) -> dict[str, object]:
