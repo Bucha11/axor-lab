@@ -5,3 +5,4 @@ features.parquet
 i1_per_tenant.parquet
 i2_shapes.npz
 i2_best_method.txt
+i4_scenarios.parquet
