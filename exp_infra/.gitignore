@@ -1,0 +1,7 @@
+# generated artefacts (regenerate with prepare.py / i1_money.py / i2_analogs.py)
+series_owner.npz
+series_app.npz
+features.parquet
+i1_per_tenant.parquet
+i2_shapes.npz
+i2_best_method.txt
