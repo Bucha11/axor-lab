@@ -11,7 +11,7 @@ hit are silent until that moment, and neither error message says what to do:
     (axor-wrap, axor-eval) to integration branches, so a publish today fails on
     upload with nothing published and the tag consumed.
 
-  * **A dependency that is not on PyPI.** `axor-core>=0.11,<0.12` is not a
+  * **A dependency that is not on PyPI.** `axor-core>=0.12,<0.13` is not a
     direct reference, so the upload succeeds — and then every
     `pip install axor-lab` on a clean machine fails to resolve, because the
     only axor-core on PyPI is older than the floor. A release that installs

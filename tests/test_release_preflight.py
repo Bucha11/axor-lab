@@ -29,7 +29,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 
 GIT_PIN = "axor-wrap @ git+https://github.com/Bucha11/axor-wrap@some-branch"
-RANGE = "axor-core<0.12,>=0.11"
+RANGE = "axor-core<0.13,>=0.12"
 EXTRA = 'pyyaml>=6.0; extra == "yaml"'
 MARKED = 'tomli>=2.0; python_version < "3.11"'
 

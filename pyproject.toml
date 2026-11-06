@@ -34,15 +34,22 @@ requires-python = ">=3.11"
 # Each is bounded to one minor line, the same rule as the kernel: an environment
 # must not resolve a version Lab's integration jobs never ran against.
 dependencies = [
-    "axor-core>=0.11,<0.12",
+    # Moved 0.11 -> 0.12 whole, not widened: one minor line, so an environment
+    # cannot resolve a kernel Lab's integration jobs never ran against. 0.12's
+    # breaking changes are STRICT-only and Lab compiles no STRICT governor;
+    # 1317 tests pass against an installed 0.12.0 once the kernel pin in
+    # examples/banking-exfil-01.axl follows (see below).
+    "axor-core>=0.12,<0.13",
     "axor-wrap>=0.2,<0.3",
     # axor-eval is the shared fault-injection evaluator (silent_fail deprivation,
     # the ToolAuditLayer that emits FABRICATED_TOOL_RESULT). Lab reuses it for the
     # tool-fabrication experiment (silent_fail + ToolAuditLayer + the shared
     # reconstruct_claim in axor_eval.claims) rather than re-implementing the
     # deviation machinery — the same "one engine, no duplicate" rule the wrap
-    # migration followed. 0.2.0 declares axor-core>=0.8,<0.12 and
-    # axor-wrap>=0.2,<0.3, so all three resolve together.
+    # migration followed. The 0.2.0 wheels of eval and wrap both declared
+    # axor-core<0.12, so neither could resolve beside the kernel this file now
+    # requires; eval 0.2.2 and wrap 0.2.1 carry the widened ceiling, and all
+    # three resolve together again.
     "axor-eval>=0.2,<0.3",
 ]
 
