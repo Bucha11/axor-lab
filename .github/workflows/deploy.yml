@@ -1,0 +1,87 @@
+name: Deploy
+
+# Rolls the hosted Lab (lab.useaxor.net) forward after a push to main: once the
+# `:edge` image is on GHCR AND CI passed on that same commit, ssh to the server
+# and restart `lab` on the new image. Nothing else on the server is touched —
+# the Control Plane checkout and its compose are deployed from that repo.
+#
+# Why both gates: Image and CI run side by side on every push. Waiting on Image
+# alone would ship a commit whose tests failed; waiting on CI alone could pull
+# an image that is still building.
+#
+# The `production` environment is the brake: give it a required reviewer in
+# Settings and every roll waits for a human. Without one, main deploys itself.
+#
+# One-time setup (Settings → Secrets and variables → Actions), the same four
+# the Control Plane's Deploy uses:
+#   DEPLOY_HOST         server hostname or IP
+#   DEPLOY_USER         SSH user that can run docker
+#   DEPLOY_SSH_KEY      private key for that user (ed25519, no passphrase)
+#   DEPLOY_KNOWN_HOSTS  output of `ssh-keyscan -t ed25519 <host>`
+# The server runs Lab from /opt/axor/deploy/prod with LAB_TAG=edge (the
+# default). A server pinned to a version tag is left on it: pulling `edge`
+# does not change a pinned service.
+on:
+  workflow_run:
+    workflows: ["Image"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deploy-lab
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    environment: production
+    steps:
+      - name: CI passed on this commit
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          # CI takes longer than the image; wait for it rather than race it.
+          for i in $(seq 1 40); do
+            out=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&event=push" \
+              --jq '.workflow_runs[0] | "\(.status) \(.conclusion)"')
+            status=${out%% *}; conclusion=${out#* }
+            echo "CI on ${SHA:0:7}: ${status:-none} ${conclusion:-}"
+            if [ "$status" = "completed" ]; then
+              [ "$conclusion" = "success" ] && exit 0
+              echo "CI did not pass on this commit; not deploying"; exit 1
+            fi
+            sleep 30
+          done
+          echo "CI did not finish in 20 minutes; not deploying"; exit 1
+
+      - name: Configure SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Pull and restart Lab
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i ~/.ssh/id_deploy "$USER@$HOST" sh -eu <<'EOF'
+          cd /opt/axor/deploy/prod
+          docker compose pull lab
+          docker compose up -d lab lab-edge
+          docker image prune -f
+          docker compose ps lab lab-edge
+          EOF
