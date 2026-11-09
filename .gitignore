@@ -11,7 +11,7 @@ build/
 web/node_modules/
 web/dist/
 # the release copy of web/dist inside the package (tools/bundle_web.sh)
-lab_server/_web/
+lab_server/web-dist/
 web/*.tsbuildinfo
 
 # local virtualenv — the README's quickstart makes one, and `pip install -e .`

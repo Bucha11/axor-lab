@@ -360,7 +360,7 @@ jobs:
           curl -fs localhost:8871/ | grep -q "<title>Axor Lab</title>"
           curl -fs localhost:8871/auth/status | grep -q '"auth_required": false'
           grep -q "durable → /tmp/lab-home/.axor-lab" /tmp/serve.log
-          grep -q "site-packages/lab_server/_web" /tmp/serve.log
+          grep -q "site-packages/lab_server/web-dist" /tmp/serve.log
           echo "pip install axor-lab && axor-lab serve: UI, no login, durable"
 
   identity:

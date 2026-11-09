@@ -237,6 +237,11 @@ def _cmd_serve(args: argparse.Namespace) -> int:
            "OPEN — every screen endpoint is unauthenticated. Local dev only; "
            "pass --control-token before exposing this.")
     )
+    # Said NOW, not when the buffer fills. Redirected to a file or a pipe (a
+    # service manager, `> lab.log`), stdout is block-buffered, and the banner
+    # — which URL, where the data lives, whether auth is on — sat unflushed
+    # while the server ran: the one moment it matters, it was not there.
+    sys.stdout.flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

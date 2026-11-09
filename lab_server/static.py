@@ -33,7 +33,7 @@ APP_ROUTES = ("/", "/index.html")
 
 #: Where a released wheel carries the built app. `tools/bundle_web.sh` copies
 #: `web/dist` here before `python -m build`; a source checkout never has it.
-PACKAGED_ROOT = Path(__file__).resolve().parent / "_web"
+PACKAGED_ROOT = Path(__file__).resolve().parent / "web-dist"
 
 
 def default_root() -> Path | None:

@@ -9,6 +9,6 @@ set -eu
 cd "$(dirname "$0")/.."
 npm --prefix web ci --no-audit --no-fund
 npm --prefix web run build
-rm -rf lab_server/_web
-cp -R web/dist lab_server/_web
-echo "bundled web app -> lab_server/_web ($(find lab_server/_web -type f | wc -l | tr -d ' ') files)"
+rm -rf lab_server/web-dist
+cp -R web/dist lab_server/web-dist
+echo "bundled web app -> lab_server/web-dist ($(find lab_server/web-dist -type f | wc -l | tr -d ' ') files)"

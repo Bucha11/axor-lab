@@ -90,9 +90,9 @@ class TestTheWheelCarriesTheApp(unittest.TestCase):
 
     def test_the_package_data_declares_it(self) -> None:
         text = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
-        self.assertIn('lab_server = ["_web/*", "_web/assets/*"]', text)
+        self.assertIn('lab_server = ["web-dist/*", "web-dist/assets/*"]', text)
         manifest = (Path(__file__).resolve().parent.parent / "MANIFEST.in").read_text()
-        self.assertIn("recursive-include lab_server/_web *", manifest)
+        self.assertIn("recursive-include lab_server/web-dist *", manifest)
 
 
 if __name__ == "__main__":  # pragma: no cover
