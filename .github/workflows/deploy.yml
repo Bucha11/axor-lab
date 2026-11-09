@@ -44,8 +44,23 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     environment: production
     steps:
+      # Until the four secrets exist there is nowhere to deploy to. Say so in
+      # the run summary and stop, rather than fail red on every push.
+      - name: Deploy target configured
+        id: target
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -n "$HOST" ] && [ -n "$KEY" ]; then
+            echo "ready=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::DEPLOY_HOST / DEPLOY_SSH_KEY are not set in this repository — nothing was deployed"
+            echo "ready=0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: CI passed on this commit
-        if: github.event_name == 'workflow_run'
+        if: steps.target.outputs.ready == '1' && github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.event.workflow_run.head_sha }}
@@ -65,6 +80,7 @@ jobs:
           echo "CI did not finish in 20 minutes; not deploying"; exit 1
 
       - name: Configure SSH
+        if: steps.target.outputs.ready == '1'
         env:
           KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
@@ -74,6 +90,7 @@ jobs:
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
 
       - name: Pull and restart Lab
+        if: steps.target.outputs.ready == '1'
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
