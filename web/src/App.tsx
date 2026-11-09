@@ -234,6 +234,7 @@ export function App() {
           </a>
         ))}
         <div className="spacer" />
+        <VersionBadge />
         {currentToken() && (
           <button className="linklike" onClick={logout}>
             Log out
@@ -247,5 +248,45 @@ export function App() {
         <Screen key={session} route={route} />
       </main>
     </div>
+  );
+}
+
+/** Which build is answering. The KERNEL version is on screen because that is
+ * what decides what Lab's numbers mean; the rest of the stack is in the
+ * tooltip, where an operator who is diffing a deploy will look for it.
+ *
+ * Renders NOTHING when the call does not answer — an older server that has no
+ * `/version`, or a session whose token has lapsed. A deploy check that shows a
+ * blank where a version should be reads as a broken page; no badge at all
+ * reads as a server that predates the badge, which is the truth.
+ */
+function VersionBadge() {
+  const [versions, setVersions] = useState<Record<string, string | null> | null>(
+    null,
+  );
+  useEffect(() => {
+    let alive = true;
+    api
+      .version()
+      .then((v) => {
+        if (alive) setVersions(v.versions);
+      })
+      .catch(() => {
+        /* older server, or no credential yet: say nothing */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const kernel = versions?.["axor-core"];
+  if (!kernel) return null;
+  const detail = Object.entries(versions ?? {})
+    .filter(([, v]) => v)
+    .map(([name, v]) => `${name} ${v}`)
+    .join("\n");
+  return (
+    <span className="version-badge" title={detail}>
+      kernel {kernel}
+    </span>
   );
 }

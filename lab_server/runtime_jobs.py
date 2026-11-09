@@ -94,6 +94,28 @@ from lab_server.screens import (
 
 _MAX_BODY = 8 * 1024 * 1024
 
+# What GET /version reports: Lab itself, then the ecosystem it measures.
+# axor-core first — Lab exists to measure what the kernel does, so the kernel's
+# version decides what the numbers on screen MEAN, more than Lab's own does.
+_VERSIONED = ("axor-lab", "axor-core", "axor-wrap", "axor-eval")
+
+
+def _installed_version(name: str) -> str | None:
+    """The version of an INSTALLED distribution, or None when it is absent.
+
+    Absent is a fact about this install, not an error: Lab runs from a checkout
+    as well as from a wheel, and a source tree that was never `pip install`-ed
+    has no distribution metadata to read. None says so without guessing.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _dist_version
+
+    try:
+        return _dist_version(name)
+    except PackageNotFoundError:
+        return None
+
+
 _RUNTIME_JOBS_RE = re.compile(r"^/runtime/jobs$")
 _CLAIM_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/claim$")
 _EVENTS_RE = re.compile(r"^/runtime/jobs/([A-Za-z0-9_]+)/trials/([A-Za-z0-9_.:-]+)/events$")
@@ -1639,6 +1661,22 @@ def make_runtime_server(
                     self._send(200, {"auth_required": control_token is not None,
                                      "guest": bool(guest_sessions),
                                      "identity": identity_jwks is not None})
+                    return
+                if path == "/version":
+                    # What is actually deployed here. AUTHENTICATED, unlike
+                    # /auth/status next door: an operator comparing this against
+                    # the tag they rolled is the point, and an anonymous caller
+                    # asking an open route for a version list is handed the set
+                    # of advisories to try.
+                    #
+                    # Read from the INSTALLED distributions, not a constant, so
+                    # it describes the process answering the request. A constant
+                    # can only ever agree with the deploy; these can disagree,
+                    # which is the one thing worth knowing.
+                    self._require_control()
+                    self._send(200, {"versions": {
+                        name: _installed_version(name) for name in _VERSIONED
+                    }})
                     return
                 if path == "/home":
                     # the Launchpad: the NEXT action, not the past. A catalog of

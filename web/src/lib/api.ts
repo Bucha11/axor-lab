@@ -186,6 +186,13 @@ export interface AuthStatus {
   identity?: boolean;
 }
 
+/** Versions of the INSTALLED packages, keyed by distribution name. A value is
+ * null when that package is not installed as a distribution — Lab also runs
+ * from a checkout, which has no metadata to read. */
+export interface VersionInfo {
+  versions: Record<string, string | null>;
+}
+
 export interface HomePayload {
   onboarding_step: string;
   quick_actions: { id: string; label: string; endpoint: string }[];
@@ -455,6 +462,11 @@ export const api = {
    * mode does not), whether it offers anonymous guest sessions, and whether it
    * trusts an identity service for email/password login. */
   authStatus: () => call<AuthStatus>("GET", "/auth/status"),
+  /** What is actually deployed: the versions of the packages installed in the
+   * process answering, read from distribution metadata rather than from a
+   * constant. Authenticated, unlike `/auth/status` — a version list handed to
+   * an anonymous caller is the set of advisories to try. */
+  version: () => call<VersionInfo>("GET", "/version"),
   /** Start an anonymous, ephemeral hosted session — no registration. */
   guestSession: () =>
     call<{ token: string; workspace_id: string; expires_at: number }>(

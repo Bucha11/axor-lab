@@ -13,6 +13,11 @@
 .nav a:hover { color: var(--fg); text-decoration: none; }
 .nav a.active { color: var(--accent); }
 .nav .spacer { flex: 1; }
+.version-badge {
+  font-family: var(--mono); font-size: 11px; color: var(--muted-fg);
+  border: 1px solid var(--border); border-radius: 20px; padding: 3px 10px;
+  white-space: nowrap; cursor: default;
+}
 .brand { font-weight: 700; font-size: 16px; cursor: pointer; margin-right: var(--s2); }
 .brand span { color: var(--accent); }
 .token {
