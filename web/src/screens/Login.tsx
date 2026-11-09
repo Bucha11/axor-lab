@@ -13,7 +13,9 @@ export function Login({
   identityAvailable = true,
   notice = null,
 }: {
-  onAuthenticated: (accessToken: string) => void;
+  /** `guest` is true for an anonymous trial session, so the shell can keep
+   * offering a real sign-in instead of a log-out. */
+  onAuthenticated: (accessToken: string, guest?: boolean) => void;
   guestAvailable?: boolean;
   /** whether the server trusts an identity service (/auth/status `identity`).
    * Without one, an email/password form is a dead end — the sign-in succeeds
@@ -57,7 +59,7 @@ export function Login({
     try {
       const session = await api.guestSession();
       rememberRefresh(null); // a guest session has no refresh token
-      onAuthenticated(session.token);
+      onAuthenticated(session.token, true);
     } catch {
       setError("could not start a guest session");
     } finally {

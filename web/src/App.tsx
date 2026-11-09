@@ -44,6 +44,37 @@ const NAV: [string, string][] = [
  * permission error to a user who had already entered one. */
 const TOKEN_KEY = "axor-lab-control-token";
 
+/** Whether the credential in this tab is an anonymous guest session. A guest
+ * is shown "Log in", not "Log out", and an expired guest is quietly replaced
+ * by a fresh one instead of being bounced to a login screen. */
+const GUEST_KEY = "axor-lab-guest";
+
+/** One guest mint at a time. React runs effects twice in development, and a
+ * page that opens with two requests in flight would spend two of the server's
+ * capped guest slots on one visitor. */
+let guestMint: Promise<string | null> | null = null;
+/** When the last guest was minted. A guest that 401s within a minute of being
+ * created did not EXPIRE (they last 30) — the server is refusing it, and minting
+ * another would only be refused too, forever. */
+let lastGuestAt = 0;
+const GUEST_RETRY_MS = 60_000;
+function mintGuest(): Promise<string | null> {
+  if (!guestMint) {
+    guestMint = api
+      .guestSession()
+      .then((s) => {
+        rememberRefresh(null); // a guest session has no refresh token
+        lastGuestAt = Date.now();
+        return s.token;
+      })
+      .catch(() => null)
+      .finally(() => {
+        guestMint = null;
+      });
+  }
+  return guestMint;
+}
+
 /** The nav entry a route belongs to. Only an EXACT match was highlighted, so
  * every detail page (a run, a trial, an artifact) left the nav with nothing
  * lit — the user lost where they were the moment they clicked into anything.
@@ -135,6 +166,17 @@ export function App() {
   // why the user is looking at the login screen again, when it was not their
   // choice — an expired session used to bounce them there without a word
   const [notice, setNotice] = useState<string | null>(null);
+  const [isGuest, setIsGuest] = useState(() => sessionStorage.getItem(GUEST_KEY) === "1");
+  // the sign-in panel, opened over the product rather than in place of it
+  const [signingIn, setSigningIn] = useState(false);
+  // a guest could not be started (capacity, or the route is off): only then
+  // does a hosted server fall back to the full-page login
+  const [guestFailed, setGuestFailed] = useState(false);
+
+  useEffect(() => {
+    if (isGuest) sessionStorage.setItem(GUEST_KEY, "1");
+    else sessionStorage.removeItem(GUEST_KEY);
+  }, [isGuest]);
 
   useEffect(() => {
     api
@@ -150,11 +192,40 @@ export function App() {
     else sessionStorage.removeItem(TOKEN_KEY);
   }, [token]);
 
+  // No wall in front of the product. A hosted server that offers guest
+  // sessions starts one on its own, so a visitor lands on Lab itself — the
+  // screens, the suites, a trial they can run — and signs in only when they
+  // want to keep something. Re-runs after a log-out (session bump), which
+  // drops a signed-in user back to a guest rather than to a login page.
+  useEffect(() => {
+    if (!authInfo?.auth_required || !authInfo.guest || guestFailed) return;
+    // an open sign-in panel is a question to the user; do not answer it for
+    // them by slipping a guest in behind it
+    if (currentToken() || signingIn) return;
+    let alive = true;
+    void mintGuest().then((t) => {
+      if (!alive) return;
+      if (!t) {
+        setGuestFailed(true);
+        return;
+      }
+      // not authenticate(): that closes the sign-in panel and clears its
+      // notice, and an expired user who is being asked to sign in again must
+      // keep both — the guest only fills in the product behind the panel
+      setToken(t);
+      setLocal(t);
+      setIsGuest(true);
+      setSession((n) => n + 1);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [authInfo, guestFailed, session, signingIn]);
+
   // When a request comes back 401, try to refresh the access token (identity
-  // login) once and continue. If that fails — an identity refresh token that is
-  // itself expired, or a guest session that has no refresh token and has expired
-  // — drop the credential so the app returns cleanly to the login screen instead
-  // of leaving every screen erroring until a manual reload.
+  // login) once and continue. If that fails, a GUEST is quietly given a fresh
+  // guest session — it held nothing worth a login prompt — while a signed-in
+  // user is asked to sign in again, over the screen they were on.
   useEffect(() => {
     setUnauthorizedHandler(async () => {
       const next = await refreshAccess();
@@ -162,20 +233,34 @@ export function App() {
         setLocal(next);
         return next;
       }
+      if (
+        sessionStorage.getItem(GUEST_KEY) === "1" &&
+        Date.now() - lastGuestAt > GUEST_RETRY_MS
+      ) {
+        const fresh = await mintGuest();
+        if (fresh) {
+          authenticate(fresh, true);
+          return fresh;
+        }
+      }
       setToken(null);
       setLocal("");
       rememberRefresh(null);
+      setIsGuest(false);
       setNotice("Your session expired — sign in again.");
+      setSigningIn(true);
       setSession((n) => n + 1);
       return null;
     });
     return () => setUnauthorizedHandler(null);
   }, []);
 
-  function authenticate(accessToken: string): void {
+  function authenticate(accessToken: string, guest = false): void {
     setToken(accessToken);
     setLocal(accessToken);
+    setIsGuest(guest);
     setNotice(null);
+    setSigningIn(false);
     setSession((n) => n + 1);
   }
 
@@ -187,6 +272,7 @@ export function App() {
     setToken(null);
     setLocal("");
     rememberRefresh(null);
+    setIsGuest(false);
     setNotice(null);
     setSession((n) => n + 1);
   }
@@ -195,10 +281,14 @@ export function App() {
     return <div className="app" />; // brief: waiting on GET /auth/status
   }
 
-  if (authInfo.auth_required && !currentToken()) {
-    // A hosted server gates every screen endpoint; show the login (with a guest
-    // option when the deployment offers one). An OPEN server skips this branch —
-    // running locally needs no login at all.
+  if (authInfo.auth_required && !currentToken() && authInfo.guest && !guestFailed && !signingIn) {
+    return <div className="app" />; // brief: a guest session is being started
+  }
+
+  if (authInfo.auth_required && !currentToken() && !signingIn) {
+    // Only when there is no way in without an account: a private install that
+    // offers no guests, or a public one whose guest slots are all taken. An
+    // OPEN server never reaches this — running locally needs no login at all.
     return (
       <div className="app">
         <main>
@@ -207,7 +297,9 @@ export function App() {
             guestAvailable={authInfo.guest}
             // absent (an older server) is "unknown", which keeps the form
             identityAvailable={authInfo.identity !== false}
-            notice={notice}
+            notice={guestFailed && authInfo.guest
+              ? "Guest sessions are full right now — sign in, or try again in a few minutes."
+              : notice}
           />
         </main>
       </div>
@@ -235,17 +327,57 @@ export function App() {
         ))}
         <div className="spacer" />
         <VersionBadge />
-        {currentToken() && (
-          <button className="linklike" onClick={logout}>
-            Log out
-          </button>
+        {isGuest ? (
+          <>
+            <span className="muted small" title="Nothing is saved; it expires after 30 minutes">
+              guest
+            </span>
+            <button className="btn btn-primary btn-sm" onClick={() => setSigningIn(true)}>
+              Log in
+            </button>
+          </>
+        ) : (
+          currentToken() && (
+            <button className="linklike" onClick={logout}>
+              Log out
+            </button>
+          )
         )}
       </nav>
+      {signingIn && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(e) => {
+            // close only when nothing would be lost: a guest or signed-in user
+            // has the product behind the panel; an expired session does not
+            if (e.target === e.currentTarget && currentToken()) setSigningIn(false);
+          }}
+        >
+          <div className="modal" role="dialog" aria-label="Log in">
+            {currentToken() && (
+              <button className="linklike modal-close" onClick={() => setSigningIn(false)} aria-label="Close">
+                ×
+              </button>
+            )}
+            <Login
+              onAuthenticated={authenticate}
+              // with no credential behind the panel, "try without an account"
+              // is the way back to the product for someone who does not want
+              // to sign in again
+              guestAvailable={authInfo.guest && !currentToken()}
+              identityAvailable={authInfo.identity !== false}
+              notice={notice}
+            />
+          </div>
+        </div>
+      )}
       <main>
         {/* Keyed by the SESSION, not the token: a new credential remounts the
             screen tree so every `useAsync` re-runs against it, while a refresh
             (same session, fresher token) leaves what is on screen alone. */}
-        <Screen key={session} route={route} />
+        {currentToken() || !authInfo.auth_required ? (
+          <Screen key={session} route={route} />
+        ) : null}
       </main>
     </div>
   );

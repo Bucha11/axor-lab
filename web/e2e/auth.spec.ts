@@ -51,16 +51,60 @@ test.describe("the login gate", () => {
     await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
   });
 
-  test("a guest can enter without an account when offered", async ({ page }) => {
-    await gotoSecured(page, true);
+  test("when guests are offered, a visitor lands in the product, not on a login", async ({
+    page,
+  }) => {
+    // a login wall as the first screen loses everyone who came to look
+    await stubShell(page, { auth_required: true, guest: true });
     await page.route(
       "**/guest-session",
       json(201, { token: "guest-tok", workspace_id: "guest_1", expires_at: 9e9 }),
     );
-    const guestBtn = page.getByRole("button", { name: "Try without an account" });
-    await expect(guestBtn).toBeVisible();
-    await guestBtn.click();
+    await page.goto("/");
+    await expect(page.getByRole("link", { name: "Suites" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Log in" })).toHaveCount(0);
+    await expect(page.getByText("guest", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Log in" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Log out" })).toHaveCount(0);
+  });
+
+  test("a guest signs in from the nav, over the screen they are on", async ({ page }) => {
+    await stubShell(page, { auth_required: true, guest: true });
+    await page.route(
+      "**/guest-session",
+      json(201, { token: "guest-tok", workspace_id: "guest_1", expires_at: 9e9 }),
+    );
+    await page.route("**/identity/v1/login", json(200, SESSION));
+    await page.goto("/");
+    await page.getByRole("button", { name: "Log in" }).click();
+    const panel = page.getByRole("dialog", { name: "Log in" });
+    await panel.getByLabel("Email").fill("ada@acme.io");
+    await panel.getByLabel("Password").fill("correct horse");
+    await panel.getByRole("button", { name: "Log in" }).click();
+    await expect(panel).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByText("guest", { exact: true })).toHaveCount(0);
+  });
+
+  test("the sign-in panel closes without signing in", async ({ page }) => {
+    await stubShell(page, { auth_required: true, guest: true });
+    await page.route(
+      "**/guest-session",
+      json(201, { token: "guest-tok", workspace_id: "guest_1", expires_at: 9e9 }),
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Log in" }).click();
+    await page.getByRole("button", { name: "Close" }).click();
+    await expect(page.getByRole("dialog", { name: "Log in" })).toHaveCount(0);
+    await expect(page.getByText("guest", { exact: true })).toBeVisible();
+  });
+
+  test("when every guest slot is taken, the login says so", async ({ page }) => {
+    await stubShell(page, { auth_required: true, guest: true });
+    await page.route("**/guest-session", json(429, { error: "all 200 guest sessions are in use" }));
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Log in" })).toBeVisible();
+    await expect(page.getByText(/Guest sessions are full/)).toBeVisible();
   });
 
   test("no guest button when the server does not offer it", async ({ page }) => {
@@ -141,21 +185,23 @@ test.describe("the login gate", () => {
     expect(validations).toBe(2);
   });
 
-  test("an expired guest session drops back to login", async ({ page }) => {
+  test("a guest the server refuses at once is not re-minted forever", async ({ page }) => {
+    // every 401 used to be answerable with a fresh guest — and a server that
+    // refuses guests outright would have been asked for one in a tight loop
     await stubShell(page, { auth_required: true, guest: true });
-    // the guest enters, but the very next screen fetch is unauthorized (expired)
-    // and there is no refresh token — the app must return to the login screen
-    await page.route(
-      "**/guest-session",
-      json(201, { token: "guest-tok", workspace_id: "guest_1", expires_at: 9e9 }),
-    );
+    let minted = 0;
+    await page.route("**/guest-session", (route) => {
+      minted += 1;
+      return json(201, { token: `guest-${minted}`, workspace_id: "g", expires_at: 9e9 })(route);
+    });
     await page.route("**/home", json(401, { error: "control token required" }));
     await page.route("**/identity/v1/refresh", json(401, { detail: "invalid refresh token" }));
     await page.goto("/");
-    await page.getByRole("button", { name: "Try without an account" }).click();
     await expect(page.getByRole("heading", { name: "Log in" })).toBeVisible();
     // and it says why, rather than bouncing silently
     await expect(page.getByText(/session expired/)).toBeVisible();
+    await page.waitForTimeout(1500);
+    expect(minted).toBe(1);
   });
 });
 
