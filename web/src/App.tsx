@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  api, currentToken, setToken, setUnauthorizedHandler, type AuthStatus,
+  api, currentToken, setToken, setUnauthorizedHandler, type AuthStatus, type GuestClaim,
 } from "./lib/api";
 import { logout as identityLogout, rememberRefresh, refreshAccess } from "./lib/identity";
 import { navigate, segments, useRoute } from "./lib/router";
@@ -172,6 +172,8 @@ export function App() {
   // a guest could not be started (capacity, or the route is off): only then
   // does a hosted server fall back to the full-page login
   const [guestFailed, setGuestFailed] = useState(false);
+  // what a sign-in carried over from the guest session, said once
+  const [carried, setCarried] = useState<string | null>(null);
 
   useEffect(() => {
     if (isGuest) sessionStorage.setItem(GUEST_KEY, "1");
@@ -256,7 +258,21 @@ export function App() {
   }, []);
 
   function authenticate(accessToken: string, guest = false): void {
+    const guestToken = !guest && sessionStorage.getItem(GUEST_KEY) === "1" ? currentToken() : "";
     setToken(accessToken);
+    if (guestToken) {
+      // signing in from a guest session: take what it made into the account
+      // before the screens reload, so they reload WITH it
+      void api
+        .claimGuest(guestToken)
+        .then((claim) => {
+          setCarried(describeClaim(claim));
+          setSession((n) => n + 1);
+        })
+        .catch(() => {
+          /* an expired guest has nothing left to move; the sign-in stands */
+        });
+    }
     setLocal(accessToken);
     setIsGuest(guest);
     setNotice(null);
@@ -375,6 +391,14 @@ export function App() {
         {/* Keyed by the SESSION, not the token: a new credential remounts the
             screen tree so every `useAsync` re-runs against it, while a refresh
             (same session, fresher token) leaves what is on screen alone. */}
+        {carried && (
+          <p className="banner" role="status">
+            {carried}{" "}
+            <button className="linklike" onClick={() => setCarried(null)} aria-label="Dismiss">
+              ×
+            </button>
+          </p>
+        )}
         {currentToken() || !authInfo.auth_required ? (
           <Screen key={session} route={route} />
         ) : null}
@@ -421,4 +445,31 @@ function VersionBadge() {
       kernel {kernel}
     </span>
   );
+}
+
+const KIND_LABEL: Record<string, [string, string]> = {
+  suite: ["suite", "suites"],
+  scenario: ["scenario", "scenarios"],
+  "evidence-case": ["EvidenceCase", "EvidenceCases"],
+  regression: ["regression", "regressions"],
+  artifact: ["artifact", "artifacts"],
+  publication: ["publication", "publications"],
+};
+
+/** "Moved from your guest session: 2 suites, 1 run." — or null when the guest
+ * had made nothing, which deserves no banner. */
+export function describeClaim(claim: GuestClaim): string | null {
+  const parts: string[] = [];
+  for (const [kind, n] of Object.entries(claim.documents)) {
+    const [one, many] = KIND_LABEL[kind] ?? [kind, kind];
+    parts.push(`${n} ${n === 1 ? one : many}`);
+  }
+  if (claim.runs) parts.push(`${claim.runs} ${claim.runs === 1 ? "run" : "runs"}`);
+  let text = parts.length ? `Moved from your guest session: ${parts.join(", ")}.` : "";
+  if (claim.left_running) {
+    text += `${text ? " " : ""}${claim.left_running} ${
+      claim.left_running === 1 ? "run was" : "runs were"
+    } still running and stayed behind.`;
+  }
+  return text || null;
 }

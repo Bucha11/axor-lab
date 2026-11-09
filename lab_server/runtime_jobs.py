@@ -539,6 +539,29 @@ class RuntimeJobStore:
                 "order by updated_at asc", (self._ws,)).fetchall()
         return [row[0] for row in rows]
 
+    def absorb_finished(self, source: "RuntimeJobStore") -> tuple[int, int]:
+        """Move every FINISHED run of `source` into this store, saving each one
+        here (durably, when this store has a DSN). Return (moved, left).
+
+        Only finished runs: a run still in flight has a runtime thread writing
+        to the store that created it, and moving its record out from under that
+        thread would split the run in two. Those are counted, not moved. Job ids
+        carry random suffixes, so they cannot collide with this store's own.
+        """
+        with source._lock:
+            finished = [j for j in source._jobs.values() if j.state in TERMINAL_STATES]
+            left = len(source._jobs) - len(finished)
+        moved = 0
+        with self._lock:
+            for job in finished:
+                if job.job_id in self._jobs:
+                    continue
+                job.listeners = []  # live queues belong to the old connections
+                self._jobs[job.job_id] = job
+                self._save_locked(job)
+                moved += 1
+        return moved, left
+
     def _next(self, prefix: str) -> str:
         self._n += 1
         return f"{prefix}_{self._n:04d}_{secrets.token_hex(6)}"
@@ -2180,6 +2203,26 @@ def make_runtime_server(
                     workspaces.bind_key(str(connection["ingest_key"]),
                                         workspaces.current_id() or "default")
                     self._send(201, connection)
+                    return
+                if path == "/workspaces/current/claim-guest":
+                    # the account that just signed in takes over what its guest
+                    # session made. Authenticated as the ACCOUNT (the bearer);
+                    # the guest is named by its own token in the body, which is
+                    # the proof that the caller held that session.
+                    self._require_control()
+                    body = self._read_json()
+                    guest_token = str(body.get("guest_token") or "")
+                    if not guest_token:
+                        raise RuntimeJobsError(400, "guest_token is required")
+                    try:
+                        claimed = workspaces.claim_guest(
+                            guest_token, self._current_workspace().id)
+                    except KeyError:
+                        raise RuntimeJobsError(
+                            404, "no live guest session for that token") from None
+                    except ValueError as exc:
+                        raise RuntimeJobsError(400, str(exc)) from None
+                    self._send(200, claimed)
                     return
                 if path == "/workspaces/current/members":
                     # provision a MEMBER of this workspace with a role, returning

@@ -189,6 +189,16 @@ export interface AuthStatus {
 /** Versions of the INSTALLED packages, keyed by distribution name. A value is
  * null when that package is not installed as a distribution — Lab also runs
  * from a checkout, which has no metadata to read. */
+/** What a sign-in carried over from the guest session it replaced. */
+export interface GuestClaim {
+  /** documents moved, per kind (suite, scenario, evidence-case, …) */
+  documents: Record<string, number>;
+  /** finished runs moved */
+  runs: number;
+  /** runs still in flight, which stay with the guest session */
+  left_running: number;
+}
+
 export interface VersionInfo {
   versions: Record<string, string | null>;
 }
@@ -467,6 +477,12 @@ export const api = {
    * constant. Authenticated, unlike `/auth/status` — a version list handed to
    * an anonymous caller is the set of advisories to try. */
   version: () => call<VersionInfo>("GET", "/version"),
+  /** Move what a guest session made into the account that is now signed in.
+   * Called with the ACCOUNT as the bearer; the guest is named by its token. */
+  claimGuest: (guestToken: string) =>
+    call<GuestClaim>("POST", "/workspaces/current/claim-guest", {
+      guest_token: guestToken,
+    }),
   /** Start an anonymous, ephemeral hosted session — no registration. */
   guestSession: () =>
     call<{ token: string; workspace_id: string; expires_at: number }>(

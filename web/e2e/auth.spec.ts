@@ -86,6 +86,50 @@ test.describe("the login gate", () => {
     await expect(page.getByText("guest", { exact: true })).toHaveCount(0);
   });
 
+  test("signing in from a guest session carries the guest's work into the account", async ({
+    page,
+  }) => {
+    await stubShell(page, { auth_required: true, guest: true });
+    await page.route(
+      "**/guest-session",
+      json(201, { token: "guest-tok", workspace_id: "guest_1", expires_at: 9e9 }),
+    );
+    await page.route("**/identity/v1/login", json(200, SESSION));
+    const claims: { auth: string | null; body: unknown }[] = [];
+    await page.route("**/workspaces/current/claim-guest", async (route) => {
+      claims.push({
+        auth: route.request().headers()["authorization"] ?? null,
+        body: route.request().postDataJSON(),
+      });
+      return json(200, { documents: { suite: 2 }, runs: 1, left_running: 0 })(route);
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Log in" }).click();
+    const panel = page.getByRole("dialog", { name: "Log in" });
+    await panel.getByLabel("Email").fill("ada@acme.io");
+    await panel.getByLabel("Password").fill("correct horse");
+    await panel.getByRole("button", { name: "Log in" }).click();
+    await expect(page.getByText("Moved from your guest session: 2 suites, 1 run.")).toBeVisible();
+    // as the ACCOUNT, naming the guest by its own token
+    expect(claims).toEqual([
+      { auth: `Bearer ${SESSION.access_token}`, body: { guest_token: "guest-tok" } },
+    ]);
+  });
+
+  test("a sign-in that did not start as a guest claims nothing", async ({ page }) => {
+    await gotoSecured(page);
+    await page.route("**/identity/v1/login", json(200, SESSION));
+    let claimed = 0;
+    await page.route("**/workspaces/current/claim-guest", (route) => {
+      claimed += 1;
+      return json(200, { documents: {}, runs: 0, left_running: 0 })(route);
+    });
+    await fillLogin(page);
+    await page.getByRole("button", { name: "Log in" }).click();
+    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    expect(claimed).toBe(0);
+  });
+
   test("the sign-in panel closes without signing in", async ({ page }) => {
     await stubShell(page, { auth_required: true, guest: true });
     await page.route(

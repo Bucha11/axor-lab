@@ -478,6 +478,40 @@ class Workspaces:
         return {"token": token, "workspace_id": ws_id, "expires_at": expires,
                 "plan": dict(TRIAL_PLAN)}
 
+    def claim_guest(self, guest_token: str, into_ws_id: str) -> dict[str, object]:
+        """Move what a guest session made into a real workspace, then end it.
+
+        A visitor lands in Lab as a guest and signs in once something is worth
+        keeping — which, before this, was the moment it was lost: the account is
+        another workspace, and the guest's stores lived in memory.
+
+        Copies the guest's suites, scenarios, EvidenceCases, regressions,
+        artifacts and publications (the account's own documents win on an id
+        clash) and its FINISHED runs. A run still in flight stays behind and is
+        reported, not split. The guest token stops working afterwards, so one
+        session cannot be claimed twice.
+
+        Raises KeyError when `guest_token` is not a live guest session, and
+        ValueError when the target is itself a guest.
+        """
+        entry = self._resolve(guest_token)
+        if entry is None or entry[0].id not in self._guest_expiry:
+            raise KeyError("not a live guest session")
+        guest_id = entry[0].id
+        if into_ws_id in self._guest_expiry or into_ws_id == guest_id:
+            raise ValueError("a guest session can only be claimed by an account")
+        with self._lock:
+            guest_stores = self._stores.get(guest_id)
+        if guest_stores is None:
+            raise KeyError("not a live guest session")
+        guest_jobs, guest_shelf = guest_stores
+        jobs, shelf = self.stores(into_ws_id)
+        documents = shelf.absorb(guest_shelf)
+        runs, left_running = jobs.absorb_finished(guest_jobs)
+        with self._lock:
+            self._evict_guest(guest_id, guest_token)
+        return {"documents": documents, "runs": runs, "left_running": left_running}
+
     def _evict_guest(self, ws_id: str, token: str) -> None:  # noqa: D401
         """Drop an expired guest session (caller holds the lock)."""
         self._by_token.pop(token_digest(token), None)

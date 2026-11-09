@@ -115,6 +115,29 @@ class ScreenStore:
         with self._lock:
             return self._backend.ids(kind)
 
+    def absorb(self, source: "ScreenStore") -> dict[str, int]:
+        """Copy every document of `source` into this store; return how many per
+        kind. A document already here under the same id is KEPT, not replaced —
+        absorbing a guest into an account must never overwrite the account.
+
+        Written through the backend rather than `put`: every document in
+        `source` passed `put`'s schema check on the way in, and `put` needs to
+        know each kind's id field, which the store already keyed it by.
+        """
+        moved: dict[str, int] = {}
+        for kind in SCREEN_KINDS:
+            for identifier in source.ids(kind):
+                try:
+                    document = source.get(kind, identifier)
+                except ScreenStoreError:
+                    continue  # gone between listing and reading
+                with self._lock:
+                    if self._backend.read(kind, identifier) is not None:
+                        continue
+                    self._backend.write(kind, identifier, dict(document))
+                moved[kind] = moved.get(kind, 0) + 1
+        return moved
+
     def find(self, kind: str, contains: dict[str, Any]) -> list[dict[str, Any]]:
         """Documents of `kind` that CONTAIN `contains` — the query a file tree
         cannot answer.

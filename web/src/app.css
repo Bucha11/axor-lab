@@ -236,3 +236,11 @@ button.linklike:hover { color: var(--fg); }
   position: absolute; top: 8px; right: 12px; font-size: 20px; line-height: 1;
 }
 .nav .btn { align-self: center; }
+
+/* one-line confirmation above the screen (e.g. guest work carried into an account) */
+.banner {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s2);
+  margin: 0 0 var(--s3); padding: var(--s1) var(--s2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface); font-size: 14px;
+}
