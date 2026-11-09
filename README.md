@@ -99,7 +99,19 @@ Advanced and YAML edit the **same document**, and a field no form shows is
 carried through untouched:
 
 ```
-python -m lab_runner.cli serve --port 8871
+pip install axor-lab
+axor-lab serve            # → http://127.0.0.1:8871
+```
+
+No login and no token: a local run is open, bound to `127.0.0.1`. Your work is
+kept in `~/.axor-lab` and is there the next time you start it (`--data-dir`
+moves it, `--in-memory` keeps nothing). The released wheel carries the built
+web app. From a source checkout, build it first:
+
+```
+pip install -e .
+npm --prefix web ci && npm --prefix web run build
+axor-lab serve
 ```
 
 ## What this is not
@@ -342,9 +354,10 @@ about whether a package holds up.
 `docker compose up --build` runs the platform behind a proxy that terminates
 TLS and rate-limits — the two things the app deliberately does not do itself.
 Single node: live run state is in memory, so do not scale it to two replicas.
-Outside the image, `axor-lab serve --web-root <dir>` (or `AXOR_LAB_WEB_ROOT`)
-points at the built app; the implicit `web/dist` default only exists in a source
-checkout.
+Outside the image, `axor-lab serve` finds the app inside the installed wheel
+(`tools/bundle_web.sh` puts it there for a release) or in `web/dist` in a
+source checkout; `--web-root <dir>` (or `AXOR_LAB_WEB_ROOT`) points anywhere
+else.
 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** has first boot, TLS, backup and
 restore, upgrade, and what was verified against a running stack.
 

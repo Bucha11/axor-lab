@@ -32,6 +32,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The wheel carries the built web app, so `pip install axor-lab &&
+      # axor-lab serve` opens a UI. Bundled before the build, and checked by the
+      # clean-room step below rather than trusted.
+      - name: Bundle the web app into the package
+        run: tools/bundle_web.sh
+
       - name: Build sdist + wheel
         run: |
           python -m pip install --upgrade build twine
@@ -57,6 +67,11 @@ jobs:
           from lab_contracts import load_schemas
           s = load_schemas(); assert set(s) >= {'trace','bundle','scenario'}, s
           print('schemas loaded from package data:', len(s))
+          "
+          cd / && /tmp/release-venv/bin/python -c "
+          from lab_server.static import default_root, PACKAGED_ROOT
+          assert default_root() == PACKAGED_ROOT, default_root()
+          print('web app shipped in the wheel:', PACKAGED_ROOT)
           "
           cd / && /tmp/release-venv/bin/axor-lab --help >/dev/null
           cd / && /tmp/release-venv/bin/axor-lab report --help >/dev/null

@@ -31,10 +31,23 @@ from pathlib import Path
 APP_ROUTES = ("/", "/index.html")
 
 
+#: Where a released wheel carries the built app. `tools/bundle_web.sh` copies
+#: `web/dist` here before `python -m build`; a source checkout never has it.
+PACKAGED_ROOT = Path(__file__).resolve().parent / "_web"
+
+
 def default_root() -> Path | None:
-    """`web/dist` beside the repo, when it has been built."""
-    candidate = Path(__file__).resolve().parent.parent / "web" / "dist"
-    return candidate if (candidate / "index.html").is_file() else None
+    """The built web app: the copy shipped inside the wheel, else `web/dist`
+    beside the repo when it has been built, else None.
+
+    The packaged copy is what makes `pip install axor-lab && axor-lab serve`
+    open a UI. Without it a normal install puts `lab_server` in site-packages,
+    where `../web/dist` does not exist, and served the API alone.
+    """
+    for candidate in (PACKAGED_ROOT, Path(__file__).resolve().parent.parent / "web" / "dist"):
+        if (candidate / "index.html").is_file():
+            return candidate
+    return None
 
 
 def resolve(root: Path, path: str) -> Path | None:

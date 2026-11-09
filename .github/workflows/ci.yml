@@ -333,10 +333,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Build + install the wheel into a clean venv, run outside the source tree
         run: |
+          tools/bundle_web.sh
           python -m pip install --upgrade build
-          python -m build --wheel
+          python -m build
           python -m venv /tmp/venv
           /tmp/venv/bin/pip install dist/*.whl
           # run from / with no AXOR_LAB_CONTRACTS and no contracts/ nearby:
@@ -347,6 +351,17 @@ jobs:
           print('schemas loaded from package data:', len(s))
           "
           cd / && /tmp/venv/bin/axor-lab --help >/dev/null && echo 'axor-lab console script works'
+          # the local quickstart, exactly: install, serve, open. The UI must come
+          # from the wheel, there is no login, and the work survives a restart.
+          export HOME=/tmp/lab-home
+          cd / && (/tmp/venv/bin/axor-lab serve --port 8871 > /tmp/serve.log 2>&1 &)
+          for i in $(seq 1 30); do curl -fs localhost:8871/auth/status >/dev/null && break; sleep 1; done
+          cat /tmp/serve.log
+          curl -fs localhost:8871/ | grep -q "<title>Axor Lab</title>"
+          curl -fs localhost:8871/auth/status | grep -q '"auth_required": false'
+          grep -q "durable → /tmp/lab-home/.axor-lab" /tmp/serve.log
+          grep -q "site-packages/lab_server/_web" /tmp/serve.log
+          echo "pip install axor-lab && axor-lab serve: UI, no login, durable"
 
   identity:
     name: Identity-login tests actually run (pyjwt + cryptography)

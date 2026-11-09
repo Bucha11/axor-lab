@@ -84,6 +84,9 @@ packages = [
 # thing this split removed.
 [tool.setuptools.package-data]
 lab_contracts = ["schemas/*.schema.json"]
+# the built web app, copied in by tools/bundle_web.sh for a release; absent in a
+# checkout, where `serve` falls back to web/dist
+lab_server = ["_web/*", "_web/assets/*"]
 
 [project.optional-dependencies]
 # The Builder's YAML editing mode (Suite Platform RFC §13). Basic and Advanced

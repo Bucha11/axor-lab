@@ -183,6 +183,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                       or os.environ.get("AXOR_LAB_GUEST_SESSIONS") == "1")
     dsn = (getattr(args, "database_url", None)
            or os.environ.get("AXOR_LAB_DATABASE_URL") or None)
+    if dsn is None and not data_dir and not getattr(args, "in_memory", False):
+        # A laptop run keeps its work. The default used to be memory, so every
+        # suite and run someone made locally was gone the next time they
+        # started Lab — the first thing a new user does, and the first thing
+        # they lose. `--in-memory` keeps the old behaviour for a throwaway run.
+        data_dir = str(Path.home() / ".axor-lab")
     if dsn is not None:
         # Reach the database HERE, not on the first request. psycopg_pool opens
         # in the background and retries forever, so an unreachable database let
@@ -797,7 +803,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--data-dir", default=None,
         help="persist the workspace (suites, evidence, regressions, artifacts) "
              "in this directory and reload it on restart (or AXOR_LAB_DATA_DIR); "
-             "omitted, storage is in-memory",
+             "default ~/.axor-lab",
+    )
+    p_serve.add_argument(
+        "--in-memory", action="store_true",
+        help="keep nothing: a throwaway run that forgets everything on exit",
     )
     p_serve.add_argument(
         "--database-url", default=None,
