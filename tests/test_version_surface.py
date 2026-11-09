@@ -49,12 +49,26 @@ class TestVersionSurface(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["versions"]["axor-core"], axor_core.__version__)
 
-    def test_lab_reports_its_own_version(self) -> None:
+    def test_every_package_is_named_even_when_it_is_not_installed(self) -> None:
+        """The key is always there; the VALUE is what varies.
+
+        An earlier version of this test asserted `axor-lab` is never null, and
+        CI's real-kernel job disproved it: that job installs the kernel, wrap
+        and eval and runs the suite straight out of the checkout, so Lab itself
+        has no distribution metadata to read. Null there is correct.
+
+        What a reader of this payload needs is the distinction between "this
+        deployment does not have that package" and "this server has never heard
+        of it" — so the key set is fixed and the value carries the answer.
+        """
         server, base = _serve(control_token=None)
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
         _status, payload = _get(base, "/version")
-        self.assertIsNotNone(payload["versions"]["axor-lab"])
+        self.assertEqual(
+            sorted(payload["versions"]),
+            sorted(["axor-lab", "axor-core", "axor-wrap", "axor-eval"]),
+        )
 
     def test_a_hosted_server_does_not_answer_anonymously(self) -> None:
         """/auth/status is open next door; this one is not.
