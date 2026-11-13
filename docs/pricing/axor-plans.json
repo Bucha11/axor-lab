@@ -5,8 +5,9 @@
     "price_period": "month",
     "max_suites": null,
     "max_artifacts": null,
-    "max_hosted_runtimes": 0,
-    "capabilities": []
+    "max_hosted_runtimes": 1,
+    "max_hosted_runs_per_month": 50,
+    "capabilities": ["hosted_execution"]
   },
   "team": {
     "name": "Team Workspace",

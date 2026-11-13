@@ -85,6 +85,10 @@ DEFAULT_PLAN: dict[str, object] = {
 # contain a plan with this id.
 FREE_PLAN = "free"
 
+# axor-identity's tier names → plan ids in the catalog. Identity calls the free
+# tier "community"; the catalog calls it "free".
+TIER_ALIASES: dict[str, str] = {"community": FREE_PLAN}
+
 # The plan a GUEST (anonymous, unregistered) hosted session runs on. It is a
 # product mechanism, not a priced tier, so it is fixed in code rather than the
 # operator catalog: enough to TRY hosted execution once, nothing that persists
@@ -107,8 +111,10 @@ TRIAL_PLAN: dict[str, object] = {
 EXAMPLE_PLAN_CATALOG: dict[str, dict[str, object]] = {
     "free": {
         "name": "free", "price_usd": 0,
-        "max_suites": 3, "max_artifacts": 10, "max_hosted_runtimes": 0,
-        "capabilities": [],
+        "max_suites": 3, "max_artifacts": 10,
+        # what a guest tried, kept: one hosted runtime and a small monthly allowance
+        "max_hosted_runtimes": 1, "max_hosted_runs_per_month": 50,
+        "capabilities": ["hosted_execution"],
     },
     "starter": {
         "name": "starter", "price_usd": 49,
@@ -384,9 +390,17 @@ class Workspaces:
                 # its audit history has nothing to attach to
                 self._save_workspace_locked(workspace)
             current_plan = str(workspace.subscription.get("plan_id", FREE_PLAN))
-        if tier is not None and (created or current_plan != tier):
-            plan_id = tier if tier in self.plan_catalog else FREE_PLAN
-            self.apply_plan(org_id, plan_id)
+        if tier is not None:
+            plan_id = TIER_ALIASES.get(tier, tier)
+            if plan_id not in self.plan_catalog:
+                plan_id = FREE_PLAN
+            # A login may RAISE a workspace to the plan identity says the org
+            # is on, and a new workspace starts on it; a login never LOWERS one.
+            # Identity's tier said "community" for every org and that is in no
+            # catalog, so each login re-applied free — a Team workspace bought
+            # through the Lab's own billing fell back to free on its next login.
+            if created or (plan_id != FREE_PLAN and current_plan != plan_id):
+                self.apply_plan(org_id, plan_id)
         return workspace
 
     def resolve_token(self, token: str | None) -> Workspace | None:

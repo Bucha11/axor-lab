@@ -111,7 +111,9 @@ class TestTheCatalogIsOperatorSupplied(unittest.TestCase):
 class TestPurchaseFlow(BillingTestCase):
     def test_free_blocks_then_a_paid_plan_opens_the_gate(self) -> None:
         token = self._free_tenant()
-        # free plan: hosted execution is not in capabilities → 402
+        # free plan: ONE hosted runtime (what a guest tried); a second → 402
+        self.assertEqual(
+            self.call("POST", "/hosted-runtimes", {"model": "m"}, token=token)[0], 201)
         self.assertEqual(
             self.call("POST", "/hosted-runtimes", {"model": "m"}, token=token)[0], 402)
 
@@ -129,7 +131,7 @@ class TestPurchaseFlow(BillingTestCase):
                               token=None, headers={"X-Billing-Secret": WEBHOOK})
         self.assertEqual(status, 200)
 
-        # 3) the gate is now open — hosted execution is granted by the pro plan
+        # 3) the gate is now open — pro's larger hosted pool admits the second
         self.assertEqual(
             self.call("POST", "/hosted-runtimes", {"model": "m"}, token=token)[0], 201)
         _, sub = self.call("GET", "/workspaces/current/subscription", token=token)
@@ -152,7 +154,10 @@ class TestPurchaseFlow(BillingTestCase):
                               {"workspace_id": ws_id, "event": "payment_failed"},
                               token=None, headers={"X-Billing-Secret": WEBHOOK})
         self.assertEqual(status, 200)
-        # paid feature closes again
+        # the paid allowance closes again: free keeps ONE hosted runtime (what
+        # a guest tried), pro's second one is gone
+        self.assertEqual(
+            self.call("POST", "/hosted-runtimes", {"model": "m"}, token=token)[0], 201)
         self.assertEqual(
             self.call("POST", "/hosted-runtimes", {"model": "m"}, token=token)[0], 402)
         _, sub = self.call("GET", "/workspaces/current/subscription", token=token)
@@ -177,7 +182,9 @@ class TestWebhookSecurity(BillingTestCase):
                                "event": "payment_succeeded"},
                               token=None, headers={"X-Billing-Secret": "wrong"})
         self.assertEqual(status, 401)
-        # and the plan was NOT applied
+        # and the plan was NOT applied: still free's single hosted runtime
+        self.assertEqual(
+            self.call("POST", "/hosted-runtimes", {"model": "m"}, token=token)[0], 201)
         self.assertEqual(
             self.call("POST", "/hosted-runtimes", {"model": "m"}, token=token)[0], 402)
 

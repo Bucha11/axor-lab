@@ -34,7 +34,11 @@ class TestCatalogShape(unittest.TestCase):
                 self.assertIn(cap, ALL_CAPABILITIES)
 
     def test_the_tier_ladder(self) -> None:
-        self.assertEqual(CATALOG["free"]["capabilities"], [])
+        # free keeps what a guest tried: hosted execution, one runtime, a
+        # small monthly quota — signing up never takes it away
+        self.assertEqual(CATALOG["free"]["capabilities"], ["hosted_execution"])
+        self.assertEqual(CATALOG["free"]["max_hosted_runtimes"], 1)
+        self.assertGreater(CATALOG["free"]["max_hosted_runs_per_month"], 0)
         self.assertIn("hosted_execution", CATALOG["team"]["capabilities"])
         self.assertIn("governance", CATALOG["security"]["capabilities"])
         self.assertIn("control_plane", CATALOG["enterprise"]["capabilities"])
@@ -59,10 +63,27 @@ class TestTierMapsToPlan(unittest.TestCase):
         sec = self.ws.ensure_org_workspace("org_s", tier="security")
         self.assertTrue(has_capability(sec, "governance"))
 
-    def test_community_tier_is_the_free_fallback(self) -> None:
-        # "community" is not a catalog key; it fails closed to free
+    def test_community_tier_is_the_free_plan(self) -> None:
+        # identity calls the free tier "community"
         ws = self.ws.ensure_org_workspace("org_c", tier="community")
-        self.assertEqual(ws.plan["capabilities"], [])
+        self.assertEqual(ws.plan, CATALOG["free"])
+
+    def test_an_unknown_tier_fails_closed_to_free(self) -> None:
+        ws = self.ws.ensure_org_workspace("org_u", tier="platinum-ultra")
+        self.assertEqual(ws.plan, CATALOG["free"])
+
+    def test_a_login_never_lowers_a_bought_plan(self) -> None:
+        # bought Team through the Lab's billing; identity still says community
+        self.ws.ensure_org_workspace("org_b", tier="community")
+        self.ws.apply_plan("org_b", "team")
+        again = self.ws.ensure_org_workspace("org_b", tier="community")
+        self.assertTrue(has_capability(again, "hosted_execution"))
+        self.assertEqual(again.subscription["plan_id"], "team")
+
+    def test_a_login_raises_to_the_identity_plan(self) -> None:
+        self.ws.ensure_org_workspace("org_r", tier="community")
+        up = self.ws.ensure_org_workspace("org_r", tier="security")
+        self.assertTrue(has_capability(up, "governance"))
 
     def test_require_capability_gate(self) -> None:
         team = self.ws.ensure_org_workspace("org_t", tier="team")
@@ -120,3 +141,47 @@ class GovernanceDispatchTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreeHostedAllowanceTestCase(unittest.TestCase):
+    """A free workspace runs hosted, within its monthly quota; its own
+    runtime never counts against it."""
+
+    def setUp(self) -> None:
+        catalog = json.loads(json.dumps(CATALOG))
+        catalog["free"]["max_hosted_runs_per_month"] = 2
+        self.ws = Workspaces(plan_catalog=catalog)
+        self.ws.add(Workspace(id="free", name="Free", token="free-tok"))
+        self.ws.apply_plan("free", "free")
+        self.server = make_runtime_server(port=0, control_token=ADMIN, workspaces=self.ws)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def call(self, method: str, path: str, body: object = None) -> tuple[int, dict]:
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, method=method, headers={
+            "Authorization": "Bearer free-tok", "content-type": "application/json"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_hosted_runs_up_to_the_allowance_then_402(self) -> None:
+        status, hosted = self.call("POST", "/hosted-runtimes", {"runtime_label": "h"})
+        self.assertEqual(status, 201)
+        # one hosted runtime only
+        self.assertEqual(self.call("POST", "/hosted-runtimes", {"runtime_label": "h2"})[0], 402)
+        exp = {"experiment": {"planned_trials": ["t1"]}, "runtime_ref": hosted["runtime_ref"]}
+        self.assertEqual(self.call("POST", "/runs", exp)[0], 201)
+        self.assertEqual(self.call("POST", "/runs", exp)[0], 201)
+        status, body = self.call("POST", "/runs", exp)
+        self.assertEqual(status, 402)
+        self.assertIn("max_hosted_runs_per_month", json.dumps(body))
+        # the customer's own runtime is not metered
+        status, own = self.call("POST", "/runtimes", {"runtime_label": "mine"})
+        if status == 201:
+            mine = {"experiment": {"planned_trials": ["t1"]}, "runtime_ref": own["runtime_ref"]}
+            self.assertEqual(self.call("POST", "/runs", mine)[0], 201)

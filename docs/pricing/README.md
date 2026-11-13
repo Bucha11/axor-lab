@@ -22,9 +22,15 @@ operator supplies the real one here. This file records the owner's tier ladder.
 
 ## The tiers
 
+Community includes a small hosted quota on purpose: a visitor's guest session
+runs hosted (1 runtime), and signing up must never take away what the guest
+just used. `max_hosted_runs_per_month` counts runs started on a hosted runtime
+in the calendar month (UTC); runs on your own runtime never count. Team and up
+are unlimited.
+
 | key (plan id) | tier | price | capabilities |
 |---|---|---|---|
-| `free` | Community | $0 | — (local only, no hosted execution) |
+| `free` | Community | $0 | `hosted_execution` — 1 hosted runtime, 50 hosted runs / month |
 | `team` | Team Workspace | $299 / month | `hosted_execution` |
 | `security` | Security Workspace | $1,500 / month | `hosted_execution`, `private_registry`, `governance` |
 | `enterprise` | Enterprise Platform | $30,000 / year | `hosted_execution`, `private_registry`, `governance`, `control_plane` |

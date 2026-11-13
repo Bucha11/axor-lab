@@ -595,6 +595,22 @@ class RuntimeJobStore:
                     for r in self._runtimes.values()
                     if hosted is None or bool(r.get("hosted")) == hosted]
 
+    def is_hosted(self, runtime_ref: str) -> bool:
+        with self._lock:
+            return bool((self._runtimes.get(runtime_ref) or {}).get("hosted"))
+
+    def hosted_runs_this_month(self) -> int:
+        """Runs started this calendar month (UTC) on a hosted runtime — what a
+        plan's ``max_hosted_runs_per_month`` counts."""
+        import datetime as _dt
+
+        now = _dt.datetime.now(_dt.UTC)
+        month_start = _dt.datetime(now.year, now.month, 1, tzinfo=_dt.UTC).timestamp()
+        with self._lock:
+            hosted = {ref for ref, r in self._runtimes.items() if r.get("hosted")}
+            return sum(1 for j in self._jobs.values()
+                       if j.runtime_ref in hosted and j.created_at >= month_start)
+
     def runtime_for_key(self, ingest_key: str) -> str | None:
         with self._lock:
             return self._by_key.get(ingest_key)
@@ -1381,6 +1397,16 @@ def make_runtime_server(
             if not role_at_least(getattr(self, "_role", "viewer"), minimum):
                 raise RuntimeJobsError(
                     403, f"role {getattr(self, '_role', 'viewer')!r} lacks {minimum} rights")
+
+        def _require_hosted_allowance(self, jobs: "RuntimeJobStore", runtime_ref: object) -> None:
+            """A run on a HOSTED runtime counts against the plan's monthly
+            hosted-run allowance (the free tier's is small; null =
+            unlimited). A run on the customer's own runtime never does."""
+            from lab_server.workspaces import require_within
+
+            if isinstance(runtime_ref, str) and jobs.is_hosted(runtime_ref):
+                require_within(self._current_workspace(), "max_hosted_runs_per_month",
+                               jobs.hosted_runs_this_month())
 
         def _current_workspace(self) -> "Workspace":
             from lab_server.workspaces import Workspace
@@ -2830,6 +2856,7 @@ def make_runtime_server(
                         # a manifest that resolves but cannot be executed on a
                         # remote runtime is the user's to fix, not a crash
                         raise RuntimeJobsError(422, str(exc)) from None
+                    self._require_hosted_allowance(jobs, runtime_ref)
                     created = jobs.create_run(
                         runtime_ref, planned.assignment,
                         planned=list(planned.planned),
@@ -2981,6 +3008,7 @@ def make_runtime_server(
                     if not isinstance(experiment, dict) or not isinstance(runtime_ref, str):
                         raise RuntimeJobsError(400, "runs require {runtime_ref, experiment}")
                     estimate = body.get("estimate")
+                    self._require_hosted_allowance(jobs, runtime_ref)
                     self._send(201, jobs.create_run(
                         runtime_ref, experiment,
                         planned=body.get("planned_trials"),  # type: ignore[arg-type]
