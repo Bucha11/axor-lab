@@ -1,7 +1,17 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, Card, Field } from "../components/ui";
 import { api, probeToken } from "../lib/api";
-import { IdentityError, login, rememberRefresh, signup } from "../lib/identity";
+import {
+  IdentityError,
+  login,
+  oauthExchange,
+  oauthProviders,
+  oauthStartUrl,
+  rememberRefresh,
+  signup,
+  takeOAuthReturn,
+  type OAuthProvider,
+} from "../lib/identity";
 
 /** The login gate. A human signs in (or signs up) against the axor-identity
  * service and the access token becomes this session's credential. Operators who
@@ -35,6 +45,27 @@ export function Login({
   const [showToken, setShowToken] = useState(!identityAvailable);
   const [pasted, setPasted] = useState("");
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const [providers, setProviders] = useState<OAuthProvider[]>([]);
+
+  useEffect(() => {
+    if (!identityAvailable) return;
+    void oauthProviders().then(setProviders);
+    // back from GitHub / Google: the address carries a one-time code to trade
+    const back = takeOAuthReturn();
+    if (back?.error) setError(back.error);
+    if (back?.code) {
+      setBusy(true);
+      oauthExchange(back.code)
+        .then((session) => {
+          rememberRefresh(session.refresh_token);
+          onAuthenticated(session.access_token);
+        })
+        .catch((err) => setError(err instanceof IdentityError ? err.message : "sign-in failed"))
+        .finally(() => setBusy(false));
+    }
+    // once, on arrival
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function submit() {
     setBusy(true);
@@ -106,6 +137,17 @@ export function Login({
       {error && !identityAvailable && <p className="error-text">{error}</p>}
       {identityAvailable && (
       <Card>
+        {providers.length > 0 && (
+          <div className="oauth-buttons">
+            {providers.map((p) => (
+              <a key={p.name} className="btn btn-secondary" href={oauthStartUrl(p.name)}
+                data-testid={`oauth-${p.name}`}>
+                Continue with {p.label}
+              </a>
+            ))}
+            <p className="muted small">or with e-mail</p>
+          </div>
+        )}
         <form
           onSubmit={(event) => {
             event.preventDefault();

@@ -125,3 +125,50 @@ export async function logout(): Promise<void> {
     /* best-effort: the session is over locally regardless */
   }
 }
+
+// ── sign in with GitHub / Google ─────────────────────────────────────────────
+export interface OAuthProvider {
+  name: string;
+  label: string;
+}
+
+/** The providers the identity service has set up; empty when none, or when
+ * the service predates the route. */
+export async function oauthProviders(): Promise<OAuthProvider[]> {
+  try {
+    const response = await fetch(`${IDENTITY_BASE}/v1/oauth/providers`);
+    if (!response.ok) return [];
+    const body = (await response.json()) as { providers?: OAuthProvider[] };
+    return Array.isArray(body.providers) ? body.providers : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Where to send the browser to sign in with `provider`. The identity service
+ * may live on another origin (one service for the Lab and the control plane),
+ * so the way back is absolute; it must be one of its AXOR_IDENTITY_RETURN_ORIGINS. */
+export function oauthStartUrl(provider: string): string {
+  const back = window.location.origin + window.location.pathname + window.location.hash;
+  return `${IDENTITY_BASE}/v1/oauth/${encodeURIComponent(provider)}/start?return_to=${encodeURIComponent(back)}`;
+}
+
+/** The code or error a provider sign-in left in the address bar, removed from
+ * it so a reload or a copied link does not carry it. */
+export function takeOAuthReturn(): { code?: string; error?: string } | null {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("axor_login") ?? undefined;
+  const error = params.get("axor_login_error") ?? undefined;
+  if (!code && !error) return null;
+  params.delete("axor_login");
+  params.delete("axor_login_error");
+  const query = params.toString();
+  window.history.replaceState(
+    null, "", window.location.pathname + (query ? `?${query}` : "") + window.location.hash);
+  return { code, error };
+}
+
+/** Trade the one-time code from the redirect for a session. */
+export async function oauthExchange(code: string): Promise<Session & { created: boolean }> {
+  return post<Session & { created: boolean }>("/v1/oauth/exchange", { code });
+}

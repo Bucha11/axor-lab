@@ -168,7 +168,11 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [isGuest, setIsGuest] = useState(() => sessionStorage.getItem(GUEST_KEY) === "1");
   // the sign-in panel, opened over the product rather than in place of it
-  const [signingIn, setSigningIn] = useState(false);
+  // — open from the start when the browser is back from GitHub / Google with a
+  // code in the address: the panel's Login is what trades it for a session
+  const [signingIn, setSigningIn] = useState(() =>
+    /[?&]axor_login(_error)?=/.test(window.location.search),
+  );
   // a guest could not be started (capacity, or the route is off): only then
   // does a hosted server fall back to the full-page login
   const [guestFailed, setGuestFailed] = useState(false);

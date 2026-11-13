@@ -395,3 +395,46 @@ test.describe("tenants and plan buttons", () => {
     await expect(page.getByText(/workspace admin's call/)).toBeVisible();
   });
 });
+
+test.describe("sign in with GitHub / Google", () => {
+  test("a configured provider gets a button whose way back is this page", async ({ page }) => {
+    await page.route("**/identity/v1/oauth/providers", json(200, {
+      providers: [{ name: "google", label: "Google" }],
+    }));
+    await gotoSecured(page);
+    const button = page.getByTestId("oauth-google");
+    await expect(button).toHaveText("Continue with Google");
+    const href = (await button.getAttribute("href"))!;
+    expect(href).toContain("/identity/v1/oauth/google/start?return_to=");
+    expect(decodeURIComponent(href.split("return_to=")[1])).toMatch(/^http:\/\/[^/]+\/$/);
+  });
+
+  test("back from the provider, the code becomes a session", async ({ page }) => {
+    await stubShell(page, { auth_required: true, guest: false });
+    let traded = "";
+    await page.route("**/identity/v1/oauth/exchange", async (route) => {
+      traded = route.request().postDataJSON().code;
+      await route.fulfill({ json: { ...SESSION, created: true } });
+    });
+    await page.goto("/?axor_login=one-time-code-123456");
+    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    expect(traded).toBe("one-time-code-123456");
+    expect(page.url()).not.toContain("axor_login");
+  });
+
+  test("a guest who signs in with a provider lands signed in, not as a new guest", async ({
+    page,
+  }) => {
+    await stubShell(page, { auth_required: true, guest: true });
+    await page.route("**/guest-session", json(201, { token: "guest-tok", workspace_id: "guest_1", expires_at: 9e9 }));
+    await page.route("**/identity/v1/oauth/exchange", json(200, { ...SESSION, created: false }));
+    await page.goto("/?axor_login=one-time-code-123456");
+    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+  });
+
+  test("a refused sign-in says why", async ({ page }) => {
+    await stubShell(page, { auth_required: true, guest: false });
+    await page.goto("/?axor_login_error=Google%20sign-in%20was%20cancelled");
+    await expect(page.getByText("Google sign-in was cancelled")).toBeVisible();
+  });
+});
