@@ -13,13 +13,26 @@ Community  →  Team Workspace  →  Security Workspace  →  + Production Gover
    $0            $299/mo             $1,500/mo               from $500/mo (CP nodes)          from $30k/yr
 ```
 
+### Three ways in, two meters (2026-11)
+
+Buyers arrive by one of three journeys, and each sees the plans for it (Pricing page selector, onboarding chooser):
+
+| Journey | Who | Meter | Plans shown |
+|---|---|---|---|
+| **Coding agents** | a team governing Claude Code / Codex through their hooks; no production runtime | **developer seats** | Community (1 developer free) · **Coding $25/developer/mo** · Enterprise |
+| **A production agent** | a team wrapping its own production agent | **governed nodes** (daily peak) | Community · Team · Security · Enterprise |
+| **Both** | coding agents and a production fleet | nodes **and** seats | Team (incl. **5 developer seats**) · Security (incl. **25 developer seats**) · Enterprise |
+
+A **developer** is someone whose coding agents reported in the month, counted once however many sessions, agents or trees they ran — never a session: a coding session is not a governed node, or one developer would be a fleet by lunchtime. The Control Plane learns it from the profile each coding session posts about itself (kind `coding`, an opaque hashed developer id — never an address). Seats past a rung's allowance are **$25/developer/mo** on every rung.
+
 ## 1. Canonical price matrix
 
 | Tier | Price | What it unlocks | Module |
 |---|---|---|---|
 | **Community** | **$0** | Public Lab, local BYOK runs, local private projects, replay, local regressions, public publish | Lab (free) |
-| **Team Workspace** | **$299/mo** (card) | Hosted private workspace, private scenarios/incidents, shared scenarios, basic CI, limited retention; includes hosted trial allowance | Lab (paid) |
-| **Security Workspace** | **$1,500/mo** (card) | Everything in Team + production-incident workflow, scheduled regression CI + history, approvals, policy/kernel comparison, compliance/audit exports; larger trial allowance | Lab (paid) |
+| **Coding** | **$25/developer/mo** (card) | Claude Code + Codex hooks, one taint ledger per repository, agent trees (planner → readers → implementer), checked findings, context flow + cut, every session on the Control Plane, reputation per agent/model; 1 governed node as in Community | Coding agents + CP |
+| **Team Workspace** | **$299/mo** (card) | Hosted private workspace, private scenarios/incidents, shared scenarios, basic CI, limited retention; includes hosted trial allowance; **5 developer seats** (+$25/developer/mo) | Lab (paid) |
+| **Security Workspace** | **$1,500/mo** (card) | Everything in Team + production-incident workflow, scheduled regression CI + history, approvals, policy/kernel comparison, compliance/audit exports; larger trial allowance; **25 developer seats** (+$25/developer/mo) | Lab (paid) |
 | **Production Governance add-on** | **from $500/mo** | Control Plane runtime enforcement, first governed nodes, production integrations — activated on an existing workspace | CP (add-on) |
 | **Enterprise Platform** | **from $30k/yr** | Security Workspace + SSO/RBAC + self-hosted/VPC runner + SLA + negotiated governed-node band + private benchmark registry + support | both, contracted |
 

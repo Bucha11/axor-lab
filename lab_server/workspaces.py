@@ -87,7 +87,9 @@ FREE_PLAN = "free"
 
 # axor-identity's tier names → plan ids in the catalog. Identity calls the free
 # tier "community"; the catalog calls it "free".
-TIER_ALIASES: dict[str, str] = {"community": FREE_PLAN}
+# `coding` is the coding-agent plan (Claude Code / Codex seats on the Control
+# Plane); it buys nothing in the Lab beyond what Community has.
+TIER_ALIASES: dict[str, str] = {"community": FREE_PLAN, "coding": FREE_PLAN}
 
 # The plan a GUEST (anonymous, unregistered) hosted session runs on. It is a
 # product mechanism, not a priced tier, so it is fixed in code rather than the
