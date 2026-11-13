@@ -80,7 +80,39 @@ export async function login(email: string, password: string, orgId?: string): Pr
 }
 
 export async function signup(email: string, password: string, orgName: string): Promise<Session> {
-  return post<Session>("/v1/signup", { email, password, org_name: orgName });
+  // the verification link it mails opens the Lab again
+  return post<Session>("/v1/signup", { email, password, org_name: orgName, return_to: here() });
+}
+
+/** This page, absolute (one identity service may serve the Lab and the control
+ * plane, so a relative way back would land on the other one). */
+export function here(): string | undefined {
+  // no page (a test, a worker): the identity service's default way back
+  if (typeof window === "undefined") return undefined;
+  return window.location.origin + window.location.pathname + window.location.hash;
+}
+
+/** Whether the identity service sends mail (reset links, verification). */
+export async function emailAvailable(): Promise<boolean> {
+  try {
+    const response = await fetch(`${IDENTITY_BASE}/v1/email`);
+    if (!response.ok) return false;
+    return Boolean(((await response.json()) as { available?: boolean }).available);
+  } catch {
+    return false;
+  }
+}
+
+export async function forgotPassword(email: string): Promise<{ detail: string }> {
+  return post<{ detail: string }>("/v1/password/forgot", { email, return_to: here() });
+}
+
+export async function resetPassword(token: string, password: string): Promise<unknown> {
+  return post<unknown>("/v1/password/reset", { token, password });
+}
+
+export async function verifyEmail(token: string): Promise<{ email: string }> {
+  return post<{ email: string }>("/v1/email/verify", { token });
 }
 
 export function rememberRefresh(token: string | null): void {
@@ -149,23 +181,31 @@ export async function oauthProviders(): Promise<OAuthProvider[]> {
  * may live on another origin (one service for the Lab and the control plane),
  * so the way back is absolute; it must be one of its AXOR_IDENTITY_RETURN_ORIGINS. */
 export function oauthStartUrl(provider: string): string {
-  const back = window.location.origin + window.location.pathname + window.location.hash;
+  const back = here() ?? "/";
   return `${IDENTITY_BASE}/v1/oauth/${encodeURIComponent(provider)}/start?return_to=${encodeURIComponent(back)}`;
 }
 
-/** The code or error a provider sign-in left in the address bar, removed from
- * it so a reload or a copied link does not carry it. */
-export function takeOAuthReturn(): { code?: string; error?: string } | null {
+/** The query keys a provider sign-in or an e-mailed link brings back. */
+export const AUTH_RETURN = /[?&]axor_(login|login_error|verify|reset)=/;
+
+/** What a provider sign-in or an e-mailed link left in the address bar,
+ * removed from it so a reload or a copied link does not carry it. */
+export function takeAuthReturn(): {
+  code?: string; error?: string; verify?: string; reset?: string;
+} | null {
   const params = new URLSearchParams(window.location.search);
-  const code = params.get("axor_login") ?? undefined;
-  const error = params.get("axor_login_error") ?? undefined;
-  if (!code && !error) return null;
-  params.delete("axor_login");
-  params.delete("axor_login_error");
+  const got = {
+    code: params.get("axor_login") ?? undefined,
+    error: params.get("axor_login_error") ?? undefined,
+    verify: params.get("axor_verify") ?? undefined,
+    reset: params.get("axor_reset") ?? undefined,
+  };
+  if (!got.code && !got.error && !got.verify && !got.reset) return null;
+  for (const k of ["axor_login", "axor_login_error", "axor_verify", "axor_reset"]) params.delete(k);
   const query = params.toString();
   window.history.replaceState(
     null, "", window.location.pathname + (query ? `?${query}` : "") + window.location.hash);
-  return { code, error };
+  return got;
 }
 
 /** Trade the one-time code from the redirect for a session. */

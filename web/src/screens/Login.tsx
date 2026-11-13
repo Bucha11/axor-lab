@@ -2,14 +2,18 @@ import { useEffect, useState } from "react";
 import { Button, Card, Field } from "../components/ui";
 import { api, probeToken } from "../lib/api";
 import {
+  emailAvailable,
+  forgotPassword,
   IdentityError,
   login,
   oauthExchange,
   oauthProviders,
   oauthStartUrl,
   rememberRefresh,
+  resetPassword,
   signup,
-  takeOAuthReturn,
+  takeAuthReturn,
+  verifyEmail,
   type OAuthProvider,
 } from "../lib/identity";
 
@@ -35,7 +39,10 @@ export function Login({
   /** why the user is back here when they did not choose to be */
   notice?: string | null;
 }) {
-  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [mode, setMode] = useState<"login" | "signup" | "forgot" | "reset">("login");
+  const [canMail, setCanMail] = useState(false);
+  const [resetToken, setResetToken] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [orgName, setOrgName] = useState("");
@@ -50,9 +57,20 @@ export function Login({
   useEffect(() => {
     if (!identityAvailable) return;
     void oauthProviders().then(setProviders);
-    // back from GitHub / Google: the address carries a one-time code to trade
-    const back = takeOAuthReturn();
+    void emailAvailable().then(setCanMail);
+    // back from GitHub / Google (a one-time code to trade), or from a mailed link
+    const back = takeAuthReturn();
     if (back?.error) setError(back.error);
+    if (back?.reset) {
+      setResetToken(back.reset);
+      setMode("reset");
+    }
+    if (back?.verify) {
+      verifyEmail(back.verify)
+        .then((r) => setInfo(`${r.email} is confirmed — log in to continue.`))
+        .catch((err) =>
+          setError(err instanceof IdentityError ? err.message : "could not confirm the address"));
+    }
     if (back?.code) {
       setBusy(true);
       oauthExchange(back.code)
@@ -70,6 +88,24 @@ export function Login({
   async function submit() {
     setBusy(true);
     setError(null);
+    if (mode === "forgot" || mode === "reset") {
+      try {
+        if (mode === "forgot") {
+          setInfo((await forgotPassword(email)).detail);
+        } else {
+          await resetPassword(resetToken!, password);
+          setResetToken(null);
+          setPassword("");
+          setMode("login");
+          setInfo("Password changed, and every other session signed out. Log in with the new one.");
+        }
+      } catch (err) {
+        setError(err instanceof IdentityError ? err.message : "that did not work");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     try {
       const session =
         mode === "signup"
@@ -115,18 +151,39 @@ export function Login({
   }
 
   const canSubmit =
-    email.length > 0 && password.length > 0 && (mode === "login" || orgName.length > 0);
+    mode === "forgot"
+      ? email.length > 0
+      : mode === "reset"
+        ? password.length >= 8
+        : email.length > 0 && password.length > 0 && (mode === "login" || orgName.length > 0);
 
   return (
     <div className="screen login">
       <header className="screen-head">
-        <h1>{mode === "signup" ? "Create your workspace" : "Log in"}</h1>
+        <h1>
+          {mode === "signup"
+            ? "Create your workspace"
+            : mode === "forgot"
+              ? "Reset your password"
+              : mode === "reset"
+                ? "Choose a new password"
+                : "Log in"}
+        </h1>
         <p className="muted">
           {mode === "signup"
             ? "A new account and its first organization."
-            : "Sign in to your Axor workspace."}
+            : mode === "forgot"
+              ? "We will e-mail you a link."
+              : mode === "reset"
+                ? "At least 8 characters."
+                : "Sign in to your Axor workspace."}
         </p>
       </header>
+      {info && (
+        <p className="muted" role="status" data-testid="login-info">
+          {info}
+        </p>
+      )}
       {notice && (
         <p className="error-text" role="status">
           {notice}
@@ -137,7 +194,7 @@ export function Login({
       {error && !identityAvailable && <p className="error-text">{error}</p>}
       {identityAvailable && (
       <Card>
-        {providers.length > 0 && (
+        {providers.length > 0 && (mode === "login" || mode === "signup") && (
           <div className="oauth-buttons">
             {providers.map((p) => (
               <a key={p.name} className="btn btn-secondary" href={oauthStartUrl(p.name)}
@@ -154,6 +211,7 @@ export function Login({
             if (canSubmit && !busy) submit();
           }}
         >
+          {mode !== "reset" && (
           <Field label="Email">
             <input
               type="email"
@@ -162,14 +220,17 @@ export function Login({
               onChange={(event) => setEmail(event.target.value)}
             />
           </Field>
-          <Field label="Password">
+          )}
+          {mode !== "forgot" && (
+          <Field label={mode === "reset" ? "New password" : "Password"}>
             <input
               type="password"
-              autoComplete={mode === "signup" ? "new-password" : "current-password"}
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
               value={password}
               onChange={(event) => setPassword(event.target.value)}
             />
           </Field>
+          )}
           {mode === "signup" && (
             <Field label="Organization name">
               <input value={orgName} onChange={(event) => setOrgName(event.target.value)} />
@@ -185,9 +246,47 @@ export function Login({
           )}
           {error && <p className="error-text">{error}</p>}
           <Button type="submit" disabled={!canSubmit || busy}>
-            {busy ? "…" : mode === "signup" ? "Create workspace" : "Log in"}
+            {busy
+              ? "…"
+              : mode === "signup"
+                ? "Create workspace"
+                : mode === "forgot"
+                  ? "Send reset link"
+                  : mode === "reset"
+                    ? "Set password"
+                    : "Log in"}
           </Button>
         </form>
+        {mode === "login" && canMail && (
+          <p className="muted small">
+            <a
+              href="#"
+              onClick={(event) => {
+                event.preventDefault();
+                setError(null);
+                setInfo(null);
+                setMode("forgot");
+              }}
+            >
+              Forgot password?
+            </a>
+          </p>
+        )}
+        {(mode === "forgot" || mode === "reset") && (
+          <p className="muted small">
+            <a
+              href="#"
+              onClick={(event) => {
+                event.preventDefault();
+                setError(null);
+                setMode("login");
+              }}
+            >
+              Back to log in
+            </a>
+          </p>
+        )}
+        {(mode === "login" || mode === "signup") && (
         <p className="muted small">
           {mode === "signup" ? "Already have an account? " : "New here? "}
           <a
@@ -201,6 +300,7 @@ export function Login({
             {mode === "signup" ? "Log in" : "Create a workspace"}
           </a>
         </p>
+        )}
       </Card>
       )}
 

@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import {
   api, currentToken, setToken, setUnauthorizedHandler, type AuthStatus, type GuestClaim,
 } from "./lib/api";
-import { logout as identityLogout, rememberRefresh, refreshAccess } from "./lib/identity";
+import {
+  AUTH_RETURN,
+  logout as identityLogout,
+  rememberRefresh,
+  refreshAccess,
+} from "./lib/identity";
 import { navigate, segments, useRoute } from "./lib/router";
 import { Login } from "./screens/Login";
 import { Home } from "./screens/Home";
@@ -168,11 +173,9 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [isGuest, setIsGuest] = useState(() => sessionStorage.getItem(GUEST_KEY) === "1");
   // the sign-in panel, opened over the product rather than in place of it
-  // — open from the start when the browser is back from GitHub / Google with a
-  // code in the address: the panel's Login is what trades it for a session
-  const [signingIn, setSigningIn] = useState(() =>
-    /[?&]axor_login(_error)?=/.test(window.location.search),
-  );
+  // — open from the start when the browser is back from GitHub / Google, or
+  // from an e-mailed link: the panel's Login is what finishes either
+  const [signingIn, setSigningIn] = useState(() => AUTH_RETURN.test(window.location.search));
   // a guest could not be started (capacity, or the route is off): only then
   // does a hosted server fall back to the full-page login
   const [guestFailed, setGuestFailed] = useState(false);

@@ -438,3 +438,53 @@ test.describe("sign in with GitHub / Google", () => {
     await expect(page.getByText("Google sign-in was cancelled")).toBeVisible();
   });
 });
+
+test.describe("e-mail: reset and verification links", () => {
+  test("forgot password sends a link where mail is set up", async ({ page }) => {
+    await page.route("**/identity/v1/email", json(200, { available: true }));
+    let asked: { email?: string; return_to?: string } = {};
+    await page.route("**/identity/v1/password/forgot", async (route) => {
+      asked = route.request().postDataJSON();
+      await route.fulfill({ status: 202, json: { detail: "if that address has an account, a link is on its way" } });
+    });
+    await gotoSecured(page);
+    await page.getByRole("link", { name: "Forgot password?" }).click();
+    await expect(page.getByLabel("Password")).toHaveCount(0);
+    await page.getByLabel("Email").fill("ada@acme.io");
+    await page.getByRole("button", { name: "Send reset link" }).click();
+    await expect(page.getByTestId("login-info")).toContainText("a link is on its way");
+    expect(asked.email).toBe("ada@acme.io");
+    expect(asked.return_to).toMatch(/^http:\/\/[^/]+\/$/);
+  });
+
+  test("no mail, no forgot-password", async ({ page }) => {
+    await page.route("**/identity/v1/email", json(200, { available: false }));
+    await gotoSecured(page);
+    await expect(page.getByLabel("Email")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Forgot password?" })).toHaveCount(0);
+  });
+
+  test("a reset link asks for a new password, then back to log in", async ({ page }) => {
+    await stubShell(page, { auth_required: true, guest: true });
+    await page.route("**/guest-session", json(201, { token: "guest-tok", workspace_id: "guest_1", expires_at: 9e9 }));
+    let body: { token?: string; password?: string } = {};
+    await page.route("**/identity/v1/password/reset", async (route) => {
+      body = route.request().postDataJSON();
+      await route.fulfill({ status: 204, body: "" });
+    });
+    await page.goto("/?axor_reset=reset-token-123456789");
+    await page.getByLabel("New password").fill("brand new pass");
+    await page.getByRole("button", { name: "Set password" }).click();
+    await expect(page.getByTestId("login-info")).toContainText("Password changed");
+    await expect(page.getByRole("heading", { name: "Log in" })).toBeVisible();
+    expect(body).toEqual({ token: "reset-token-123456789", password: "brand new pass" });
+  });
+
+  test("a verification link confirms the address", async ({ page }) => {
+    await stubShell(page, { auth_required: true, guest: false });
+    await page.route("**/identity/v1/email/verify", json(200, { email: "ada@acme.io", email_verified: true }));
+    await page.goto("/?axor_verify=verify-token-123456789");
+    await expect(page.getByTestId("login-info")).toContainText("ada@acme.io is confirmed");
+    expect(page.url()).not.toContain("axor_verify");
+  });
+});
