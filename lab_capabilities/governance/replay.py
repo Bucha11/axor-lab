@@ -186,7 +186,7 @@ def replay_trace_status(
             driving = bindings.get(declared[0]) if declared else None
             decision = gate_with_governor(
                 kernel.config, str(condition["enforcement"]), registrations,
-                tool, args, driving,
+                tool, args, driving, inputs,
             )
             if driving is None:
                 decision["driving_unresolved"] = (
