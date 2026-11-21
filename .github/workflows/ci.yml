@@ -170,15 +170,16 @@ jobs:
           # bump above was written to prevent, repeated.
           # Bumped 0.11.0 -> 0.12.0 with pyproject's move to `>=0.12,<0.13`.
           # Full suite re-run green against an installed 0.12.0 (1317 tests).
-          pip install "axor-core==0.12.0"
+          # Bumped 0.12.0 -> 0.13.0 with pyproject's move to `>=0.13,<0.14`.
+          pip install "axor-core==0.13.0"
           # Lab's runner imports axor-wrap (the shared wrapping engine), so it
           # must be present for discovery to import at all, and axor-eval for the
           # tool-fabrication experiment. Both are EXACT pins for the same reason
           # the kernel above is: this job's whole purpose is to measure against a
           # known build, and a floating range would let a future release drift in
           # and make a green run stop proving what it proved. Install them AFTER
-          # the axor-core pin — wrap's axor-core>=0.10.2,<0.13 and eval's
-          # >=0.8,<0.13 are both satisfied by 0.12.0, so pip leaves it untouched.
+          # the axor-core pin — wrap's axor-core>=0.10.2,<0.14 and eval's
+          # >=0.8,<0.14 are both satisfied by 0.13.0, so pip leaves it untouched.
           #
           # These were git pins to an integration branch until wrap and eval cut
           # releases carrying the API Lab imports. Now that they are on PyPI, the
@@ -191,9 +192,10 @@ jobs:
           # unsatisfiable. Those two releases exist only to carry the widened
           # ceiling to PyPI. eval skips 0.2.1 — that tag was spent on a commit
           # its own publish gate refused.
-          pip install "axor-wrap==0.2.1" "axor-eval==0.2.2"
+          # Bumped to wrap 0.3.0 / eval 0.3.0 with the move to the 0.13 kernel.
+          pip install "axor-wrap==0.3.0" "axor-eval==0.3.0"
           python -c "import axor_core; print('axor-core', axor_core.__version__)"
-          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.12.0' else 'axor-core version drift: expected 0.12.0, got ' + axor_core.__version__)"
+          python -c "import axor_core, sys; sys.exit(0 if axor_core.__version__ == '0.13.0' else 'axor-core version drift: expected 0.13.0, got ' + axor_core.__version__)"
           python -c "from lab_capabilities.governance import axor_available; assert axor_available(), 'axor-core must import so the real-kernel tests RUN, not skip'"
           # capture the test run's own exit code (no pipe, so a FAILURE still
           # fails the job) AND the output, then assert there were no skips.
@@ -301,9 +303,10 @@ jobs:
         # Bumped to 0.2.1 for the same reason as the real-kernel job above: the
         # 0.2.0 wheel's metadata caps axor-core below the kernel this repo now
         # declares. Same surface, only the dependency ceiling moved.
+        # Bumped to 0.3.0 with the move to the 0.13 kernel.
         run: |
           pip install -e .
-          pip install "axor-wrap==0.2.1"
+          pip install "axor-wrap==0.3.0"
           python -c "import axor_wrap, axor_core; print('axor-wrap', axor_wrap.__version__, '| axor-core', axor_core.__version__)"
       - name: The cross-repo acceptance test must RUN, not skip
         run: |
