@@ -68,8 +68,11 @@ class TestMultiDrivingArgTaintOnTheRealKernel(unittest.TestCase):
 
     def test_all_driving_args_clean_or_allowlisted_is_allowed(self) -> None:
         toolset = self._toolset()
+        # the user's own words: under context integrity (axor-core 0.13) a body
+        # the model wrote after the read is untrusted unless the user gave it
+        toolset.register_task("rent for March")
         toolset.call("read_secret", {})
-        # recipient allowlisted, body a clean constant → nothing tainted drives it
+        # recipient allowlisted, body from the task → nothing tainted drives it
         out = toolset.call("send", {"recipient": TRUSTED, "body": "rent for March"})
         self.assertEqual(out, {"ok": True})
 

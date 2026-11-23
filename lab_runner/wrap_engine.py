@@ -62,9 +62,18 @@ def make_toolset(
     enforcement is forced off and the trace is stripped afterwards; present →
     the condition's own enforcement (`on` blocks, `off` observes) is honored.
     The `$inputs.x` allowlist expands against the scenario inputs either way.
+
+    The scenario's inputs are what the user gave — the task's own values, in
+    structured form. Under axor-core's context integrity (the default from 0.13)
+    a destination they name is a trusted origin, so a faithful payment to it
+    after the untrusted read is not refused. Registered in both arms, so the
+    arms differ in enforcement only, and registered again on replay
+    (`gate_with_governor`), which is handed the same inputs — so a replay stays
+    an exact function of the frozen trace. The free-text task is not: replay is
+    not handed it everywhere, and a value only it named would replay differently.
     """
     enforcement = str(condition.get("enforcement", "off")) if governed else "off"
-    return WrappedToolset(
+    toolset = WrappedToolset(
         tools,
         list(manifests.values()),
         policy=condition.get("policy"),  # type: ignore[arg-type]
@@ -72,6 +81,24 @@ def make_toolset(
         record=True,
         inputs=inputs,
     )
+    for value in trusted_inputs(inputs):
+        toolset.register_task(value)
+    return toolset
+
+
+def trusted_inputs(inputs: object) -> list[str]:
+    """Every string in the scenario's inputs: the values the user gave."""
+    return _string_leaves(inputs)
+
+
+def _string_leaves(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _string_leaves(v)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _string_leaves(v)]
+    return []
 
 
 def last_verdict(toolset: WrappedToolset) -> str:

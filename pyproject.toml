@@ -39,8 +39,10 @@ dependencies = [
     # breaking changes are STRICT-only and Lab compiles no STRICT governor;
     # 1317 tests pass against an installed 0.12.0 once the kernel pin in
     # examples/banking-exfil-01.axl follows (see below).
-    "axor-core>=0.12,<0.13",
-    "axor-wrap>=0.2,<0.3",
+    # Moved 0.12 -> 0.13 whole, the same way, with wrap 0.3 and eval 0.3 (both
+    # declare axor-core<0.14). The kernel pin in the example follows again.
+    "axor-core>=0.13,<0.14",
+    "axor-wrap>=0.3,<0.4",
     # axor-eval is the shared fault-injection evaluator (silent_fail deprivation,
     # the ToolAuditLayer that emits FABRICATED_TOOL_RESULT). Lab reuses it for the
     # tool-fabrication experiment (silent_fail + ToolAuditLayer + the shared
@@ -50,7 +52,7 @@ dependencies = [
     # axor-core<0.12, so neither could resolve beside the kernel this file now
     # requires; eval 0.2.2 and wrap 0.2.1 carry the widened ceiling, and all
     # three resolve together again.
-    "axor-eval>=0.2,<0.3",
+    "axor-eval>=0.3,<0.4",
 ]
 
 [project.scripts]

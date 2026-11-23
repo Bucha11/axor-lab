@@ -310,6 +310,7 @@ def gate_with_governor(
     sink_tool: str,
     sink_args: dict[str, object],
     driving_value_id: str | None,
+    inputs: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """The single decision path (live AND replay).
 
@@ -329,6 +330,14 @@ def gate_with_governor(
         raise UnknownKernelError("axor-core is not installed; cannot use the real kernel backend")
 
     governor = ToolCallGovernor(**config)  # type: ignore[arg-type]
+    # the values the user gave, trusted as the live toolset trusts them
+    # (lab_runner.wrap_engine.make_toolset) — context integrity's trusted origin
+    from lab_runner.wrap_engine import trusted_inputs
+
+    register_task = getattr(governor, "register_task", None)
+    if register_task is not None:
+        for value in trusted_inputs(inputs or {}):
+            register_task(value)
     for read_tool, value in registrations:
         read_decision = governor.evaluate(read_tool, {})
         governor.register_output(read_decision, value)
